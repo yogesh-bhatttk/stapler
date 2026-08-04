@@ -498,7 +498,10 @@ The hardest ticket in v1.0. Budget accordingly.
 
 ### SCN-02 · Deskew, threshold, despeckle — `M` `P0`
 
-**Status: Partial** — Two real bugs fixed and pinned: `Uint32` overflow in the summed-area table, and the deskew sign that *doubled* skew. **No despeckle.**
+**Status: Done** — Two real bugs fixed and pinned: `Uint32` overflow in the summed-area
+table, and the deskew sign that *doubled* skew. Despeckle exists, is tested, and is wired
+into `cv.worker.ts`; all three presets match the AC (`bw`/`auto` threshold, `photo` skips
+thresholding so a colour photo is not destroyed).
 
 - **Requirements:** Auto-deskew via dominant text-line angle (±15°); adaptive threshold for
   a clean white background; despeckle; three presets — **Auto**, **B&W document**,
