@@ -1,0 +1,76 @@
+import { Moon, Search, Sun } from 'lucide-preact';
+import { useState } from 'preact/hooks';
+import { Badge } from '../components/Badge';
+import { Button } from '../components/Button';
+import { IconButton } from '../components/IconButton';
+import { TrustModal } from '../components/TrustModal';
+import { FileTabs } from './FileTabs';
+import { isCommandPaletteOpen } from '../../core/ui';
+import { resolvedTheme, toggleTheme } from '../theme';
+import styles from './TopBar.module.css';
+
+/** ⌘ on Apple platforms, Ctrl everywhere else — the hint must match the key. */
+const MOD_LABEL =
+  typeof navigator !== 'undefined' && /mac|iphone|ipad/i.test(navigator.userAgent)
+    ? '⌘K'
+    : 'Ctrl K';
+
+export function TopBar() {
+  const [showTrust, setShowTrust] = useState(false);
+  const isDark = resolvedTheme.value === 'dark';
+
+  return (
+    <header className={styles.topBar}>
+      <a href="#/" className={styles.logo}>
+        <svg
+          width="20"
+          height="20"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M5 8h14" />
+          <path d="M5 12h14" />
+          <path d="M5 16h14" />
+        </svg>
+        Stapler
+      </a>
+
+      <FileTabs />
+
+      <div className={styles.actions}>
+        <Button
+          variant="ghost"
+          size="compact"
+          icon={Search}
+          // This control had no handler at all before: it rendered the shortcut
+          // hint as decoration and could not open anything.
+          onClick={() => (isCommandPaletteOpen.value = true)}
+        >
+          <span className={styles.shortcut}>{MOD_LABEL}</span>
+        </Button>
+        <IconButton
+          icon={isDark ? Sun : Moon}
+          onClick={toggleTheme}
+          size="compact"
+          aria-label={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
+        />
+        {/* DS-07: the claim is the product, so this is a real button on every route. */}
+        <button
+          type="button"
+          className={styles.trustChip}
+          onClick={() => setShowTrust(true)}
+          aria-label="Offline, zero network requests. Read how to verify this."
+        >
+          <Badge variant="success">Offline · 0 requests</Badge>
+        </button>
+      </div>
+
+      {showTrust && <TrustModal onClose={() => setShowTrust(false)} />}
+    </header>
+  );
+}

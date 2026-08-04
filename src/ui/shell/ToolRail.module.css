@@ -1,0 +1,91 @@
+.rail {
+  width: var(--rail-w);
+  background: var(--surface-overlay);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-right: 1px solid var(--hairline);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  flex-shrink: 0;
+  overflow-y: auto;
+  z-index: 100;
+}
+
+.railGroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+}
+
+.railHeading {
+  font: var(--text-micro);
+  letter-spacing: var(--text-micro-ls);
+  color: var(--ink-subtle);
+  text-transform: uppercase;
+  margin: 0;
+  padding: 0 var(--space-xs);
+}
+
+.railList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.railItem {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  height: var(--control-h);
+  padding: 0 var(--space-xs);
+  border-radius: var(--radius-md);
+  font: var(--text-body);
+  color: var(--ink-muted);
+  text-decoration: none;
+  cursor: pointer;
+  transition: var(--transition-snappy);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.railItem:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+
+.railItem.active {
+  background: var(--surface-active);
+  color: var(--ink);
+  font: var(--text-body-strong);
+  letter-spacing: var(--text-body-strong-ls);
+}
+
+.railLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Below 800px the rail collapses to icons (DESIGN-ADAPTATION §4.2). */
+@media (max-width: 800px) {
+  .rail {
+    width: var(--rail-w-collapsed);
+    padding: var(--space-md) var(--space-xs);
+    align-items: center;
+  }
+  .railHeading {
+    display: none;
+  }
+  .railLabel {
+    display: none;
+  }
+  .railItem {
+    width: var(--control-h);
+    justify-content: center;
+    padding: 0;
+  }
+}

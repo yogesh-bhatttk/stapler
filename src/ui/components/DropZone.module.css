@@ -1,0 +1,58 @@
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  width: 100%;
+  min-height: 220px;
+  padding: var(--space-xl);
+  border: 2px dashed var(--border-control);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+  color: var(--ink);
+  cursor: pointer;
+  transition: var(--transition-snappy);
+}
+
+.dropzone:hover {
+  border-color: var(--primary);
+  background: var(--surface-2);
+}
+
+.dropzone:focus-visible {
+  outline: 2px solid var(--primary-focus);
+  outline-offset: 2px;
+}
+
+/* Distinct active and reject states, which DS-05 asks for by name. */
+.active {
+  border-color: var(--primary);
+  border-style: solid;
+  background: var(--surface-2);
+  box-shadow: var(--shadow-glow);
+}
+
+.reject {
+  border-color: var(--danger);
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.busy {
+  cursor: progress;
+  opacity: 0.75;
+  pointer-events: none;
+}
+
+.title {
+  font: var(--text-section);
+  letter-spacing: var(--text-section-ls);
+  margin: 0;
+}
+
+.hint {
+  font: var(--text-small);
+  color: var(--ink-subtle);
+  margin: 0;
+}

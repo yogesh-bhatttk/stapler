@@ -1,0 +1,9 @@
+dist/
+node_modules/
+tests/fixtures/
+playwright-report/
+test-results/
+pnpm-lock.yaml
+# DESIGN.md is the unmodified upstream design system and is read-only (CLAUDE.md).
+# Markdown is excluded wholesale so a formatter run can never rewrite it.
+*.md

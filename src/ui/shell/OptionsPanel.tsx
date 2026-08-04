@@ -1,0 +1,61 @@
+/**
+ * The options panel: a frame plus a per-tool body.
+ *
+ * It used to be a single 499-line component holding nine `useRoute` calls, the
+ * import pipeline, blank-page detection, and every tool's controls inline with
+ * repeated `style` objects. Each tool now owns its own panel file.
+ */
+
+import { useActiveTool } from '../useActiveTool';
+import { activeDoc } from '../../core/store';
+import { MergePanel } from '../tools/organize/MergePanel';
+import { OrganizePanel } from '../tools/organize/OrganizePanel';
+import { SplitPanel } from '../tools/split/SplitPanel';
+import { BlanksPanel } from '../tools/blanks/BlanksPanel';
+import { PdfToImagePanel } from '../tools/convert/PdfToImagePanel';
+import { ExtractPanel } from '../tools/extract/ExtractPanel';
+import { CompressPanel } from '../tools/compress/CompressPanel';
+import { CleanupPanel } from '../tools/cleanup/CleanupPanel';
+import { SignPanel } from '../tools/sign/SignPanel';
+import { RedactPanel } from '../tools/redact/RedactPanel';
+import { MetadataPanel } from '../tools/metadata/MetadataPanel';
+import styles from './OptionsPanel.module.css';
+
+const BODIES: Record<string, () => preact.JSX.Element | null> = {
+  merge: MergePanel,
+  organize: OrganizePanel,
+  insert: MergePanel,
+  split: SplitPanel,
+  'remove-blanks': BlanksPanel,
+  'pdf-to-img': PdfToImagePanel,
+  extract: ExtractPanel,
+  compress: CompressPanel,
+  cleanup: CleanupPanel,
+  sign: SignPanel,
+  redact: RedactPanel,
+  metadata: MetadataPanel
+};
+
+export function OptionsPanel() {
+  const tool = useActiveTool();
+  if (!tool || !tool.needsOptionsPanel) return null;
+
+  const Body = BODIES[tool.id];
+  const hasDocument = activeDoc.value !== null;
+
+  return (
+    <aside className={styles.panel} aria-label={`${tool.title} options`}>
+      <div className={styles.section}>
+        <h2 className={styles.title}>{tool.title}</h2>
+        <p className={styles.description}>{tool.summary}</p>
+      </div>
+      {hasDocument || tool.worksWithoutDocument ? (
+        Body && <Body />
+      ) : (
+        <p className={`${styles.note} ${styles.noteInfo}`}>Open a document to use this tool.</p>
+      )}
+    </aside>
+  );
+}
+
+export { styles as panelStyles };

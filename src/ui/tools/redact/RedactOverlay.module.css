@@ -1,0 +1,42 @@
+.layer {
+  position: absolute;
+  inset: 0;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.mark {
+  position: absolute;
+  background: var(--doc-redact);
+  border: 2px solid var(--danger);
+  box-sizing: border-box;
+}
+
+.remove {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--danger);
+  color: var(--on-status);
+  cursor: pointer;
+}
+
+.remove:focus-visible {
+  outline: 2px solid var(--primary-focus);
+  outline-offset: 2px;
+}
+
+.drawing {
+  position: absolute;
+  background: var(--danger-bg);
+  border: 1px dashed var(--danger);
+  pointer-events: none;
+  box-sizing: border-box;
+}

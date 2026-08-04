@@ -1,0 +1,96 @@
+.scroller {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-lg) var(--space-xl);
+  background: var(--doc-bg);
+}
+
+.header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-md);
+}
+
+.title {
+  font: var(--text-page-title);
+  letter-spacing: var(--text-page-title-ls);
+  color: var(--ink);
+  margin: 0;
+}
+
+.count {
+  font: var(--text-small);
+  color: var(--ink-subtle);
+}
+
+/* The windowed viewport: `height` is the full content height so the scrollbar is
+   honest, and only the visible rows are in the DOM. */
+.viewport {
+  position: relative;
+  width: 100%;
+}
+
+.window {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: grid;
+  gap: var(--space-lg);
+}
+
+.cell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-xs);
+  border-radius: var(--radius-lg);
+  outline-offset: 4px;
+}
+
+.cell:focus-visible {
+  outline: 2px solid var(--primary-focus);
+}
+
+.dragging {
+  opacity: 0.4;
+}
+
+.pageNumber {
+  font: var(--text-small);
+  color: var(--ink-subtle);
+}
+
+.pageNumberSelected {
+  font: var(--text-body-strong);
+  letter-spacing: var(--text-body-strong-ls);
+  color: var(--primary-text);
+}
+
+/* A 2px insertion line, not a scale transform: the user needs to know *where* the
+   page will land, which a growing tile does not say. */
+.dropBefore::before,
+.dropAfter::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: var(--space-lg);
+  width: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--primary);
+}
+
+.dropBefore::before {
+  left: calc(var(--space-lg) / -2 - 1px);
+}
+
+.dropAfter::after {
+  right: calc(var(--space-lg) / -2 - 1px);
+}
+
+.hint {
+  margin-top: var(--space-md);
+  font: var(--text-small);
+  color: var(--ink-subtle);
+}

@@ -1,0 +1,109 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  width: var(--panel-w);
+  padding: var(--space-lg) var(--space-md);
+  background: var(--surface-overlay);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-left: 1px solid var(--hairline);
+  flex-shrink: 0;
+  overflow-y: auto;
+  z-index: 100;
+}
+
+.title {
+  font: var(--text-section);
+  letter-spacing: var(--text-section-ls);
+  color: var(--ink);
+  margin: 0;
+}
+
+.description {
+  font: var(--text-small);
+  color: var(--ink-subtle);
+  margin: 0;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.divider {
+  height: 1px;
+  background: var(--hairline);
+  border: 0;
+  margin: 0;
+}
+
+.note {
+  padding: var(--space-sm);
+  border-radius: var(--radius-md);
+  font: var(--text-small);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  color: var(--warning);
+}
+
+.noteInfo {
+  background: var(--surface-2);
+  border-color: var(--hairline);
+  color: var(--ink-muted);
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.listRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-height: var(--row-h);
+  padding: 0 var(--space-xxs);
+  border-radius: var(--radius-sm);
+  font: var(--text-small);
+  color: var(--ink-muted);
+}
+
+.listRow:nth-child(odd) {
+  background: var(--surface-2);
+}
+
+.listRowText {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * Below 1100px the panel becomes a bottom sheet (DESIGN-ADAPTATION §4.2). The old
+ * rule was `display: none`, so on a 1024px laptop every tool option was simply
+ * unreachable.
+ */
+@media (max-width: 1100px) {
+  .panel {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: var(--actionbar-h);
+    width: auto;
+    max-height: 45vh;
+    border-left: 0;
+    border-top: 1px solid var(--hairline);
+    border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    box-shadow: var(--shadow-3);
+  }
+}

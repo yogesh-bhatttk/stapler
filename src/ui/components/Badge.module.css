@@ -1,0 +1,22 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  padding: 0 var(--space-xs);
+  border-radius: var(--radius-pill);
+  font: var(--text-micro);
+  letter-spacing: var(--text-micro-ls);
+  white-space: nowrap;
+}
+
+.variant-neutral {
+  background-color: var(--surface-2);
+  color: var(--ink-subtle);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+
+.variant-success {
+  background-color: color-mix(in srgb, var(--success) 15%, transparent);
+  color: var(--success);
+}

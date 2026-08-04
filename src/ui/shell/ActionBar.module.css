@@ -1,0 +1,32 @@
+.actionBar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  height: var(--actionbar-h);
+  padding: 0 var(--space-md);
+  background: var(--canvas);
+  border-top: 1px solid var(--hairline);
+  flex-shrink: 0;
+  z-index: 101;
+}
+
+.status {
+  font: var(--text-small);
+  color: var(--ink-subtle);
+  white-space: nowrap;
+}
+
+.progress {
+  flex: 1;
+  min-width: 0;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}

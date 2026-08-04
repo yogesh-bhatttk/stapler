@@ -1,0 +1,66 @@
+{
+  "name": "stapler",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline PDF toolkit: merge, split, compress, sign, and redact entirely in the browser. No upload, no account, no limits.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "^11.20.0",
+      "onFail": "download"
+    }
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "run-s build:ext build:web",
+    "build:ext": "BUILD_TARGET=ext vite build",
+    "build:web": "BUILD_TARGET=web vite build",
+    "check": "run-s check:type check:lint check:format check:tokens check:contrast",
+    "check:type": "tsc --noEmit",
+    "check:lint": "eslint .",
+    "check:format": "prettier --check .",
+    "check:tokens": "node scripts/check-tokens.mjs",
+    "check:contrast": "node scripts/check-contrast.mjs",
+    "check:bundle": "run-s build:web && node scripts/check-bundle-size.js",
+    "fixtures:static": "node scripts/generate-static-fixtures.mjs",
+    "pretest": "npm run fixtures:static",
+    "pretest:e2e": "npm run fixtures:static",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "verify": "run-s check test check:bundle test:e2e"
+  },
+  "dependencies": {
+    "@preact/signals": "^2.10.1",
+    "comlink": "^4.4.2",
+    "fflate": "^0.8.3",
+    "heic2any": "^0.0.4",
+    "idb": "^8.0.3",
+    "lucide-preact": "^1.28.0",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^6.2.108",
+    "preact": "^10.29.8",
+    "wouter-preact": "^3.10.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.62.1",
+    "@preact/preset-vite": "^2.10.6",
+    "@types/chrome": "^0.2.5",
+    "@types/node": "^26.1.2",
+    "eslint": "^10.8.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-import": "^2.32.0",
+    "npm-run-all": "^4.1.5",
+    "prettier": "^3.9.6",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.65.0",
+    "vite": "^8.2.0",
+    "vitest": "^4.1.10"
+  }
+}

@@ -1,0 +1,18 @@
+node_modules/
+dist/
+test-results/
+playwright-report/
+# Fixtures are generated deterministically by tests/e2e/fixtures.ts (QA-01 asks that
+# large/easily-reconstructed fixtures be generated at test time rather than committed).
+# The small static fixtures below need external encoders to build and must not regress,
+# so they are committed — see tests/fixtures/README.md.
+tests/fixtures/*
+!tests/fixtures/README.md
+!tests/fixtures/scanned_skewed.pdf
+!tests/fixtures/cmyk.pdf
+!tests/fixtures/jbig2.pdf
+!tests/fixtures/jpx.pdf
+!tests/fixtures/encrypted.pdf
+!tests/fixtures/cjk.pdf
+!tests/fixtures/rtl.pdf
+!tests/fixtures/xfa.pdf

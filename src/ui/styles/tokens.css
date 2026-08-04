@@ -1,0 +1,322 @@
+/*
+ * Stapler design tokens — the single source of colour, type, space, and motion.
+ * Implements docs/DESIGN-ADAPTATION.md §3. This is the ONLY file in the repo
+ * permitted to contain a colour literal (PLAN §5.4, invariant 3).
+ *
+ * Contrast: every foreground/background pair below is recorded with its measured
+ * WCAG ratio in docs/CONTRAST-AUDIT.md (DS-02). Values that failed AA against the
+ * upstream palette were darkened here rather than waived.
+ */
+
+:root {
+  /* ---------- Motion (DESIGN-ADAPTATION §3.3) ---------- */
+  --dur-fast: 120ms;
+  --dur-base: 160ms;
+  --dur-slow: 220ms;
+  --ease-snappy: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-smooth: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --transition-snappy: all var(--dur-fast) var(--ease-snappy);
+  --transition-smooth: all var(--dur-base) var(--ease-smooth);
+
+  /* ---------- Typography (§3.2) ---------- */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* Composite roles — prefer these. */
+  --text-page-title: 600 20px/1.25 var(--font-sans);
+  --text-page-title-ls: -0.3px;
+
+  --text-section: 600 15px/1.35 var(--font-sans);
+  --text-section-ls: 0px;
+
+  --text-body: 400 14px/1.5 var(--font-sans);
+  --text-body-ls: 0px;
+
+  --text-body-strong: 500 14px/1.5 var(--font-sans);
+  --text-body-strong-ls: 0px;
+
+  --text-small: 400 13px/1.45 var(--font-sans);
+  --text-small-ls: 0px;
+
+  --text-micro: 500 12px/1.35 var(--font-sans);
+  --text-micro-ls: 0.1px;
+
+  --text-mono: 400 12px/1.45 var(--font-mono);
+  --text-mono-ls: 0px;
+
+  /* Bare sizes, for the cases where only the size varies. Same ramp as above:
+     no size exists here that is not a role above. */
+  --font-size-xs: 12px;
+  --font-size-sm: 13px;
+  --font-size-md: 14px;
+  --font-size-lg: 15px;
+  --font-size-xl: 20px;
+
+  /* ---------- Spacing — 8px grid; 4px only inside controls (§3.3) ---------- */
+  --space-xxs: 4px;
+  --space-xs: 8px;
+  --space-sm: 12px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-xxl: 48px;
+  --space-section: 96px;
+
+  /* ---------- Radius ---------- */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-pill: 9999px;
+
+  /* ---------- Density (§3.4) ---------- */
+  --control-h: 32px;
+  --control-h-compact: 28px;
+  --row-h: 36px;
+  --topbar-h: 48px;
+  --actionbar-h: 56px;
+  --rail-w: 224px;
+  --rail-w-collapsed: 56px;
+  --panel-w: 300px;
+
+  /* ---------- Colour — light (§3.1) ---------- */
+  --canvas: #ffffff;
+  --surface-1: #f9f9fb;
+  --surface-2: #f4f5f8;
+  --surface-3: #eeeff2;
+  --surface-4: #e8e9ee;
+
+  --surface-overlay: rgba(255, 255, 255, 0.78);
+  --surface-hover: rgba(8, 9, 10, 0.04);
+  --surface-active: rgba(8, 9, 10, 0.08);
+
+  /* Modal/dialog backdrop. */
+  --scrim: rgba(8, 9, 10, 0.55);
+
+  --hairline: #e6e7eb;
+  --hairline-strong: #d3d5da;
+  --hairline-tertiary: #c3c5cc;
+  /* Boundary of an interactive control: must clear 3:1 (WCAG 1.4.11). */
+  --border-control: #8a8f98;
+
+  --ink: #08090a;
+  --ink-muted: #3c4149;
+  --ink-subtle: #63676e;
+  /* Decorative only — 3.25:1. Never carries text. */
+  --ink-tertiary: #8a8f98;
+
+  --primary: #5e6ad2;
+  --primary-hover: #4c56c0;
+  --primary-focus: #5e69d1;
+  --on-primary: #ffffff;
+  /* Accent as text: the fill value is too light to read on white. */
+  --primary-text: #4c56c0;
+
+  --success: #17742d;
+  --warning: #8a5300;
+  --danger: #b3282d;
+  --on-status: #ffffff;
+
+  --success-bg: #eef7f0;
+  --success-border: #bfdfc8;
+  --warning-bg: #fdf6e8;
+  --warning-border: #ecd9ae;
+  --danger-bg: #fdefef;
+  --danger-border: #f0c5c6;
+
+  /* ---------- Document surfaces (§3.1) ---------- */
+  --doc-bg: #eceef1;
+  --doc-page: #ffffff;
+  --doc-shadow: 0 1px 3px rgba(8, 9, 10, 0.14);
+  --doc-select: var(--primary);
+  --doc-redact: #0a0a0b;
+
+  /* ---------- Elevation (§3.3) ---------- */
+  --shadow-1: 0 1px 2px rgba(8, 9, 10, 0.06);
+  --shadow-2: 0 4px 12px rgba(8, 9, 10, 0.08);
+  --shadow-3: 0 12px 32px rgba(8, 9, 10, 0.12);
+  --shadow-glow: 0 0 0 2px var(--primary-focus);
+}
+
+[data-theme='dark'] {
+  --canvas: #010102;
+  --surface-1: #0f1011;
+  --surface-2: #141516;
+  --surface-3: #18191a;
+  --surface-4: #191a1b;
+
+  --surface-overlay: rgba(15, 16, 17, 0.78);
+  --surface-hover: rgba(247, 248, 248, 0.05);
+  --surface-active: rgba(247, 248, 248, 0.1);
+
+  --scrim: rgba(1, 1, 2, 0.7);
+
+  --hairline: #23252a;
+  --hairline-strong: #34343a;
+  --hairline-tertiary: #3e3e44;
+  --border-control: #6f7379;
+
+  --ink: #f7f8f8;
+  --ink-muted: #d0d6e0;
+  --ink-subtle: #8a8f98;
+  --ink-tertiary: #62666d;
+
+  --primary: #5e6ad2;
+  --primary-hover: #828fff;
+  --primary-focus: #828fff;
+  --on-primary: #ffffff;
+  --primary-text: #828fff;
+
+  --success: #27a644;
+  --warning: #f5a623;
+  --danger: #e5484d;
+  --on-status: #08090a;
+
+  --success-bg: #0c1a10;
+  --success-border: #1d4028;
+  --warning-bg: #231a08;
+  --warning-border: #4a3813;
+  --danger-bg: #231012;
+  --danger-border: #4d2124;
+
+  --doc-bg: #0a0a0b;
+  /* A page is always white in both themes. Never invert a document. */
+  --doc-page: #ffffff;
+  --doc-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+  --doc-select: var(--primary);
+  --doc-redact: #0a0a0b;
+
+  /* In dark mode depth comes from surface steps, not shadows (§3.3). */
+  --shadow-1: none;
+  --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.5);
+  --shadow-3: 0 12px 32px rgba(0, 0, 0, 0.6);
+  --shadow-glow: 0 0 0 2px var(--primary-focus);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+    --dur-slow: 0ms;
+  }
+
+  /* Tokens cover transitions we author; this covers keyframe animations and
+     anything a component hard-codes. */
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---------- Reset and base ---------- */
+* {
+  box-sizing: border-box;
+}
+
+*:focus-visible {
+  outline: 2px solid var(--primary-focus);
+  outline-offset: 2px;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  font: var(--text-body);
+  font-family: var(--font-sans);
+  background-color: var(--canvas);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#app {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Visible only to screen readers — used for live progress announcements. */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------- Typography utilities ---------- */
+.text-page-title {
+  font: var(--text-page-title);
+  letter-spacing: var(--text-page-title-ls);
+}
+.text-section {
+  font: var(--text-section);
+  letter-spacing: var(--text-section-ls);
+}
+.text-body {
+  font: var(--text-body);
+  letter-spacing: var(--text-body-ls);
+}
+.text-body-strong {
+  font: var(--text-body-strong);
+  letter-spacing: var(--text-body-strong-ls);
+}
+.text-small {
+  font: var(--text-small);
+  letter-spacing: var(--text-small-ls);
+}
+.text-micro {
+  font: var(--text-micro);
+  letter-spacing: var(--text-micro-ls);
+}
+.text-mono {
+  font: var(--text-mono);
+  letter-spacing: var(--text-mono-ls);
+}
+
+/* ---------- Animations ---------- */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}

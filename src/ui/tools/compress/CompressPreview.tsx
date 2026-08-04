@@ -1,0 +1,224 @@
+import { useEffect, useRef, useState, useMemo } from 'preact/hooks';
+import { ZoomIn, ZoomOut } from 'lucide-preact';
+import { type PageRef } from '../../../core/store';
+import { compressReport, compressSettings } from './state';
+import { composeDocument, compressDocument, planCompression } from '../../../core/operations';
+import { renderWorker } from '../../../core/workers';
+import { CompareSlider } from '../../components/CompareSlider';
+import { IconButton } from '../../components/IconButton';
+import { EmptyState } from '../../components/Feedback';
+import { isCancellation, logEvent, fromUnknown } from '../../../core/errors';
+import styles from '../../shell/SinglePageView.module.css';
+
+export interface CompressPreviewProps {
+  pages: PageRef[];
+}
+
+const ZOOM_STEPS = [0.5, 0.75, 1, 1.5, 2, 3, 4] as const;
+
+export function CompressPreview({ pages }: CompressPreviewProps) {
+  const [zoomStep, setZoomStep] = useState(2); // 100%
+  const zoom = ZOOM_STEPS[zoomStep];
+
+  const beforeCanvasRef = useRef<HTMLCanvasElement>(null);
+  const afterCanvasRef = useRef<HTMLCanvasElement>(null);
+
+  const [beforeSize, setBeforeSize] = useState({ width: 0, height: 0 });
+  const [afterSize, setAfterSize] = useState({ width: 0, height: 0 });
+
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  const report = compressReport.value;
+  const settings = compressSettings.value;
+
+  // 1. Identify representative page
+  const representativeIndex = useMemo(() => {
+    if (!report || report.plan.pages.length === 0) return 0;
+
+    let best = report.plan.pages[0];
+    for (const p of report.plan.pages) {
+      if (p.actionableBytes > best.actionableBytes) best = p;
+    }
+    return best.pageIndex;
+  }, [report]);
+
+  const page = pages[representativeIndex];
+
+  // 2. Render before
+  useEffect(() => {
+    if (!page) return;
+    let cancelled = false;
+
+    const renderBefore = async () => {
+      try {
+        const composedBytes = await composeDocument({ pages: [page], annotations: [] });
+        if (cancelled) return;
+
+        const handle = await renderWorker
+          .lease(api => api.loadDocument(composedBytes))
+          .then(info => info.handle);
+        if (cancelled) {
+          await renderWorker.lease(api => api.closeDocument(handle));
+          return;
+        }
+
+        const scale = Number(
+          (zoom * Math.min(2, typeof devicePixelRatio === 'number' ? devicePixelRatio : 1)).toFixed(
+            2
+          )
+        );
+        const bitmap = await renderWorker.lease(api => api.renderPage(handle, 0, scale));
+
+        if (cancelled) {
+          bitmap.close();
+          await renderWorker.lease(api => api.closeDocument(handle));
+          return;
+        }
+
+        const canvas = beforeCanvasRef.current;
+        if (canvas) {
+          canvas.width = bitmap.width;
+          canvas.height = bitmap.height;
+          const ctx = canvas.getContext('2d');
+          ctx?.clearRect(0, 0, bitmap.width, bitmap.height);
+          ctx?.drawImage(bitmap, 0, 0);
+          setBeforeSize({ width: bitmap.width / scale, height: bitmap.height / scale });
+        }
+
+        bitmap.close();
+        await renderWorker.lease(api => api.closeDocument(handle));
+      } catch (err) {
+        if (!isCancellation(err)) logEvent('error', 'compress.preview', fromUnknown(err).message);
+      }
+    };
+    renderBefore();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [page, zoom]);
+
+  // 3. Render after (debounced on settings)
+  useEffect(() => {
+    if (!page) return;
+    let cancelled = false;
+
+    const renderAfter = async () => {
+      setIsProcessing(true);
+      try {
+        const composedBytes = await composeDocument({ pages: [page], annotations: [] });
+        if (cancelled) return;
+
+        const miniReport = await planCompression(composedBytes, settings);
+        if (cancelled) return;
+
+        const compressedResult = await compressDocument(composedBytes, settings, miniReport);
+        if (cancelled) return;
+
+        const handle = await renderWorker
+          .lease(api => api.loadDocument(compressedResult.bytes))
+          .then(info => info.handle);
+        if (cancelled) {
+          await renderWorker.lease(api => api.closeDocument(handle));
+          return;
+        }
+
+        const scale = Number(
+          (zoom * Math.min(2, typeof devicePixelRatio === 'number' ? devicePixelRatio : 1)).toFixed(
+            2
+          )
+        );
+        const bitmap = await renderWorker.lease(api => api.renderPage(handle, 0, scale));
+
+        if (cancelled) {
+          bitmap.close();
+          await renderWorker.lease(api => api.closeDocument(handle));
+          return;
+        }
+
+        const canvas = afterCanvasRef.current;
+        if (canvas) {
+          canvas.width = bitmap.width;
+          canvas.height = bitmap.height;
+          const ctx = canvas.getContext('2d');
+          ctx?.clearRect(0, 0, bitmap.width, bitmap.height);
+          ctx?.drawImage(bitmap, 0, 0);
+          setAfterSize({ width: bitmap.width / scale, height: bitmap.height / scale });
+        }
+
+        bitmap.close();
+        await renderWorker.lease(api => api.closeDocument(handle));
+      } catch (err) {
+        if (!isCancellation(err)) logEvent('error', 'compress.preview', fromUnknown(err).message);
+      } finally {
+        if (!cancelled) setIsProcessing(false);
+      }
+    };
+
+    const debounceTimer = setTimeout(renderAfter, 200);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(debounceTimer);
+    };
+  }, [page, settings, zoom]);
+
+  if (!page) {
+    return <EmptyState title="No page" body="There are no pages to preview." />;
+  }
+
+  const w = Math.max(beforeSize.width, afterSize.width);
+  const h = Math.max(beforeSize.height, afterSize.height);
+
+  return (
+    <div className={styles.workspace}>
+      <div className={styles.scrollArea}>
+        <div
+          className={styles.canvasContainer}
+          style={{
+            width: w * zoom,
+            height: h * zoom,
+            opacity: isProcessing ? 0.7 : 1,
+            transition: 'opacity 0.2s'
+          }}
+        >
+          <CompareSlider
+            before={
+              <canvas
+                ref={beforeCanvasRef}
+                className={styles.canvas}
+                style={{ width: '100%', height: '100%' }}
+              />
+            }
+            after={
+              <canvas
+                ref={afterCanvasRef}
+                className={styles.canvas}
+                style={{ width: '100%', height: '100%' }}
+              />
+            }
+          />
+        </div>
+      </div>
+
+      <div className={styles.bottomBar}>
+        <span className={styles.pageLabel}>Preview: Page {page.sourceIndex + 1}</span>
+        <div className={styles.toolbar}>
+          <IconButton
+            icon={ZoomOut}
+            title="Zoom out"
+            disabled={zoomStep === 0}
+            onClick={() => setZoomStep(s => Math.max(0, s - 1))}
+          />
+          <span className={styles.zoomLabel}>{Math.round(zoom * 100)}%</span>
+          <IconButton
+            icon={ZoomIn}
+            title="Zoom in"
+            disabled={zoomStep === ZOOM_STEPS.length - 1}
+            onClick={() => setZoomStep(s => Math.min(ZOOM_STEPS.length - 1, s + 1))}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}

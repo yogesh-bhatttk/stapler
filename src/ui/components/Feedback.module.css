@@ -1,0 +1,167 @@
+/* ---------- toasts ---------- */
+
+.toastRegion {
+  position: fixed;
+  right: var(--space-md);
+  bottom: var(--space-md);
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  width: min(420px, calc(100vw - var(--space-xl)));
+  /* The region must not eat clicks aimed at the page behind it. */
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  display: flex;
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline-strong);
+  border-left: 3px solid var(--hairline-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  animation: slideUp var(--dur-base) var(--ease-smooth);
+}
+
+.tone-info {
+  border-left-color: var(--primary);
+}
+.tone-success {
+  border-left-color: var(--success);
+  background: var(--success-bg);
+  border-color: var(--success-border);
+}
+.tone-warning {
+  border-left-color: var(--warning);
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
+}
+.tone-danger {
+  border-left-color: var(--danger);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+}
+
+.toastBody {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+}
+
+.toastTitle {
+  font: var(--text-body-strong);
+  letter-spacing: var(--text-body-strong-ls);
+  color: var(--ink);
+}
+
+.toastDetail {
+  font: var(--text-small);
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+}
+
+.toastActions {
+  display: flex;
+  gap: var(--space-xs);
+  margin-top: var(--space-xxs);
+}
+
+/* ---------- progress ---------- */
+
+.progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.progressLabel {
+  font: var(--text-small);
+  color: var(--ink-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40ch;
+}
+
+.track {
+  position: relative;
+  flex: 1;
+  min-width: 120px;
+  height: 6px;
+  background: var(--surface-3);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+
+.bar {
+  height: 100%;
+  background: var(--primary);
+  border-radius: var(--radius-pill);
+  transition: width var(--dur-base) var(--ease-snappy);
+}
+
+/* Shown only while the total is genuinely unknown. */
+.indeterminate {
+  width: 35%;
+  animation: indeterminateSlide 1.1s var(--ease-smooth) infinite;
+}
+
+@keyframes indeterminateSlide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+
+/* ---------- empty state ---------- */
+
+.empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  padding: var(--space-xl);
+  text-align: center;
+  color: var(--ink-subtle);
+}
+
+.emptyTitle {
+  font: var(--text-section);
+  letter-spacing: var(--text-section-ls);
+  color: var(--ink);
+}
+
+.emptyBody {
+  font: var(--text-body);
+  max-width: 46ch;
+}
+
+/* ---------- size delta ---------- */
+
+.sizeDelta {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+  font: var(--text-mono);
+  letter-spacing: var(--text-mono-ls);
+}
+
+.deltaGain {
+  color: var(--success);
+  font: var(--text-body-strong);
+}
+
+.deltaNone {
+  color: var(--ink-subtle);
+  font: var(--text-body-strong);
+}

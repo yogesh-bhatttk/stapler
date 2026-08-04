@@ -1,0 +1,89 @@
+.grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.point {
+  display: flex;
+  gap: var(--space-sm);
+}
+
+.pointIcon {
+  color: var(--primary-text);
+  flex-shrink: 0;
+}
+
+.pointTitle {
+  font: var(--text-body-strong);
+  letter-spacing: var(--text-body-strong-ls);
+  margin: 0 0 var(--space-xxs);
+  color: var(--ink);
+}
+
+.pointBody {
+  font: var(--text-small);
+  color: var(--ink-muted);
+  margin: 0;
+}
+
+.steps {
+  margin: var(--space-xs) 0 0;
+  padding-left: var(--space-lg);
+  font: var(--text-small);
+  color: var(--ink-muted);
+}
+
+.callout {
+  padding: var(--space-sm);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.link {
+  color: var(--primary-text);
+  font: var(--text-body-strong);
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--space-lg);
+}
+
+.groupTitle {
+  font: var(--text-body-strong);
+  letter-spacing: var(--text-body-strong-ls);
+  color: var(--ink);
+  margin: 0 0 var(--space-xs);
+  padding-bottom: var(--space-xxs);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  min-height: 28px;
+  font: var(--text-small);
+  color: var(--ink-muted);
+}
+
+.keys {
+  font: var(--text-mono);
+  letter-spacing: var(--text-mono-ls);
+  padding: 1px var(--space-xxs);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--ink);
+  white-space: nowrap;
+}

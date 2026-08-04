@@ -1,0 +1,107 @@
+.frame {
+  position: relative;
+  width: 100%;
+  background: var(--doc-page);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  box-shadow: var(--doc-shadow);
+  transition:
+    box-shadow var(--dur-fast) var(--ease-snappy),
+    transform var(--dur-fast) var(--ease-snappy);
+}
+
+.frame:hover {
+  box-shadow: var(--shadow-3);
+  transform: translateY(-2px);
+}
+
+.selected {
+  /* DESIGN-ADAPTATION §3.1: a 2px selection ring in --doc-select. */
+  border-color: var(--doc-select);
+  box-shadow: 0 0 0 2px var(--doc-select);
+}
+
+.canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* The canvas is rendered at the page's rotated size, so it fills the frame
+     directly — the previous version rotated it with a CSS transform inside a fixed
+     portrait frame, which squashed every landscape page. */
+  object-fit: contain;
+}
+
+.placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-2);
+  color: var(--ink-subtle);
+  font: var(--text-micro);
+  letter-spacing: var(--text-micro-ls);
+}
+
+.failed {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.tools {
+  position: absolute;
+  top: var(--space-xxs);
+  right: var(--space-xxs);
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--surface-overlay);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-snappy);
+}
+
+/* Shown on hover *and* on keyboard focus — hover-only controls are unreachable
+   without a mouse (NFR-01). */
+.frame:hover .tools,
+.frame:focus-within .tools,
+:global(.cell:focus-visible) .tools {
+  opacity: 1;
+}
+
+.checkbox {
+  position: absolute;
+  top: var(--space-xxs);
+  left: var(--space-xxs);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--hairline-strong);
+  background: var(--surface-1);
+  color: var(--on-primary);
+}
+
+.checkboxOn {
+  background: var(--primary);
+  border-color: var(--primary);
+}
+
+.rotationBadge {
+  position: absolute;
+  bottom: var(--space-xxs);
+  left: var(--space-xxs);
+  padding: 0 var(--space-xxs);
+  border-radius: var(--radius-sm);
+  background: var(--surface-overlay);
+  color: var(--ink-muted);
+  font: var(--text-micro);
+  letter-spacing: var(--text-micro-ls);
+}
