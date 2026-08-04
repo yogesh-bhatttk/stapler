@@ -228,7 +228,10 @@ dirty }`. `PageRef` carries source doc id, source index, rotation, crop box, and
 
 ### DOC-05 · Export pipeline — `M` `P0`
 
-**Status: Partial** — Order and rotation asserted on real bytes. **Save-over-original not offered in the UI**; QA-05 not run.
+**Status: Partial** — Order and rotation asserted on real bytes. Save-over-original is now
+offered in the UI (asks explicitly on every commit for a document opened from one writable
+file). **Unverified by automation** — needs the QA-05 manual pass, since Playwright cannot
+drive the native file picker.
 
 - **Requirements:** Compose the output from `PageRef`s via pdf-lib; `useObjectStreams`
   enabled. Save via `showSaveFilePicker` with a sensible default filename

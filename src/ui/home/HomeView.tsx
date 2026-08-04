@@ -55,7 +55,8 @@ export function HomeView() {
           name: imported.source.name,
           pages: makePageRefs(imported.source.id, imported.source.pageCount),
           annotations: [],
-          dirty: false
+          dirty: false,
+          sourceHandle: handle.writable ? { fileId: handle.id, writable: true } : undefined
         });
       }
       for (const failure of outcome.failures) {

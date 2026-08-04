@@ -54,6 +54,14 @@ export interface StaplerDoc {
   pages: PageRef[];
   annotations: Annotation[];
   dirty: boolean;
+  /**
+   * The file handle this document was opened from, when the platform can write
+   * back to it (DOC-05, save-over-original). Only ever set for a document opened
+   * from exactly one file — a merge or an insert produces a document that no
+   * longer corresponds to any single file on disk, so it is not carried forward
+   * by those operations.
+   */
+  sourceHandle?: { fileId: string; writable: boolean };
 }
 
 /** Workspace documents — what the file tabs show. */

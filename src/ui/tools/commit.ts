@@ -44,7 +44,37 @@ function stem(name: string): string {
   return name.replace(/\.[^.]+$/, '') || 'document';
 }
 
-async function save(bytes: Uint8Array, name: string): Promise<boolean> {
+/**
+ * DOC-05 — offers save-over-original when the document's handle supports it.
+ *
+ * Always asks rather than defaulting to overwrite: the file this document came
+ * from is not necessarily what the caller's suggested `name` refers to (most
+ * commit paths suggest a derived name like `contract-compressed.pdf`), and
+ * silently overwriting the original the first time a user clicks the one
+ * button that used to always mean "save a new file" is exactly the kind of
+ * surprise this product's error-handling philosophy exists to avoid.
+ */
+async function save(doc: StaplerDoc, bytes: Uint8Array, name: string): Promise<boolean> {
+  if (doc.sourceHandle?.writable) {
+    const overwrite = await confirmAction({
+      title: `Save changes to ${doc.name}?`,
+      body: 'Save over the original file, or keep it and save a new file instead.',
+      confirmLabel: 'Save over original',
+      cancelLabel: 'Save as new file'
+    });
+    if (overwrite) {
+      const saved = await platform.saveOver(doc.sourceHandle.fileId, bytes);
+      if (saved) {
+        notify('success', `Saved ${doc.name}`, { detail: formatBytes(bytes.byteLength) });
+      } else {
+        notify('warning', 'Could not save over the original file.', {
+          detail: 'Nothing was overwritten. Try again to save a new file instead.'
+        });
+      }
+      return saved;
+    }
+  }
+
   const saved = await platform.saveFileAs(bytes, name);
   if (saved) notify('success', `Saved ${name}`, { detail: formatBytes(bytes.byteLength) });
   return saved;
@@ -59,7 +89,7 @@ type CommitHandler = (context: CommitContext) => Promise<void>;
 
 const exportComposed: CommitHandler = async ({ doc, job }) => {
   const bytes = await composeDocument({ pages: doc.pages, annotations: doc.annotations }, job);
-  await save(bytes, `${stem(doc.name)}-stapler.pdf`);
+  await save(doc, bytes, `${stem(doc.name)}-stapler.pdf`);
 };
 
 const HANDLERS: Record<ToolId, CommitHandler> = {
@@ -80,7 +110,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         return;
       }
       const bytes = await composeDocument({ pages: selected, annotations: doc.annotations }, job);
-      await save(bytes, `${stem(doc.name)}-extract.pdf`);
+      await save(doc, bytes, `${stem(doc.name)}-extract.pdf`);
       return;
     }
 
@@ -106,10 +136,10 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     );
 
     if (!result.isZip) {
-      await save(result.bytes, `${stem(doc.name)}-part-01.pdf`);
+      await save(doc, result.bytes, `${stem(doc.name)}-part-01.pdf`);
       return;
     }
-    await save(result.bytes, `${stem(doc.name)}-split.zip`);
+    await save(doc, result.bytes, `${stem(doc.name)}-split.zip`);
   },
 
   'remove-blanks': async ({ doc }) => {
@@ -140,7 +170,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       .map(({ index }) => index);
 
     const archive = await pagesToImageArchive(bytes, indices, settings.format, settings.dpi, job);
-    await save(archive, `${stem(doc.name)}-${settings.dpi}dpi.zip`);
+    await save(doc, archive, `${stem(doc.name)}-${settings.dpi}dpi.zip`);
   },
 
   compress: async ({ doc, job }) => {
@@ -173,7 +203,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       return;
     }
 
-    const saved = await save(result.bytes, `${stem(doc.name)}-compressed.pdf`);
+    const saved = await save(doc, result.bytes, `${stem(doc.name)}-compressed.pdf`);
     if (saved) {
       const percent = Math.round((1 - result.bytes.byteLength / result.originalBytes) * 100);
       notify('success', `Reduced by ${percent}%`, {
@@ -186,7 +216,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // The cleanup editor writes its result straight into the document, so committing
     // is an ordinary export of whatever the workspace now holds.
     const bytes = await composeDocument({ pages: doc.pages, annotations: doc.annotations }, job);
-    await save(bytes, `${stem(doc.name)}-cleaned.pdf`);
+    await save(doc, bytes, `${stem(doc.name)}-cleaned.pdf`);
   },
 
   sign: async ({ doc, job }) => {
@@ -197,7 +227,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       return;
     }
     const bytes = await composeDocument({ pages: doc.pages, annotations: doc.annotations }, job);
-    await save(bytes, `${stem(doc.name)}-signed.pdf`);
+    await save(doc, bytes, `${stem(doc.name)}-signed.pdf`);
   },
 
   redact: async ({ doc, job }) => {
@@ -250,7 +280,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     const scrubbed = await processWorker.lease(api =>
       api.scrubMetadata(original, scrubSettings.value)
     );
-    await save(scrubbed, `${stem(doc.name)}-scrubbed.pdf`);
+    await save(doc, scrubbed, `${stem(doc.name)}-scrubbed.pdf`);
   }
 };
 

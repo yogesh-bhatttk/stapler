@@ -9,7 +9,7 @@
 import { useRef, useState } from 'preact/hooks';
 import { UploadCloud } from 'lucide-preact';
 import { platform } from '../../platform/current';
-import { PDF_AND_IMAGES, acceptToInputAccept } from '../../platform/index';
+import { PDF_AND_IMAGES, acceptToInputAccept, type OpenedFile } from '../../platform/index';
 import { importFiles } from '../../core/import';
 import { addDocument, makePageRefs } from '../../core/store';
 import { resetHistory } from '../../core/history';
@@ -34,7 +34,7 @@ export function DropZone({ onImported }: DropZoneProps) {
         item.kind === 'file' && (item.type === 'application/pdf' || item.type.startsWith('image/'))
     );
 
-  const process = async (files: File[]) => {
+  const process = async (files: File[], handles?: OpenedFile[]) => {
     if (files.length === 0) return;
     setState('busy');
     setProgress({ label: 'Reading files', value: null });
@@ -44,12 +44,17 @@ export function DropZone({ onImported }: DropZoneProps) {
       });
 
       for (const imported of outcome.imported) {
+        // Matched by name rather than position: images grouped into one PDF and
+        // per-file failures both mean `outcome.imported` does not line up
+        // positionally with the files that were opened.
+        const handle = handles?.find(h => h.name === imported.source.name);
         addDocument({
           id: crypto.randomUUID(),
           name: imported.source.name,
           pages: makePageRefs(imported.source.id, imported.source.pageCount),
           annotations: [],
-          dirty: false
+          dirty: false,
+          sourceHandle: handle?.writable ? { fileId: handle.id, writable: true } : undefined
         });
         for (const warning of imported.warnings) {
           notify('warning', imported.source.name, { detail: warning });
@@ -80,7 +85,7 @@ export function DropZone({ onImported }: DropZoneProps) {
       for (const handle of opened) {
         if (handle.persistable) await platform.persistHandle(handle);
       }
-      await process(await Promise.all(opened.map(handle => handle.getFile())));
+      await process(await Promise.all(opened.map(handle => handle.getFile())), opened);
     } catch (err) {
       notifyError('import.browse', err);
     }
