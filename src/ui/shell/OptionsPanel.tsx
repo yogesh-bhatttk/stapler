@@ -10,6 +10,7 @@ import { useActiveTool } from '../useActiveTool';
 import { activeDoc } from '../../core/store';
 import { MergePanel } from '../tools/organize/MergePanel';
 import { OrganizePanel } from '../tools/organize/OrganizePanel';
+import { InsertPanel } from '../tools/organize/InsertPanel';
 import { SplitPanel } from '../tools/split/SplitPanel';
 import { BlanksPanel } from '../tools/blanks/BlanksPanel';
 import { PdfToImagePanel } from '../tools/convert/PdfToImagePanel';
@@ -24,7 +25,7 @@ import styles from './OptionsPanel.module.css';
 const BODIES: Record<string, () => preact.JSX.Element | null> = {
   merge: MergePanel,
   organize: OrganizePanel,
-  insert: MergePanel,
+  insert: InsertPanel,
   split: SplitPanel,
   'remove-blanks': BlanksPanel,
   'pdf-to-img': PdfToImagePanel,

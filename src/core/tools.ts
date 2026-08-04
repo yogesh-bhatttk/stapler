@@ -180,7 +180,9 @@ export const TOOLS: readonly ToolDefinition[] = [
     canvasMode: 'grid',
     needsOptionsPanel: true,
     commitLabel: 'Export PDF',
-    selectable: false
+    // Selecting a page in the grid sets the insertion anchor — the panel inserts
+    // right after the last selected page.
+    selectable: true
   }
 ];
 

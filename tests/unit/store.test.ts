@@ -2,11 +2,13 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
   activeDocId,
   addDocument,
+  appendPages,
   bytesForPages,
   closeDocument,
   deletePages,
   documents,
   duplicatePages,
+  insertPages,
   makePageRefs,
   movePages,
   registerSource,
@@ -88,6 +90,92 @@ describe('movePages', () => {
     const doc = seed();
     movePages(doc.id, [], 2);
     expect(order()).toEqual([0, 1, 2, 3, 4]);
+  });
+});
+
+describe('insertPages', () => {
+  it('inserts at the given index, leaving everything else in place', () => {
+    const doc = seed(3, 'src-a');
+    const originalKeys = doc.pages.map(p => p.key);
+    registerSource({
+      id: 'src-b',
+      name: 'src-b.pdf',
+      bytes: new Uint8Array([9]),
+      pageCount: 2,
+      pageSizes: [
+        { width: 595, height: 842 },
+        { width: 595, height: 842 }
+      ]
+    });
+    const inserted = makePageRefs('src-b', 2);
+
+    insertPages(doc.id, inserted, 1);
+
+    expect(documents.value[0].pages.map(p => p.key)).toEqual([
+      originalKeys[0],
+      inserted[0].key,
+      inserted[1].key,
+      originalKeys[1],
+      originalKeys[2]
+    ]);
+  });
+
+  it('clamps an out-of-range index to the end', () => {
+    const doc = seed(2, 'src-a');
+    const inserted = makePageRefs('src-a', 1);
+
+    insertPages(doc.id, inserted, 99);
+
+    const keys = documents.value[0].pages.map(p => p.key);
+    expect(keys).toHaveLength(3);
+    expect(keys[2]).toBe(inserted[0].key);
+  });
+
+  it('clamps a negative index to the start', () => {
+    const doc = seed(2, 'src-a');
+    const inserted = makePageRefs('src-a', 1);
+
+    insertPages(doc.id, inserted, -5);
+
+    expect(documents.value[0].pages[0].key).toBe(inserted[0].key);
+  });
+
+  it('does nothing for an empty page list', () => {
+    const doc = seed(2);
+    insertPages(doc.id, [], 1);
+    expect(order()).toEqual([0, 1]);
+  });
+
+  it('leaves the source document that the inserted pages came from untouched', () => {
+    const doc = seed(2, 'src-a');
+    registerSource({
+      id: 'src-b',
+      name: 'src-b.pdf',
+      bytes: new Uint8Array([1, 2, 3]),
+      pageCount: 4,
+      pageSizes: Array.from({ length: 4 }, () => ({ width: 595, height: 842 }))
+    });
+    const sourceBytesBefore = sources.value['src-b'].bytes;
+    const inserted = makePageRefs('src-b', 4);
+
+    insertPages(doc.id, inserted, 1);
+
+    // Inserting only ever creates new PageRefs pointing at the existing source;
+    // the source's own bytes are never read back out or mutated by this call.
+    expect(sources.value['src-b'].bytes).toBe(sourceBytesBefore);
+  });
+});
+
+describe('appendPages', () => {
+  it('adds pages after the current last page', () => {
+    const doc = seed(2, 'src-a');
+    const inserted = makePageRefs('src-a', 1);
+
+    appendPages(doc.id, inserted);
+
+    const keys = documents.value[0].pages.map(p => p.key);
+    expect(keys).toHaveLength(3);
+    expect(keys[2]).toBe(inserted[0].key);
   });
 });
 

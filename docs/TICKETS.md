@@ -279,7 +279,9 @@ dirty }`. `PageRef` carries source doc id, source index, rotation, crop box, and
 
 ### OPS-04 · Insert pages from another document — `S` `P0`
 
-**Status: Partial** — `insertPages` and a drop indicator exist; no dedicated insert-at-index UI and no test.
+**Status: Done** — Dedicated `InsertPanel`, insertion index defaults to after the last
+grid-selected page, newly-inserted pages are selected as the insertion indicator. 6 unit
+tests, verified end-to-end against a live instance.
 
 - **AC:** Pages insert at a chosen index with a visible insertion indicator; source
   document remains unmodified.
