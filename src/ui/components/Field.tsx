@@ -8,7 +8,9 @@
  * and the 32px target height once.
  */
 import type { ComponentChildren, JSX } from 'preact';
-import { useId } from 'preact/hooks';
+import { useEffect, useId, useRef, useState } from 'preact/hooks';
+import { Minus, Plus } from 'lucide-preact';
+import { IconButton } from './IconButton';
 import styles from './Field.module.css';
 
 export interface FieldProps {
@@ -208,5 +210,147 @@ export function Checkbox({ label, checked, onChange, disabled }: CheckboxProps) 
       />
       {label}
     </label>
+  );
+}
+
+export interface NumberStepperProps {
+  id?: string;
+  value: number;
+  onChange: (value: number) => void;
+  min?: number;
+  max?: number;
+  step?: number;
+  disabled?: boolean;
+  ariaLabel?: string;
+}
+
+function clampStep(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+/** A number input with +/- controls. Arrow keys step; typing edits directly. */
+export function NumberStepper({
+  id,
+  value,
+  onChange,
+  min = -Infinity,
+  max = Infinity,
+  step = 1,
+  disabled,
+  ariaLabel
+}: NumberStepperProps) {
+  // Text state is separate from the committed value so an in-progress edit like
+  // "1" while typing "12" is not clobbered by a re-clamp on every keystroke. Only
+  // resynced from an external value change while the input is not focused, so
+  // typing is never overwritten mid-edit.
+  const [text, setText] = useState(String(value));
+  const focused = useRef(false);
+  useEffect(() => {
+    if (!focused.current) setText(String(value));
+  }, [value]);
+
+  const commit = (next: number) => {
+    const clamped = clampStep(next, min, max);
+    onChange(clamped);
+    setText(String(clamped));
+  };
+
+  return (
+    <div className={styles.stepper}>
+      <IconButton
+        icon={Minus}
+        size="compact"
+        aria-label="Decrease"
+        disabled={disabled || value <= min}
+        onClick={() => commit(value - step)}
+      />
+      <input
+        id={id}
+        className={styles.stepperInput}
+        type="text"
+        inputMode="decimal"
+        role="spinbutton"
+        aria-label={ariaLabel}
+        aria-valuemin={min === -Infinity ? undefined : min}
+        aria-valuemax={max === -Infinity ? undefined : max}
+        aria-valuenow={value}
+        disabled={disabled}
+        value={text}
+        onFocus={() => {
+          focused.current = true;
+        }}
+        onInput={event => setText((event.target as HTMLInputElement).value)}
+        onBlur={() => {
+          focused.current = false;
+          commit(Number(text) || 0);
+        }}
+        onKeyDown={event => {
+          if (event.key === 'Enter') commit(Number(text) || 0);
+          else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            commit(value + step);
+          } else if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            commit(value - step);
+          }
+        }}
+      />
+      <IconButton
+        icon={Plus}
+        size="compact"
+        aria-label="Increase"
+        disabled={disabled || value >= max}
+        onClick={() => commit(value + step)}
+      />
+    </div>
+  );
+}
+
+export interface SegmentedOption<T extends string> {
+  value: T;
+  label: string;
+}
+
+export interface SegmentedControlProps<T extends string> {
+  legend: string;
+  name: string;
+  value: T;
+  options: readonly SegmentedOption<T>[];
+  onChange: (value: T) => void;
+  disabled?: boolean;
+}
+
+/**
+ * Built on native radio inputs so arrow-key navigation between segments comes
+ * from the browser rather than a hand-rolled roving-tabindex implementation —
+ * the same reasoning as `RadioGroup`, laid out as connected pill segments instead.
+ */
+export function SegmentedControl<T extends string>({
+  legend,
+  name,
+  value,
+  options,
+  onChange,
+  disabled
+}: SegmentedControlProps<T>) {
+  return (
+    <fieldset className={styles.segmented} disabled={disabled}>
+      <legend className={styles.srOnlyLegend}>{legend}</legend>
+      {options.map(option => (
+        <label
+          key={option.value}
+          className={`${styles.segment} ${value === option.value ? styles.segmentActive : ''}`}
+        >
+          <input
+            type="radio"
+            name={name}
+            checked={value === option.value}
+            disabled={disabled}
+            onChange={() => onChange(option.value)}
+          />
+          {option.label}
+        </label>
+      ))}
+    </fieldset>
   );
 }

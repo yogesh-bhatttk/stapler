@@ -123,7 +123,10 @@ Implement DESIGN-ADAPTATION §3 in `src/ui/styles/tokens.css`.
 
 ### DS-03 · Component library — `L` `P0`
 
-**Status: Partial** — 15 components added. **Missing** `NumberStepper`, `SegmentedControl`, `Tooltip`, `Chip`, `Skeleton`, `ContextMenu`, and the `#/dev/components` gallery the AC requires.
+**Status: Partial** — All 20 components built, including a `#/dev/components` gallery
+exercising every state. **Missing:** the gallery's axe-core pass (blocked on NFR-01, which
+wires axe-core in at all) and `forwardRef` on the pre-existing components from before this
+pass (not retrofitted here — no current call site needs a forwarded ref).
 
 Build the primitives and app components listed in DESIGN-ADAPTATION §5.
 

@@ -147,3 +147,100 @@
   width: 16px;
   height: 16px;
 }
+
+/* ---------- number stepper ---------- */
+
+.stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xxs);
+}
+
+.stepperInput {
+  width: 56px;
+  height: var(--control-h);
+  padding: 0 var(--space-xxs);
+  text-align: center;
+  font: var(--text-mono);
+  color: var(--ink);
+  background: var(--canvas);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-md);
+}
+
+.stepperInput:focus-visible {
+  outline: 2px solid var(--primary-focus);
+  outline-offset: 1px;
+  border-color: var(--primary);
+}
+
+.stepperInput:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ---------- segmented control ---------- */
+
+.srOnlyLegend {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.segmented {
+  display: inline-flex;
+  border: 0;
+  margin: 0;
+  padding: var(--space-xxs);
+  gap: 2px;
+  background: var(--surface-2);
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+
+.segmented:disabled {
+  opacity: 0.5;
+}
+
+.segment {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: calc(var(--control-h) - 2 * var(--space-xxs));
+  padding: 0 var(--space-sm);
+  border-radius: var(--radius-sm);
+  font: var(--text-body-strong);
+  color: var(--ink-subtle);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.segment:hover {
+  color: var(--ink);
+}
+
+.segment input {
+  /* Kept in the accessibility tree and in tab/arrow-key order; visually hidden
+     since the label's background is what shows the checked state. */
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.segment:has(input:focus-visible) {
+  outline: 2px solid var(--primary-focus);
+  outline-offset: 1px;
+}
+
+.segmentActive {
+  background: var(--canvas);
+  color: var(--ink);
+  box-shadow: var(--shadow-1);
+}

@@ -12,6 +12,7 @@ import { useHashLocation } from 'wouter-preact/use-hash-location';
 import { AppShell } from './shell/AppShell';
 import { Canvas } from './shell/Canvas';
 import { HomeView } from './home/HomeView';
+import { ComponentGallery } from './dev/ComponentGallery';
 import { EmptyState } from './components/Feedback';
 import { Button } from './components/Button';
 import { notifyError } from '../core/notify';
@@ -38,6 +39,8 @@ function App() {
       <AppShell>
         <Switch>
           <Route path="/" component={HomeView} />
+          {/* Not linked from the app; a visual-review surface for DS-03. */}
+          <Route path="/dev/components" component={ComponentGallery} />
           {/* Every tool shares one route; the tool registry decides what renders. */}
           <Route path="/tool/:toolId" component={Canvas} />
           <Route component={NotFound} />

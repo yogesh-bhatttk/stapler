@@ -1,0 +1,44 @@
+.wrapper {
+  position: relative;
+  display: inline-flex;
+}
+
+.bubble {
+  position: absolute;
+  z-index: 20;
+  max-width: 240px;
+  padding: var(--space-xxs) var(--space-xs);
+  background: var(--ink);
+  color: var(--canvas);
+  font: var(--text-micro);
+  letter-spacing: var(--text-micro-ls);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-2);
+  white-space: nowrap;
+  pointer-events: none;
+  animation: fadeIn var(--dur-fast) var(--ease-snappy);
+}
+
+.top {
+  bottom: calc(100% + var(--space-xs));
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.bottom {
+  top: calc(100% + var(--space-xs));
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.left {
+  right: calc(100% + var(--space-xs));
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.right {
+  left: calc(100% + var(--space-xs));
+  top: 50%;
+  transform: translateY(-50%);
+}
