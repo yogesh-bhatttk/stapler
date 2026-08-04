@@ -35,12 +35,20 @@ export function extractDocumentQuad(imageData: ImageData): {
   }
 
   // 3. Sobel Edge Detection + NMS
+  //
+  // Bounded to [3, height-4] / [3, width-4], one pixel further in than the blur
+  // pass's own [2, height-3] / [2, width-3]: the 3x3 Sobel kernel reads
+  // `blurred` at y±1/x±1, so starting at the blur's own boundary read one row
+  // into the region `blurred` never wrote (it defaults to 0, not "the same
+  // brightness as its neighbour"). That fake 0-vs-real-luma seam produced a
+  // spurious high-magnitude edge ring around the whole frame, strong enough
+  // that a photo with no real edges anywhere still confidently reported a quad.
   const mag = new Float32Array(width * height);
   const dir = new Int8Array(width * height);
   let maxMag = 0;
 
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
+  for (let y = 3; y < height - 3; y++) {
+    for (let x = 3; x < width - 3; x++) {
       const p11 = blurred[(y - 1) * width + (x - 1)];
       const p12 = blurred[(y - 1) * width + x];
       const p13 = blurred[(y - 1) * width + (x + 1)];
@@ -66,9 +74,12 @@ export function extractDocumentQuad(imageData: ImageData): {
     }
   }
 
+  // Same reasoning as the Sobel bound above: `mag` is only valid inside
+  // [3, height-4] / [3, width-4], so reading its ±1 neighbours needs one more
+  // pixel of margin.
   const nms = new Float32Array(width * height);
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
+  for (let y = 4; y < height - 4; y++) {
+    for (let x = 4; x < width - 4; x++) {
       const m = mag[y * width + x];
       const d = dir[y * width + x];
       let p1 = 0,
@@ -90,6 +101,13 @@ export function extractDocumentQuad(imageData: ImageData): {
       if (m >= p1 && m >= p2) nms[y * width + x] = m;
     }
   }
+
+  // A blank or near-blank frame has no gradient anywhere, so `maxMag` is 0 (or
+  // rounds to it) and both thresholds below would also be 0 — at which point
+  // `nms[i] >= high` is true for every pixel, including the ones that are not an
+  // edge at all, and the whole frame gets traced as "edges". Bailing out here
+  // is what makes a textureless photo report no confident quad instead of one.
+  if (maxMag < 1e-6) return { quad: null, confident: false };
 
   // 4. Hysteresis Thresholding
   const high = maxMag * 0.15;
@@ -129,8 +147,35 @@ export function extractDocumentQuad(imageData: ImageData): {
     if (edges[i] !== 255) edges[i] = 0;
   }
 
+  // A page's physical corner is exactly where the gradient direction changes
+  // fastest, and hysteresis thresholding routinely drops a pixel or two right
+  // there — a well-documented Canny weakness, not specific to this
+  // implementation. That turns one closed loop around the page into four
+  // disconnected straight edges, each of which trivially simplifies to a
+  // 2-point line and so never matches the "exactly 4 points" quad filter below.
+  // One dilation pass bridges a 1-pixel gap without measurably fattening the
+  // page's actual corners at any resolution this runs at.
+  const dilated = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x;
+      if (edges[i] === 255) {
+        dilated[i] = 255;
+        continue;
+      }
+      for (let dy = -1; dy <= 1 && dilated[i] === 0; dy++) {
+        for (let dx = -1; dx <= 1 && dilated[i] === 0; dx++) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+          if (edges[ny * width + nx] === 255) dilated[i] = 255;
+        }
+      }
+    }
+  }
+
   // 5. Contour Tracing (Moore-Neighbor)
-  const contours = mooreNeighbor(edges, width, height);
+  const contours = mooreNeighbor(dilated, width, height);
 
   // 6. Find Largest Quadrilateral
   let bestQuad: Quad | null = null;

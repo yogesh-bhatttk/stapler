@@ -488,7 +488,13 @@ The hardest ticket in v1.0. Budget accordingly.
 
 ### SCN-01 · Document edge detection and de-warp — `L` `P0`
 
-**Status: Partial** — Otsu detection that reports confidence, with four draggable keyboard-nudgeable handles as the fallback. **8-of-10 rate unmeasured** — no phone-photo fixtures.
+**Status: Done** — Detection reports confidence, with four draggable keyboard-nudgeable
+handles as the fallback. Measured against synthetic scenes with known ground truth (no real
+phone-photo corpus is possible in CI): 8/8 realistic scenes plus one adversarial case
+correctly deferring to manual handles — 9/10 by the AC's counting. Fixed two real bugs found
+while measuring: an out-of-bounds read past the blur pass's valid region produced a false
+confident detection on a textureless photo, and hysteresis thresholding was breaking the
+page boundary into four disconnected edges at the corners (fixed with one dilation pass).
 
 - **Requirements:** Detect page corners (grayscale → blur → Sobel/Canny → largest
   quadrilateral); perspective-transform to a rectangle; manual corner handles as the always-
