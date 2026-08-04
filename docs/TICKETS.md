@@ -511,7 +511,9 @@ thresholding so a colour photo is not destroyed).
 
 ### SCN-03 · Cleanup UI and before/after — `M` `P0`
 
-**Status: Partial** — Compare view and per-page apply that writes back — **there was no Apply at all, so the feature produced no output**. No apply-to-all with batch progress.
+**Status: Done** — Compare view and per-page apply that writes back — **there was no
+Apply at all, so the feature produced no output**. Apply-to-all now reports per-page
+progress and is cancellable at the same per-page boundary.
 
 - **Requirements:** Single-page view with `CompareSlider`; per-page or apply-to-all;
   batch progress across pages; re-run without reimporting.

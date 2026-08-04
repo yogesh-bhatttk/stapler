@@ -22,7 +22,7 @@ import { cvWorker, processWorker, renderWorker } from '../../../core/workers';
 import { createJobHandle } from '../../../core/workers/protocol';
 import { frameQuad, type Quad } from '../../../core/cv/imageUtils';
 import { notify } from '../../../core/notify';
-import { logEvent } from '../../../core/errors';
+import { cancelled, logEvent } from '../../../core/errors';
 import { Button } from '../../components/Button';
 import { cleanupSettings, cornerOverrides, isDetectingCorners } from './state';
 import { useJob } from '../../useJob';
@@ -192,6 +192,13 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
       const jpegs: Uint8Array[] = [];
 
       for (let i = 0; i < pages.length; i++) {
+        // Checked at a per-page boundary, never mid-page — the same granularity
+        // every other batch loop in this app cancels at. Thrown rather than
+        // `break`ed: falling through to build a replacement source from fewer
+        // JPEGs than `pages.length` would silently drop the untouched pages.
+        if (job.signal?.aborted) throw cancelled();
+        job.onProgress?.(i / pages.length, `Cleaning page ${i + 1} of ${pages.length}`);
+
         const p = pages[i];
         const s = sources.value[p.sourceDocId];
         if (!s) continue;
