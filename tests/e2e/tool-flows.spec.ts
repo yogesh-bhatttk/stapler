@@ -1,7 +1,15 @@
 import { expect, test } from '@playwright/test';
-import { PDFDocument } from 'pdf-lib';
+import { PDFDict, PDFDocument, PDFName, PDFRawStream, PDFRef, PDFStream } from 'pdf-lib';
 import { readFileSync } from 'node:fs';
-import { ensureFixture, mixedSizePdf, textPdf } from './fixtures';
+import { createHash } from 'node:crypto';
+import {
+  ensureFixture,
+  mixedSizePdf,
+  mixedTextImagePdf,
+  sharedImagePdf,
+  textPdf,
+  transparentImagePdf
+} from './fixtures';
 import { gotoTool, openApp } from './helpers';
 
 /**
@@ -27,6 +35,166 @@ async function commitAndRead(page: import('@playwright/test').Page, label: strin
   const location = await saved.path();
   expect(location).toBeTruthy();
   return new Uint8Array(readFileSync(location!));
+}
+
+/* ------------------------------------------------------------------ *
+ * CMP-03 helpers — the surgical re-encode is judged on output bytes and
+ * rendered pixels, not on the button having been clickable.
+ * ------------------------------------------------------------------ */
+
+interface ImageEntry {
+  pageIndex: number;
+  name: string;
+  ref: number;
+  width: number;
+  height: number;
+  filter: string;
+  colorSpace: string;
+  bytes: number;
+  /** Digest of the /SMask stream, so "unchanged" can be asserted literally. */
+  smask: { ref: number; width: number; height: number; sha: string } | null;
+}
+
+/** Every image XObject in the document, with enough detail to diff two versions. */
+async function imageEntries(bytes: Uint8Array): Promise<ImageEntry[]> {
+  const doc = await PDFDocument.load(bytes);
+  const entries: ImageEntry[] = [];
+  doc.getPages().forEach((page, pageIndex) => {
+    const xobjects = page.node.Resources()?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+    if (!xobjects) return;
+    for (const [key] of xobjects.entries()) {
+      const ref = xobjects.get(key);
+      const stream = xobjects.lookup(key);
+      if (!(stream instanceof PDFStream) || !(ref instanceof PDFRef)) continue;
+      if (String(stream.dict.get(PDFName.of('Subtype'))) !== '/Image') continue;
+      const smaskRef = stream.dict.get(PDFName.of('SMask'));
+      const smask = smaskRef instanceof PDFRef ? doc.context.lookup(smaskRef) : undefined;
+      entries.push({
+        pageIndex,
+        name: key.asString(),
+        ref: ref.objectNumber,
+        width: Number(String(stream.dict.get(PDFName.of('Width')))),
+        height: Number(String(stream.dict.get(PDFName.of('Height')))),
+        filter: String(stream.dict.get(PDFName.of('Filter'))),
+        colorSpace: String(stream.dict.get(PDFName.of('ColorSpace'))),
+        bytes: stream instanceof PDFRawStream ? stream.contents.length : stream.sizeInBytes(),
+        smask:
+          smask instanceof PDFRawStream && smaskRef instanceof PDFRef
+            ? {
+                ref: smaskRef.objectNumber,
+                width: Number(String(smask.dict.get(PDFName.of('Width')))),
+                height: Number(String(smask.dict.get(PDFName.of('Height')))),
+                sha: createHash('sha256').update(Buffer.from(smask.contents)).digest('hex')
+              }
+            : null
+      });
+    }
+  });
+  return entries;
+}
+
+/** SHA of every content stream, i.e. of the text and vectors on each page. */
+async function contentDigests(bytes: Uint8Array): Promise<string[]> {
+  const doc = await PDFDocument.load(bytes);
+  return doc.getPages().map(page => {
+    const hash = createHash('sha256');
+    const contents = page.node.get(PDFName.of('Contents'));
+    const refs = contents instanceof PDFRef ? [contents] : [];
+    for (const ref of refs) {
+      const stream = doc.context.lookup(ref);
+      if (stream instanceof PDFRawStream) hash.update(Buffer.from(stream.contents));
+    }
+    return hash.digest('hex');
+  });
+}
+
+/**
+ * Samples the rendered first page at page-relative coordinates.
+ *
+ * The grid draws each page to a real canvas through the same pdf.js worker the
+ * app uses, so this is what a viewer shows — including the white page under a
+ * transparent image, which is the whole point of the black-box check.
+ */
+async function samplePage(
+  page: import('@playwright/test').Page,
+  points: [number, number][]
+): Promise<number[][]> {
+  // An undrawn canvas is 300×150 and fully transparent, so "has a width" proves
+  // nothing — wait for actual paint, or every sample reads as black.
+  await page.waitForFunction(
+    () => {
+      const canvas = document.querySelector<HTMLCanvasElement>('[role="option"] canvas');
+      const ctx = canvas?.getContext('2d');
+      if (!canvas || !ctx || canvas.width < 2 || canvas.height < 2) return false;
+      const middle = ctx.getImageData(canvas.width >> 1, canvas.height >> 1, 1, 1).data;
+      return middle[3] > 0;
+    },
+    undefined,
+    { timeout: 30_000 }
+  );
+  return page.evaluate(pts => {
+    const canvas = document.querySelector<HTMLCanvasElement>('[role="option"] canvas');
+    if (!canvas) throw new Error('no rendered page canvas');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('no 2d context');
+    return pts.map(([fx, fy]) => {
+      const x = Math.min(canvas.width - 1, Math.round(fx * canvas.width));
+      const y = Math.min(canvas.height - 1, Math.round(fy * canvas.height));
+      const data = ctx.getImageData(x, y, 1, 1).data;
+      return [data[0], data[1], data[2]];
+    });
+  }, points);
+}
+
+/**
+ * A deterministic JPEG, encoded by the browser.
+ *
+ * Node has no JPEG encoder here and the corpus may not assume ImageMagick is
+ * installed, so the one realistic already-compressed photo the mixed fixture
+ * needs is drawn and encoded in the page instead.
+ */
+async function makePhotoJpeg(
+  page: import('@playwright/test').Page,
+  width: number,
+  height: number,
+  quality: number
+): Promise<Uint8Array> {
+  const base64 = await page.evaluate(
+    async ({ width, height, quality }) => {
+      const canvas = new OffscreenCanvas(width, height);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('no 2d context');
+      const gradient = ctx.createLinearGradient(0, 0, width, height);
+      gradient.addColorStop(0, '#1b3a6b');
+      gradient.addColorStop(0.5, '#c98b3a');
+      gradient.addColorStop(1, '#2f7d5a');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, width, height);
+      let seed = 7;
+      const next = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+      for (let i = 0; i < 900; i++) {
+        ctx.beginPath();
+        ctx.ellipse(
+          next() * width,
+          next() * height,
+          4 + next() * 40,
+          4 + next() * 40,
+          next() * 6,
+          0,
+          Math.PI * 2
+        );
+        ctx.fillStyle = `rgba(${(next() * 255) | 0},${(next() * 255) | 0},${(next() * 255) | 0},0.35)`;
+        ctx.fill();
+      }
+      const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality });
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      let binary = '';
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      return btoa(binary);
+    },
+    { width, height, quality }
+  );
+  return new Uint8Array(Buffer.from(base64, 'base64'));
 }
 
 test.describe('tool flows', () => {
@@ -150,6 +318,139 @@ test.describe('tool flows', () => {
 
     expect(reduction).toBeGreaterThan(0.7);
     expect(reduction).toBeLessThan(0.95);
+  });
+
+  test('compress: CMP-03 surgical path shrinks a mixed page and keeps its text', async ({
+    page
+  }) => {
+    // Real compression work on a real document: the default 60s is not enough.
+    test.setTimeout(180_000);
+    await openApp(page);
+    // An already-JPEG photo, which is the shape of document PLAN §4.1 projects
+    // 30–70% for. A Flate-stored image would reduce by far more than that and
+    // so would prove nothing about the band.
+    const jpeg = await makePhotoJpeg(page, 1600, 1200, 0.85);
+    const file = await ensureFixture('mixed-text-image.pdf', () => mixedTextImagePdf(jpeg));
+    const original = new Uint8Array(readFileSync(file));
+
+    await page.locator('input[type="file"]').setInputFiles(file);
+    await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
+    await gotoTool(page, 'compress');
+    await page.getByRole('button', { name: /Analyse without changing/ }).click();
+    await expect(page.getByText(/Images re-encoded, text kept/i)).toBeVisible({ timeout: 60_000 });
+
+    const output = await commitAndRead(page, 'Compress & export');
+    const reduction = 1 - output.length / original.length;
+    expect(reduction).toBeGreaterThan(0.3);
+    expect(reduction).toBeLessThan(0.7);
+
+    // Structure survives, and only the image changed.
+    const rebuilt = await PDFDocument.load(output);
+    expect(rebuilt.getPageCount()).toBe(1);
+    expect(await contentDigests(output)).toEqual(await contentDigests(original));
+
+    const before = await imageEntries(original);
+    const after = await imageEntries(output);
+    expect(after).toHaveLength(1);
+    expect(after[0].filter).toBe('/DCTDecode');
+    expect(after[0].bytes).toBeLessThan(before[0].bytes);
+    // Downscaled to the 150 DPI default: 450pt wide is 938px, not 1600.
+    expect(after[0].width).toBeLessThan(before[0].width);
+
+    // The text layer is the point of the surgical path — it must still extract.
+    // Reloading first, because importing again would add a second document to
+    // the workspace and the assertion could then be reading the original.
+    await openApp(page);
+    await page.locator('input[type="file"]').setInputFiles({
+      name: 'compressed.pdf',
+      mimeType: 'application/pdf',
+      buffer: Buffer.from(output)
+    });
+    await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
+    await gotoTool(page, 'extract');
+    await page.getByRole('button', { name: 'Extract text' }).click();
+    const extracted = page.getByRole('textbox', { name: 'Extracted text' });
+    await expect(extracted).toBeVisible({ timeout: 30_000 });
+    expect(await extracted.inputValue()).toContain('the quick brown fox jumps over the lazy dog');
+  });
+
+  test('compress: CMP-03 keeps a transparent image transparent, with no black box', async ({
+    page
+  }) => {
+    // Real compression work on a real document: the default 60s is not enough.
+    test.setTimeout(180_000);
+    const file = await ensureFixture('transparent-image.pdf', transparentImagePdf);
+    const original = new Uint8Array(readFileSync(file));
+    await importFixture(page, file);
+
+    // Band centres, in page fractions: the image occupies 40..440pt across and
+    // 141.89..441.89pt down, and each of the four bands is a quarter of it.
+    const bands: [number, number][] = [
+      [0.1512, 0.3467],
+      [0.3192, 0.3467],
+      [0.4872, 0.3467],
+      [0.6552, 0.3467]
+    ];
+    const beforePixels = await samplePage(page, bands);
+
+    await gotoTool(page, 'compress');
+    await page.getByRole('button', { name: /Analyse without changing/ }).click();
+    await expect(page.getByText(/Images re-encoded, text kept/i)).toBeVisible({ timeout: 60_000 });
+    const output = await commitAndRead(page, 'Compress & export');
+
+    // The base image is re-encoded; the soft mask is carried over untouched, so
+    // its bytes must be identical, not merely present.
+    const before = await imageEntries(original);
+    const after = await imageEntries(output);
+    expect(before[0].smask).not.toBeNull();
+    expect(after[0].filter).toBe('/DCTDecode');
+    expect(after[0].smask).not.toBeNull();
+    expect(after[0].smask?.sha).toBe(before[0].smask?.sha);
+    expect(after[0].smask?.width).toBe(before[0].smask?.width);
+
+    // And the rendered result: reload — so the workspace holds the compressed
+    // file and nothing else — then sample the same four points.
+    await openApp(page);
+    await page.locator('input[type="file"]').setInputFiles({
+      name: 'compressed.pdf',
+      mimeType: 'application/pdf',
+      buffer: Buffer.from(output)
+    });
+    await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
+    const afterPixels = await samplePage(page, bands);
+
+    // The fully transparent band must show the white page. Compositing a JPEG
+    // over black — the failure this ticket is named for — would read as ~0.
+    const clear = afterPixels[2];
+    for (const channel of clear) expect(channel).toBeGreaterThan(230);
+
+    // The half-transparent band must not be darkened twice: its colour is stored
+    // un-premultiplied and the mask applies exactly once. Double darkening would
+    // pull the green channel from ~220 down to ~175.
+    for (let i = 0; i < bands.length; i++) {
+      for (let c = 0; c < 3; c++) {
+        expect(Math.abs(afterPixels[i][c] - beforePixels[i][c])).toBeLessThanOrEqual(12);
+      }
+    }
+  });
+
+  test('compress: CMP-03 stores one copy of an image shared by ten pages', async ({ page }) => {
+    // Real compression work on a real document: the default 60s is not enough.
+    test.setTimeout(180_000);
+    const file = await ensureFixture('shared-image.pdf', () => sharedImagePdf(10));
+    await importFixture(page, file);
+    await gotoTool(page, 'compress');
+    await page.getByRole('button', { name: /Analyse without changing/ }).click();
+    await expect(page.getByText(/Images re-encoded, text kept/i)).toBeVisible({ timeout: 120_000 });
+
+    const output = await commitAndRead(page, 'Compress & export');
+    const entries = await imageEntries(output);
+    expect(entries).toHaveLength(10);
+    // Ten pages, one image object: encoded once and stored once.
+    expect(new Set(entries.map(e => e.ref)).size).toBe(1);
+    expect(new Set(entries.map(e => e.filter))).toEqual(new Set(['/DCTDecode']));
+    // One JPEG plus ten pages of text, not ten JPEGs.
+    expect(output.length).toBeLessThan(entries[0].bytes * 3);
   });
 
   test('metadata: the inspector reports what the file carries', async ({ page }) => {

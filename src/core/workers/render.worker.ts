@@ -45,11 +45,31 @@ export interface PageTextPresence {
 }
 
 export interface ExtractedImage {
-  /** XObject name as it appears in the page's /Resources, e.g. `Im1`. */
-  name: string;
+  /**
+   * PDF object number of the image XObject this JPEG replaces.
+   *
+   * Deliberately *not* the resource name: pdf.js identifies images in an operator
+   * list by its own generated id (`img_p0_1`), which has no relationship to the
+   * `/XObject` key in the page's resources, and the same image reached from two
+   * pages gets two different ids. The object number is the one identifier both
+   * halves of the pipeline agree on.
+   */
+  objectNumber: number;
   jpeg: Uint8Array;
+  /** Pixel size of the JPEG, which is the downscaled size, not the source size. */
   width: number;
   height: number;
+  /** Source pixel size, so the caller can report what was actually resampled. */
+  sourceWidth: number;
+  sourceHeight: number;
+  /**
+   * True when pdf.js applied an /SMask or stencil /Mask to this image. The JPEG
+   * carries the *base colour* only; the mask has to be re-attached to the
+   * replacement stream or the image renders opaque.
+   */
+  hadTransparency: boolean;
+  /** Downscaled grayscale mask (SMask) pixels, uncompressed. */
+  maskBytes?: Uint8Array;
 }
 
 export interface RegionRaster {
@@ -87,11 +107,16 @@ export interface RenderJob {
   documentText(handle: string, job?: JobHandle): Promise<string[]>;
   detectBlankPages(handle: string, threshold: number, job?: JobHandle): Promise<number[]>;
   detectSignatureLines(handle: string, job?: JobHandle): Promise<TextRegion[]>;
+  /**
+   * Re-encodes the page's image XObjects to JPEG (CMP-03). `wanted` names the
+   * object numbers worth touching; anything else on the page is left alone.
+   */
   extractPageImages(
     handle: string,
     pageIndex: number,
     quality: number,
-    wantedNames?: string[]
+    targetDpi: number,
+    wanted?: number[]
   ): Promise<ExtractedImage[]>;
   checkRegionText(
     handle: string,
@@ -394,38 +419,36 @@ const api: RenderJob = {
     return blank;
   },
 
-  async extractPageImages(handle, pageIndex, quality, wantedNames) {
+  async extractPageImages(handle, pageIndex, quality, targetDpi, wanted) {
     const page = await entry(handle).doc.getPage(pageIndex + 1);
     try {
       const ops = await page.getOperatorList();
       const out: ExtractedImage[] = [];
-      const seen = new Set<string>();
 
-      for (let i = 0; i < ops.fnArray.length; i++) {
-        // Only plain image XObjects. Masks, inline images, and repeats are left
-        // alone: re-encoding them needs the mask geometry we do not have here,
-        // and getting it wrong is what produces black boxes.
-        if (ops.fnArray[i] !== pdfjsLib.OPS.paintImageXObject) continue;
-        const name = ops.argsArray[i][0];
-        if (typeof name !== 'string' || seen.has(name)) continue;
-        if (wantedNames && !wantedNames.includes(name)) continue;
-        seen.add(name);
+      for (const placement of imagePlacements(ops)) {
+        const decoded = await decodeImage(page, placement.objId);
+        // A null decode is pdf.js telling us it could not read the image
+        // (JBIG2/JPX without a decoder, a broken stream). Leaving the original
+        // in place is the only safe answer — PLAN §5.2.
+        if (!decoded) continue;
+        if (wanted && !wanted.includes(decoded.objectNumber)) continue;
 
-        const bitmap = await resolveBitmap(page, name);
-        if (!bitmap) continue;
-        try {
-          const { canvas, ctx } = offscreen(bitmap.width, bitmap.height);
-          ctx.drawImage(bitmap, 0, 0);
-          const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality });
-          out.push({
-            name,
-            jpeg: new Uint8Array(await blob.arrayBuffer()),
-            width: bitmap.width,
-            height: bitmap.height
-          });
-        } finally {
-          bitmap.close();
-        }
+        const target = targetSize(placement, decoded, targetDpi);
+        const jpeg = await encodeJpeg(decoded, target, quality);
+        const maskBytes = decoded.mask
+          ? await encodeMask(decoded.mask, decoded.width, decoded.height, target)
+          : undefined;
+
+        out.push({
+          objectNumber: decoded.objectNumber,
+          jpeg,
+          width: target.width,
+          height: target.height,
+          sourceWidth: decoded.width,
+          sourceHeight: decoded.height,
+          hadTransparency: decoded.hadTransparency,
+          maskBytes
+        });
       }
 
       return Comlink.transfer(
@@ -486,42 +509,442 @@ const api: RenderJob = {
   }
 };
 
-/** Resolves an image XObject from the page store or the cross-page shared store. */
-async function resolveImage(page: pdfjsLib.PDFPageProxy, name: string): Promise<unknown> {
-  // Images reused across pages land in commonObjs, not objs — checking only the
-  // latter silently skipped every shared image.
-  for (const store of [page.objs, page.commonObjs]) {
-    if (!store.has(name)) continue;
-    return new Promise(resolve => store.get(name, resolve));
+/* ------------------------------------------------------------------ *
+ * Surgical image re-encode (CMP-03)
+ * ------------------------------------------------------------------ */
+
+/** `[a, b, c, d, e, f]`, the PDF transformation matrix. */
+type Matrix = [number, number, number, number, number, number];
+
+const IDENTITY: Matrix = [1, 0, 0, 1, 0, 0];
+
+/** `m` applied first, then `ctm` — pdf.js's `Util.transform(ctm, m)`. */
+function concat(ctm: Matrix, m: Matrix): Matrix {
+  return [
+    ctm[0] * m[0] + ctm[2] * m[1],
+    ctm[1] * m[0] + ctm[3] * m[1],
+    ctm[0] * m[2] + ctm[2] * m[3],
+    ctm[1] * m[2] + ctm[3] * m[3],
+    ctm[0] * m[4] + ctm[2] * m[5] + ctm[4],
+    ctm[1] * m[4] + ctm[3] * m[5] + ctm[5]
+  ];
+}
+
+interface ImagePlacement {
+  /** pdf.js's own object id for the image, e.g. `img_p0_1`. */
+  objId: string;
+  /** Largest width this image is drawn at anywhere on the page, in points. */
+  widthPt: number;
+  heightPt: number;
+  /** False when an operator we do not model could have changed the matrix. */
+  measured: boolean;
+}
+
+function isMatrix(value: unknown): value is Matrix {
+  return Array.isArray(value) && value.length === 6 && value.every(n => typeof n === 'number');
+}
+
+/**
+ * Walks the operator list, tracking the CTM, and reports how large each image is
+ * actually drawn — the input to "downscale to displayed size".
+ *
+ * Getting the matrix wrong can only pick the wrong *resolution*; the image is
+ * still drawn into the same unit square, so geometry cannot break. Even so the
+ * tracker refuses to guess: transparency groups and annotations re-base the
+ * canvas transform in ways that are not visible from the operator list, so any
+ * image drawn inside one is marked unmeasured and re-encoded at source size.
+ */
+function imagePlacements(ops: { fnArray: number[]; argsArray: unknown[] }): ImagePlacement[] {
+  const OPS = pdfjsLib.OPS;
+  const found = new Map<string, ImagePlacement>();
+  const stack: Matrix[] = [];
+  let ctm: Matrix = IDENTITY;
+
+  const record = (objId: unknown, scaleX: number, scaleY: number) => {
+    if (typeof objId !== 'string') return;
+    const widthPt = Math.abs(scaleX) * Math.hypot(ctm[0], ctm[1]);
+    const heightPt = Math.abs(scaleY) * Math.hypot(ctm[2], ctm[3]);
+    const previous = found.get(objId);
+    if (!previous) {
+      found.set(objId, { objId, widthPt, heightPt, measured: true });
+      return;
+    }
+    // An image drawn twice has to survive at the size of its largest use.
+    previous.widthPt = Math.max(previous.widthPt, widthPt);
+    previous.heightPt = Math.max(previous.heightPt, heightPt);
+  };
+
+  for (let i = 0; i < ops.fnArray.length; i++) {
+    const args = ops.argsArray[i];
+    switch (ops.fnArray[i]) {
+      case OPS.save:
+        stack.push(ctm);
+        break;
+      case OPS.restore:
+        ctm = stack.pop() ?? IDENTITY;
+        break;
+      case OPS.transform:
+        if (isMatrix(args)) ctm = concat(ctm, args);
+        break;
+      case OPS.paintFormXObjectBegin: {
+        stack.push(ctm);
+        const matrix = Array.isArray(args) ? args[0] : null;
+        if (isMatrix(matrix)) ctm = concat(ctm, matrix);
+        break;
+      }
+      case OPS.paintFormXObjectEnd:
+        ctm = stack.pop() ?? IDENTITY;
+        break;
+      case OPS.paintImageXObject:
+        if (Array.isArray(args)) record(args[0], 1, 1);
+        break;
+      case OPS.paintImageXObjectRepeat:
+        // pdf.js collapses three or more identical draws into one op carrying
+        // the per-instance scale.
+        if (Array.isArray(args)) record(args[0], Number(args[1]) || 1, Number(args[2]) || 1);
+        break;
+      default:
+        break;
+    }
+  }
+
+  return [...found.values()];
+}
+
+interface DecodedImage {
+  objectNumber: number;
+  rgba: Uint8ClampedArray;
+  width: number;
+  height: number;
+  hadTransparency: boolean;
+  mask?: Uint8Array;
+}
+
+/**
+ * pdf.js writes `Ref.toString()` into the decoded image, e.g. `"7R"` or `"7R2"`.
+ * That object number is the only identifier shared with the pdf-lib half of the
+ * pipeline, which addresses the same image as `/XObject` entry N.
+ */
+function refObjectNumber(ref: unknown): number {
+  if (typeof ref === 'string') {
+    const match = /^(\d+)R/.exec(ref);
+    return match ? Number(match[1]) : -1;
+  }
+  if (ref && typeof ref === 'object' && typeof (ref as { num?: unknown }).num === 'number') {
+    return (ref as { num: number }).num;
+  }
+  return -1;
+}
+
+/**
+ * How long to wait for pdf.js to hand over a decoded image before giving up.
+ *
+ * `getOperatorList()` resolves as soon as the *operators* are known: the
+ * evaluator kicks off `PDFImage.buildImage()` and deliberately does not await it,
+ * so the pixels arrive tens of milliseconds later, and for a large image much
+ * later than that. The previous implementation asked `store.has(name)` the
+ * instant the operator list came back, always got `false`, and skipped the image
+ * — which is why the surgical path silently re-encoded nothing at all.
+ */
+const IMAGE_DECODE_TIMEOUT_MS = 60_000;
+
+/**
+ * Waits for one decoded image.
+ *
+ * Which store it lands in is not knowable in advance: an image used on a single
+ * page goes to `page.objs`, and one pdf.js has seen on two pages is promoted to
+ * the document-wide `commonObjs`. Both are asked, and whichever answers first
+ * wins.
+ */
+function awaitImageObject(
+  page: pdfjsLib.PDFPageProxy,
+  objId: string
+): Promise<{ data: unknown; shared: boolean } | null> {
+  // pdf.js does not export the `PDFObjects` type, so the store is taken
+  // structurally — the callback form of `get` is all this needs.
+  const from = (
+    store: { get(id: string, callback: (data: unknown) => void): unknown },
+    shared: boolean
+  ) =>
+    new Promise<{ data: unknown; shared: boolean }>(resolve => {
+      store.get(objId, (data: unknown) => resolve({ data, shared }));
+    });
+  return Promise.race([
+    from(page.objs, false),
+    from(page.commonObjs, true),
+    new Promise<null>(resolve => setTimeout(() => resolve(null), IMAGE_DECODE_TIMEOUT_MS))
+  ]);
+}
+
+interface DrawableFrame {
+  source: CanvasImageSource;
+  width: number;
+  height: number;
+  close(): void;
+}
+
+/**
+ * pdf.js hands back one of two drawable objects, and which one depends on the
+ * filter: a Flate image arrives as an `ImageBitmap`, while a DCTDecode one is
+ * decoded through WebCodecs and arrives as a `VideoFrame`. The old code only
+ * recognised `ImageBitmap`, so *JPEG* images — by far the most common thing in
+ * a PDF worth compressing — were silently skipped.
+ */
+function drawableFrom(...candidates: unknown[]): DrawableFrame | null {
+  for (const candidate of candidates) {
+    if (candidate instanceof ImageBitmap) {
+      return {
+        source: candidate,
+        width: candidate.width,
+        height: candidate.height,
+        close: () => candidate.close()
+      };
+    }
+    if (typeof VideoFrame !== 'undefined' && candidate instanceof VideoFrame) {
+      return {
+        source: candidate,
+        width: candidate.displayWidth,
+        height: candidate.displayHeight,
+        close: () => candidate.close()
+      };
+    }
   }
   return null;
 }
 
 /**
- * pdf.js hands back either a decoded bitmap or raw pixels with a `kind`
- * discriminant. Anything we do not recognise returns null and is skipped.
+ * Normalises whatever pdf.js decoded into straight RGBA.
+ *
+ * Two shapes come back. With OffscreenCanvas available the worker returns an
+ * `ImageBitmap`, whose backing store is alpha-premultiplied; `getImageData`
+ * undoes that, so colour is recovered to within a level or two wherever alpha is
+ * non-zero, and is lost only where alpha is zero — pixels that contribute
+ * nothing to the rendered result. Otherwise raw pixels arrive with a `kind`
+ * discriminant. Anything else is refused rather than guessed at.
+ *
+ * The colour space has already been resolved by this point: pdf.js converts
+ * DeviceCMYK, Indexed, ICCBased and friends to RGB while decoding, which is why
+ * those images can be re-encoded at all.
  */
-async function resolveBitmap(
+async function decodeImage(
   page: pdfjsLib.PDFPageProxy,
-  name: string
-): Promise<ImageBitmap | null> {
-  const data = await resolveImage(page, name);
-  if (!data) return null;
-  if (data instanceof ImageBitmap) return data;
+  objId: string
+): Promise<DecodedImage | null> {
+  const resolved = await awaitImageObject(page, objId);
+  if (!resolved || !resolved.data || typeof resolved.data !== 'object') return null;
 
-  const img = data as {
+  const img = resolved.data as {
     bitmap?: unknown;
     data?: Uint8Array | Uint8ClampedArray;
     width?: number;
     height?: number;
     kind?: number;
+    ref?: unknown;
   };
-  if (img.bitmap instanceof ImageBitmap) return img.bitmap;
-  if (!img.data || !img.width || !img.height || img.kind === undefined) return null;
+  const objectNumber = refObjectNumber(img.ref);
+  // Without an object number there is no way to say which XObject this replaces.
+  if (objectNumber < 0) return null;
 
-  const rgba = toRgba(img.data, img.width, img.height, img.kind);
-  if (!rgba) return null;
-  return createImageBitmap(new ImageData(rgba, img.width, img.height));
+  let rgba: Uint8ClampedArray | null = null;
+  let width = 0;
+  let height = 0;
+
+  const frame = drawableFrom(img.bitmap, resolved.data);
+  if (frame) {
+    // pdf.js reports the logical size; a VideoFrame's own coded size can be
+    // padded out to whole macroblocks, so the payload's dimensions win.
+    width = img.width ?? frame.width;
+    height = img.height ?? frame.height;
+    const { canvas, ctx } = offscreen(width, height);
+    ctx.drawImage(frame.source, 0, 0, width, height);
+    rgba = ctx.getImageData(0, 0, width, height).data;
+    // A frame in commonObjs belongs to the document, and other pages still need
+    // it; only a page-local one is ours to release early.
+    if (!resolved.shared) frame.close();
+    canvas.width = 0;
+    canvas.height = 0;
+  } else if (img.data && img.width && img.height && img.kind !== undefined) {
+    width = img.width;
+    height = img.height;
+    rgba = toRgba(img.data, width, height, img.kind);
+  }
+
+  if (!rgba || width <= 0 || height <= 0) return null;
+
+  const mask = extractMask(rgba, width, height);
+  return { objectNumber, rgba, width, height, hadTransparency: mask !== undefined, mask };
+}
+
+/**
+ * Makes the buffer opaque, and reports whether it was not.
+ *
+ * JPEG has no alpha, so a canvas holding transparency is composited onto black
+ * on the way out — which is exactly the "black box" this ticket exists to
+ * prevent, and it is worse than it looks: a half-transparent pixel would be
+ * darkened once here and again when the re-attached soft mask is applied.
+ *
+ * So the alpha is dropped deliberately rather than by accident. The colour is
+ * kept as-is (it is the *un*-premultiplied base colour), and pixels that have no
+ * colour of their own — fully transparent ones — are filled from the nearest
+ * pixel that does. That fill is invisible in any correct renderer, because the
+ * original soft mask is re-attached to the replacement stream and hides those
+ * pixels again; its job is to stop JPEG's 8×8 blocks from smearing black across
+ * the edge of the mask into pixels that *are* visible.
+ */
+function extractMask(
+  rgba: Uint8ClampedArray,
+  width: number,
+  height: number
+): Uint8Array | undefined {
+  const total = width * height;
+  let transparent = 0;
+  let translucent = false;
+  for (let p = 0; p < total; p++) {
+    const alpha = rgba[p * 4 + 3];
+    if (alpha === 0) transparent += 1;
+    else if (alpha !== 255) translucent = true;
+  }
+  if (transparent === 0 && !translucent) return undefined;
+
+  const mask = new Uint8Array(total);
+  for (let p = 0; p < total; p++) {
+    mask[p] = rgba[p * 4 + 3];
+  }
+
+  // Colourless pixels borrow from their nearest coloured neighbour; with none to
+  // borrow from there is nothing to do but make the buffer opaque.
+  if (transparent > 0 && transparent < total) bleedColour(rgba, width, height);
+  for (let p = 0; p < total; p++) rgba[p * 4 + 3] = 255;
+  return mask;
+}
+
+/**
+ * Breadth-first fill of fully transparent pixels from their nearest opaque
+ * neighbour. Every pixel is queued at most once, so this is linear in the image.
+ */
+function bleedColour(rgba: Uint8ClampedArray, width: number, height: number): void {
+  const total = width * height;
+  const queue = new Int32Array(total);
+  const filled = new Uint8Array(total);
+  let head = 0;
+  let tail = 0;
+
+  for (let p = 0; p < total; p++) {
+    if (rgba[p * 4 + 3] !== 0) {
+      filled[p] = 1;
+      queue[tail++] = p;
+    }
+  }
+
+  while (head < tail) {
+    const from = queue[head++];
+    const x = from % width;
+    const y = (from - x) / width;
+    for (let n = 0; n < 4; n++) {
+      const nx = x + (n === 0 ? -1 : n === 1 ? 1 : 0);
+      const ny = y + (n === 2 ? -1 : n === 3 ? 1 : 0);
+      if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+      const to = ny * width + nx;
+      if (filled[to]) continue;
+      filled[to] = 1;
+      rgba[to * 4] = rgba[from * 4];
+      rgba[to * 4 + 1] = rgba[from * 4 + 1];
+      rgba[to * 4 + 2] = rgba[from * 4 + 2];
+      queue[tail++] = to;
+    }
+  }
+}
+
+interface TargetSize {
+  width: number;
+  height: number;
+}
+
+/** Below this ratio the resample costs quality for no meaningful saving. */
+const MIN_RESAMPLE_RATIO = 1.15;
+
+/**
+ * Pixel size to re-encode at: the displayed size at the target resolution,
+ * never larger than the source and never below one pixel.
+ */
+function targetSize(
+  placement: ImagePlacement,
+  decoded: DecodedImage,
+  targetDpi: number
+): TargetSize {
+  const source = { width: decoded.width, height: decoded.height };
+  if (!placement.measured || targetDpi <= 0) return source;
+  if (placement.widthPt <= 0 || placement.heightPt <= 0) return source;
+
+  const wanted = {
+    width: Math.round((placement.widthPt / 72) * targetDpi),
+    height: Math.round((placement.heightPt / 72) * targetDpi)
+  };
+  const ratio = Math.min(source.width / wanted.width, source.height / wanted.height);
+  if (!Number.isFinite(ratio) || ratio < MIN_RESAMPLE_RATIO) return source;
+
+  return {
+    width: Math.max(1, Math.min(source.width, wanted.width)),
+    height: Math.max(1, Math.min(source.height, wanted.height))
+  };
+}
+
+async function encodeJpeg(
+  decoded: DecodedImage,
+  target: TargetSize,
+  quality: number
+): Promise<Uint8Array> {
+  const source = new ImageData(decoded.rgba, decoded.width, decoded.height);
+  const bitmap = await createImageBitmap(source);
+  try {
+    const { canvas, ctx } = offscreen(target.width, target.height);
+    ctx.drawImage(bitmap, 0, 0, target.width, target.height);
+    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality });
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    canvas.width = 0;
+    canvas.height = 0;
+    return bytes;
+  } finally {
+    bitmap.close();
+  }
+}
+
+async function encodeMask(
+  mask: Uint8Array,
+  sourceWidth: number,
+  sourceHeight: number,
+  target: TargetSize
+): Promise<Uint8Array> {
+  if (sourceWidth === target.width && sourceHeight === target.height) {
+    return mask;
+  }
+
+  const rgba = new Uint8ClampedArray(sourceWidth * sourceHeight * 4);
+  for (let p = 0; p < mask.length; p++) {
+    rgba[p * 4] = mask[p];
+    rgba[p * 4 + 1] = mask[p];
+    rgba[p * 4 + 2] = mask[p];
+    rgba[p * 4 + 3] = 255;
+  }
+
+  const source = new ImageData(rgba, sourceWidth, sourceHeight);
+  const bitmap = await createImageBitmap(source);
+  try {
+    const { canvas, ctx } = offscreen(target.width, target.height);
+    ctx.drawImage(bitmap, 0, 0, target.width, target.height);
+    const { data } = ctx.getImageData(0, 0, target.width, target.height);
+
+    const outMask = new Uint8Array(target.width * target.height);
+    for (let p = 0; p < outMask.length; p++) {
+      outMask[p] = data[p * 4]; // Copy back the R channel
+    }
+
+    canvas.width = 0;
+    canvas.height = 0;
+    return outMask;
+  } finally {
+    bitmap.close();
+  }
 }
 
 Comlink.expose(api);

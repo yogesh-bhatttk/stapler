@@ -24,6 +24,18 @@ export interface WorkerClient<T> {
   lease<R>(fn: (api: Comlink.Remote<T>) => Promise<R>): Promise<R>;
   /** Immediate teardown of every instance. Any in-flight call rejects. */
   terminate(): void;
+  /**
+   * Acquires an instance and holds it open until `release()` is called.
+   * `lease()` on the returned client routes to that specific instance.
+   */
+  pin(): PinnedClient<T>;
+}
+
+export interface PinnedClient<T> {
+  /** Runs `fn` against the pinned instance. */
+  lease<R>(fn: (api: Comlink.Remote<T>) => Promise<R>): Promise<R>;
+  /** Releases the pin, allowing the instance to idle out if no other leases remain. */
+  release(): void;
 }
 
 export interface WorkerClientOptions {
@@ -131,6 +143,25 @@ export function createWorkerClient<T>(
     },
     terminate() {
       for (const inst of [...pool]) terminateInstance(inst);
+    },
+    pin() {
+      const inst = acquire();
+      inst.leases += 1;
+      return {
+        async lease(fn) {
+          inst.leases += 1;
+          try {
+            return await fn(inst.proxy);
+          } finally {
+            inst.leases -= 1;
+            scheduleIdle(inst);
+          }
+        },
+        release() {
+          inst.leases -= 1;
+          scheduleIdle(inst);
+        }
+      };
     }
   };
 }

@@ -37,9 +37,20 @@ export interface CompressionPlan {
 const UNDECODABLE_FILTERS = new Set(['JPXDecode', 'JBIG2Decode']);
 
 /**
- * Colour spaces a canvas round-trip changes.
+ * Colour spaces we refuse to re-encode.
+ *
+ * Not because pdf.js cannot decode them — it resolves the tint transform and
+ * hands back RGB like any other space — but because the result would no longer
+ * be a separation. A `/Separation` or `/DeviceN` image is a named ink plate in a
+ * print job, and flattening it to DeviceRGB silently destroys the plate. That is
+ * a decision for the person sending the file to press, so it is reported rather
+ * than taken.
+ *
+ * DeviceCMYK and Indexed are *not* here: those genuinely are "convert to RGB
+ * before the canvas re-encode" (PLAN §4.1), and pdf.js does the conversion
+ * itself while decoding.
  */
-const UNSAFE_COLOR_SPACES = new Set(['DeviceN']);
+const UNSAFE_COLOR_SPACES = new Set(['DeviceN', 'Separation']);
 
 /**
  * A page needs this much extractable text before we refuse to rasterise it. One
@@ -63,14 +74,29 @@ function imageIsSafe(image: ImageFacts): { safe: boolean; reason?: string } {
       reason: `${image.filter} image (decoder output cannot be re-encoded safely)`
     };
   }
-  if (
-    UNSAFE_COLOR_SPACES.has(image.colorSpace) ||
-    ['DeviceCMYK', 'Indexed', 'Separation'].includes(image.colorSpace)
-  ) {
-    return { safe: false, reason: `${image.colorSpace} image (re-encoding would shift colour)` };
+  if (UNSAFE_COLOR_SPACES.has(image.colorSpace)) {
+    return {
+      safe: false,
+      reason: `${image.colorSpace} image (re-encoding would flatten a named ink to RGB)`
+    };
   }
-  if (image.hasSMask || image.hasMask) {
-    return { safe: false, reason: `Masked image (re-encoding would destroy transparency)` };
+  if (image.isImageMask) {
+    return {
+      safe: false,
+      reason: 'Stencil mask (a 1-bit shape, not a picture — JPEG cannot carry it)'
+    };
+  }
+  if (image.maskKind === 'colorKey') {
+    return {
+      safe: false,
+      reason: 'Colour-key masked image (transparency defined by exact pixel values)'
+    };
+  }
+  if (image.maskKind === 'preblended') {
+    return {
+      safe: false,
+      reason: 'Pre-blended soft mask (/Matte), where colour and mask cannot be separated'
+    };
   }
 
   if (image.bitsPerComponent < 8) {

@@ -160,20 +160,28 @@ export async function planCompression(
 ): Promise<CompressionReport> {
   const job = createJobHandle(options);
   const inventory = await processWorker.lease(api => api.imageInventory(bytes, job));
-  const handle = await renderWorker.lease(api => api.loadDocument(bytes)).then(info => info.handle);
-  try {
-    const text = await renderWorker.lease(api => api.textPresence(handle, job));
-    const plan = classifyPages(inventory, text, { rasterDpi: settings.dpi });
-    const estimate = estimateSavings(plan, bytes.byteLength, settings.quality);
-    return {
-      plan,
-      originalBytes: bytes.byteLength,
-      ...estimate,
-      alreadyOptimized: estimate.estimatedFraction < MEANINGFUL_SAVING
-    };
-  } finally {
-    await renderWorker.lease(api => api.closeDocument(handle));
-  }
+
+  // One lease for the whole read, because a render handle belongs to the worker
+  // *instance* that opened it. The pool hands each `lease()` whichever instance
+  // is idle, so opening a document in one call and using the handle in the next
+  // is a race the caller loses as soon as the pool has grown past one — and it
+  // surfaces as "Render handle is not open" halfway through a job.
+  return renderWorker.lease(async api => {
+    const { handle } = await api.loadDocument(bytes);
+    try {
+      const text = await api.textPresence(handle, job);
+      const plan = classifyPages(inventory, text, { rasterDpi: settings.dpi });
+      const estimate = estimateSavings(plan, bytes.byteLength, settings.quality);
+      return {
+        plan,
+        originalBytes: bytes.byteLength,
+        ...estimate,
+        alreadyOptimized: estimate.estimatedFraction < MEANINGFUL_SAVING
+      };
+    } finally {
+      await api.closeDocument(handle);
+    }
+  });
 }
 
 export interface CompressionResult {
@@ -191,59 +199,82 @@ export async function compressDocument(
   options: JobOptions = {}
 ): Promise<CompressionResult> {
   const job = createJobHandle(options);
-  const handle = await renderWorker.lease(api => api.loadDocument(bytes)).then(info => info.handle);
 
   const rasterPages: Record<number, Uint8Array> = {};
-  const replacedImages: Record<number, Record<string, Uint8Array>> = {};
+  type EncodedImage = { jpeg: Uint8Array; width: number; height: number; maskBytes?: Uint8Array };
+  const replacedImages: Record<number, Record<string, EncodedImage>> = {};
   const seenObjectNumbers = new Set<number>();
-  const sharedJpegs = new Map<number, Uint8Array>();
+  const sharedJpegs = new Map<number, EncodedImage>();
 
-  try {
-    const work = report.plan.pages.filter(p => p.route === 'raster' || p.route === 'surgical');
-    for (let i = 0; i < work.length; i++) {
-      const page = work[i];
-      options.onProgress?.(i / Math.max(1, work.length), `Processing page ${page.pageIndex + 1}`);
-      if (options.signal?.aborted) break;
+  // One lease for every read, so every call reaches the instance that owns the
+  // handle. See the note in `planCompression`.
+  await renderWorker.lease(async api => {
+    const { handle } = await api.loadDocument(bytes);
+    try {
+      const work = report.plan.pages.filter(p => p.route === 'raster' || p.route === 'surgical');
+      for (let i = 0; i < work.length; i++) {
+        const page = work[i];
+        options.onProgress?.(i / Math.max(1, work.length), `Processing page ${page.pageIndex + 1}`);
+        if (options.signal?.aborted) break;
 
-      if (page.route === 'raster') {
-        rasterPages[page.pageIndex] = await renderWorker.lease(api =>
-          api.pageToImageBytes(handle, page.pageIndex, 'jpeg', settings.dpi, settings.quality)
-        );
-        continue;
-      }
-
-      const wantedNames: string[] = [];
-      const replacements: Record<string, Uint8Array> = {};
-
-      for (const { name, objectNumber } of page.reencode) {
-        if (seenObjectNumbers.has(objectNumber)) {
-          const cached = sharedJpegs.get(objectNumber);
-          if (cached) replacements[name] = cached;
-        } else {
-          wantedNames.push(name);
+        if (page.route === 'raster') {
+          rasterPages[page.pageIndex] = await api.pageToImageBytes(
+            handle,
+            page.pageIndex,
+            'jpeg',
+            settings.dpi,
+            settings.quality
+          );
+          continue;
         }
-      }
 
-      if (wantedNames.length > 0) {
-        const extracted = await renderWorker.lease(api =>
-          api.extractPageImages(handle, page.pageIndex, settings.quality, wantedNames)
-        );
+        const wanted: number[] = [];
+        const replacements: Record<string, EncodedImage> = {};
 
-        for (const image of extracted) {
-          const entry = page.reencode.find(e => e.name === image.name);
-          if (!entry) continue;
-
-          seenObjectNumbers.add(entry.objectNumber);
-          replacements[image.name] = image.jpeg;
-          sharedJpegs.set(entry.objectNumber, image.jpeg);
+        for (const { name, objectNumber } of page.reencode) {
+          if (seenObjectNumbers.has(objectNumber)) {
+            // Encode once, reuse everywhere: the same image on ten pages is one
+            // JPEG, both in time spent and in bytes written.
+            const cached = sharedJpegs.get(objectNumber);
+            if (cached) replacements[name] = cached;
+          } else {
+            wanted.push(objectNumber);
+          }
         }
-      }
 
-      if (Object.keys(replacements).length > 0) replacedImages[page.pageIndex] = replacements;
+        if (wanted.length > 0) {
+          const extracted = await api.extractPageImages(
+            handle,
+            page.pageIndex,
+            settings.quality,
+            settings.dpi,
+            wanted
+          );
+
+          for (const image of extracted) {
+            // Images are addressed by object number; the resource name is
+            // per-page, and pdf.js does not know it at all.
+            const entry = page.reencode.find(e => e.objectNumber === image.objectNumber);
+            if (!entry) continue;
+
+            seenObjectNumbers.add(entry.objectNumber);
+            const encoded = {
+              jpeg: image.jpeg,
+              width: image.width,
+              height: image.height,
+              maskBytes: image.maskBytes
+            };
+            replacements[entry.name] = encoded;
+            sharedJpegs.set(entry.objectNumber, encoded);
+          }
+        }
+
+        if (Object.keys(replacements).length > 0) replacedImages[page.pageIndex] = replacements;
+      }
+    } finally {
+      await api.closeDocument(handle);
     }
-  } finally {
-    await renderWorker.lease(api => api.closeDocument(handle));
-  }
+  });
 
   const result = await processWorker.lease(api =>
     api.rebuildCompressed(bytes, rasterPages, replacedImages, job)
@@ -284,12 +315,14 @@ export async function searchForRedaction(
   options: JobOptions = {}
 ): Promise<TextRegion[]> {
   const job = createJobHandle(options);
-  const handle = await renderWorker.lease(api => api.loadDocument(bytes)).then(info => info.handle);
-  try {
-    return await renderWorker.lease(api => api.findText(handle, query, matchCase, job));
-  } finally {
-    await renderWorker.lease(api => api.closeDocument(handle));
-  }
+  return renderWorker.lease(async api => {
+    const { handle } = await api.loadDocument(bytes);
+    try {
+      return await api.findText(handle, query, matchCase, job);
+    } finally {
+      await api.closeDocument(handle);
+    }
+  });
 }
 
 /**
@@ -308,31 +341,23 @@ export async function applyRedactions(
 
   const job = createJobHandle(options);
 
-  const sourceHandle = await renderWorker
-    .lease(api => api.loadDocument(bytes))
-    .then(info => info.handle);
+  options.onProgress?.(0.55, 'Rebuilding document');
+  let output = await processWorker.lease(api => api.applyRedactions(bytes, regions, job));
 
-  try {
-    options.onProgress?.(0.55, 'Rebuilding document');
-    let output = await processWorker.lease(api => api.applyRedactions(bytes, regions, job));
+  // RED-04: metadata is scrubbed as part of redaction, because redacted content
+  // routinely survives in XMP, the info dictionary, and embedded thumbnails.
+  options.onProgress?.(0.75, 'Stripping metadata');
+  output = await processWorker.lease(api => api.scrubMetadata(output));
 
-    // RED-04: metadata is scrubbed as part of redaction, because redacted content
-    // routinely survives in XMP, the info dictionary, and embedded thumbnails.
-    options.onProgress?.(0.75, 'Stripping metadata');
-    output = await processWorker.lease(api => api.scrubMetadata(output));
+  options.onProgress?.(0.85, 'Verifying');
+  const verdicts = await verifyRedaction(output, regions);
 
-    options.onProgress?.(0.85, 'Verifying');
-    const verdicts = await verifyRedaction(output, regions);
-
-    return {
-      bytes: output,
-      verdicts,
-      verified: verdicts.every(v => v.pass),
-      rasterizedPages: [] // No longer rasterizing full pages
-    };
-  } finally {
-    await renderWorker.lease(api => api.closeDocument(sourceHandle));
-  }
+  return {
+    bytes: output,
+    verdicts,
+    verified: verdicts.every(v => v.pass),
+    rasterizedPages: [] // No longer rasterizing full pages
+  };
 }
 
 /**
@@ -359,44 +384,44 @@ async function verifyRedaction(
   output: Uint8Array,
   regions: RedactionRegion[]
 ): Promise<RegionVerdict[]> {
-  const handle = await renderWorker
-    .lease(api => api.loadDocument(output))
-    .then(info => info.handle);
-  try {
-    const pageText = await renderWorker.lease(api => api.documentText(handle));
-    const wholeDocument = pageText.join('\n').toLowerCase();
+  return renderWorker.lease(async api => {
+    const { handle } = await api.loadDocument(output);
+    try {
+      const pageText = await api.documentText(handle);
+      const wholeDocument = pageText.join('\n').toLowerCase();
 
-    // RED-03: geometric verification — no text may remain inside any marked region.
-    const regionChecks = await renderWorker.lease(api => api.checkRegionText(handle, regions));
+      // RED-03: geometric verification — no text may remain inside any marked region.
+      const regionChecks = await api.checkRegionText(handle, regions);
 
-    return regionChecks.map(({ region, foundText }) => {
-      if (foundText.trim().length > 0) {
+      return regionChecks.map(({ region, foundText }) => {
+        if (foundText.trim().length > 0) {
+          return {
+            region,
+            pass: false,
+            detail: `The redacted region on page ${region.pageIndex + 1} still contains extractable text: "${foundText}".`
+          };
+        }
+
+        if (region.text && wholeDocument.includes(region.text.toLowerCase())) {
+          return {
+            region,
+            pass: false,
+            detail: `The text "${region.text}" is still present elsewhere in the document.`
+          };
+        }
+
         return {
           region,
-          pass: false,
-          detail: `The redacted region on page ${region.pageIndex + 1} still contains extractable text: "${foundText}".`
+          pass: true,
+          detail: region.text
+            ? `"${region.text}" is absent, and the redacted region is geometrically clear.`
+            : `The redacted region on page ${region.pageIndex + 1} is geometrically clear.`
         };
-      }
-
-      if (region.text && wholeDocument.includes(region.text.toLowerCase())) {
-        return {
-          region,
-          pass: false,
-          detail: `The text "${region.text}" is still present elsewhere in the document.`
-        };
-      }
-
-      return {
-        region,
-        pass: true,
-        detail: region.text
-          ? `"${region.text}" is absent, and the redacted region is geometrically clear.`
-          : `The redacted region on page ${region.pageIndex + 1} is geometrically clear.`
-      };
-    });
-  } finally {
-    await renderWorker.lease(api => api.closeDocument(handle));
-  }
+      });
+    } finally {
+      await api.closeDocument(handle);
+    }
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -409,26 +434,28 @@ export async function extractDocumentText(
   mode: 'text' | 'markdown',
   options: JobOptions = {}
 ): Promise<string> {
-  const handle = await renderWorker.lease(api => api.loadDocument(bytes)).then(info => info.handle);
-  try {
-    const parts: string[] = [];
-    for (let i = 0; i < pageIndices.length; i++) {
-      if (options.signal?.aborted) break;
-      const pageIndex = pageIndices[i];
-      options.onProgress?.(i / pageIndices.length, `Reading page ${pageIndex + 1}`);
-      const text = await renderWorker.lease(api => api.extractText(handle, pageIndex, mode));
-      if (text) {
-        parts.push(
-          mode === 'markdown'
-            ? `# Page ${pageIndex + 1}\n\n${text}`
-            : `--- Page ${pageIndex + 1} ---\n\n${text}`
-        );
+  return renderWorker.lease(async api => {
+    const { handle } = await api.loadDocument(bytes);
+    try {
+      const parts: string[] = [];
+      for (let i = 0; i < pageIndices.length; i++) {
+        if (options.signal?.aborted) break;
+        const pageIndex = pageIndices[i];
+        options.onProgress?.(i / pageIndices.length, `Reading page ${pageIndex + 1}`);
+        const text = await api.extractText(handle, pageIndex, mode);
+        if (text) {
+          parts.push(
+            mode === 'markdown'
+              ? `# Page ${pageIndex + 1}\n\n${text}`
+              : `--- Page ${pageIndex + 1} ---\n\n${text}`
+          );
+        }
       }
+      return parts.join('\n\n');
+    } finally {
+      await api.closeDocument(handle);
     }
-    return parts.join('\n\n');
-  } finally {
-    await renderWorker.lease(api => api.closeDocument(handle));
-  }
+  });
 }
 
 export async function detectBlankPages(
@@ -437,12 +464,14 @@ export async function detectBlankPages(
   options: JobOptions = {}
 ): Promise<number[]> {
   const job = createJobHandle(options);
-  const handle = await renderWorker.lease(api => api.loadDocument(bytes)).then(info => info.handle);
-  try {
-    return await renderWorker.lease(api => api.detectBlankPages(handle, threshold, job));
-  } finally {
-    await renderWorker.lease(api => api.closeDocument(handle));
-  }
+  return renderWorker.lease(async api => {
+    const { handle } = await api.loadDocument(bytes);
+    try {
+      return await api.detectBlankPages(handle, threshold, job);
+    } finally {
+      await api.closeDocument(handle);
+    }
+  });
 }
 
 export async function detectSignatureLines(
@@ -450,12 +479,14 @@ export async function detectSignatureLines(
   options: JobOptions = {}
 ): Promise<TextRegion[]> {
   const job = createJobHandle(options);
-  const handle = await renderWorker.lease(api => api.loadDocument(bytes)).then(info => info.handle);
-  try {
-    return await renderWorker.lease(api => api.detectSignatureLines(handle, job));
-  } finally {
-    await renderWorker.lease(api => api.closeDocument(handle));
-  }
+  return renderWorker.lease(async api => {
+    const { handle } = await api.loadDocument(bytes);
+    try {
+      return await api.detectSignatureLines(handle, job);
+    } finally {
+      await api.closeDocument(handle);
+    }
+  });
 }
 
 /** CNV-02 — pages to a ZIP of images. */
@@ -467,24 +498,24 @@ export async function pagesToImageArchive(
   options: JobOptions = {}
 ): Promise<Uint8Array> {
   const { zipSync } = await import('fflate');
-  const handle = await renderWorker.lease(api => api.loadDocument(bytes)).then(info => info.handle);
   const files: Record<string, Uint8Array> = {};
   const pad = Math.max(2, String(Math.max(...pageIndices, 1) + 1).length);
 
-  try {
-    for (let i = 0; i < pageIndices.length; i++) {
-      if (options.signal?.aborted) break;
-      const pageIndex = pageIndices[i];
-      options.onProgress?.(i / pageIndices.length, `Rendering page ${pageIndex + 1}`);
-      const image = await renderWorker.lease(api =>
-        api.pageToImageBytes(handle, pageIndex, format, dpi)
-      );
-      const name = `page-${String(pageIndex + 1).padStart(pad, '0')}.${format === 'jpeg' ? 'jpg' : 'png'}`;
-      files[name] = image;
+  await renderWorker.lease(async api => {
+    const { handle } = await api.loadDocument(bytes);
+    try {
+      for (let i = 0; i < pageIndices.length; i++) {
+        if (options.signal?.aborted) break;
+        const pageIndex = pageIndices[i];
+        options.onProgress?.(i / pageIndices.length, `Rendering page ${pageIndex + 1}`);
+        const image = await api.pageToImageBytes(handle, pageIndex, format, dpi);
+        const name = `page-${String(pageIndex + 1).padStart(pad, '0')}.${format === 'jpeg' ? 'jpg' : 'png'}`;
+        files[name] = image;
+      }
+    } finally {
+      await api.closeDocument(handle);
     }
-  } finally {
-    await renderWorker.lease(api => api.closeDocument(handle));
-  }
+  });
 
   options.onProgress?.(0.95, 'Compressing archive');
   // Store, not deflate: PNG and JPEG are already compressed, so deflating them

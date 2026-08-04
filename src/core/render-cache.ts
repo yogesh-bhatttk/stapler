@@ -13,6 +13,8 @@
  *    thumbnail. The key is now the *source* id.
  */
 import { renderWorker } from './workers';
+import type { PinnedClient } from './workers/client';
+import type { RenderJob } from './workers/render.worker';
 import { logEvent } from './errors';
 
 /** Bitmaps are GPU-backed; the ceiling is a count because we cannot measure them. */
@@ -112,7 +114,7 @@ export function bitmapKey(sourceId: string, pageIndex: number, scale: number): s
  * ------------------------------------------------------------------ */
 
 interface HandleEntry {
-  promise: Promise<string>;
+  promise: Promise<{ handle: string; client: PinnedClient<RenderJob> }>;
   /** Kept so an invalidated source is reopened rather than served stale. */
   bytes: Uint8Array;
 }
@@ -123,17 +125,22 @@ const handles = new Map<string, HandleEntry>();
  * Returns the render-worker handle for a source, opening it at most once even if
  * fifty thumbnails ask simultaneously.
  */
-export function renderHandleFor(sourceId: string, bytes: Uint8Array): Promise<string> {
+export function renderHandleFor(
+  sourceId: string,
+  bytes: Uint8Array
+): Promise<{ handle: string; client: PinnedClient<RenderJob> }> {
   const existing = handles.get(sourceId);
   if (existing && existing.bytes === bytes) return existing.promise;
   if (existing) closeRenderHandle(sourceId);
 
-  const promise = renderWorker
+  const client = renderWorker.pin();
+  const promise = client
     .lease(api => api.loadDocument(bytes))
-    .then(info => info.handle)
+    .then(info => ({ handle: info.handle, client }))
     .catch(err => {
       // A failed open must not be cached, or every later thumbnail reuses the
       // rejection and the page stays blank with no way to retry.
+      client.release();
       handles.delete(sourceId);
       throw err;
     });
@@ -148,7 +155,9 @@ export function closeRenderHandle(sourceId: string): void {
   handles.delete(sourceId);
   thumbnailCache.invalidateSource(sourceId);
   entry.promise
-    .then(handle => renderWorker.lease(api => api.closeDocument(handle)))
+    .then(({ handle, client }) => {
+      return client.lease(api => api.closeDocument(handle)).finally(() => client.release());
+    })
     .catch(err => logEvent('warn', 'render-cache', `Closing handle failed: ${String(err)}`));
 }
 

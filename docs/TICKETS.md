@@ -449,7 +449,7 @@ Implements PLAN §4.1 classification.
 
 ### CMP-03 · Surgical image re-encode — `XL` `P0`
 
-**Status: Partial** — Deliberately conservative: only plain RGB/grey over-sampled images are re-encoded; SMask/mask, CMYK/Indexed/Separation, JPX/JBIG2 and sub-byte depth are skipped **and reported**. Full SMask re-attachment and CMYK conversion remain open.
+**Status: Partial** — The path now works: it did nothing at all before, in three independent ways (pdf.js image objects were read before they had been decoded; images were matched by resource name against pdf.js's own object ids, which never match; and JPEG images arrive as a `VideoFrame`, which the decoder did not recognise). SMask and stencil-mask images, DeviceCMYK, Indexed and ICCBased are all re-encoded now, downscaled to displayed size, with the mask re-attached byte-for-byte; a shared image is encoded *and stored* once. Still skipped and reported: `/Separation` and `/DeviceN` (flattening a named ink to RGB destroys the plate), colour-key `/Mask` arrays, `/Matte` pre-blended soft masks, `/ImageMask` stencils, JPX/JBIG2, sub-byte depth. **Unmet:** the mask stream itself is never resampled, so a small image behind a large soft mask still carries the full-resolution mask.
 
 The hardest ticket in v1.0. Budget accordingly.
 

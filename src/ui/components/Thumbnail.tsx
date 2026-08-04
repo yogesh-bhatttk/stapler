@@ -16,7 +16,6 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { Check, RotateCw, Trash2 } from 'lucide-preact';
 import { deletePage, rotatePage, sources, type PageRef } from '../../core/store';
 import { bitmapKey, renderHandleFor, thumbnailCache } from '../../core/render-cache';
-import { renderWorker } from '../../core/workers';
 import { isCancellation, logEvent } from '../../core/errors';
 import { normalizeRotation } from '../../core/rotation';
 import { IconButton } from './IconButton';
@@ -90,11 +89,9 @@ export function Thumbnail({ page, docId, width, aspect, isSelected, selectable }
     setState('loading');
     void (async () => {
       try {
-        const handle = await renderHandleFor(source.id, source.bytes);
+        const { handle, client } = await renderHandleFor(source.id, source.bytes);
         if (cancelled) return;
-        const bitmap = await renderWorker.lease(api =>
-          api.renderPage(handle, page.sourceIndex, scale)
-        );
+        const bitmap = await client.lease(api => api.renderPage(handle, page.sourceIndex, scale));
         if (cancelled) {
           // Scrolled away mid-render: release the bitmap rather than caching a
           // thumbnail nobody is looking at.

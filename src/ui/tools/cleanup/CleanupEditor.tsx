@@ -62,8 +62,8 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
 
     void (async () => {
       try {
-        const handle = await renderHandleFor(source.id, source.bytes);
-        const bitmap = await renderWorker.lease(api =>
+        const { handle, client } = await renderHandleFor(source.id, source.bytes);
+        const bitmap = await client.lease(api =>
           api.renderPage(handle, page.sourceIndex, WORK_DPI / 72)
         );
         if (cancelled) {
@@ -203,8 +203,8 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         const s = sources.value[p.sourceDocId];
         if (!s) continue;
 
-        const handle = await renderHandleFor(s.id, s.bytes);
-        const bitmap = await renderWorker.lease(api =>
+        const { handle, client } = await renderHandleFor(s.id, s.bytes);
+        const bitmap = await client.lease(api =>
           api.renderPage(handle, p.sourceIndex, WORK_DPI / 72)
         );
 

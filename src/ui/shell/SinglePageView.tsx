@@ -12,7 +12,6 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-preact';
 import { sources, type PageRef } from '../../core/store';
 import { bitmapKey, renderHandleFor, thumbnailCache } from '../../core/render-cache';
-import { renderWorker } from '../../core/workers';
 import { isCancellation, logEvent } from '../../core/errors';
 import { Button } from '../components/Button';
 import { IconButton } from '../components/IconButton';
@@ -75,11 +74,9 @@ export function SinglePageView({
 
     void (async () => {
       try {
-        const handle = await renderHandleFor(source.id, source.bytes);
+        const { handle, client } = await renderHandleFor(source.id, source.bytes);
         if (cancelled) return;
-        const bitmap = await renderWorker.lease(api =>
-          api.renderPage(handle, page.sourceIndex, scale)
-        );
+        const bitmap = await client.lease(api => api.renderPage(handle, page.sourceIndex, scale));
         if (cancelled) {
           bitmap.close();
           return;

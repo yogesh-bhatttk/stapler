@@ -1,5 +1,6 @@
 import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { deflateSync } from 'node:zlib';
 import path from 'node:path';
 
 export const FIXTURES_DIR = path.resolve(process.cwd(), 'tests/fixtures');
@@ -38,23 +39,202 @@ export async function textPdf(pages: number): Promise<Uint8Array> {
   return doc.save();
 }
 
-/** A document containing both text and a raster image. */
-export async function mixedTextImagePdf(): Promise<Uint8Array> {
+/* ------------------------------------------------------------------ *
+ * Image fixtures for CMP-03
+ *
+ * Built with a small PNG encoder rather than an external tool, so the corpus
+ * stays reproducible on a bare checkout (the static fixtures that *do* need
+ * ImageMagick are committed instead — see tests/fixtures/README.md).
+ * ------------------------------------------------------------------ */
+
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of bytes) crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type: string, data: Uint8Array): Uint8Array {
+  const body = new Uint8Array(type.length + data.length);
+  for (let i = 0; i < type.length; i++) body[i] = type.charCodeAt(i);
+  body.set(data, type.length);
+  const out = new Uint8Array(body.length + 8);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, data.length);
+  out.set(body, 4);
+  view.setUint32(out.length - 4, crc32(body));
+  return out;
+}
+
+/** 8-bit PNG, no filtering, from raw RGB or RGBA samples. */
+function encodePng(pixels: Uint8Array, width: number, height: number, alpha: boolean): Uint8Array {
+  const channels = alpha ? 4 : 3;
+  const stride = width * channels;
+  const raw = new Uint8Array((stride + 1) * height);
+  for (let y = 0; y < height; y++) {
+    raw[y * (stride + 1)] = 0; // filter type: none
+    raw.set(pixels.subarray(y * stride, (y + 1) * stride), y * (stride + 1) + 1);
+  }
+  const ihdr = new Uint8Array(13);
+  const view = new DataView(ihdr.buffer);
+  view.setUint32(0, width);
+  view.setUint32(4, height);
+  ihdr[8] = 8;
+  ihdr[9] = alpha ? 6 : 2;
+  const parts = [
+    new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', new Uint8Array(deflateSync(raw, { level: 9 }))),
+    pngChunk('IEND', new Uint8Array(0))
+  ];
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  const png = new Uint8Array(total);
+  let at = 0;
+  for (const part of parts) {
+    png.set(part, at);
+    at += part.length;
+  }
+  return png;
+}
+
+/**
+ * A deterministic photograph stand-in: smooth gradients, one bright blob, and a
+ * little grain — compressible enough to be realistic, detailed enough that JPEG
+ * has something to do.
+ */
+function photoPixels(width: number, height: number): Uint8Array {
+  const px = new Uint8Array(width * height * 3);
+  let seed = 20260804;
+  const grain = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return (seed / 0x7fffffff - 0.5) * 10;
+  };
+  const clamp = (n: number) => Math.max(0, Math.min(255, Math.round(n)));
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 3;
+      const fx = x / width;
+      const fy = y / height;
+      const blob = Math.exp(-(((fx - 0.35) ** 2 + (fy - 0.4) ** 2) / 0.03));
+      px[i] = clamp(40 + 180 * fx + 60 * blob + grain());
+      px[i + 1] = clamp(90 + 120 * fy - 40 * blob + grain());
+      px[i + 2] = clamp(200 - 120 * fx * fy + grain());
+    }
+  }
+  return px;
+}
+
+/**
+ * Four vertical bands of known colour and known alpha, in an image large enough
+ * to be re-encoded (CMP-03 only touches over-sampled images) and coarse enough
+ * that a renderer's downsampling cannot smear one band into the next.
+ *
+ * `smaskPdf()` above is a 2×2 image: it proves an /SMask can be *parsed*, but it
+ * is far below the re-encode threshold and has no sampleable interior, so it
+ * cannot show whether transparency survives compression. This can.
+ */
+export const TRANSPARENCY_BANDS = [
+  { rgb: [220, 30, 40], alpha: 255 },
+  { rgb: [30, 200, 90], alpha: 128 },
+  { rgb: [40, 80, 230], alpha: 0 },
+  { rgb: [240, 200, 20], alpha: 255 }
+] as const;
+
+export async function transparentImagePdf(): Promise<Uint8Array> {
+  const width = 1600;
+  const height = 1200;
+  const px = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const band = TRANSPARENCY_BANDS[Math.floor((x / width) * TRANSPARENCY_BANDS.length)];
+      const i = (y * width + x) * 4;
+      // A gentle vertical shade keeps the JPEG honest without moving the centre
+      // of each band, which is what the pixel assertions sample.
+      const shade = 1 - (y / height) * 0.15;
+      px[i] = Math.round(band.rgb[0] * shade);
+      px[i + 1] = Math.round(band.rgb[1] * shade);
+      px[i + 2] = Math.round(band.rgb[2] * shade);
+      px[i + 3] = band.alpha;
+    }
+  }
+
   const doc = await PDFDocument.create();
   const font = await doc.embedFont(StandardFonts.Helvetica);
   const page = doc.addPage([595.28, 841.89]);
-  page.drawText(`Mixed text and image`, { x: 50, y: 780, size: 18, font });
+  page.drawText('Transparency fixture: opaque, half, clear, opaque.', {
+    x: 40,
+    y: 780,
+    size: 14,
+    font
+  });
+  const image = await doc.embedPng(encodePng(px, width, height, true));
+  // 400×300pt from a 1600×1200 source is 288 DPI — over-sampled for the 150 DPI
+  // default, so the surgical path acts on it.
+  page.drawImage(image, { x: 40, y: 400, width: 400, height: 300 });
+  return doc.save();
+}
 
-  // 1x1 black pixel PNG
-  const pngImage = await doc.embedPng(
-    new Uint8Array([
-      137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0,
-      0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 8, 215, 99, 248, 255, 255, 63, 0, 5,
-      254, 2, 254, 220, 204, 89, 231, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
-    ])
-  );
-  page.drawImage(pngImage, { x: 50, y: 700, width: 100, height: 100 });
+/**
+ * A document containing both text and a substantial raster image.
+ *
+ * Pass `jpeg` to embed an already-compressed photo, which is the realistic shape
+ * of the mixed document PLAN §4.1 projects 30–70% for. Without it the image is
+ * stored Flate-encoded, and re-encoding then saves far more than that band —
+ * accurate, but not evidence for the band.
+ */
+export async function mixedTextImagePdf(jpeg?: Uint8Array): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage([595.28, 841.89]);
+  page.drawText('Mixed text and image', { x: 40, y: 790, size: 18, font });
+  for (let i = 0; i < 14; i++) {
+    page.drawText(`Body line ${i + 1}: the quick brown fox jumps over the lazy dog.`, {
+      x: 40,
+      y: 758 - i * 18,
+      size: 11,
+      font,
+      color: rgb(0, 0, 0)
+    });
+  }
+  const image = jpeg
+    ? await doc.embedJpg(jpeg)
+    : await doc.embedPng(encodePng(photoPixels(1600, 1200), 1600, 1200, false));
+  page.drawImage(image, { x: 40, y: 120, width: 450, height: 338 });
+  return doc.save();
+}
 
+/** The same image on every page, for the encode-once acceptance criterion. */
+export async function sharedImagePdf(pageCount = 10): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const image = await doc.embedPng(encodePng(photoPixels(1600, 1200), 1600, 1200, false));
+  for (let p = 0; p < pageCount; p++) {
+    const page = doc.addPage([595.28, 841.89]);
+    page.drawText(`Shared image page ${p + 1} of ${pageCount}`, {
+      x: 40,
+      y: 790,
+      size: 14,
+      font
+    });
+    for (let i = 0; i < 10; i++) {
+      page.drawText(`Page ${p + 1} body line ${i + 1}, enough text to keep the page surgical.`, {
+        x: 40,
+        y: 758 - i * 18,
+        size: 11,
+        font
+      });
+    }
+    page.drawImage(image, { x: 40, y: 120, width: 450, height: 338 });
+  }
   return doc.save();
 }
 

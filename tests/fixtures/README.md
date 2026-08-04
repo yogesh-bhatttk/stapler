@@ -54,6 +54,17 @@ git-ignored — deterministic, so re-running tests reproduces them identically:
 - `heavy.pdf` — a large (~20MB) document with bloated, non-deduplicated text content, for
   memory-safety testing (`heavyPdf`).
 - `not-a-pdf.pdf` — bytes that do not start with a PDF header, for import-error tests.
+- `transparent-image.pdf` — a 1600×1200 RGBA image over text, in four vertical bands of
+  known colour and known alpha (opaque, half, clear, opaque), drawn at 400×300pt so it is
+  over-sampled for the 150 DPI default (`transparentImagePdf`). **Must not regress:** after
+  `CMP-03` compression the `/SMask` stream is still referenced and byte-identical, the clear
+  band renders as the white page rather than black, and no band shifts by more than 12/255.
+- `mixed-text-image.pdf` — a page of text plus an already-JPEG photo (`mixedTextImagePdf`;
+  the JPEG is encoded by the browser inside the test, since Node here has no encoder).
+  **Must not regress:** compression reduces it by 30–70%, the content stream is byte-identical,
+  and the text still extracts.
+- `shared-image.pdf` — the same image on ten text pages (`sharedImagePdf`). **Must not
+  regress:** the output holds exactly one image object, referenced from all ten pages.
 
 `tests/e2e/fixtures.ts` also exports `largePdf` (300 pages), `rotatedPdf` (90/180/270°
 pages), `acroformPdf` (fillable text field + checkbox), and `corruptPdf` (truncated PDF) —

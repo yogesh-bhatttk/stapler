@@ -26,7 +26,7 @@ export default defineConfig({
     // websocket client, so a zero-network assertion against it would be meaningless.
     command: 'npm run build:web && npx vite preview --port 4173 --strictPort',
     port: 4173,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
     timeout: 180_000
   }
 });

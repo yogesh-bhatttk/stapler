@@ -101,8 +101,9 @@ class OffscreenCanvasFactory {
  * high-contrast override render without it. Since Stapler never asks pdf.js for
  * high-contrast rendering, and a missing transfer map is a subtle tone shift rather than
  * corruption, this is the right trade for keeping rendering off the main thread. The
- * compression classifier separately refuses to *re-encode* masked images at all
- * (CMP-01), so nothing here can be written back into a document.
+ * corruption, this is the right trade for keeping rendering off the main thread. The
+ * compression classifier separately restricts re-encoding masked images
+ * depending on their type (CMP-03), avoiding writing bad renders back to a document.
  */
 class NoopFilterFactory {
   addFilter() {

@@ -15,6 +15,7 @@
 import * as Comlink from 'comlink';
 import {
   PDFArray,
+  PDFBool,
   PDFDict,
   PDFDocument,
   PDFName,
@@ -83,6 +84,23 @@ export interface ImageFacts {
   filter: string;
   hasSMask: boolean;
   hasMask: boolean;
+  /**
+   * How this image is masked, which decides whether it can be re-encoded:
+   *
+   *  • `none` — no mask.
+   *  • `soft` — an `/SMask` stream, or a `/Mask` pointing at a stencil stream.
+   *    The mask is a separate object, so the base image can be re-encoded and
+   *    the mask re-attached byte-for-byte.
+   *  • `colorKey` — `/Mask` as an array of colour ranges. Transparency is
+   *    defined by *exact sample values* in the image's own colour space, which a
+   *    lossy re-encode into DeviceRGB destroys outright.
+   *  • `preblended` — an `/SMask` carrying `/Matte`, i.e. colour pre-multiplied
+   *    against a matte. pdf.js un-blends it while decoding, so re-attaching the
+   *    original mask would tell a viewer to un-blend data that no longer is.
+   */
+  maskKind: 'none' | 'soft' | 'colorKey' | 'preblended';
+  /** A 1-bit stencil (`/ImageMask true`), which paints the fill colour, not pixels. */
+  isImageMask: boolean;
   /** Encoded size of the image stream in bytes. */
   byteLength: number;
 }
@@ -194,7 +212,10 @@ export interface ProcessJob {
   rebuildCompressed(
     bytes: Uint8Array,
     rasterPages: Record<number, Uint8Array>,
-    replacedImages: Record<number, Record<string, Uint8Array>>,
+    replacedImages: Record<
+      number,
+      Record<string, { jpeg: Uint8Array; width: number; height: number; maskBytes?: Uint8Array }>
+    >,
     job?: JobHandle
   ): Promise<{ bytes: Uint8Array; keptOriginal: boolean }>;
   imagesToPdf(images: Uint8Array[], job?: JobHandle): Promise<Uint8Array>;
@@ -444,6 +465,17 @@ function numberOf(dict: PDFDict, key: string, fallback: number): number {
   return value instanceof PDFNumber ? value.asNumber() : fallback;
 }
 
+/** Which flavour of transparency an image carries — see `ImageFacts.maskKind`. */
+function maskKindOf(smask: PDFStream | undefined, mask: unknown): ImageFacts['maskKind'] {
+  if (smask) {
+    return smask.dict.get(PDFName.of('Matte')) !== undefined ? 'preblended' : 'soft';
+  }
+  if (mask instanceof PDFArray) return 'colorKey';
+  if (mask instanceof PDFStream) return 'soft';
+  if (mask !== undefined) return 'colorKey';
+  return 'none';
+}
+
 /* ------------------------------------------------------------------ *
  * Metadata (RED-04)
  * ------------------------------------------------------------------ */
@@ -496,16 +528,25 @@ const api: ProcessJob = {
           const dict = stream.dict;
           if (nameOf(dict.get(PDFName.of('Subtype'))) !== 'Image') continue;
 
+          const smask = dict.lookupMaybe(PDFName.of('SMask'), PDFStream);
+          const mask = dict.lookup(PDFName.of('Mask'));
+          const isImageMask = dict.lookup(PDFName.of('ImageMask')) === PDFBool.True;
+
           images.push({
             name: key.asString().replace(/^\//, ''),
             objectNumber: ref?.objectNumber ?? -1,
             width: numberOf(dict, 'Width', 0),
             height: numberOf(dict, 'Height', 0),
-            bitsPerComponent: numberOf(dict, 'BitsPerComponent', 8),
+            // A stencil mask has no /BitsPerComponent of its own; it is 1 by
+            // definition, and defaulting it to 8 would let a stencil through the
+            // re-encode gate as if it were a photograph.
+            bitsPerComponent: numberOf(dict, 'BitsPerComponent', isImageMask ? 1 : 8),
             colorSpace: nameOf(dict.get(PDFName.of('ColorSpace'))),
             filter: nameOf(dict.get(PDFName.of('Filter'))),
             hasSMask: dict.get(PDFName.of('SMask')) !== undefined,
             hasMask: dict.get(PDFName.of('Mask')) !== undefined,
+            maskKind: maskKindOf(smask, mask),
+            isImageMask,
             byteLength:
               stream instanceof PDFRawStream ? stream.contents.length : stream.sizeInBytes()
           });
@@ -669,6 +710,12 @@ const api: ProcessJob = {
     // copyPages will not carry it into the output. Mutating and re-saving in
     // place would keep both copies, which is how "compression" grew files.
     const pages = source.getPages();
+
+    // One replacement stream per *original* image, keyed by its object number.
+    // A logo on ten pages is one object in the input, and embedding it once per
+    // page would write ten copies of the same JPEG — a shared image has to stay
+    // shared or the "compressed" file grows a tenfold image table.
+    const embedded = new Map<number, PDFRef>();
     for (const [pageIndexKey, byName] of Object.entries(replacedImages)) {
       const pageIndex = Number(pageIndexKey);
       const page = pages[pageIndex];
@@ -676,39 +723,80 @@ const api: ProcessJob = {
       const xobjects = page.node.Resources()?.lookupMaybe(PDFName.of('XObject'), PDFDict);
       if (!xobjects) continue;
 
-      for (const [name, jpeg] of Object.entries(byName)) {
+      for (const [name, encoded] of Object.entries(byName)) {
         const key = PDFName.of(name);
         if (!xobjects.has(key)) continue;
         const oldRef = xobjects.get(key);
-        let smaskRef;
-        let maskRef;
+        if (!(oldRef instanceof PDFRef)) continue;
 
-        if (oldRef instanceof PDFRef) {
-          const oldStream = source.context.lookupMaybe(oldRef, PDFStream);
-          if (oldStream) {
-            smaskRef = oldStream.dict.get(PDFName.of('SMask'));
-            maskRef = oldStream.dict.get(PDFName.of('Mask'));
-          }
+        const reused = embedded.get(oldRef.objectNumber);
+        if (reused) {
+          xobjects.set(key, reused);
+          continue;
         }
 
-        const embedded = await source.embedJpg(jpeg);
+        const oldStream = source.context.lookupMaybe(oldRef, PDFStream);
+        if (!oldStream) continue;
 
-        if (smaskRef || maskRef) {
-          const newStream = source.context.lookup(embedded.ref) as PDFStream;
-          if (smaskRef) newStream.dict.set(PDFName.of('SMask'), smaskRef);
-          if (maskRef) newStream.dict.set(PDFName.of('Mask'), maskRef);
+        const smaskRef = oldStream.dict.get(PDFName.of('SMask'));
+        const maskRef = oldStream.dict.get(PDFName.of('Mask'));
+
+        // The replacement JPEG holds base colour only, so a mask that cannot be
+        // carried across means the image would render opaque — the black box
+        // this whole path exists to avoid. The classifier already refuses these,
+        // and this is the second lock on the same door: leave the original.
+        const carriable = (value: unknown) => value === undefined || value instanceof PDFRef;
+        if (!carriable(smaskRef) || !carriable(maskRef)) continue;
+
+        const image = await source.embedJpg(encoded.jpeg);
+        // `embedJpg` only reserves a reference; the stream itself is written on
+        // save. Forcing it now is what makes the object exist to hang the mask
+        // off — without this the lookup below returns undefined and the mask is
+        // quietly dropped.
+        await image.embed();
+        const newStream = source.context.lookup(image.ref);
+        if (!(newStream instanceof PDFStream)) continue;
+
+        let finalSmaskRef = smaskRef;
+        if (smaskRef && encoded.maskBytes) {
+          const smaskStream = source.context.flateStream(encoded.maskBytes, {
+            Type: 'XObject',
+            Subtype: 'Image',
+            Width: encoded.width,
+            Height: encoded.height,
+            ColorSpace: 'DeviceGray',
+            BitsPerComponent: 8
+          });
+          finalSmaskRef = source.context.register(smaskStream);
         }
 
-        xobjects.set(key, embedded.ref);
+        // Re-attached untouched (or updated): the mask keeps its own resolution, filter and
+        // bytes, so only the colour data is ever rewritten, unless we explicitly resampled it.
+        if (finalSmaskRef) newStream.dict.set(PDFName.of('SMask'), finalSmaskRef);
+        if (maskRef) newStream.dict.set(PDFName.of('Mask'), maskRef);
+
+        embedded.set(oldRef.objectNumber, image.ref);
+        xobjects.set(key, image.ref);
       }
     }
 
     const out = await PDFDocument.create();
     const total = source.getPageCount();
 
+    // Every kept page is copied in one call. pdf-lib builds a fresh object
+    // copier per `copyPages` call, so copying page by page duplicates anything
+    // the pages share — a logo on ten pages came out as ten identical JPEGs,
+    // undoing the whole point of encoding it once.
+    const kept: number[] = [];
+    for (let i = 0; i < total; i++) if (!rasterPages[i]) kept.push(i);
+    await checkpoint(job, 0.5, 'Rebuilding pages');
+    const copies = await out.copyPages(source, kept);
+    const copyByIndex = new Map(kept.map((pageIndex, at) => [pageIndex, copies[at]]));
+
     for (let i = 0; i < total; i++) {
-      await checkpoint(job, i / total, `Rebuilding page ${i + 1} of ${total}`);
+      await checkpoint(job, 0.5 + (i / total) * 0.4, `Rebuilding page ${i + 1} of ${total}`);
       const raster = rasterPages[i];
+      const copied = copyByIndex.get(i);
       if (raster) {
         // A rasterised page keeps its box and its /Rotate, so the output lines up
         // with what the grid showed.
@@ -718,8 +806,7 @@ const api: ProcessJob = {
         page.setRotation(original.getRotation());
         const image = await out.embedJpg(raster);
         page.drawImage(image, { x: 0, y: 0, width, height });
-      } else {
-        const [copied] = await out.copyPages(source, [i]);
+      } else if (copied) {
         out.addPage(copied);
       }
     }
