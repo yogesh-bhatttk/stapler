@@ -68,7 +68,9 @@ Implement `src/platform/` per PLAN §2.2 with `extension.ts` and `web.ts`.
 
 ### F-05 · Worker infrastructure — `M` `P0`
 
-**Status: Partial** — Progress + `AbortSignal` cancellation and one client factory with terminate-on-idle. **No worker pool**, so `min(4, cores-1)` is unmet.
+**Status: Done** — Progress + `AbortSignal` cancellation, and the client factory now pools
+real instances up to `min(4, hardwareConcurrency - 1)`, spawning lazily and sharing the
+least-busy instance once at the cap. `ocr` worker itself does not exist yet (OCR-01, P2).
 
 - **Requirements:** Comlink-wrapped `render`, `process`, `ocr` workers with typed RPC. A
   shared job protocol supporting `progress(0..1, label)`, `cancel()` via `AbortSignal`, and

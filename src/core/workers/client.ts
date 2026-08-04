@@ -3,89 +3,134 @@
  * (`process.ts`, `render.ts`, `redact.ts`, `verify.ts`, `cv.ts`) that differed
  * only in the worker URL.
  *
- * Adds what F-05 asks for and none of them had: reference counting with
- * terminate-on-idle, so Chrome's task manager shows workers going away instead of
- * five of them living for the lifetime of the tab.
+ * Adds what F-05 asks for and none of them had: a real pool. A single shared
+ * instance per role meant two concurrent `lease()` calls — the common case once
+ * BAT-01 processes a folder — serialised behind whichever call got there first,
+ * no matter how many cores the machine had. Instances are spawned lazily, up to
+ * `min(4, hardwareConcurrency - 1)`, and each terminates on its own idle timer
+ * so Chrome's task manager shows them going away individually rather than five
+ * of them living for the lifetime of the tab.
  */
 import * as Comlink from 'comlink';
 
 export interface WorkerClient<T> {
-  /** The RPC proxy. Spawns the worker on first use. */
+  /** The RPC proxy of whichever instance the next call would use. Spawns on first use. */
   api(): Comlink.Remote<T>;
   /**
-   * Marks the worker busy for the duration of `fn`. When the last lease is
-   * released the worker is retired after `idleMs`.
+   * Runs `fn` against one pool instance, marked busy for its duration. A lease
+   * prefers an idle instance, then spawns a new one below the pool cap, and only
+   * once at the cap does it share the least-busy instance with another lease.
    */
   lease<R>(fn: (api: Comlink.Remote<T>) => Promise<R>): Promise<R>;
-  /** Immediate teardown. Any in-flight call rejects. */
+  /** Immediate teardown of every instance. Any in-flight call rejects. */
   terminate(): void;
 }
 
 export interface WorkerClientOptions {
-  /** ms to keep an idle worker warm. pdf.js takes ~100ms to boot, so not zero. */
+  /** ms to keep an idle instance warm. pdf.js takes ~100ms to boot, so not zero. */
   idleMs?: number;
   /** Name shown in DevTools. */
   name?: string;
+  /** Defaults to `min(4, hardwareConcurrency - 1)`, per F-05. */
+  maxSize?: number;
+}
+
+function defaultPoolSize(): number {
+  const cores =
+    typeof navigator !== 'undefined' && navigator.hardwareConcurrency
+      ? navigator.hardwareConcurrency
+      : 4;
+  return Math.max(1, Math.min(4, cores - 1));
+}
+
+interface Instance<T> {
+  worker: Worker;
+  proxy: Comlink.Remote<T>;
+  leases: number;
+  idleTimer: ReturnType<typeof setTimeout> | null;
 }
 
 export function createWorkerClient<T>(
   spawn: () => Worker,
-  { idleMs = 30_000, name = 'worker' }: WorkerClientOptions = {}
+  { idleMs = 30_000, name = 'worker', maxSize }: WorkerClientOptions = {}
 ): WorkerClient<T> {
-  let worker: Worker | null = null;
-  let proxy: Comlink.Remote<T> | null = null;
-  let leases = 0;
-  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  const poolMax = Math.max(1, maxSize ?? defaultPoolSize());
+  const pool: Instance<T>[] = [];
 
-  const clearIdle = () => {
-    if (idleTimer !== null) {
-      clearTimeout(idleTimer);
-      idleTimer = null;
+  const clearIdle = (inst: Instance<T>) => {
+    if (inst.idleTimer !== null) {
+      clearTimeout(inst.idleTimer);
+      inst.idleTimer = null;
     }
   };
 
-  const terminate = () => {
-    clearIdle();
-    if (proxy) proxy[Comlink.releaseProxy]();
-    worker?.terminate();
-    worker = null;
-    proxy = null;
-    leases = 0;
+  const drop = (inst: Instance<T>) => {
+    clearIdle(inst);
+    const at = pool.indexOf(inst);
+    if (at >= 0) pool.splice(at, 1);
   };
 
-  const api = () => {
-    clearIdle();
-    if (!worker || !proxy) {
-      worker = spawn();
-      worker.addEventListener('error', event => {
-        // A worker that failed to boot must not be reused, or every later call
-        // hangs on a dead port.
-        console.error(`[${name}] worker error`, event.message);
-        terminate();
-      });
-      proxy = Comlink.wrap<T>(worker);
+  const terminateInstance = (inst: Instance<T>) => {
+    drop(inst);
+    inst.proxy[Comlink.releaseProxy]();
+    inst.worker.terminate();
+  };
+
+  const scheduleIdle = (inst: Instance<T>) => {
+    if (inst.leases > 0 || idleMs <= 0) return;
+    clearIdle(inst);
+    inst.idleTimer = setTimeout(() => terminateInstance(inst), idleMs);
+  };
+
+  const spawnInstance = (): Instance<T> => {
+    const worker = spawn();
+    const inst: Instance<T> = {
+      worker,
+      // Placeholder until Comlink.wrap runs; assigned immediately below, but the
+      // error handler needs `inst` to exist first to be able to drop it.
+      proxy: null as unknown as Comlink.Remote<T>,
+      leases: 0,
+      idleTimer: null
+    };
+    worker.addEventListener('error', event => {
+      // An instance that failed to boot must not be reused, or every later call
+      // leased to it hangs on a dead port.
+      console.error(`[${name}] worker error`, event.message);
+      drop(inst);
+      worker.terminate();
+    });
+    inst.proxy = Comlink.wrap<T>(worker);
+    pool.push(inst);
+    return inst;
+  };
+
+  /** Prefers an idle instance, then grows the pool, then shares the least-busy one. */
+  const acquire = (): Instance<T> => {
+    const idle = pool.find(inst => inst.leases === 0);
+    if (idle) {
+      clearIdle(idle);
+      return idle;
     }
-    return proxy;
-  };
-
-  const scheduleIdle = () => {
-    if (leases > 0 || idleMs <= 0) return;
-    clearIdle();
-    idleTimer = setTimeout(terminate, idleMs);
+    if (pool.length < poolMax) return spawnInstance();
+    return pool.reduce((least, inst) => (inst.leases < least.leases ? inst : least));
   };
 
   return {
-    api,
+    api() {
+      return acquire().proxy;
+    },
     async lease(fn) {
-      const remote = api();
-      leases += 1;
+      const inst = acquire();
+      inst.leases += 1;
       try {
-        return await fn(remote);
+        return await fn(inst.proxy);
       } finally {
-        leases -= 1;
-        scheduleIdle();
+        inst.leases -= 1;
+        scheduleIdle(inst);
       }
     },
-    terminate
+    terminate() {
+      for (const inst of [...pool]) terminateInstance(inst);
+    }
   };
 }
