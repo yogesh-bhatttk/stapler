@@ -302,7 +302,19 @@ tests, verified end-to-end against a live instance.
 
 ### OPS-06 · Crop and trim margins — `M` `P1`
 
-**Status: Not started** — P1.
+**Status: Done** — `cropBoxes` undo integration landed in Chunk 1; this pass added the
+rest. `CropOverlay` now has 8 pointer-draggable resize handles plus a move-by-dragging-the-
+interior gesture, and is keyboard-operable (arrow keys move, Ctrl/Cmd+arrow resizes,
+Delete/Backspace resets) — mirroring the SGN-02 stamp overlay's keyboard pattern. The
+"Apply crop to" dropdown (`cropSettings.scope`) is wired for real: drawing, resizing,
+moving, or resetting a box now applies it to every page the chosen scope
+(`current`/`all`/`odd`/`even`) resolves to via the new `pagesForScope` helper, not just
+the page on screen — previously "all pages" silently did nothing beyond the current page.
+Auto-trim uses the same scope. A "Reset crop" button clears the box on every scoped page.
+Export still uses `setCropBox`, unchanged, so text stays selectable. Covered by
+`tests/unit/crop.test.ts` (scope resolution, resize-handle geometry and clamping) and a
+new Playwright test exercising odd-page scope propagation, keyboard resize/move, the
+reset button, and undo of the reset.
 
 - **Requirements:** Manual crop box with handles, auto-detect content bounds, apply to
   one page / odd / even / all. Modify `CropBox`, do not destroy content.

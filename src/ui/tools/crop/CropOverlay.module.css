@@ -11,11 +11,67 @@
   border: 2px dashed var(--primary);
   background: var(--surface-hover);
   box-sizing: border-box;
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: move;
+  touch-action: none;
+}
+
+.box:focus-visible {
+  outline: 2px solid var(--primary-focus);
+  outline-offset: 2px;
+}
+
+.dragging {
+  border-color: var(--primary-hover);
 }
 
 .dim {
   position: absolute;
   background: var(--scrim);
   pointer-events: none;
+}
+
+.handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: var(--primary);
+  border: 1px solid var(--surface-1);
+  border-radius: 2px;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.handle-nw {
+  top: 0;
+  left: 0;
+}
+.handle-n {
+  top: 0;
+  left: 50%;
+}
+.handle-ne {
+  top: 0;
+  left: 100%;
+}
+.handle-e {
+  top: 50%;
+  left: 100%;
+}
+.handle-se {
+  top: 100%;
+  left: 100%;
+}
+.handle-s {
+  top: 100%;
+  left: 50%;
+}
+.handle-sw {
+  top: 100%;
+  left: 0;
+}
+.handle-w {
+  top: 50%;
+  left: 0;
 }

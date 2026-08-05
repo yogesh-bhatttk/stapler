@@ -217,7 +217,8 @@ This is what let the above ship looking done. Do this alongside or right after C
 
 ## Chunk 4 — Remaining P1 features not started (L, pick individually — these are genuinely greenfield)
 
-- [ ] **OPS-06** — resize handles, odd/even scope (currently a dead dropdown)
+- [x] **OPS-06** — resize handles, odd/even scope (currently a dead dropdown). See
+      `docs/TICKETS.md` for what shipped.
 - [ ] **ANN-01** — real annotation layer (highlight, freehand, shapes, sticky note,
       whiteout, color/stroke picker) — separate from the SGN-02 stamp layer it currently
       gets confused with

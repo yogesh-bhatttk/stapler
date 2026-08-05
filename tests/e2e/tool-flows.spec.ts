@@ -830,6 +830,72 @@ test.describe('tool flows', () => {
     expect(cropBox.height).toBeLessThan(output.getPage(0).getHeight());
   });
 
+  test('crop: odd-page scope, resize handles, keyboard nudge, and reset', async ({ page }) => {
+    const file = await ensureFixture('text-6.pdf', () => textPdf(6));
+    await importFixture(page, file);
+    await gotoTool(page, 'crop');
+
+    await page.getByLabel('Apply crop to').selectOption('odd');
+
+    const layer = page.locator('[data-index="0"]');
+    const box = await layer.boundingBox();
+    if (!box) throw new Error('no box');
+
+    // Draw an initial crop box on page 1 (odd) while the "odd pages" scope is active.
+    await page.mouse.move(box.x + 40, box.y + 40);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 220, box.y + 220, { steps: 5 });
+    await page.mouse.up();
+
+    const cropGroup = page.getByRole('group', { name: /Crop box/i });
+    await expect(cropGroup).toBeVisible();
+
+    // Resize via keyboard (Control+ArrowRight grows the box) so the test does not
+    // depend on locating a specific handle's pixel position.
+    await cropGroup.focus();
+    const before = await cropGroup.boundingBox();
+    await page.keyboard.press('Control+ArrowRight');
+    const afterResize = await cropGroup.boundingBox();
+    if (!before || !afterResize) throw new Error('missing box geometry');
+    expect(afterResize.width).toBeGreaterThan(before.width);
+
+    // Arrow-key nudge moves it.
+    await page.keyboard.press('ArrowRight');
+    const afterMove = await cropGroup.boundingBox();
+    if (!afterMove) throw new Error('missing box geometry');
+    expect(afterMove.x).toBeGreaterThan(afterResize.x);
+
+    // Page 2 (even) must not have received the odd-scoped box — this is the dead
+    // dropdown OPS-06 calls out; previously "all"/"odd"/"even" never propagated.
+    await page.getByRole('button', { name: 'Next' }).click();
+    await expect(page.getByRole('group', { name: /Crop box/i })).toHaveCount(0);
+
+    // Page 3 (odd) must have received it.
+    await page.getByRole('button', { name: 'Next' }).click();
+    await expect(page.getByRole('group', { name: /Crop box/i })).toBeVisible();
+
+    // The panel's reset action clears the box on every scoped (odd) page, not just
+    // the one on screen.
+    await page.getByRole('button', { name: /Reset crop on odd pages/i }).click();
+    await expect(page.getByRole('group', { name: /Crop box/i })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Previous' }).click();
+    await page.getByRole('button', { name: 'Previous' }).click();
+    await expect(page.getByRole('group', { name: /Crop box/i })).toHaveCount(0);
+
+    // The reset itself is undoable.
+    await page.keyboard.press('Control+z');
+    await expect(page.getByRole('group', { name: /Crop box/i })).toBeVisible();
+
+    const result = await commitAndRead(page, /Export PDF/i);
+    const output = await PDFDocument.load(result);
+    const page1Crop = output.getPage(0).getCropBox();
+    const page2Crop = output.getPage(1).getCropBox();
+    const page3Crop = output.getPage(2).getCropBox();
+    expect(page1Crop.width).toBeLessThan(output.getPage(0).getWidth());
+    expect(page2Crop.width).toBe(output.getPage(1).getWidth());
+    expect(page3Crop.width).toBeLessThan(output.getPage(2).getWidth());
+  });
+
   test('watermark: adding a watermark and exporting embeds the text', async ({ page }) => {
     const file = await ensureFixture('text-6.pdf', () => textPdf(6));
     await importFixture(page, file);

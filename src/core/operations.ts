@@ -1,4 +1,4 @@
-import { cropBoxes } from '../ui/tools/crop/state';
+import { cropBoxes, pagesForScope } from '../ui/tools/crop/state';
 import { commit } from './history';
 /**
  * Tool operations, orchestrated on the main thread but executed in workers.
@@ -662,10 +662,10 @@ export { unsupported };
 
 export async function autoTrimDocument(
   doc: { pages: PageRef[]; annotations: Annotation[] },
-  allPages: boolean,
+  scope: import('../ui/tools/crop/state').CropScope,
   options?: import('./workers/protocol').JobOptions
 ) {
-  const pagesToTrim = allPages ? doc.pages : [doc.pages[activePageIndex.value]];
+  const pagesToTrim = pagesForScope(doc.pages, scope, activePageIndex.value);
   if (!pagesToTrim[0]) return;
 
   const canvas = document.createElement('canvas');

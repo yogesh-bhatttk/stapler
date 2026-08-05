@@ -1,16 +1,26 @@
-import { Scissors } from 'lucide-preact';
-import { activeDoc } from '../../../core/store';
+import { RotateCcw, Scissors } from 'lucide-preact';
+import { activeDoc, activePageIndex } from '../../../core/store';
+import { commit } from '../../../core/history';
 import { Button } from '../../components/Button';
 import { Field, Select } from '../../components/Field';
 import { panelStyles } from '../../shell/OptionsPanel';
-import { cropSettings } from './state';
+import { cropBoxes, cropSettings, pagesForScope, type CropScope } from './state';
 import { useJob } from '../../useJob';
 import { autoTrimDocument } from '../../../core/operations';
 
-const SCOPE_OPTIONS = [
+const SCOPE_OPTIONS: { value: CropScope; label: string }[] = [
   { value: 'current', label: 'Current page only' },
-  { value: 'all', label: 'All pages' }
-] as const;
+  { value: 'all', label: 'All pages' },
+  { value: 'odd', label: 'Odd pages' },
+  { value: 'even', label: 'Even pages' }
+];
+
+const SCOPE_LABEL: Record<CropScope, string> = {
+  current: 'current page',
+  all: 'all pages',
+  odd: 'odd pages',
+  even: 'even pages'
+};
 
 export function CropPanel() {
   const doc = activeDoc.value;
@@ -21,23 +31,42 @@ export function CropPanel() {
 
   const handleAutoTrim = () => {
     run({ label: 'Auto-trimming pages', scope: 'crop.autotrim' }, async job => {
-      // Logic for auto trim
-      await autoTrimDocument(doc, settings.applyToAll, job);
+      await autoTrimDocument(doc, settings.scope, job);
     });
+  };
+
+  const handleReset = () => {
+    const targets = pagesForScope(doc.pages, settings.scope, activePageIndex.value);
+    if (targets.length === 0) return;
+    commit();
+    const next = { ...cropBoxes.value };
+    for (const page of targets) delete next[page.key];
+    cropBoxes.value = next;
   };
 
   return (
     <>
-      <Field label="Apply manual crop to">
+      <Field label="Apply crop to">
         {id => (
           <Select
             id={id}
-            value={settings.applyToAll ? 'all' : 'current'}
+            value={settings.scope}
             options={SCOPE_OPTIONS}
-            onChange={val => (cropSettings.value = { ...settings, applyToAll: val === 'all' })}
+            onChange={val => (cropSettings.value = { ...settings, scope: val })}
           />
         )}
       </Field>
+
+      <div className={panelStyles.section}>
+        <h3 className={panelStyles.title}>Manual crop</h3>
+        <p className={panelStyles.description}>
+          Drag on the page to draw a crop box, drag its handles to resize, or drag inside it to move
+          it. The box applies to {SCOPE_LABEL[settings.scope]}.
+        </p>
+        <Button variant="secondary" icon={RotateCcw} onClick={handleReset}>
+          Reset crop on {SCOPE_LABEL[settings.scope]}
+        </Button>
+      </div>
 
       <div className={panelStyles.section}>
         <h3 className={panelStyles.title}>Auto-trim</h3>
@@ -46,7 +75,7 @@ export function CropPanel() {
           removing white margins.
         </p>
         <Button variant="secondary" icon={Scissors} onClick={handleAutoTrim}>
-          Auto-trim {settings.applyToAll ? 'all pages' : 'current page'}
+          Auto-trim {SCOPE_LABEL[settings.scope]}
         </Button>
       </div>
     </>
