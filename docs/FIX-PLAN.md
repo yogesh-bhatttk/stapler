@@ -177,7 +177,7 @@ and all 41 Playwright E2E tests pass.
 
 ---
 
-## Chunk 3 — Stop the tests from lying (M)
+## Chunk 3 — Stop the tests from lying (M) — **Done**
 
 This is what let the above ship looking done. Do this alongside or right after Chunk 2.
 
@@ -190,8 +190,25 @@ This is what let the above ship looking done. Do this alongside or right after C
       downscaled colour image has a matching downscaled alpha mask, then checks rendered
       transparent and semi-transparent bands. The mask is intentionally resampled, so a
       byte-identical SHA assertion would have tested the wrong contract.
-- [ ] Add at least one golden-file test per P0 operation (QA-02) — needed before any of
-      the above can be trusted long-term
+- [x] Add at least one golden-file test per P0 operation (QA-02). New `tests/unit/golden.test.ts`
+      drives each operation through the real code path — `core/store.ts` mutations where the
+      operation lives there, then the same `process.worker.ts` compose path the app actually
+      exports through — and re-parses the output, asserting page count, order, and text content
+      (never a byte-exact snapshot, which would just relocate Chunk 3's "vacuous assertion"
+      problem into a snapshot file). Covers OPS-01 merge, OPS-02 organize (rotate + delete +
+      duplicate + reorder, all four applied together in one test and traced through to the
+      export), OPS-03 split and extract, OPS-04 insert-from-another-document, CNV-01 images→PDF,
+      plus OPS-06 crop and OPS-09 normalize as a bonus since the same harness made them nearly
+      free. `imagesToPdf`'s test uses a hand-built minimal JPEG (valid SOI/SOF0 header, no real
+      scan data) rather than a canvas-rendered one — `pdf-lib`'s `JpegEmbedder` never decodes the
+      scan data, only reads the SOF0 header for width/height/components, so this is sufficient to
+      prove page count/order/sizing without needing a real decodable image.
+      <br>**Deliberately not here:** PDF→images (CNV-02), PDF→text/Markdown (CNV-04), and both
+      compress routes (CMP-02/03) decode or rasterise through pdf.js, which needs a real browser
+      (`OffscreenCanvas`, a Worker-hosted decoder) this Node/vitest environment does not provide.
+      They're already covered end to end by `tests/e2e/tool-flows.spec.ts`, which is the layer
+      that can actually exercise them — duplicating that in a unit test that can't really run the
+      decode path would test nothing extra.
 - [x] Wire the 4 new tools (crop/watermark/n-up/normalize) into the a11y route and
       palette-reachability checks. The focused Chromium run now exercises each route and
       asserts each command is present.

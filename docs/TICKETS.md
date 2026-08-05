@@ -709,7 +709,12 @@ README describing what each one is for and what must not regress.
 
 ### QA-02 · Unit and golden-file suites — `M` `P0`
 
-**Status: Partial** — 143 unit tests across 9 files. **No golden-file tests**, which need QA-01.
+**Status: Done** — 196 unit tests across 13 files, including `tests/unit/golden.test.ts`: one
+golden-file test per pdf-lib-based P0 operation (merge, organize, split, extract, insert,
+images→PDF, plus crop and normalize), each driving the real code path and re-parsing the output
+for page count, order, and text content. PDF→images, PDF→text/Markdown, and both compress routes
+need pdf.js's real decode/render path (no Node/vitest equivalent available) and are covered end
+to end by `tests/e2e/tool-flows.spec.ts` instead.
 
 - **AC:** Every `core/ops` function has unit coverage. Every operation has a golden-file
   test that re-parses output and asserts page count, order, and text content.
