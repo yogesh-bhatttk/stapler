@@ -9,6 +9,7 @@ import { Field, SegmentedControl } from '../../components/Field';
 import { Button } from '../../components/Button';
 import { notifyError } from '../../../core/notify';
 import styles from './WatermarkPanel.module.css';
+import { useTranslation } from '../../../core/i18n';
 
 const POSITIONS: { value: WatermarkPosition; label: string }[] = [
   { value: 'top-left', label: 'Top Left' },
@@ -29,6 +30,7 @@ const ALIGN_OPTIONS: { value: HeaderFooterAlign; label: string }[] = [
 ];
 
 export function WatermarkPanel() {
+  const t = useTranslation();
   const settings = watermarkSettings.value;
   const headerFooter = headerFooterSettings.value;
 
@@ -53,7 +55,7 @@ export function WatermarkPanel() {
   return (
     <div className={styles.panel}>
       <SegmentedControl
-        legend="Watermark type"
+        legend={t('Watermark type')}
         name="watermark-kind"
         value={settings.kind}
         options={[
@@ -64,7 +66,7 @@ export function WatermarkPanel() {
       />
 
       {settings.kind === 'text' ? (
-        <Field label="Text">
+        <Field label={t('Text')}>
           {id => (
             <>
               <input
@@ -72,17 +74,19 @@ export function WatermarkPanel() {
                 type="text"
                 value={settings.text}
                 onInput={e => update({ text: e.currentTarget.value })}
-                placeholder="CONFIDENTIAL or Page {n}"
+                placeholder={t('CONFIDENTIAL or Page {n}')}
                 className={styles.input}
               />
               <div className={styles.hint}>
-                Use {'{n}'} for page number, {'{total}'} for total pages.
+                {t('Use')}
+                {'{n}'} {t('for page number,')}
+                {'{total}'} {t('for total pages.')}
               </div>
             </>
           )}
         </Field>
       ) : (
-        <Field label="Image" hint="PNG or JPEG, picked from disk.">
+        <Field label={t('Image')} hint={t('PNG or JPEG, picked from disk.')}>
           {id => (
             <>
               <input
@@ -103,7 +107,7 @@ export function WatermarkPanel() {
                     {settings.image.name} ({settings.image.width}×{settings.image.height})
                   </span>
                   <Button size="compact" variant="ghost" onClick={() => update({ image: null })}>
-                    Remove
+                    {t('Remove')}
                   </Button>
                 </div>
               )}
@@ -129,7 +133,7 @@ export function WatermarkPanel() {
         </Field>
       )}
 
-      <Field label="Position">
+      <Field label={t('Position')}>
         {id => (
           <select
             id={id}
@@ -146,21 +150,21 @@ export function WatermarkPanel() {
         )}
       </Field>
 
-      <Field label="Pages" hint="All pages, or a list such as 1-3, 6.">
+      <Field label={t('Pages')} hint={t('All pages, or a list such as 1-3, 6.')}>
         {id => (
           <input
             id={id}
             type="text"
             value={settings.pageRange}
             onInput={e => update({ pageRange: e.currentTarget.value })}
-            placeholder="all"
+            placeholder={t('all')}
             className={styles.input}
           />
         )}
       </Field>
 
       {settings.kind === 'text' && (
-        <Field label="Start page number">
+        <Field label={t('Start page number')}>
           {id => (
             <input
               id={id}
@@ -222,7 +226,7 @@ export function WatermarkPanel() {
             )}
           </Field>
 
-          <Field label="Color">
+          <Field label={t('Color')}>
             {id => (
               <input
                 id={id}
@@ -237,20 +241,23 @@ export function WatermarkPanel() {
       )}
 
       <div className={styles.sectionDivider} />
-      <h3 className={styles.sectionHeading}>Header &amp; footer</h3>
+      <h3 className={styles.sectionHeading}>{t('Header &amp; footer')}</h3>
       <p className={styles.hint}>
-        A fixed, unrotated line printed in the page margin — distinct from the watermark stamp
-        above. Use {'{n}'} for page number, {'{total}'} for total pages.
+        {t(
+          'A fixed, unrotated line printed in the page margin — distinct from the watermark stamp above. Use'
+        )}
+        {'{n}'} {t('for page number,')}
+        {'{total}'} {t('for total pages.')}
       </p>
 
-      <Field label="Header text">
+      <Field label={t('Header text')}>
         {id => (
           <input
             id={id}
             type="text"
             value={headerFooter.headerText}
             onInput={e => updateHeaderFooter({ headerText: e.currentTarget.value })}
-            placeholder="Company confidential"
+            placeholder={t('Company confidential')}
             className={styles.input}
           />
         )}
@@ -258,7 +265,7 @@ export function WatermarkPanel() {
 
       {headerFooter.headerText && (
         <SegmentedControl
-          legend="Header alignment"
+          legend={t('Header alignment')}
           name="header-align"
           value={headerFooter.headerAlign}
           options={ALIGN_OPTIONS}
@@ -266,14 +273,14 @@ export function WatermarkPanel() {
         />
       )}
 
-      <Field label="Footer text">
+      <Field label={t('Footer text')}>
         {id => (
           <input
             id={id}
             type="text"
             value={headerFooter.footerText}
             onInput={e => updateHeaderFooter({ footerText: e.currentTarget.value })}
-            placeholder="Page {n} of {total}"
+            placeholder={t('Page {n} of {total}')}
             className={styles.input}
           />
         )}
@@ -281,7 +288,7 @@ export function WatermarkPanel() {
 
       {headerFooter.footerText && (
         <SegmentedControl
-          legend="Footer alignment"
+          legend={t('Footer alignment')}
           name="footer-align"
           value={headerFooter.footerAlign}
           options={ALIGN_OPTIONS}
@@ -290,14 +297,14 @@ export function WatermarkPanel() {
       )}
 
       {(headerFooter.headerText || headerFooter.footerText) && (
-        <Field label="Header/footer pages" hint="All pages, or a list such as 1-3, 6.">
+        <Field label={t('Header/footer pages')} hint={t('All pages, or a list such as 1-3, 6.')}>
           {id => (
             <input
               id={id}
               type="text"
               value={headerFooter.pageRange}
               onInput={e => updateHeaderFooter({ pageRange: e.currentTarget.value })}
-              placeholder="all"
+              placeholder={t('all')}
               className={styles.input}
             />
           )}

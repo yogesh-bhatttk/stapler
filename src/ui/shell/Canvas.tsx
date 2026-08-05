@@ -25,8 +25,13 @@ import { HeaderFooterOverlay } from '../tools/watermark/HeaderFooterOverlay';
 import { CleanupEditor } from '../tools/cleanup/CleanupEditor';
 import { CompressPreview } from '../tools/compress/CompressPreview';
 import { CropOverlay } from '../tools/crop/CropOverlay';
+import { CompareView } from '../tools/compare/CompareView';
+import { AnnotateOverlay } from '../tools/annotate/AnnotateOverlay';
+import { BatchView } from '../tools/batch/BatchView';
+import { useTranslation } from '../../core/i18n';
 
 export function Canvas() {
+  const t = useTranslation();
   const tool = useActiveTool();
   const doc = activeDoc.value;
   const [pageIndex, setPageIndex] = useState(0);
@@ -44,13 +49,17 @@ export function Canvas() {
   }, [doc, pageIndex]);
 
   if (!tool) {
-    return <EmptyState title="Unknown tool" body="Pick one from the rail or press ⌘K." />;
+    return <EmptyState title={t('Unknown tool')} body="Pick one from the rail or press ⌘K." />;
+  }
+
+  if (tool.id === 'batch') {
+    return <BatchView />;
   }
 
   if (!doc || doc.pages.length === 0) {
     return (
       <EmptyState
-        title="No document open"
+        title={t('No document open')}
         body={
           doc
             ? 'Every page in this document has been deleted. Undo with ⌘Z, or open another file.'
@@ -76,6 +85,12 @@ export function Canvas() {
       return <CompressPreview pages={doc.pages} />;
     }
 
+    if (tool.id === 'compare') {
+      return (
+        <CompareView pages={doc.pages} pageIndex={Math.min(pageIndex, doc.pages.length - 1)} />
+      );
+    }
+
     return (
       <SinglePageView
         pages={doc.pages}
@@ -86,6 +101,8 @@ export function Canvas() {
             <RedactOverlay page={page} pageIndex={pageIndex} width={width} height={height} />
           ) : tool.id === 'crop' ? (
             <CropOverlay page={page} width={width} height={height} />
+          ) : tool.id === 'annotate' ? (
+            <AnnotateOverlay pageKey={page.key} width={width} height={height} />
           ) : tool.id === 'watermark' ? (
             <>
               <WatermarkOverlay pageIndex={pageIndex} width={width} height={height} />

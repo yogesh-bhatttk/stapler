@@ -2,6 +2,7 @@ import { Field } from '../../components/Field';
 import { panelStyles } from '../../shell/OptionsPanel';
 import { normalizeSettings, type NormalizeSettings, type PaperSize, type ScaleMode } from './state';
 import styles from './NormalizePanel.module.css';
+import { useTranslation } from '../../../core/i18n';
 
 const PAPER_SIZES: { label: string; value: PaperSize }[] = [
   { label: 'A4 (210 × 297 mm)', value: 'A4' },
@@ -20,6 +21,7 @@ const SCALE_MODES: { label: string; value: ScaleMode; hint: string }[] = [
 ];
 
 export function NormalizePanel() {
+  const t = useTranslation();
   // Initialize default state when the panel mounts if it's null
   if (!normalizeSettings.value) {
     normalizeSettings.value = { targetSize: 'A4', scaleMode: 'fit' };
@@ -30,12 +32,12 @@ export function NormalizePanel() {
   return (
     <div className={styles.panel}>
       <p className={panelStyles.description}>
-        Resize documents with mixed page sizes to a uniform standard size.
+        {t('Resize documents with mixed page sizes to a uniform standard size.')}
       </p>
 
       <div className={panelStyles.section}>
-        <h3 className={panelStyles.title}>Dimensions</h3>
-        <Field label="Target size">
+        <h3 className={panelStyles.title}>{t('Dimensions')}</h3>
+        <Field label={t('Target size')}>
           {id => (
             <select
               id={id}
@@ -59,8 +61,8 @@ export function NormalizePanel() {
       </div>
 
       <div className={panelStyles.section}>
-        <h3 className={panelStyles.title}>Layout</h3>
-        <Field label="Scaling behavior">
+        <h3 className={panelStyles.title}>{t('Layout')}</h3>
+        <Field label={t('Scaling behavior')}>
           {id => (
             <select
               id={id}

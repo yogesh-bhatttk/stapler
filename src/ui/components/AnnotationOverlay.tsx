@@ -24,6 +24,7 @@ import { signaturePreviewUrl, signatures } from '../../core/signatures';
 import { notify } from '../../core/notify';
 import { activeStamp, signatureSuggestions } from '../tools/sign/state';
 import styles from './AnnotationOverlay.module.css';
+import { useTranslation } from '../../core/i18n';
 
 export interface AnnotationOverlayProps {
   docId: string;
@@ -45,6 +46,7 @@ const NUDGE = 0.002;
 const NUDGE_COARSE = 0.02;
 
 export function AnnotationOverlay({ docId, pageKey, width, height }: AnnotationOverlayProps) {
+  const t = useTranslation();
   const layerRef = useRef<HTMLDivElement>(null);
   const doc = documents.value.find(d => d.id === docId);
   const armed = activeStamp.value;
@@ -130,7 +132,7 @@ export function AnnotationOverlay({ docId, pageKey, width, height }: AnnotationO
             signatureSuggestions.value = signatureSuggestions.value.filter(s => s !== suggestion);
           }}
         >
-          Sign here
+          {t('Sign here')}
         </button>
       ))}
     </div>
@@ -146,6 +148,7 @@ function Stamp({
   stamp: Annotation;
   layerRef: { current: HTMLDivElement | null };
 }) {
+  const t = useTranslation();
   const [dragging, setDragging] = useState(false);
 
   /** Shared pointer drag for both moving and resizing. */
@@ -312,7 +315,7 @@ function Stamp({
         (signature ? (
           <img className={styles.image} src={signaturePreviewUrl(signature)} alt="Signature" />
         ) : (
-          <span className={styles.check}>Signature unavailable</span>
+          <span className={styles.check}>{t('Signature unavailable')}</span>
         ))}
 
       {stamp.type === 'check' && <span className={styles.check}>✓</span>}
@@ -346,7 +349,7 @@ function Stamp({
         type="button"
         className={styles.duplicate}
         aria-label="Duplicate to all pages"
-        title="Duplicate to all pages"
+        title={t('Duplicate to all pages')}
         onClick={event => {
           event.stopPropagation();
           duplicateAnnotationToAllPages(docId, stamp.id);

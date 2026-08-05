@@ -6,6 +6,7 @@ import { Layers, Shield, Zap } from 'lucide-preact';
 import { Button } from './Button';
 import { Modal } from './Modal';
 import styles from './InfoModals.module.css';
+import { useTranslation } from '../../core/i18n';
 
 const POINTS = [
   {
@@ -28,14 +29,15 @@ const POINTS = [
 ];
 
 export function WelcomeModal({ onClose }: { onClose: () => void }) {
+  const t = useTranslation();
   return (
     <Modal
-      title="Welcome to Stapler"
+      title={t('Welcome to Stapler')}
       onClose={onClose}
       size="md"
       footer={
         <Button variant="primary" onClick={onClose}>
-          Get started
+          {t('Get started')}
         </Button>
       }
     >

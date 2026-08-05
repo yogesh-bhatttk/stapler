@@ -14,6 +14,7 @@ import { panelStyles } from '../../shell/OptionsPanel';
 import { compressReport, compressSettings } from './state';
 import { useEffect } from 'preact/hooks';
 import { useJob } from '../../useJob';
+import { useTranslation } from '../../../core/i18n';
 
 const DPI_OPTIONS = [
   { value: 72, label: '72 DPI — smallest' },
@@ -22,6 +23,7 @@ const DPI_OPTIONS = [
 ] as const;
 
 export function CompressPanel() {
+  const t = useTranslation();
   const doc = activeDoc.value;
   const settings = compressSettings.value;
   const report = compressReport.value;
@@ -56,7 +58,7 @@ export function CompressPanel() {
 
   return (
     <>
-      <Field label="Scanned-page resolution">
+      <Field label={t('Scanned-page resolution')}>
         {id => (
           <Select
             id={id}
@@ -67,7 +69,7 @@ export function CompressPanel() {
         )}
       </Field>
 
-      <Field label="Image quality" value={`${Math.round(settings.quality * 100)}%`}>
+      <Field label={t('Image quality')} value={`${Math.round(settings.quality * 100)}%`}>
         {id => (
           <Slider
             id={id}
@@ -82,41 +84,48 @@ export function CompressPanel() {
       </Field>
 
       <Button variant="secondary" icon={Gauge} onClick={analyse}>
-        Analyse without changing anything
+        {t('Analyse without changing anything')}
       </Button>
 
       {report && (
         <div className={panelStyles.section}>
-          <h3 className={panelStyles.title}>Projection</h3>
+          <h3 className={panelStyles.title}>{t('Projection')}</h3>
           <SizeDelta before={report.originalBytes} after={report.estimatedBytes} />
           <p className={panelStyles.description}>
-            Estimated, deliberately cautious. Actual output is measured before saving, and if it is
-            not smaller the original is kept.
+            {t(
+              'Estimated, deliberately cautious. Actual output is measured before saving, and if it is not smaller the original is kept.'
+            )}
           </p>
 
           {routeCounts && (
             <ul className={panelStyles.list}>
               {routeCounts.raster > 0 && (
                 <li className={panelStyles.listRow}>
-                  <span className={panelStyles.listRowText}>Re-rendered as images (scans)</span>
+                  <span className={panelStyles.listRowText}>
+                    {t('Re-rendered as images (scans)')}
+                  </span>
                   <span>{routeCounts.raster}</span>
                 </li>
               )}
               {routeCounts.surgical > 0 && (
                 <li className={panelStyles.listRow}>
-                  <span className={panelStyles.listRowText}>Images re-encoded, text kept</span>
+                  <span className={panelStyles.listRowText}>
+                    {t('Images re-encoded, text kept')}
+                  </span>
                   <span>{routeCounts.surgical}</span>
                 </li>
               )}
               {routeCounts['already-optimized'] > 0 && (
                 <li className={panelStyles.listRow}>
-                  <span className={panelStyles.listRowText}>Nothing to gain</span>
+                  <span className={panelStyles.listRowText}>{t('Nothing to gain')}</span>
                   <span>{routeCounts['already-optimized']}</span>
                 </li>
               )}
               {routeCounts.skip > 0 && (
                 <li className={panelStyles.listRow}>
-                  <span className={panelStyles.listRowText}>Left untouched deliberately</span>
+                  <span className={panelStyles.listRowText}>
+                    {t('Left untouched deliberately')}
+                  </span>
                   <span>{routeCounts.skip}</span>
                 </li>
               )}
@@ -125,15 +134,18 @@ export function CompressPanel() {
 
           {report.plan.skipped.length > 0 && (
             <p className={panelStyles.note}>
-              Not re-encoded, to avoid damaging them: {report.plan.skipped.join('; ')}.
+              {t('Not re-encoded, to avoid damaging them:')}
+              {report.plan.skipped.join('; ')}.
             </p>
           )}
 
           {report.alreadyOptimized && (
             <p className={panelStyles.note}>
-              This document is already optimized — about{' '}
-              {Math.max(0, Math.round(report.estimatedFraction * 100))}% is all that is available
-              from {formatBytes(report.originalBytes)}. Compressing it is not worth the time.
+              {t('This document is already optimized — about')}{' '}
+              {Math.max(0, Math.round(report.estimatedFraction * 100))}
+              {t('% is all that is available from')}
+              {formatBytes(report.originalBytes)}
+              {t('. Compressing it is not worth the time.')}
             </p>
           )}
         </div>

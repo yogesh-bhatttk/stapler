@@ -14,8 +14,10 @@ import { notify, notifyError } from '../../../core/notify';
 import { Button } from '../../components/Button';
 import { panelStyles } from '../../shell/OptionsPanel';
 import { useJob } from '../../useJob';
+import { useTranslation } from '../../../core/i18n';
 
 export function MergePanel() {
+  const t = useTranslation();
   const doc = activeDoc.value;
   const sourceList = activeSources.value;
   const { run } = useJob();
@@ -55,12 +57,12 @@ export function MergePanel() {
   return (
     <>
       <Button variant="secondary" icon={Plus} onClick={addFiles} disabled={busy || !doc}>
-        Add PDFs or images
+        {t('Add PDFs or images')}
       </Button>
 
       {sourceList.length > 0 && (
         <div className={panelStyles.section}>
-          <h3 className={panelStyles.title}>Source files</h3>
+          <h3 className={panelStyles.title}>{t('Source files')}</h3>
           <ol className={panelStyles.list}>
             {sourceList.map((source, index) => (
               <li className={panelStyles.listRow} key={source.id} title={source.name}>
@@ -72,7 +74,9 @@ export function MergePanel() {
             ))}
           </ol>
           <p className={panelStyles.description}>
-            Drag pages in the grid to reorder across files. Page sizes are preserved as they are.
+            {t(
+              'Drag pages in the grid to reorder across files. Page sizes are preserved as they are.'
+            )}
           </p>
         </div>
       )}

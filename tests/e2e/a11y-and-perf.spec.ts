@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 import { ensureFixture, textPdf } from './fixtures';
 import { gotoTool, openApp } from './helpers';
+import AxeBuilder from '@axe-core/playwright';
 
 /**
  * NFR-01 and NFR-02.
@@ -80,6 +81,9 @@ test.describe('accessibility', () => {
       expect(
         await page.locator('[tabindex]:not([tabindex="0"]):not([tabindex="-1"])').count()
       ).toBe(0);
+
+      const accessibilityScanResults = await new AxeBuilder({ page }).analyze();
+      expect(accessibilityScanResults.violations).toEqual([]);
     }
   });
 
@@ -231,7 +235,7 @@ test.describe('performance budgets (PLAN §5.1)', () => {
     await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
 
     // Scroll to the bottom to force rendering of later pages
-    const scroller = page.locator('[class*="PageGrid_viewport"]');
+    const scroller = page.locator('[data-testid="pagegrid-scroller"]');
     if (await scroller.isVisible()) {
       await scroller.evaluate(e => e.scrollTo(0, e.scrollHeight));
     }
@@ -249,4 +253,58 @@ test.describe('performance budgets (PLAN §5.1)', () => {
       expect(mem2).toBeLessThan(300 * 1024 * 1024); // 300MB
     }
   });
+
+  test('merges 10 × 5MB PDFs within 8 seconds', async ({ page }) => {
+    // We reuse the heavyPdf which is approx 5MB.
+    const file = await ensureFixture('heavy.pdf', () =>
+      import('./fixtures').then(m => m.heavyPdf())
+    );
+    // Duplicate the file to get 10 files
+    const files = Array(10).fill(file);
+    await openApp(page);
+    await page.locator('input[type="file"]').setInputFiles(files);
+    await gotoTool(page, 'merge');
+
+    const started = Date.now();
+
+    // Set up a download listener
+    const downloadPromise = page.waitForEvent('download');
+
+    // Start main-thread blocking monitor during the merge
+    await page.evaluate(() => {
+      window.__maxFrameGap = 0;
+      let lastTime = performance.now();
+      const measure = (time: number) => {
+        const gap = time - lastTime;
+        if (gap > window.__maxFrameGap) {
+          window.__maxFrameGap = gap;
+        }
+        lastTime = time;
+        if (!window.__stopMonitor) requestAnimationFrame(measure);
+      };
+      requestAnimationFrame(measure);
+    });
+
+    await page.getByRole('button', { name: 'Export PDF' }).click();
+    await downloadPromise;
+    const elapsed = Date.now() - started;
+
+    // Stop the monitor and read the max gap
+    const maxGap = await page.evaluate(() => {
+      window.__stopMonitor = true;
+      return window.__maxFrameGap;
+    });
+
+    expect(elapsed).toBeLessThan(8000);
+    // Allow a bit of overhead above 50ms, but Playwright + rendering might push this a little.
+    // The budget is 50ms for worker offloading. We check < 70ms to prevent flakiness in CI.
+    expect(maxGap).toBeLessThan(70);
+  });
 });
+
+declare global {
+  interface Window {
+    __maxFrameGap: number;
+    __stopMonitor: boolean;
+  }
+}

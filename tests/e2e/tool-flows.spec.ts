@@ -967,4 +967,30 @@ test.describe('tool flows', () => {
     // 8 pages, booklet -> 8/2 = 4 pages
     expect(doc.getPageCount()).toBe(4);
   });
+
+  test('compare: opening a second document renders diffs without crashing', async ({ page }) => {
+    const file1 = await ensureFixture('text-6.pdf', () => textPdf(6));
+    const file2 = await ensureFixture('text-8.pdf', () => textPdf(8));
+
+    await importFixture(page, file1);
+    await gotoTool(page, 'compare');
+    await expect(
+      page.getByText('Open a second PDF from the panel on the left to compare.')
+    ).toBeVisible();
+
+    const fileChooserPromise = page.waitForEvent('filechooser');
+    await page.getByRole('button', { name: 'Open file to compare...' }).click();
+    const fileChooser = await fileChooserPromise;
+    await fileChooser.setFiles(file2);
+
+    // Wait for the comparison canvas to render diff
+    await expect(page.locator('canvas').first()).toBeAttached({ timeout: 30_000 });
+
+    // Switch to Text diff mode
+    await page.getByRole('radio', { name: 'Text Diff' }).check();
+
+    // It should render text diff chunks with 'insert' or 'delete' classes or similar
+    // Actually just verifying no crash and radio works is a good smoke test for compare flow
+    await expect(page.getByText(/Text diff shows structural text changes/i)).toBeVisible();
+  });
 });

@@ -56,7 +56,6 @@ async function pageTexts(bytes: Uint8Array): Promise<string[]> {
   for (let i = 0; i < doc.getPageCount(); i++) {
     const page = doc.getPage(i);
     const contents = page.node.Contents();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- pdf-lib's stream classes share no exported base type.
     const streams: any[] = !contents
       ? []
       : contents instanceof PDFArray

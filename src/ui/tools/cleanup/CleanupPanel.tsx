@@ -5,8 +5,10 @@ import { cleanupSettings, isDetectingCorners } from './state';
 import { Checkbox, Field, RadioGroup, Slider } from '../../components/Field';
 import { panelStyles } from '../../shell/OptionsPanel';
 import type { Preset } from '../../../core/cv/enhance';
+import { useTranslation } from '../../../core/i18n';
 
 export function CleanupPanel() {
+  const t = useTranslation();
   const settings = cleanupSettings.value;
   const manual = settings.preset === 'photo' || settings.preset === 'original';
   const update = (patch: Partial<typeof settings>) => {
@@ -16,7 +18,7 @@ export function CleanupPanel() {
   return (
     <>
       <RadioGroup<Preset>
-        legend="Preset"
+        legend={t('Preset')}
         name="cleanupPreset"
         value={settings.preset}
         onChange={preset =>
@@ -33,19 +35,19 @@ export function CleanupPanel() {
       />
 
       <Checkbox
-        label="Straighten automatically"
+        label={t('Straighten automatically')}
         checked={settings.deskew}
         onChange={deskew => update({ deskew })}
       />
 
       <Checkbox
-        label="Despeckle (remove noise)"
+        label={t('Despeckle (remove noise)')}
         checked={settings.despeckle}
         disabled={manual}
         onChange={despeckle => update({ despeckle })}
       />
 
-      <Field label="Contrast" value={String(settings.contrast)}>
+      <Field label={t('Contrast')} value={String(settings.contrast)}>
         {id => (
           <Slider
             id={id}
@@ -58,7 +60,7 @@ export function CleanupPanel() {
         )}
       </Field>
 
-      <Field label="Brightness" value={String(settings.brightness)}>
+      <Field label={t('Brightness')} value={String(settings.brightness)}>
         {id => (
           <Slider
             id={id}
@@ -73,18 +75,20 @@ export function CleanupPanel() {
 
       {!manual && (
         <p className={`${panelStyles.note} ${panelStyles.noteInfo}`}>
-          The Auto and B&amp;W presets set contrast per pixel, so the sliders do not apply. Switch
-          to Photo or Manual to use them.
+          {t(
+            'The Auto and B&amp;W presets set contrast per pixel, so the sliders do not apply. Switch to Photo or Manual to use them.'
+          )}
         </p>
       )}
 
       {isDetectingCorners.value && (
-        <p className={panelStyles.description}>Finding the page edges…</p>
+        <p className={panelStyles.description}>{t('Finding the page edges…')}</p>
       )}
 
       <p className={panelStyles.description}>
-        Drag the corner handles on the page to correct the detected edges. Apply writes the cleaned
-        page back into the document.
+        {t(
+          'Drag the corner handles on the page to correct the detected edges. Apply writes the cleaned page back into the document.'
+        )}
       </p>
     </>
   );

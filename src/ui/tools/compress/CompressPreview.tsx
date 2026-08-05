@@ -3,12 +3,14 @@ import { ZoomIn, ZoomOut } from 'lucide-preact';
 import { type PageRef } from '../../../core/store';
 import { compressReport, compressSettings } from './state';
 import { composeDocument, compressDocument, planCompression } from '../../../core/operations';
+import { pageAnnotations } from '../annotate/state';
 import { renderWorker } from '../../../core/workers';
 import { CompareSlider } from '../../components/CompareSlider';
 import { IconButton } from '../../components/IconButton';
 import { EmptyState } from '../../components/Feedback';
 import { isCancellation, logEvent, fromUnknown } from '../../../core/errors';
 import styles from '../../shell/SinglePageView.module.css';
+import { useTranslation } from '../../../core/i18n';
 
 export interface CompressPreviewProps {
   pages: PageRef[];
@@ -17,6 +19,7 @@ export interface CompressPreviewProps {
 const ZOOM_STEPS = [0.5, 0.75, 1, 1.5, 2, 3, 4] as const;
 
 export function CompressPreview({ pages }: CompressPreviewProps) {
+  const t = useTranslation();
   const [zoomStep, setZoomStep] = useState(2); // 100%
   const zoom = ZOOM_STEPS[zoomStep];
 
@@ -51,7 +54,13 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
 
     const renderBefore = async () => {
       try {
-        const composedBytes = await composeDocument({ pages: [page], annotations: [] });
+        const annotations = pageAnnotations.value[page.key] || [];
+        const layerAnnotations = annotations.map(ann => ({ ...ann, pageKey: page.key }));
+        const composedBytes = await composeDocument({
+          pages: [page],
+          annotations: [],
+          layerAnnotations
+        });
         if (cancelled) return;
 
         const handle = await renderWorker
@@ -106,7 +115,13 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
     const renderAfter = async () => {
       setIsProcessing(true);
       try {
-        const composedBytes = await composeDocument({ pages: [page], annotations: [] });
+        const annotations = pageAnnotations.value[page.key] || [];
+        const layerAnnotations = annotations.map(ann => ({ ...ann, pageKey: page.key }));
+        const composedBytes = await composeDocument({
+          pages: [page],
+          annotations: [],
+          layerAnnotations
+        });
         if (cancelled) return;
 
         const miniReport = await planCompression(composedBytes, settings);
@@ -164,7 +179,7 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
   }, [page, settings, zoom]);
 
   if (!page) {
-    return <EmptyState title="No page" body="There are no pages to preview." />;
+    return <EmptyState title={t('No page')} body="There are no pages to preview." />;
   }
 
   const w = Math.max(beforeSize.width, afterSize.width);
@@ -202,18 +217,21 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
       </div>
 
       <div className={styles.bottomBar}>
-        <span className={styles.pageLabel}>Preview: Page {page.sourceIndex + 1}</span>
+        <span className={styles.pageLabel}>
+          {t('Preview: Page')}
+          {page.sourceIndex + 1}
+        </span>
         <div className={styles.toolbar}>
           <IconButton
             icon={ZoomOut}
-            title="Zoom out"
+            title={t('Zoom out')}
             disabled={zoomStep === 0}
             onClick={() => setZoomStep(s => Math.max(0, s - 1))}
           />
           <span className={styles.zoomLabel}>{Math.round(zoom * 100)}%</span>
           <IconButton
             icon={ZoomIn}
-            title="Zoom in"
+            title={t('Zoom in')}
             disabled={zoomStep === ZOOM_STEPS.length - 1}
             onClick={() => setZoomStep(s => Math.min(ZOOM_STEPS.length - 1, s + 1))}
           />

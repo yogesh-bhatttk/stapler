@@ -7,6 +7,7 @@ import { TrustModal } from '../components/TrustModal';
 import { FileTabs } from './FileTabs';
 import { isCommandPaletteOpen } from '../../core/ui';
 import { resolvedTheme, toggleTheme } from '../theme';
+import { useTranslation, currentLocale, setLocale, locales } from '../../core/i18n';
 import styles from './TopBar.module.css';
 
 /** ⌘ on Apple platforms, Ctrl everywhere else — the hint must match the key. */
@@ -18,6 +19,7 @@ const MOD_LABEL =
 export function TopBar() {
   const [showTrust, setShowTrust] = useState(false);
   const isDark = resolvedTheme.value === 'dark';
+  const t = useTranslation();
 
   return (
     <header className={styles.topBar}>
@@ -37,7 +39,7 @@ export function TopBar() {
           <path d="M5 12h14" />
           <path d="M5 16h14" />
         </svg>
-        Stapler
+        {t('header.title')}
       </a>
 
       <FileTabs />
@@ -59,6 +61,28 @@ export function TopBar() {
           size="compact"
           aria-label={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
         />
+        <select
+          value={currentLocale.value}
+          onChange={e =>
+            setLocale(
+              (e.currentTarget as HTMLSelectElement).value as Parameters<typeof setLocale>[0]
+            )
+          }
+          style={{
+            background: 'transparent',
+            color: 'inherit',
+            border: '1px solid var(--hairline)',
+            borderRadius: '4px',
+            padding: '4px'
+          }}
+          aria-label="Change Language"
+        >
+          {locales.map(loc => (
+            <option key={loc} value={loc} style={{ color: 'black' }}>
+              {loc.toUpperCase()}
+            </option>
+          ))}
+        </select>
         {/* DS-07: the claim is the product, so this is a real button on every route. */}
         <button
           type="button"
@@ -66,7 +90,7 @@ export function TopBar() {
           onClick={() => setShowTrust(true)}
           aria-label="Offline, zero network requests. Read how to verify this."
         >
-          <Badge variant="success">Offline · 0 requests</Badge>
+          <Badge variant="success">{t('Offline · 0 requests')}</Badge>
         </button>
       </div>
 

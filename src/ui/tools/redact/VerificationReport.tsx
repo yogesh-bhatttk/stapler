@@ -12,8 +12,10 @@ import { Button } from '../../components/Button';
 import { panelStyles } from '../../shell/OptionsPanel';
 import { redactionReport } from './state';
 import styles from './VerificationReport.module.css';
+import { useTranslation } from '../../../core/i18n';
 
 export function VerificationReport() {
+  const t = useTranslation();
   const report = redactionReport.value;
   if (!report) return null;
 
@@ -34,7 +36,7 @@ export function VerificationReport() {
 
   return (
     <div className={panelStyles.section}>
-      <h3 className={panelStyles.title}>Verification</h3>
+      <h3 className={panelStyles.title}>{t('Verification')}</h3>
       <p className={report.verified ? styles.pass : styles.fail}>
         {report.verified
           ? `All ${report.verdicts.length} region(s) verified.`
@@ -44,9 +46,9 @@ export function VerificationReport() {
       <table className={styles.table}>
         <thead>
           <tr>
-            <th scope="col">Page</th>
-            <th scope="col">Region</th>
-            <th scope="col">Result</th>
+            <th scope="col">{t('Page')}</th>
+            <th scope="col">{t('Region')}</th>
+            <th scope="col">{t('Result')}</th>
           </tr>
         </thead>
         <tbody>
@@ -75,7 +77,7 @@ export function VerificationReport() {
         size="compact"
         onClick={() => navigator.clipboard.writeText(asText())}
       >
-        Copy report
+        {t('Copy report')}
       </Button>
     </div>
   );

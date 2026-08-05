@@ -21,8 +21,10 @@ import { IconButton } from '../components/IconButton';
 import { ToolIcon } from '../components/ToolIcon';
 import { fuzzyRank } from '../../core/fuzzy';
 import styles from './HomeView.module.css';
+import { useTranslation } from '../../core/i18n';
 
 export function HomeView() {
+  const t = useTranslation();
   const [, setLocation] = useLocation();
   const [query, setQuery] = useState('');
   const [recents, setRecents] = useState<RecentEntry[]>([]);
@@ -72,27 +74,32 @@ export function HomeView() {
     <div className={styles.page}>
       <div className={styles.inner}>
         <div>
-          <h1 className={styles.title}>Offline PDF tools</h1>
+          <h1 className={styles.title}>{t('Offline PDF tools')}</h1>
           <p className={styles.subtitle}>
-            Everything runs on this device. No upload, no account, no limits.
+            {t('Everything runs on this device. No upload, no account, no limits.')}
           </p>
         </div>
 
         <DropZone onImported={() => setLocation(toolRoute('organize'))} />
 
         <div className={styles.section}>
-          <Field label="Search tools">
+          <Field label={t('Search tools')}>
             {id => (
               <TextInput
                 id={id}
                 value={query}
-                placeholder="merge, compress, redact…"
+                placeholder={t('merge, compress, redact…')}
                 onInput={event => setQuery((event.target as HTMLInputElement).value)}
               />
             )}
           </Field>
 
-          {groups.length === 0 && <p className={styles.empty}>No tool matches “{query}”.</p>}
+          {groups.length === 0 && (
+            <p className={styles.empty}>
+              {t('No tool matches “')}
+              {query}”.
+            </p>
+          )}
 
           {groups.map(({ group, tools }) => (
             <div className={styles.section} key={group}>
@@ -116,7 +123,7 @@ export function HomeView() {
 
         {recents.length > 0 ? (
           <div className={styles.section}>
-            <h2 className={styles.sectionTitle}>Recent</h2>
+            <h2 className={styles.sectionTitle}>{t('Recent')}</h2>
             <ul className={styles.recents}>
               {recents.slice(0, 8).map(entry => (
                 <li className={styles.recentRow} key={entry.id}>
@@ -145,8 +152,9 @@ export function HomeView() {
           platform.supportsFileSystemAccess && (
             <p className={styles.empty}>
               <Info size={14} aria-hidden="true" />
-              Files you open appear here so you can reopen them in one click. Only a reference is
-              stored, never the document.
+              {t(
+                'Files you open appear here so you can reopen them in one click. Only a reference is stored, never the document.'
+              )}
             </p>
           )
         )}

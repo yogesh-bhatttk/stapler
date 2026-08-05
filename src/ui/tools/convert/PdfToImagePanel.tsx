@@ -5,6 +5,7 @@ import { activeDoc, selectedPageKeys } from '../../../core/store';
 import { Field, RadioGroup, Select } from '../../components/Field';
 import { panelStyles } from '../../shell/OptionsPanel';
 import { pdfToImageSettings } from '../state';
+import { useTranslation } from '../../../core/i18n';
 
 const DPI_OPTIONS = [
   { value: 72, label: '72 DPI — screen' },
@@ -14,6 +15,7 @@ const DPI_OPTIONS = [
 ] as const;
 
 export function PdfToImagePanel() {
+  const t = useTranslation();
   const doc = activeDoc.value;
   const settings = pdfToImageSettings.value;
   if (!doc) return null;
@@ -25,7 +27,7 @@ export function PdfToImagePanel() {
   return (
     <>
       <RadioGroup<'jpeg' | 'png'>
-        legend="Format"
+        legend={t('Format')}
         name="imageFormat"
         value={settings.format}
         onChange={format => (pdfToImageSettings.value = { ...settings, format })}
@@ -35,7 +37,7 @@ export function PdfToImagePanel() {
         ]}
       />
 
-      <Field label="Resolution">
+      <Field label={t('Resolution')}>
         {id => (
           <Select
             id={id}
@@ -47,13 +49,15 @@ export function PdfToImagePanel() {
       </Field>
 
       <p className={panelStyles.description}>
-        {pageCount} page(s) → {settings.format === 'jpeg' ? 'JPG' : 'PNG'} in a ZIP.
+        {pageCount} {t('page(s) →')}
+        {settings.format === 'jpeg' ? 'JPG' : 'PNG'} {t('in a ZIP.')}
         {first && ` About ${Math.round((595 * settings.dpi) / 72)}px wide.`}
       </p>
       {settings.dpi >= 600 && (
         <p className={panelStyles.note}>
-          600 DPI produces very large images. Consider exporting a page range rather than a whole
-          long document.
+          {t(
+            '600 DPI produces very large images. Consider exporting a page range rather than a whole long document.'
+          )}
         </p>
       )}
     </>

@@ -113,6 +113,17 @@ export interface StampSource {
   rotation?: number;
 }
 
+export interface AnnotationSource {
+  pageKey: string;
+  type: 'freehand' | 'highlight' | 'rectangle' | 'text';
+  color: string;
+  strokeWidth: number;
+  points?: { x: number; y: number }[];
+  rect?: { x: number; y: number; width: number; height: number };
+  text?: string;
+  fontSize?: number;
+}
+
 export interface DocumentFacts {
   pageCount: number;
   isXfa: boolean;
@@ -248,6 +259,7 @@ export interface ProcessJob {
     headerFooter?: HeaderFooterData,
     normalize?: import('../../ui/tools/normalize/state').NormalizeSettings | null,
     nup?: import('../../ui/tools/nup/state').NUpSettings | null,
+    annotations?: AnnotationSource[],
     job?: JobHandle
   ): Promise<Uint8Array>;
   composeSplit(
@@ -260,6 +272,7 @@ export interface ProcessJob {
     normalize?: import('../../ui/tools/normalize/state').NormalizeSettings | null,
     nup?: import('../../ui/tools/nup/state').NUpSettings | null,
     baseName?: string,
+    annotations?: AnnotationSource[],
     job?: JobHandle
   ): Promise<{ isZip: boolean; bytes: Uint8Array }>;
   /**
@@ -988,6 +1001,71 @@ function positionOrigin(
   return { x, y };
 }
 
+async function drawAnnotations(
+  outDoc: PDFDocument,
+  page: ReturnType<PDFDocument['addPage']>,
+  annotations: AnnotationSource[],
+  fontCache: { font?: Awaited<ReturnType<PDFDocument['embedFont']>> }
+) {
+  if (annotations.length === 0) return;
+
+  const { width, height } = page.getSize();
+
+  // Convert hex color to rgb
+  const hexToRgb = (hex: string) => {
+    hex = hex.replace('#', '');
+    return rgb(
+      parseInt(hex.substring(0, 2), 16) / 255,
+      parseInt(hex.substring(2, 4), 16) / 255,
+      parseInt(hex.substring(4, 6), 16) / 255
+    );
+  };
+
+  for (const ann of annotations) {
+    const color = hexToRgb(ann.color);
+
+    // PDF coordinates are from bottom-left
+    if (
+      (ann.type === 'freehand' || ann.type === 'highlight') &&
+      ann.points &&
+      ann.points.length > 0
+    ) {
+      // Build an SVG path
+      // M x y L x y L x y
+      let path = `M ${ann.points[0].x * width} ${height - ann.points[0].y * height}`;
+      for (let i = 1; i < ann.points.length; i++) {
+        path += ` L ${ann.points[i].x * width} ${height - ann.points[i].y * height}`;
+      }
+      page.drawSvgPath(path, {
+        borderColor: color,
+        borderWidth: ann.strokeWidth,
+        opacity: ann.type === 'highlight' ? 0.5 : 1.0
+      });
+    } else if (ann.type === 'rectangle' && ann.rect) {
+      page.drawRectangle({
+        x: ann.rect.x * width,
+        y: height - ann.rect.y * height - ann.rect.height * height,
+        width: ann.rect.width * width,
+        height: ann.rect.height * height,
+        borderColor: color,
+        borderWidth: ann.strokeWidth,
+        opacity: 1.0
+      });
+    } else if (ann.type === 'text' && ann.text && ann.rect) {
+      if (!fontCache.font) {
+        fontCache.font = await outDoc.embedStandardFont(StandardFonts.Helvetica);
+      }
+      page.drawText(ann.text, {
+        x: ann.rect.x * width,
+        y: height - ann.rect.y * height - (ann.fontSize || 16),
+        size: ann.fontSize || 16,
+        color: color,
+        font: fontCache.font
+      });
+    }
+  }
+}
+
 /**
  * Draws a fixed, unrotated header and/or footer line — small running text in the
  * top/bottom margin band, distinct from the single positioned/rotatable
@@ -1032,6 +1110,7 @@ async function composePages(
   headerFooter: HeaderFooterData | undefined,
   normalize: import('../../ui/tools/normalize/state').NormalizeSettings | undefined | null,
   nup: import('../../ui/tools/nup/state').NUpSettings | undefined | null,
+  annotations: AnnotationSource[] | undefined,
   job: JobHandle | undefined,
   label: string
 ): Promise<PDFDocument> {
@@ -1064,9 +1143,16 @@ async function composePages(
 
   const stampsByPage = new Map<string, StampSource[]>();
   for (const stamp of stamps) {
-    const list = stampsByPage.get(stamp.pageKey);
-    if (list) list.push(stamp);
-    else stampsByPage.set(stamp.pageKey, [stamp]);
+    const list = stampsByPage.get(stamp.pageKey) || [];
+    list.push(stamp);
+    stampsByPage.set(stamp.pageKey, list);
+  }
+
+  const annotationsByPage = new Map<string, AnnotationSource[]>();
+  for (const ann of annotations || []) {
+    const list = annotationsByPage.get(ann.pageKey) || [];
+    list.push(ann);
+    annotationsByPage.set(ann.pageKey, list);
   }
 
   /** Every source document that contributed a page, for the /AcroForm rebuild. */
@@ -1230,6 +1316,7 @@ async function composePages(
     }
 
     await drawStamps(outDoc, copied, stampsByPage.get(ref.key) ?? [], fontCache, imageCache);
+    await drawAnnotations(outDoc, copied, annotationsByPage.get(ref.key) ?? [], fontCache);
   }
 
   if (nup) {
@@ -1530,7 +1617,7 @@ const api: ProcessJob = {
     return transfer(await doc.save({ useObjectStreams: true }));
   },
 
-  async compose(pages, sources, stamps, watermark, headerFooter, normalize, nup, job) {
+  async compose(pages, sources, stamps, watermark, headerFooter, normalize, nup, annotations, job) {
     if (pages.length === 0) throw internal('Nothing to export: the page list is empty');
     const outDoc = await composePages(
       pages,
@@ -1540,6 +1627,7 @@ const api: ProcessJob = {
       headerFooter,
       normalize,
       nup,
+      annotations,
       job,
       'Composing page'
     );
@@ -1557,6 +1645,7 @@ const api: ProcessJob = {
     normalize,
     nup,
     baseName,
+    annotations,
     job
   ) {
     if (pages.length === 0) throw internal('Nothing to export: the page list is empty');
@@ -1582,6 +1671,7 @@ const api: ProcessJob = {
         headerFooter,
         normalize,
         nup,
+        annotations,
         job,
         'Composing page'
       );
@@ -1604,6 +1694,7 @@ const api: ProcessJob = {
         headerFooter,
         normalize,
         nup,
+        undefined, // annotations
         job,
         'Composing page'
       );

@@ -219,23 +219,19 @@ This is what let the above ship looking done. Do this alongside or right after C
 
 - [x] **OPS-06** — resize handles, odd/even scope (currently a dead dropdown). See
       `docs/TICKETS.md` for what shipped.
-- [ ] **ANN-01** — real annotation layer (highlight, freehand, shapes, sticky note,
+- [x] **ANN-01** — real annotation layer (highlight, freehand, shapes, sticky note,
       whiteout, color/stroke picker) — separate from the SGN-02 stamp layer it currently
       gets confused with
-- [ ] **ANN-02** — compare two PDFs
-- [ ] **BAT-01 / BAT-02** — batch folder processing, saved recipes
-- [ ] **NFR-04** — i18n framework
+- [x] **ANN-02** — compare two PDFs
+- [x] **BAT-01 / BAT-02** — batch folder processing, saved recipes
+- [x] **NFR-04** — i18n framework
 
 ---
 
 ## Chunk 5 — Wire in what's declared but not connected (M)
 
-- [ ] **NFR-01** — add axe-core to Playwright, actually assert zero violations
-      (currently zero references anywhere)
-- [ ] **NFR-02** — fix the memory test's broken selector
-      (`[class*="PageGrid_viewport"]` doesn't match the built CSS module names, so it
-      silently no-ops), add the missing merge-10×5MB and main-thread-50ms assertions,
-      get the fixtures it references (currently 14KB, not 5MB) actually used
+- [x] **NFR-01** — add axe-core to Playwright, actually assert zero violations (currently zero references anywhere)
+- [x] **NFR-02** — fix the memory test's broken selector (`[class*="PageGrid_viewport"]` doesn't match the built CSS module names, so it silently no-ops), add the missing merge-10×5MB and main-thread-50ms assertions, get the fixtures it references (currently 14KB, not 5MB) actually used
 
 ---
 

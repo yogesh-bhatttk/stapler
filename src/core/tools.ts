@@ -25,9 +25,12 @@ export type ToolId =
   | 'redact'
   | 'metadata'
   | 'normalize'
-  | 'nup';
+  | 'nup'
+  | 'compare'
+  | 'annotate'
+  | 'batch';
 
-export type ToolGroup = 'Organize' | 'Convert' | 'Optimize' | 'Document';
+export type ToolGroup = 'Organize' | 'Convert' | 'Optimize' | 'Document' | 'Automation';
 
 /** Grid shows page thumbnails; single shows one page with an overlay layer. */
 export type CanvasMode = 'grid' | 'single';
@@ -220,6 +223,28 @@ export const TOOLS: readonly ToolDefinition[] = [
     selectable: false
   },
   {
+    id: 'compare',
+    title: 'Compare',
+    group: 'Document',
+    summary: 'Compare two PDFs and view visual or text differences.',
+    icon: 'GitPullRequest',
+    canvasMode: 'single',
+    needsOptionsPanel: true,
+    commitLabel: 'Done',
+    selectable: false
+  },
+  {
+    id: 'annotate',
+    title: 'Annotate',
+    group: 'Document',
+    summary: 'Draw highlights, shapes, and text notes on the document.',
+    icon: 'PenTool',
+    canvasMode: 'single',
+    needsOptionsPanel: true,
+    commitLabel: 'Export annotated PDF',
+    selectable: false
+  },
+  {
     id: 'insert',
     title: 'Insert pages',
     group: 'Organize',
@@ -231,6 +256,18 @@ export const TOOLS: readonly ToolDefinition[] = [
     // Selecting a page in the grid sets the insertion anchor — the panel inserts
     // right after the last selected page.
     selectable: true
+  },
+  {
+    id: 'batch',
+    title: 'Batch process',
+    group: 'Automation',
+    summary: 'Apply a recipe of operations to a folder of PDFs.',
+    icon: 'FolderOpen',
+    canvasMode: 'single',
+    needsOptionsPanel: true,
+    commitLabel: 'Run Batch',
+    selectable: false,
+    worksWithoutDocument: true
   }
 ];
 
@@ -246,7 +283,7 @@ export function toolRoute(id: ToolId): string {
 
 /** Rail order: groups in declaration order, tools in declaration order. */
 export function groupedTools(): { group: ToolGroup; tools: ToolDefinition[] }[] {
-  const order: ToolGroup[] = ['Organize', 'Convert', 'Optimize', 'Document'];
+  const order: ToolGroup[] = ['Organize', 'Convert', 'Optimize', 'Document', 'Automation'];
   return order
     .map(group => ({ group, tools: TOOLS.filter(t => t.group === group) }))
     .filter(entry => entry.tools.length > 0);

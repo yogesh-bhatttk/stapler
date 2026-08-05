@@ -1,6 +1,7 @@
 import { formFields, formValues } from './state';
 import type { PageRef } from '../../../core/store';
 import styles from './AcroFormOverlay.module.css';
+import { useTranslation } from '../../../core/i18n';
 
 export interface AcroFormOverlayProps {
   page: PageRef;
@@ -9,6 +10,7 @@ export interface AcroFormOverlayProps {
 }
 
 export function AcroFormOverlay({ page, width, height }: AcroFormOverlayProps) {
+  const t = useTranslation();
   const data = formFields.value;
   if (!data || data.isXfa || data.fields.length === 0) return null;
 
@@ -63,7 +65,7 @@ export function AcroFormOverlay({ page, width, height }: AcroFormOverlayProps) {
               onChange={e => onChange((e.target as HTMLSelectElement).value)}
             >
               <option value="" disabled>
-                Select an option
+                {t('Select an option')}
               </option>
               {field.options?.map(opt => (
                 <option key={opt} value={opt}>
@@ -94,7 +96,7 @@ export function AcroFormOverlay({ page, width, height }: AcroFormOverlayProps) {
             </select>
           );
         } else {
-          input = <div className={styles.unknown}>Unsupported</div>;
+          input = <div className={styles.unknown}>{t('Unsupported')}</div>;
         }
 
         return (

@@ -12,8 +12,10 @@ import { Field, Slider } from '../../components/Field';
 import { panelStyles } from '../../shell/OptionsPanel';
 import { removeBlanksThreshold } from '../state';
 import { useJob } from '../../useJob';
+import { useTranslation } from '../../../core/i18n';
 
 export function BlanksPanel() {
+  const t = useTranslation();
   const doc = activeDoc.value;
   const threshold = removeBlanksThreshold.value;
   const { run } = useJob();
@@ -40,7 +42,7 @@ export function BlanksPanel() {
 
   return (
     <>
-      <Field label="Sensitivity" value={String(threshold)}>
+      <Field label={t('Sensitivity')} value={String(threshold)}>
         {id => (
           <Slider
             id={id}
@@ -54,13 +56,15 @@ export function BlanksPanel() {
       </Field>
 
       <Button variant="secondary" icon={Search} onClick={detect}>
-        Detect blank pages
+        {t('Detect blank pages')}
       </Button>
 
       {selectedPageKeys.value.size > 0 && (
         <p className={panelStyles.note}>
-          {selectedPageKeys.value.size} page(s) marked. Check them in the grid, then use Delete
-          selected — nothing is removed until you confirm.
+          {selectedPageKeys.value.size}{' '}
+          {t(
+            'page(s) marked. Check them in the grid, then use Delete selected — nothing is removed until you confirm.'
+          )}
         </p>
       )}
     </>

@@ -16,8 +16,10 @@ import { ProgressBar } from '../components/Feedback';
 import { commitTool } from '../tools/commit';
 import { useJob } from '../useJob';
 import styles from './ActionBar.module.css';
+import { useTranslation } from '../../core/i18n';
 
 export function ActionBar() {
+  const t = useTranslation();
   const tool = useActiveTool();
   const doc = activeDoc.value;
   const job = activeJob.value;
@@ -48,7 +50,7 @@ export function ActionBar() {
             permanently dead control. */}
         {job && (
           <Button variant="tertiary" onClick={job.cancel}>
-            Cancel
+            {t('Cancel')}
           </Button>
         )}
         <Button

@@ -16,6 +16,7 @@ import { isCancellation, logEvent } from '../../core/errors';
 import { Button } from '../components/Button';
 import { IconButton } from '../components/IconButton';
 import styles from './SinglePageView.module.css';
+import { useTranslation } from '../../core/i18n';
 
 export interface SinglePageViewProps {
   pages: PageRef[];
@@ -36,6 +37,7 @@ export function SinglePageView({
   onPageIndexChange,
   overlay
 }: SinglePageViewProps) {
+  const t = useTranslation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [zoomStep, setZoomStep] = useState(2); // 100%
   const [size, setSize] = useState({ width: 0, height: 0 });
@@ -124,10 +126,12 @@ export function SinglePageView({
           disabled={pageIndex === 0}
           onClick={() => onPageIndexChange(pageIndex - 1)}
         >
-          Previous
+          {t('Previous')}
         </Button>
         <span className={styles.pagerLabel}>
-          Page {pageIndex + 1} of {pages.length}
+          {t('Page')}
+          {pageIndex + 1} {t('of')}
+          {pages.length}
         </span>
         <Button
           variant="tertiary"
@@ -137,7 +141,7 @@ export function SinglePageView({
           disabled={pageIndex >= pages.length - 1}
           onClick={() => onPageIndexChange(pageIndex + 1)}
         >
-          Next
+          {t('Next')}
         </Button>
 
         <div className={styles.zoom}>

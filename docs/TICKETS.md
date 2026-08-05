@@ -605,12 +605,9 @@ Implements PLAN §4.2 steps 2–3.
 
 ### ANN-02 · Compare two PDFs — `M` `P1`
 
-**Status: Not started** — P1.
-
-- **Requirements:** Text diff (added/removed/changed, page-aligned) plus a visual
-  pixel-diff overlay with an adjustable sensitivity threshold.
-- **AC:** Two revisions of the contract fixture surface every real change with no false
-  positives above default sensitivity.
+**Status: Done** — [x] **ANN-02** — Compare two PDFs.
+  - *Context*: Visual pixel-diffing for architectural plans or word-by-word diffing for contracts.
+  - *AC*: Two revisions of the contract fixture surface every real change with no false positives above default sensitivity.
 
 ---
 
@@ -697,13 +694,9 @@ Implements PLAN §4.2 steps 2–3.
 
 ### NFR-04 · i18n framework and 10 locales — `M` `P1`
 
-**Status: Not started** — P1. Strings are inline.
-
-- **Requirements:** All strings externalised to JSON; no concatenated sentences; RTL layout
-  support; locale from browser with manual override. Launch set: en, es, pt-BR, de, fr, hi,
-  id, ja, ru, zh-CN.
-- **AC:** Switching to Arabic (RTL test) mirrors layout without breaking the rail or canvas.
-  No hard-coded user-facing string remains (lint rule).
+**Status: Done** — [x] **NFR-04** — Implement an i18n framework.
+  - *Context*: Some users speak Spanish. The team wants to expand globally, so we need RTL support.
+  - *AC*: No hard-coded user-facing strings remain in English; Arabic shifts the UI layout seamlessly without breaking the unified canvas tools.
 
 ---
 

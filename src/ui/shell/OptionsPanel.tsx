@@ -24,7 +24,11 @@ import { RedactPanel } from '../tools/redact/RedactPanel';
 import { MetadataPanel } from '../tools/metadata/MetadataPanel';
 import { NormalizePanel } from '../tools/normalize/NormalizePanel';
 import { NUpPanel } from '../tools/nup/NUpPanel';
+import { ComparePanel } from '../tools/compare/ComparePanel';
+import { AnnotatePanel } from '../tools/annotate/AnnotatePanel';
+import { BatchPanel } from '../tools/batch/BatchPanel';
 import styles from './OptionsPanel.module.css';
+import { useTranslation } from '../../core/i18n';
 
 const BODIES: Record<string, () => preact.JSX.Element | null> = {
   merge: MergePanel,
@@ -42,10 +46,14 @@ const BODIES: Record<string, () => preact.JSX.Element | null> = {
   redact: RedactPanel,
   metadata: MetadataPanel,
   normalize: NormalizePanel,
-  nup: NUpPanel
+  nup: NUpPanel,
+  compare: ComparePanel,
+  annotate: AnnotatePanel,
+  batch: BatchPanel
 };
 
 export function OptionsPanel() {
+  const t = useTranslation();
   const tool = useActiveTool();
   if (!tool || !tool.needsOptionsPanel) return null;
 
@@ -61,7 +69,9 @@ export function OptionsPanel() {
       {hasDocument || tool.worksWithoutDocument ? (
         Body && <Body />
       ) : (
-        <p className={`${styles.note} ${styles.noteInfo}`}>Open a document to use this tool.</p>
+        <p className={`${styles.note} ${styles.noteInfo}`}>
+          {t('Open a document to use this tool.')}
+        </p>
       )}
     </aside>
   );

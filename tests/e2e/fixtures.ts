@@ -315,20 +315,31 @@ export async function corruptPdf(): Promise<Uint8Array> {
  */
 export async function heavyPdf(): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
-  const font = await doc.embedFont(StandardFonts.Helvetica);
 
-  // Create 100 pages with lots of distinct text to bloat the file
-  for (let i = 0; i < 100; i++) {
-    const page = doc.addPage([595.28, 841.89]);
-    for (let j = 0; j < 50; j++) {
-      // Create a unique long string so it doesn't get deduplicated easily
-      const longText = Array(100)
-        .fill(`Heavy page ${i} line ${j} padding ` + Math.random())
-        .join(' ');
-      page.drawText(longText.slice(0, 50), { x: 10, y: 800 - j * 15, size: 8, font });
-    }
+  // A 5MB PDF requires about 5MB of uncompressible data.
+  // Let's create a 1200x1200x4 (5.7MB) noise PNG.
+  const width = 1200;
+  const height = 1200;
+  const px = new Uint8Array(width * height * 4);
+  let seed = 12345;
+  for (let i = 0; i < px.length; i++) {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    px[i] = (seed >> 16) & 0xff;
   }
-  return doc.save({ useObjectStreams: false }); // Avoid compressing objects to ensure file size is actually large
+
+  // encodePng is defined earlier in this file.
+  const png = encodePng(px, width, height, true);
+  const image = await doc.embedPng(png);
+
+  // We'll create 10 pages and draw the same image.
+  // Wait, pdf-lib will deduplicate the image object.
+  // But the file itself will be > 5MB because of the 5.7MB PNG.
+  for (let i = 0; i < 10; i++) {
+    const page = doc.addPage([595.28, 841.89]);
+    page.drawImage(image, { x: 0, y: 0, width: 595.28, height: 841.89 });
+  }
+
+  return doc.save({ useObjectStreams: false });
 }
 
 /**

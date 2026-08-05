@@ -17,8 +17,10 @@ import { panelStyles } from '../../shell/OptionsPanel';
 import { VerificationReport } from './VerificationReport';
 import { pendingRedactions, redactionReport } from './state';
 import { useJob } from '../../useJob';
+import { useTranslation } from '../../../core/i18n';
 
 export function RedactPanel() {
+  const t = useTranslation();
   const doc = activeDoc.value;
   const regions = pendingRedactions.value;
   const [query, setQuery] = useState('');
@@ -44,12 +46,12 @@ export function RedactPanel() {
 
   return (
     <>
-      <Field label="Find and mark text">
+      <Field label={t('Find and mark text')}>
         {id => (
           <TextInput
             id={id}
             value={query}
-            placeholder="Account number, name…"
+            placeholder={t('Account number, name…')}
             onInput={event => setQuery((event.target as HTMLInputElement).value)}
             onKeyDown={event => {
               if (event.key === 'Enter' && query.trim()) search();
@@ -57,25 +59,31 @@ export function RedactPanel() {
           />
         )}
       </Field>
-      <Checkbox label="Match case" checked={matchCase} onChange={setMatchCase} />
+      <Checkbox label={t('Match case')} checked={matchCase} onChange={setMatchCase} />
       <Button variant="secondary" icon={Search} disabled={!query.trim()} onClick={search}>
-        Mark every occurrence
+        {t('Mark every occurrence')}
       </Button>
 
       <hr className={panelStyles.divider} />
 
       <div className={panelStyles.section}>
-        <h3 className={panelStyles.title}>Marks ({regions.length})</h3>
+        <h3 className={panelStyles.title}>
+          {t('Marks (')}
+          {regions.length})
+        </h3>
         {regions.length === 0 ? (
           <p className={panelStyles.description}>
-            Draw a rectangle on the page, or search above. Nothing is changed until you apply.
+            {t(
+              'Draw a rectangle on the page, or search above. Nothing is changed until you apply.'
+            )}
           </p>
         ) : (
           <ul className={panelStyles.list}>
             {regions.map((region, index) => (
               <li className={panelStyles.listRow} key={`${region.pageIndex}-${index}`}>
                 <span className={panelStyles.listRowText}>
-                  {region.text ? `"${region.text}"` : 'Drawn region'} · page {region.pageIndex + 1}
+                  {region.text ? `"${region.text}"` : 'Drawn region'} {t('· page')}
+                  {region.pageIndex + 1}
                 </span>
                 <IconButton
                   icon={Trash2}
@@ -90,9 +98,9 @@ export function RedactPanel() {
       </div>
 
       <p className={panelStyles.note}>
-        Applying replaces each affected page with an image of itself, so no text, font, or image
-        data survives underneath the marks. Text on those pages stops being selectable. Stapler
-        verifies removal and refuses to save if it cannot.
+        {t(
+          'Applying replaces each affected page with an image of itself, so no text, font, or image data survives underneath the marks. Text on those pages stops being selectable. Stapler verifies removal and refuses to save if it cannot.'
+        )}
       </p>
 
       {redactionReport.value && <VerificationReport />}

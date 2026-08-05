@@ -15,8 +15,10 @@ import { RadioGroup, TextArea } from '../../components/Field';
 import { panelStyles } from '../../shell/OptionsPanel';
 import { extractSettings, extractedText } from './state';
 import { useJob } from '../../useJob';
+import { useTranslation } from '../../../core/i18n';
 
 export function ExtractPanel() {
+  const t = useTranslation();
   const doc = activeDoc.value;
   const settings = extractSettings.value;
   const text = extractedText.value;
@@ -50,7 +52,7 @@ export function ExtractPanel() {
   return (
     <>
       <RadioGroup<'text' | 'markdown'>
-        legend="Output"
+        legend={t('Output')}
         name="extractMode"
         value={settings.mode}
         onChange={mode => (extractSettings.value = { mode })}
@@ -67,7 +69,7 @@ export function ExtractPanel() {
       </p>
 
       <Button variant="secondary" icon={FileText} onClick={extract}>
-        Extract text
+        {t('Extract text')}
       </Button>
 
       {text && (
@@ -82,10 +84,10 @@ export function ExtractPanel() {
                 notify('success', 'Copied to the clipboard.');
               }}
             >
-              Copy
+              {t('Copy')}
             </Button>
             <Button variant="tertiary" size="compact" icon={Download} onClick={download}>
-              Download
+              {t('Download')}
             </Button>
           </div>
           <TextArea readOnly value={text} aria-label="Extracted text" />

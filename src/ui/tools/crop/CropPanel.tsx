@@ -7,6 +7,7 @@ import { panelStyles } from '../../shell/OptionsPanel';
 import { cropBoxes, cropSettings, pagesForScope, type CropScope } from './state';
 import { useJob } from '../../useJob';
 import { autoTrimDocument } from '../../../core/operations';
+import { useTranslation } from '../../../core/i18n';
 
 const SCOPE_OPTIONS: { value: CropScope; label: string }[] = [
   { value: 'current', label: 'Current page only' },
@@ -23,6 +24,7 @@ const SCOPE_LABEL: Record<CropScope, string> = {
 };
 
 export function CropPanel() {
+  const t = useTranslation();
   const doc = activeDoc.value;
   const settings = cropSettings.value;
   const { run } = useJob();
@@ -46,7 +48,7 @@ export function CropPanel() {
 
   return (
     <>
-      <Field label="Apply crop to">
+      <Field label={t('Apply crop to')}>
         {id => (
           <Select
             id={id}
@@ -58,24 +60,29 @@ export function CropPanel() {
       </Field>
 
       <div className={panelStyles.section}>
-        <h3 className={panelStyles.title}>Manual crop</h3>
+        <h3 className={panelStyles.title}>{t('Manual crop')}</h3>
         <p className={panelStyles.description}>
-          Drag on the page to draw a crop box, drag its handles to resize, or drag inside it to move
-          it. The box applies to {SCOPE_LABEL[settings.scope]}.
+          {t(
+            'Drag on the page to draw a crop box, drag its handles to resize, or drag inside it to move it. The box applies to'
+          )}
+          {SCOPE_LABEL[settings.scope]}.
         </p>
         <Button variant="secondary" icon={RotateCcw} onClick={handleReset}>
-          Reset crop on {SCOPE_LABEL[settings.scope]}
+          {t('Reset crop on')}
+          {SCOPE_LABEL[settings.scope]}
         </Button>
       </div>
 
       <div className={panelStyles.section}>
-        <h3 className={panelStyles.title}>Auto-trim</h3>
+        <h3 className={panelStyles.title}>{t('Auto-trim')}</h3>
         <p className={panelStyles.description}>
-          Automatically detect ink on the page(s) and shrink the crop box to fit the content,
-          removing white margins.
+          {t(
+            'Automatically detect ink on the page(s) and shrink the crop box to fit the content, removing white margins.'
+          )}
         </p>
         <Button variant="secondary" icon={Scissors} onClick={handleAutoTrim}>
-          Auto-trim {SCOPE_LABEL[settings.scope]}
+          {t('Auto-trim')}
+          {SCOPE_LABEL[settings.scope]}
         </Button>
       </div>
     </>

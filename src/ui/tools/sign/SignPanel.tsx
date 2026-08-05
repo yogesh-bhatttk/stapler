@@ -27,6 +27,7 @@ import { SignatureModal } from './SignatureModal';
 import { activeStamp, signatureSuggestions, formFields, type StampType } from './state';
 import { useJob } from '../../useJob';
 import styles from './SignPanel.module.css';
+import { useTranslation } from '../../../core/i18n';
 
 const STAMPS: { type: StampType; label: string; icon: typeof Type }[] = [
   { type: 'text', label: 'Text', icon: Type },
@@ -35,6 +36,7 @@ const STAMPS: { type: StampType; label: string; icon: typeof Type }[] = [
 ];
 
 export function SignPanel() {
+  const t = useTranslation();
   const [modalType, setModalType] = useState<'signature' | 'initials' | null>(null);
   const armed = activeStamp.value;
   const { run } = useJob();
@@ -84,19 +86,21 @@ export function SignPanel() {
     <>
       {formFields.value?.isXfa && (
         <p className={`${panelStyles.note} ${panelStyles.noteWarning}`}>
-          This is an XFA form. Interactive filling is not supported. Use the stamp tools below to
-          place text and signatures instead.
+          {t(
+            'This is an XFA form. Interactive filling is not supported. Use the stamp tools below to place text and signatures instead.'
+          )}
         </p>
       )}
       {!formFields.value?.isXfa && (formFields.value?.fields.length ?? 0) > 0 && (
         <p className={`${panelStyles.note} ${panelStyles.noteInfo}`}>
-          This document contains interactive form fields. You can click on them in the page to type
-          and fill them out.
+          {t(
+            'This document contains interactive form fields. You can click on them in the page to type and fill them out.'
+          )}
         </p>
       )}
 
       <div className={panelStyles.section}>
-        <h3 className={panelStyles.title}>Signatures</h3>
+        <h3 className={panelStyles.title}>{t('Signatures')}</h3>
         <div className={styles.list}>
           {signatures.value
             .filter(s => s.purpose !== 'initials')
@@ -140,12 +144,12 @@ export function SignPanel() {
             })}
         </div>
         <Button variant="secondary" icon={Plus} onClick={() => setModalType('signature')}>
-          Create a signature
+          {t('Create a signature')}
         </Button>
       </div>
 
       <div className={panelStyles.section}>
-        <h3 className={panelStyles.title}>Initials</h3>
+        <h3 className={panelStyles.title}>{t('Initials')}</h3>
         <div className={styles.list}>
           {signatures.value
             .filter(s => s.purpose === 'initials')
@@ -189,12 +193,12 @@ export function SignPanel() {
             })}
         </div>
         <Button variant="secondary" icon={Plus} onClick={() => setModalType('initials')}>
-          Create initials
+          {t('Create initials')}
         </Button>
       </div>
 
       <div className={panelStyles.section}>
-        <h3 className={panelStyles.title}>Other stamps</h3>
+        <h3 className={panelStyles.title}>{t('Other stamps')}</h3>
         <div className={styles.stampGrid}>
           {STAMPS.map(stamp => {
             const active = armed?.type === stamp.type;
@@ -221,11 +225,11 @@ export function SignPanel() {
       </p>
 
       <Button variant="tertiary" icon={ScanSearch} onClick={detect} disabled={!doc}>
-        Detect signature lines
+        {t('Detect signature lines')}
       </Button>
 
       <p className={`${panelStyles.note} ${panelStyles.noteInfo}`}>
-        These are stamped signature images. Stapler makes no claim about legal validity.
+        {t('These are stamped signature images. Stapler makes no claim about legal validity.')}
       </p>
 
       {modalType && (

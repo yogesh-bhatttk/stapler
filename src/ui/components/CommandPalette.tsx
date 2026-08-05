@@ -17,6 +17,7 @@ import { resolvedTheme, toggleTheme } from '../theme';
 import { fuzzyRank } from '../../core/fuzzy';
 import { toolIconComponent } from './ToolIcon';
 import styles from './CommandPalette.module.css';
+import { useTranslation } from '../../core/i18n';
 
 interface Command {
   id: string;
@@ -29,6 +30,7 @@ interface Command {
 }
 
 export function CommandPalette() {
+  const t = useTranslation();
   const [location, setLocation] = useLocation();
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
@@ -181,7 +183,7 @@ export function CommandPalette() {
           <input
             ref={inputRef}
             className={styles.input}
-            placeholder="Search tools and actions…"
+            placeholder={t('Search tools and actions…')}
             value={query}
             role="combobox"
             aria-expanded="true"
@@ -195,7 +197,12 @@ export function CommandPalette() {
         </div>
 
         <ul className={styles.list} id="palette-results" role="listbox">
-          {results.length === 0 && <li className={styles.empty}>Nothing matches “{query}”.</li>}
+          {results.length === 0 && (
+            <li className={styles.empty}>
+              {t('Nothing matches “')}
+              {query}”.
+            </li>
+          )}
           {results.map((command, index) => {
             const header = command.group !== lastGroup ? command.group : null;
             lastGroup = command.group;

@@ -16,6 +16,7 @@ import { panelStyles } from '../../shell/OptionsPanel';
 import { useJob } from '../../useJob';
 import { Checkbox } from '../../components/Field';
 import { scrubSettings, type ExtendedScrubSettings } from './state';
+import { useTranslation } from '../../../core/i18n';
 
 const FLAGS: { key: keyof MetadataFindings; label: string }[] = [
   { key: 'hasXmp', label: 'XMP metadata packet' },
@@ -39,6 +40,7 @@ const FIELDS: { key: keyof MetadataFindings; label: string }[] = [
 ];
 
 export function MetadataPanel() {
+  const t = useTranslation();
   const doc = activeDoc.value;
   const [findings, setFindings] = useState<MetadataFindings | null>(null);
   const [hasCustomInfo, setHasCustomInfo] = useState<boolean>(false);
@@ -77,18 +79,18 @@ export function MetadataPanel() {
   return (
     <>
       <Button variant="secondary" icon={ScanSearch} onClick={inspect}>
-        Inspect this document
+        {t('Inspect this document')}
       </Button>
 
       {findings && present.length === 0 && !hasCustomInfo && (
         <p className={`${panelStyles.note} ${panelStyles.noteInfo}`}>
-          Nothing identifying found: no author, no paths, no XMP, no embedded scripts.
+          {t('Nothing identifying found: no author, no paths, no XMP, no embedded scripts.')}
         </p>
       )}
 
       {(present.length > 0 || hasCustomInfo) && (
         <div className={panelStyles.section}>
-          <h3 className={panelStyles.title}>Found in this file</h3>
+          <h3 className={panelStyles.title}>{t('Found in this file')}</h3>
           <ul className={panelStyles.list}>
             {present.map(item => (
               <li className={panelStyles.listRow} key={item.key}>
@@ -108,7 +110,7 @@ export function MetadataPanel() {
             {hasCustomInfo && (
               <li className={panelStyles.listRow} key="customInfo">
                 <Checkbox
-                  label="Custom properties and paths"
+                  label={t('Custom properties and paths')}
                   checked={scrubSettings.value.customInfo ?? false}
                   onChange={checked =>
                     (scrubSettings.value = {
@@ -117,13 +119,14 @@ export function MetadataPanel() {
                     })
                   }
                 />
-                <span className={panelStyles.listRowText}>present</span>
+                <span className={panelStyles.listRowText}>{t('present')}</span>
               </li>
             )}
           </ul>
           <p className={panelStyles.description}>
-            Selected items will be stripped from the document. The file is rebuilt so the removed
-            objects are absent rather than merely unreferenced.
+            {t(
+              'Selected items will be stripped from the document. The file is rebuilt so the removed objects are absent rather than merely unreferenced.'
+            )}
           </p>
         </div>
       )}

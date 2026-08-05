@@ -2,6 +2,7 @@ import { useEffect } from 'preact/hooks';
 import { Field } from '../../components/Field';
 import { nupSettings, type NUpLayout } from './state';
 import styles from './NUpPanel.module.css';
+import { useTranslation } from '../../../core/i18n';
 
 const LAYOUTS: { value: NUpLayout; label: string }[] = [
   { value: '2-up', label: '2-up' },
@@ -10,6 +11,7 @@ const LAYOUTS: { value: NUpLayout; label: string }[] = [
 ];
 
 export function NUpPanel() {
+  const t = useTranslation();
   useEffect(() => {
     if (!nupSettings.value) {
       nupSettings.value = {
@@ -35,7 +37,7 @@ export function NUpPanel() {
 
   return (
     <div className={styles.panel}>
-      <Field label="Layout">
+      <Field label={t('Layout')}>
         {id => (
           <select
             id={id}
@@ -82,7 +84,7 @@ export function NUpPanel() {
         )}
       </Field>
 
-      <Field label="Draw Borders">
+      <Field label={t('Draw Borders')}>
         {id => (
           <label
             style={{
@@ -101,7 +103,7 @@ export function NUpPanel() {
               onChange={e => update({ drawBorders: e.currentTarget.checked })}
               style={{ accentColor: 'var(--primary)' }}
             />
-            Outline original pages
+            {t('Outline original pages')}
           </label>
         )}
       </Field>

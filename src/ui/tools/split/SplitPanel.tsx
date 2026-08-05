@@ -6,8 +6,10 @@ import { splitBoundaries } from '../../../core/operations';
 import { Field, NumberInput, RadioGroup, TextInput } from '../../components/Field';
 import { panelStyles } from '../../shell/OptionsPanel';
 import { splitSettings, type SplitMode } from '../state';
+import { useTranslation } from '../../../core/i18n';
 
 export function SplitPanel() {
+  const t = useTranslation();
   const doc = activeDoc.value;
   const settings = splitSettings.value;
   if (!doc) return null;
@@ -27,7 +29,7 @@ export function SplitPanel() {
   return (
     <>
       <RadioGroup<SplitMode>
-        legend="Mode"
+        legend={t('Mode')}
         name="splitMode"
         value={settings.mode}
         onChange={mode => update({ mode })}
@@ -40,7 +42,7 @@ export function SplitPanel() {
       />
 
       {settings.mode === 'every_n' && (
-        <Field label="Pages per file">
+        <Field label={t('Pages per file')}>
           {id => (
             <NumberInput
               id={id}
@@ -59,13 +61,13 @@ export function SplitPanel() {
 
       {settings.mode === 'custom' && (
         <Field
-          label="Split after page"
+          label={t('Split after page')}
           hint={`Comma-separated page numbers between 1 and ${doc.pages.length - 1}.`}
         >
           {id => (
             <TextInput
               id={id}
-              placeholder="5, 10, 15"
+              placeholder={t('5, 10, 15')}
               value={settings.customBoundaries}
               onInput={event =>
                 update({ customBoundaries: (event.target as HTMLInputElement).value })

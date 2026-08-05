@@ -8,6 +8,7 @@
 import { Keyboard } from 'lucide-preact';
 import { Modal } from './Modal';
 import styles from './InfoModals.module.css';
+import { useTranslation } from '../../core/i18n';
 
 const IS_APPLE = typeof navigator !== 'undefined' && /mac|iphone|ipad/i.test(navigator.userAgent);
 const MOD = IS_APPLE ? '⌘' : 'Ctrl';
@@ -54,9 +55,10 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
 ];
 
 export function ShortcutModal({ onClose }: { onClose: () => void }) {
+  const t = useTranslation();
   return (
     <Modal
-      title="Keyboard shortcuts"
+      title={t('Keyboard shortcuts')}
       icon={<Keyboard size={20} aria-hidden="true" />}
       onClose={onClose}
       size="lg"

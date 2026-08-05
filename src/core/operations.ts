@@ -98,6 +98,7 @@ async function resolveStamps(pages: PageRef[], annotations: Annotation[]): Promi
 export interface ComposeRequest {
   pages: PageRef[];
   annotations: Annotation[];
+  layerAnnotations?: import('./workers/process.worker').AnnotationSource[];
   cropBoxes?: Record<string, { x: number; y: number; width: number; height: number }>;
   watermark?: WatermarkSettings;
   headerFooter?: import('../ui/tools/watermark/state').HeaderFooterSettings;
@@ -130,6 +131,7 @@ export async function composeDocument(
         : undefined,
       request.normalize,
       request.nup,
+      request.layerAnnotations,
       job
     )
   );
@@ -162,6 +164,7 @@ export async function splitDocument(request: SplitRequest, options: JobOptions =
       request.normalize,
       request.nup,
       request.baseName,
+      request.layerAnnotations,
       job
     )
   );

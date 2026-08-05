@@ -18,6 +18,7 @@ import { Button } from '../../components/Button';
 import { Field, NumberStepper } from '../../components/Field';
 import { panelStyles } from '../../shell/OptionsPanel';
 import { useJob } from '../../useJob';
+import { useTranslation } from '../../../core/i18n';
 
 /** Right after the last selected page, or the end of the document if none. */
 function defaultInsertIndex(doc: { pages: { key: string }[] }, selected: Set<string>): number {
@@ -29,6 +30,7 @@ function defaultInsertIndex(doc: { pages: { key: string }[] }, selected: Set<str
 }
 
 export function InsertPanel() {
+  const t = useTranslation();
   const doc = activeDoc.value;
   const { run } = useJob();
   const [busy, setBusy] = useState(false);
@@ -87,7 +89,7 @@ export function InsertPanel() {
   return (
     <>
       <Field
-        label="Insert at position"
+        label={t('Insert at position')}
         hint={clampedIndex === 0 ? 'At the start' : `After page ${clampedIndex}`}
       >
         {id => (
@@ -103,11 +105,11 @@ export function InsertPanel() {
       </Field>
 
       <Button variant="secondary" icon={FilePlus} onClick={addFiles} disabled={busy}>
-        Choose PDFs or images to insert
+        {t('Choose PDFs or images to insert')}
       </Button>
 
       {pageCount === 0 && (
-        <p className={panelStyles.description}>This document has no pages yet.</p>
+        <p className={panelStyles.description}>{t('This document has no pages yet.')}</p>
       )}
     </>
   );

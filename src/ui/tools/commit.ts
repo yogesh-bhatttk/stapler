@@ -93,6 +93,19 @@ type CommitHandler = (context: CommitContext) => Promise<void>;
 import { cropBoxes } from './crop/state';
 import { watermarkSettings, headerFooterSettings } from './watermark/state';
 import { nupSettings } from './nup/state';
+import { pageAnnotations } from './annotate/state';
+
+import { type AnnotationSource } from '../../core/workers/process.worker';
+
+function getLayerAnnotations(): AnnotationSource[] {
+  const result: AnnotationSource[] = [];
+  for (const [pageKey, anns] of Object.entries(pageAnnotations.value)) {
+    for (const ann of anns) {
+      result.push({ ...ann, pageKey });
+    }
+  }
+  return result;
+}
 
 // Normalize is deliberately not read here: it is its own tool, applied only via
 // `currentDocumentBytes(job, true)` in its own handler below. Reading the global
@@ -107,7 +120,8 @@ const exportComposed: CommitHandler = async ({ doc, job }) => {
       cropBoxes: cropBoxes.value,
       watermark: watermarkSettings.value,
       headerFooter: headerFooterSettings.value,
-      nup: nupSettings.value
+      nup: nupSettings.value,
+      layerAnnotations: getLayerAnnotations()
     },
     job
   );
@@ -122,6 +136,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   nup: exportComposed,
   crop: exportComposed,
   watermark: exportComposed,
+  annotate: exportComposed,
 
   split: async ({ doc, job }) => {
     const settings = splitSettings.value;
@@ -134,7 +149,10 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         });
         return;
       }
-      const bytes = await composeDocument({ pages: selected, annotations: doc.annotations }, job);
+      const bytes = await composeDocument(
+        { pages: selected, annotations: doc.annotations, layerAnnotations: getLayerAnnotations() },
+        job
+      );
       await save(doc, bytes, `${stem(doc.name)}-extract.pdf`);
       return;
     }
@@ -154,6 +172,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       {
         pages: doc.pages,
         annotations: doc.annotations,
+        layerAnnotations: getLayerAnnotations(),
         boundaries,
         baseName: stem(doc.name)
       },
@@ -240,7 +259,10 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   cleanup: async ({ doc, job }) => {
     // The cleanup editor writes its result straight into the document, so committing
     // is an ordinary export of whatever the workspace now holds.
-    const bytes = await composeDocument({ pages: doc.pages, annotations: doc.annotations }, job);
+    const bytes = await composeDocument(
+      { pages: doc.pages, annotations: doc.annotations, layerAnnotations: getLayerAnnotations() },
+      job
+    );
     await save(doc, bytes, `${stem(doc.name)}-cleaned.pdf`);
   },
 
@@ -271,7 +293,10 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // composed document, and `composePages` rebuilds /AcroForm on it so the
     // fields are there to write to. `fillFormFields` now throws if a name is
     // missing, so a regression here fails loudly instead of saving a blank form.
-    let bytes = await composeDocument({ pages: doc.pages, annotations: doc.annotations }, job);
+    let bytes = await composeDocument(
+      { pages: doc.pages, annotations: doc.annotations, layerAnnotations: getLayerAnnotations() },
+      job
+    );
     if (hasValues) {
       bytes = await fillFormFields(bytes, formValues.value, true);
     }
@@ -334,7 +359,9 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       api.scrubMetadata(original, scrubSettings.value)
     );
     await save(doc, scrubbed, `${stem(doc.name)}-scrubbed.pdf`);
-  }
+  },
+  compare: async () => {},
+  batch: async () => {}
 };
 
 export async function commitTool(toolId: ToolId, job: JobOptions): Promise<void> {

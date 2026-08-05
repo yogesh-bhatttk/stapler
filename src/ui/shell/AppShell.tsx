@@ -97,10 +97,10 @@ export function AppShell({ children }: { children: ComponentChildren }) {
       <TopBar />
       <div className={styles.main}>
         <ToolRail />
-        <div className={styles.center}>
+        <main className={styles.center}>
           <div className={styles.canvasWrapper}>{children}</div>
           <ActionBar />
-        </div>
+        </main>
         <OptionsPanel />
       </div>
 

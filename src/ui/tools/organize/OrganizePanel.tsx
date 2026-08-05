@@ -14,8 +14,10 @@ import {
 } from '../../../core/store';
 import { Button } from '../../components/Button';
 import { panelStyles } from '../../shell/OptionsPanel';
+import { useTranslation } from '../../../core/i18n';
 
 export function OrganizePanel() {
+  const t = useTranslation();
   const doc = activeDoc.value;
   const selection = selectedPageKeys.value;
   if (!doc) return null;
@@ -27,7 +29,10 @@ export function OrganizePanel() {
 
   return (
     <>
-      <p className={panelStyles.description}>Acting on {scope} page(s).</p>
+      <p className={panelStyles.description}>
+        {t('Acting on')}
+        {scope} {t('page(s).')}
+      </p>
 
       <div className={panelStyles.section}>
         <Button
@@ -35,17 +40,17 @@ export function OrganizePanel() {
           icon={RotateCw}
           onClick={() => rotatePages(doc.id, targets, 90)}
         >
-          Rotate right
+          {t('Rotate right')}
         </Button>
         <Button
           variant="secondary"
           icon={RotateCcw}
           onClick={() => rotatePages(doc.id, targets, -90)}
         >
-          Rotate left
+          {t('Rotate left')}
         </Button>
         <Button variant="secondary" icon={Copy} onClick={() => duplicatePages(doc.id, targets)}>
-          Duplicate
+          {t('Duplicate')}
         </Button>
         <Button
           variant="danger"
@@ -53,7 +58,7 @@ export function OrganizePanel() {
           disabled={targets.length >= doc.pages.length && selection.size === 0}
           onClick={() => deletePages(doc.id, targets)}
         >
-          Delete
+          {t('Delete')}
         </Button>
       </div>
 
@@ -61,7 +66,7 @@ export function OrganizePanel() {
 
       <div className={panelStyles.section}>
         <Button variant="tertiary" size="compact" onClick={() => selectAllPages(doc.id)}>
-          Select all
+          {t('Select all')}
         </Button>
         <Button
           variant="tertiary"
@@ -69,7 +74,7 @@ export function OrganizePanel() {
           disabled={selection.size === 0}
           onClick={clearPageSelection}
         >
-          Clear selection
+          {t('Clear selection')}
         </Button>
       </div>
     </>
