@@ -19,11 +19,21 @@ import styles from './SignatureModal.module.css';
 
 type Tab = 'draw' | 'type' | 'image';
 
-export function SignatureModal({ onClose }: { onClose: () => void }) {
+export function SignatureModal({
+  onClose,
+  isInitials
+}: {
+  onClose: () => void;
+  isInitials?: boolean;
+}) {
   const [tab, setTab] = useState<Tab>('draw');
 
   return (
-    <Modal title="Create a signature" onClose={onClose} size="md">
+    <Modal
+      title={isInitials ? 'Create initials' : 'Create a signature'}
+      onClose={onClose}
+      size="md"
+    >
       <div className={styles.tabs} role="tablist" aria-label="Signature source">
         {(['draw', 'type', 'image'] as Tab[]).map(name => (
           <button
@@ -39,9 +49,9 @@ export function SignatureModal({ onClose }: { onClose: () => void }) {
         ))}
       </div>
 
-      {tab === 'draw' && <DrawTab onDone={onClose} />}
-      {tab === 'type' && <TypeTab onDone={onClose} />}
-      {tab === 'image' && <ImageTab onDone={onClose} />}
+      {tab === 'draw' && <DrawTab onDone={onClose} isInitials={isInitials} />}
+      {tab === 'type' && <TypeTab onDone={onClose} isInitials={isInitials} />}
+      {tab === 'image' && <ImageTab onDone={onClose} isInitials={isInitials} />}
     </Modal>
   );
 }
@@ -50,7 +60,8 @@ export function SignatureModal({ onClose }: { onClose: () => void }) {
 async function persist(
   canvas: HTMLCanvasElement | OffscreenCanvas,
   kind: 'draw' | 'type' | 'image',
-  onDone: () => void
+  onDone: () => void,
+  isInitials?: boolean
 ) {
   const bitmap = await createImageBitmap(canvas as unknown as ImageBitmapSource);
   try {
@@ -63,7 +74,8 @@ async function persist(
       kind,
       png: trimmed.png,
       width: trimmed.width,
-      height: trimmed.height
+      height: trimmed.height,
+      purpose: isInitials ? 'initials' : 'signature'
     });
     if (saved) {
       notify('success', 'Signature saved.', { detail: 'It stays on this device.' });
@@ -74,7 +86,7 @@ async function persist(
   }
 }
 
-function DrawTab({ onDone }: { onDone: () => void }) {
+function DrawTab({ onDone, isInitials }: { onDone: () => void; isInitials?: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [hasInk, setHasInk] = useState(false);
   const drawing = useRef(false);
@@ -158,7 +170,7 @@ function DrawTab({ onDone }: { onDone: () => void }) {
           variant="primary"
           disabled={!hasInk}
           onClick={() => {
-            if (canvasRef.current) void persist(canvasRef.current, 'draw', onDone);
+            if (canvasRef.current) void persist(canvasRef.current, 'draw', onDone, isInitials);
           }}
         >
           Save signature
@@ -168,7 +180,7 @@ function DrawTab({ onDone }: { onDone: () => void }) {
   );
 }
 
-function TypeTab({ onDone }: { onDone: () => void }) {
+function TypeTab({ onDone, isInitials }: { onDone: () => void; isInitials?: boolean }) {
   const [text, setText] = useState('');
 
   const save = async () => {
@@ -180,7 +192,7 @@ function TypeTab({ onDone }: { onDone: () => void }) {
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'center';
     ctx.fillText(text.trim(), canvas.width / 2, canvas.height / 2);
-    await persist(canvas, 'type', onDone);
+    await persist(canvas, 'type', onDone, isInitials);
   };
 
   return (
@@ -202,7 +214,7 @@ function TypeTab({ onDone }: { onDone: () => void }) {
   );
 }
 
-function ImageTab({ onDone }: { onDone: () => void }) {
+function ImageTab({ onDone, isInitials }: { onDone: () => void; isInitials?: boolean }) {
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [dropWhite, setDropWhite] = useState(true);
@@ -223,7 +235,7 @@ function ImageTab({ onDone }: { onDone: () => void }) {
         // an opaque white rectangle over the page.
         const source = dropWhite ? await removeWhiteBackground(bitmap) : bitmap;
         if (!source) return;
-        await persist(source as OffscreenCanvas, 'image', onDone);
+        await persist(source as OffscreenCanvas, 'image', onDone, isInitials);
       } finally {
         bitmap.close();
       }

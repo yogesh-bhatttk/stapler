@@ -32,6 +32,7 @@ interface StaplerSchema extends DBSchema {
       png: Uint8Array;
       width: number;
       height: number;
+      purpose?: 'signature' | 'initials';
       createdAt: number;
     };
     indexes: { 'by-createdAt': number };

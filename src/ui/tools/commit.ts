@@ -15,6 +15,7 @@ import {
   composeDocument,
   currentDocumentBytes,
   extractDocumentText,
+  fillFormFields,
   pagesToImageArchive,
   planCompression,
   splitBoundaries,
@@ -35,6 +36,7 @@ import type { ToolId } from '../../core/tools';
 import { compressSettings } from './compress/state';
 import { pdfToImageSettings, removeBlanksThreshold, splitSettings } from './state';
 import { extractSettings } from './extract/state';
+import { formValues } from './sign/state';
 import { pendingRedactions, redactionReport } from './redact/state';
 import { scrubSettings } from './metadata/state';
 import { renderWorker } from '../../core/workers';
@@ -87,8 +89,23 @@ export interface CommitContext {
 
 type CommitHandler = (context: CommitContext) => Promise<void>;
 
+import { cropBoxes } from './crop/state';
+import { watermarkSettings } from './watermark/state';
+import { nupSettings } from './nup/state';
+import { normalizeSettings } from './normalize/state';
+
 const exportComposed: CommitHandler = async ({ doc, job }) => {
-  const bytes = await composeDocument({ pages: doc.pages, annotations: doc.annotations }, job);
+  const bytes = await composeDocument(
+    {
+      pages: doc.pages,
+      annotations: doc.annotations,
+      cropBoxes: cropBoxes.value,
+      watermark: watermarkSettings.value,
+      nup: nupSettings.value,
+      normalize: normalizeSettings.value
+    },
+    job
+  );
   await save(doc, bytes, `${stem(doc.name)}-stapler.pdf`);
 };
 
@@ -97,6 +114,9 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   organize: exportComposed,
   insert: exportComposed,
   extract: exportComposed,
+  nup: exportComposed,
+  crop: exportComposed,
+  watermark: exportComposed,
 
   split: async ({ doc, job }) => {
     const settings = splitSettings.value;
@@ -220,14 +240,23 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   },
 
   sign: async ({ doc, job }) => {
-    if (doc.annotations.length === 0) {
+    const hasValues = Object.keys(formValues.value).length > 0;
+    if (doc.annotations.length === 0 && !hasValues) {
       notify('warning', 'Nothing has been placed yet.', {
-        detail: 'Pick a signature or stamp from the panel, then click the page.'
+        detail: 'Pick a signature or stamp from the panel, or fill out a form field first.'
       });
       return;
     }
-    const bytes = await composeDocument({ pages: doc.pages, annotations: doc.annotations }, job);
+    let bytes = await composeDocument({ pages: doc.pages, annotations: doc.annotations }, job);
+    if (hasValues) {
+      bytes = await fillFormFields(bytes, formValues.value, true);
+    }
     await save(doc, bytes, `${stem(doc.name)}-signed.pdf`);
+  },
+
+  normalize: async ({ doc, job }) => {
+    const bytes = await currentDocumentBytes(job);
+    await save(doc, bytes, `${stem(doc.name)}-normalized.pdf`);
   },
 
   redact: async ({ doc, job }) => {

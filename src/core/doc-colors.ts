@@ -26,5 +26,12 @@ export const DOC_SIGNATURE_STROKE = '#08090a';
 /** Ink for stamped text and check marks, as 0..1 components. Matches `--ink`. */
 export const DOC_INK_RGB: readonly [number, number, number] = [8 / 255, 9 / 255, 10 / 255];
 
+/** N-up cell border lines. Matches `--hairline-strong` light theme. */
+export const DOC_HAIRLINE_RGB: readonly [number, number, number] = [
+  211 / 255,
+  213 / 255,
+  218 / 255
+];
+
 /** Redaction fill. Matches `--doc-redact`; opaque and identical in both themes. */
 export const DOC_REDACT_RGB: readonly [number, number, number] = [10 / 255, 10 / 255, 11 / 255];

@@ -60,6 +60,7 @@ export async function saveSignature(
     png: input.png,
     width: input.width,
     height: input.height,
+    purpose: input.purpose ?? 'signature',
     createdAt: Date.now()
   };
   if (!(await putSignature(signature))) return null;

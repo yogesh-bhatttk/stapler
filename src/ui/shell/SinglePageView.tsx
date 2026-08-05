@@ -102,6 +102,7 @@ export function SinglePageView({
       <div className={styles.stage}>
         <div
           className={styles.page}
+          data-index={pageIndex}
           style={{
             width: `${size.width || pageSize.width}px`,
             height: `${size.height || pageSize.height}px`

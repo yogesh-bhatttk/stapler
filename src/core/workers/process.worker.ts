@@ -1,3 +1,11 @@
+export interface WatermarkData {
+  text: string;
+  position: string;
+  opacity: number;
+  rotation: number;
+  fontSize: number;
+  color: string;
+}
 /**
  * The pdf-lib worker: everything that *writes* a PDF.
  *
@@ -30,7 +38,7 @@ import {
 import { zipSync } from 'fflate';
 import { checkpoint, type JobHandle } from './protocol';
 import { corrupt, encrypted, internal, unsupported } from '../errors';
-import { DOC_INK_RGB, DOC_REDACT_RGB } from '../doc-colors';
+import { DOC_HAIRLINE_RGB, DOC_INK_RGB, DOC_REDACT_RGB } from '../doc-colors';
 import { normalizeRotation } from '../rotation';
 import {
   tokenizeContentStream,
@@ -47,6 +55,7 @@ export interface PageSource {
   sourceDocId: string;
   sourceIndex: number;
   rotation: number;
+  cropBox?: { x: number; y: number; width: number; height: number };
 }
 
 export interface StampSource {
@@ -61,6 +70,8 @@ export interface StampSource {
   text?: string;
   /** Resolved PNG bytes, for signature stamps. The worker never reads the DB. */
   imagePng?: Uint8Array;
+  /** Clockwise rotation in degrees. */
+  rotation?: number;
 }
 
 export interface DocumentFacts {
@@ -194,6 +205,9 @@ export interface ProcessJob {
     pages: PageSource[],
     sources: Record<string, Uint8Array>,
     stamps: StampSource[],
+    watermark?: WatermarkData,
+    normalize?: import('../../ui/tools/normalize/state').NormalizeSettings | null,
+    nup?: import('../../ui/tools/nup/state').NUpSettings | null,
     job?: JobHandle
   ): Promise<Uint8Array>;
   composeSplit(
@@ -201,9 +215,12 @@ export interface ProcessJob {
     sources: Record<string, Uint8Array>,
     boundaries: number[],
     stamps: StampSource[],
-    baseName: string,
+    watermark?: WatermarkData,
+    normalize?: import('../../ui/tools/normalize/state').NormalizeSettings | null,
+    nup?: import('../../ui/tools/nup/state').NUpSettings | null,
+    baseName?: string,
     job?: JobHandle
-  ): Promise<SplitResult>;
+  ): Promise<{ isZip: boolean; bytes: Uint8Array }>;
   /**
    * Rebuilds `bytes` with the given pages replaced by rasters and the given image
    * XObjects re-encoded. Returns the original bytes untouched if the result is
@@ -344,6 +361,21 @@ async function drawStamps(
     const y = height - stamp.y * height - stamp.height * height;
     const w = stamp.width * width;
     const h = stamp.height * height;
+    const rot = stamp.rotation ?? 0;
+
+    // CSS clockwise rotation mapped to PDF counter-clockwise rotation
+    const rad = (-rot * Math.PI) / 180;
+
+    // Center of the unrotated stamp box
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+
+    // Calculate the new bottom-left origin in page space such that
+    // the center of the rotated box remains at (cx, cy)
+    const dx = (w / 2) * Math.cos(rad) - (h / 2) * Math.sin(rad);
+    const dy = (w / 2) * Math.sin(rad) + (h / 2) * Math.cos(rad);
+    const drawX = cx - dx;
+    const drawY = cy - dy;
 
     if (stamp.type === 'signature') {
       if (!stamp.imagePng) continue;
@@ -354,25 +386,32 @@ async function drawStamps(
         image = await outDoc.embedPng(stamp.imagePng);
         imageCache.set(key, image);
       }
-      page.drawImage(image, { x, y, width: w, height: h });
+      page.drawImage(image, { x: drawX, y: drawY, width: w, height: h, rotate: degrees(-rot) });
       continue;
     }
 
     const raw = stamp.type === 'check' ? '✓' : (stamp.text ?? '');
     if (!raw) continue;
+
+    // Transform a local point (origin at unrotated bottom-left) to rotated page coordinates
+    const transform = (lx: number, ly: number) => ({
+      x: drawX + lx * Math.cos(rad) - ly * Math.sin(rad),
+      y: drawY + lx * Math.sin(rad) + ly * Math.cos(rad)
+    });
+
     // The check glyph is not in WinAnsi; draw it as a vector tick instead of a
     // question mark.
     if (stamp.type === 'check') {
       const t = Math.max(1, Math.min(w, h) * 0.12);
       page.drawLine({
-        start: { x: x + w * 0.15, y: y + h * 0.5 },
-        end: { x: x + w * 0.42, y: y + h * 0.2 },
+        start: transform(w * 0.15, h * 0.5),
+        end: transform(w * 0.42, h * 0.2),
         thickness: t,
         color: DOC_INK
       });
       page.drawLine({
-        start: { x: x + w * 0.42, y: y + h * 0.2 },
-        end: { x: x + w * 0.85, y: y + h * 0.8 },
+        start: transform(w * 0.42, h * 0.2),
+        end: transform(w * 0.85, h * 0.8),
         thickness: t,
         color: DOC_INK
       });
@@ -382,13 +421,19 @@ async function drawStamps(
     const { text } = toWinAnsi(raw);
     const font = await stampFont(outDoc, fontCache);
     const size = Math.max(4, h * 0.7);
+
+    // Baseline start in local coordinates
+    const tx = 0;
+    const ty = (h - size) / 2 + size * 0.18;
+    const tp = transform(tx, ty);
+
     page.drawText(text, {
-      x,
-      // Sit the baseline inside the box rather than on its lower edge.
-      y: y + (h - size) / 2 + size * 0.18,
+      x: tp.x,
+      y: tp.y,
       size,
       font,
-      color: DOC_INK
+      color: DOC_INK,
+      rotate: degrees(-rot)
     });
   }
 }
@@ -403,10 +448,110 @@ function fingerprintBytes(bytes: Uint8Array): string {
   return `${bytes.length}:${(h1 >>> 0).toString(36)}`;
 }
 
+async function applyNUp(
+  outDoc: PDFDocument,
+  settings: import('../../ui/tools/nup/state').NUpSettings,
+  job: JobHandle | undefined
+): Promise<PDFDocument> {
+  const originalPages = outDoc.getPages();
+  if (originalPages.length === 0) return outDoc;
+
+  const firstPage = originalPages[0];
+  const { width: pw, height: ph } = firstPage.getSize();
+  const W = Math.max(pw, ph);
+  const H = Math.min(pw, ph);
+
+  const { layout, margin, gutter, drawBorders } = settings;
+  const isBooklet = layout === 'booklet';
+  const is2up = layout === '2-up';
+
+  const cols = is2up || isBooklet ? 2 : 2;
+  const rows = is2up || isBooklet ? 1 : 2;
+  const sheetW = is2up || isBooklet ? W : H;
+  const sheetH = is2up || isBooklet ? H : W;
+
+  const cellW = (sheetW - margin * 2 - gutter * (cols - 1)) / cols;
+  const cellH = (sheetH - margin * 2 - gutter * (rows - 1)) / rows;
+
+  const ordering: number[] = [];
+
+  if (isBooklet) {
+    const totalPages = Math.ceil(originalPages.length / 4) * 4;
+    for (let i = 0; i < totalPages / 2; i++) {
+      if (i % 2 === 0) {
+        ordering.push(totalPages - i - 1, i);
+      } else {
+        ordering.push(i, totalPages - i - 1);
+      }
+    }
+  } else {
+    for (let i = 0; i < Math.ceil(originalPages.length / (cols * rows)) * (cols * rows); i++) {
+      ordering.push(i);
+    }
+  }
+
+  const finalDoc = await PDFDocument.create();
+
+  for (let i = 0; i < ordering.length; i += cols * rows) {
+    if (job)
+      await checkpoint(
+        job,
+        i / ordering.length,
+        `Imposing sheet ${Math.floor(i / (cols * rows)) + 1}`
+      );
+    const sheet = finalDoc.addPage([sheetW, sheetH]);
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const idx = ordering[i + r * cols + c];
+        if (idx === undefined || idx >= originalPages.length) continue;
+
+        const original = originalPages[idx];
+        const embedded = await finalDoc.embedPage(original);
+
+        const scaleX = cellW / embedded.width;
+        const scaleY = cellH / embedded.height;
+        const scale = Math.min(scaleX, scaleY);
+
+        const actualW = embedded.width * scale;
+        const actualH = embedded.height * scale;
+
+        // Center within cell
+        const x = margin + c * (cellW + gutter) + (cellW - actualW) / 2;
+        // In PDF coordinates, Y=0 is bottom. So row 0 is top.
+        const y = sheetH - margin - r * (cellH + gutter) - cellH + (cellH - actualH) / 2;
+
+        sheet.drawPage(embedded, {
+          x,
+          y,
+          width: actualW,
+          height: actualH
+        });
+
+        if (drawBorders) {
+          sheet.drawRectangle({
+            x,
+            y,
+            width: actualW,
+            height: actualH,
+            borderWidth: 1,
+            borderColor: rgb(...DOC_HAIRLINE_RGB)
+          });
+        }
+      }
+    }
+  }
+
+  return finalDoc;
+}
+
 async function composePages(
   pages: PageSource[],
   sources: Record<string, Uint8Array>,
   stamps: StampSource[],
+  watermark: WatermarkData | undefined,
+  normalize: import('../../ui/tools/normalize/state').NormalizeSettings | undefined | null,
+  nup: import('../../ui/tools/nup/state').NUpSettings | undefined | null,
   job: JobHandle | undefined,
   label: string
 ): Promise<PDFDocument> {
@@ -414,6 +559,11 @@ async function composePages(
   const getSource = sourceCache(sources);
   const fontCache: { font?: Awaited<ReturnType<PDFDocument['embedFont']>> } = {};
   const imageCache = new Map<string, Awaited<ReturnType<PDFDocument['embedPng']>>>();
+
+  let watermarkFont: import('pdf-lib').PDFFont | undefined;
+  if (watermark?.text) {
+    watermarkFont = await outDoc.embedStandardFont(StandardFonts.HelveticaBold);
+  }
 
   const stampsByPage = new Map<string, StampSource[]>();
   for (const stamp of stamps) {
@@ -440,8 +590,115 @@ async function composePages(
       // produce -90 by taking a plain modulo of a negative sum.
       copied.setRotation(degrees(normalizeRotation(copied.getRotation().angle + ref.rotation)));
     }
+
+    if (normalize) {
+      const { width, height } = copied.getSize();
+      let targetW = 595.28; // A4 default
+      let targetH = 841.89;
+      if (normalize.targetSize === 'Letter') {
+        targetW = 612;
+        targetH = 792;
+      } else if (normalize.targetSize === 'Legal') {
+        targetW = 612;
+        targetH = 1008;
+      }
+
+      // If page is landscape, target should be landscape
+      if (width > height) {
+        const temp = targetW;
+        targetW = targetH;
+        targetH = temp;
+      }
+
+      let factor = 1;
+      const scaleX = targetW / width;
+      const scaleY = targetH / height;
+
+      if (normalize.scaleMode === 'fit') {
+        factor = Math.min(scaleX, scaleY);
+      } else if (normalize.scaleMode === 'fill') {
+        factor = Math.max(scaleX, scaleY);
+      }
+
+      if (factor !== 1) {
+        copied.scale(factor, factor);
+      }
+
+      const scaledW = width * factor;
+      const scaledH = height * factor;
+
+      // translateContent shifts the origin so the content is centered
+      const dx = (targetW - scaledW) / 2;
+      const dy = (targetH - scaledH) / 2;
+
+      if (dx !== 0 || dy !== 0) {
+        copied.translateContent(dx, dy);
+      }
+
+      // Override the boxes to match the target size exactly
+      copied.setSize(targetW, targetH);
+      copied.setCropBox(0, 0, targetW, targetH);
+    }
+
     outDoc.addPage(copied);
+
+    if (ref.cropBox) {
+      // PDF-lib coordinates are bottom-left. The incoming cropBox is top-left normalized [0,1].
+      const { width, height } = copied.getSize();
+      const cropX = ref.cropBox.x * width;
+      const cropY = (1 - (ref.cropBox.y + ref.cropBox.height)) * height;
+      const cropW = ref.cropBox.width * width;
+      const cropH = ref.cropBox.height * height;
+      copied.setCropBox(cropX, cropY, cropW, cropH);
+    }
+
+    if (watermark?.text && watermarkFont) {
+      const { width, height } = copied.getSize();
+      const displayText = watermark.text
+        .replace(/{n}/g, String(i + 1))
+        .replace(/{total}/g, String(pages.length));
+
+      const textWidth = watermarkFont.widthOfTextAtSize(displayText, watermark.fontSize);
+      const textHeight = watermarkFont.heightAtSize(watermark.fontSize);
+
+      const [vertical, horizontal] = watermark.position.split('-');
+
+      const padding = 36; // 0.5 inch
+      let x = padding;
+      if (horizontal === 'center' || (vertical === 'center' && !horizontal)) {
+        x = (width - textWidth) / 2;
+      } else if (horizontal === 'right') {
+        x = width - textWidth - padding;
+      }
+
+      let y = height - textHeight - padding;
+      if (vertical === 'center') {
+        y = (height - textHeight) / 2;
+      } else if (vertical === 'bottom') {
+        y = padding;
+      }
+
+      const hex = watermark.color.replace('#', '');
+      const r = parseInt(hex.substring(0, 2), 16) / 255;
+      const g = parseInt(hex.substring(2, 4), 16) / 255;
+      const b = parseInt(hex.substring(4, 6), 16) / 255;
+
+      copied.drawText(displayText, {
+        x,
+        y,
+        size: watermark.fontSize,
+        font: watermarkFont,
+        color: rgb(r, g, b),
+        opacity: watermark.opacity,
+        rotate: degrees(watermark.rotation)
+      });
+    }
+
     await drawStamps(outDoc, copied, stampsByPage.get(ref.key) ?? [], fontCache, imageCache);
+  }
+
+  if (nup) {
+    return applyNUp(outDoc, nup, job);
   }
 
   return outDoc;
@@ -656,14 +913,23 @@ const api: ProcessJob = {
     return transfer(await doc.save({ useObjectStreams: true }));
   },
 
-  async compose(pages, sources, stamps, job) {
+  async compose(pages, sources, stamps, watermark, normalize, nup, job) {
     if (pages.length === 0) throw internal('Nothing to export: the page list is empty');
-    const outDoc = await composePages(pages, sources, stamps, job, 'Composing page');
+    const outDoc = await composePages(
+      pages,
+      sources,
+      stamps,
+      watermark,
+      normalize,
+      nup,
+      job,
+      'Composing page'
+    );
     await checkpoint(job, 0.95, 'Writing file');
     return transfer(await outDoc.save({ useObjectStreams: true }));
   },
 
-  async composeSplit(pages, sources, boundaries, stamps, baseName, job) {
+  async composeSplit(pages, sources, boundaries, stamps, watermark, normalize, nup, baseName, job) {
     if (pages.length === 0) throw internal('Nothing to export: the page list is empty');
 
     const cuts = [...new Set(boundaries)]
@@ -679,7 +945,16 @@ const api: ProcessJob = {
     slices.push(pages.slice(from));
 
     if (slices.length === 1) {
-      const outDoc = await composePages(slices[0], sources, stamps, job, 'Composing page');
+      const outDoc = await composePages(
+        slices[0],
+        sources,
+        stamps,
+        watermark,
+        normalize,
+        nup,
+        job,
+        'Composing page'
+      );
       return {
         bytes: transfer(await outDoc.save({ useObjectStreams: true })),
         isZip: false,
@@ -691,7 +966,16 @@ const api: ProcessJob = {
     const pad = Math.max(2, String(slices.length).length);
     for (let i = 0; i < slices.length; i++) {
       await checkpoint(job, i / slices.length, `Writing file ${i + 1} of ${slices.length}`);
-      const outDoc = await composePages(slices[i], sources, stamps, undefined, 'Composing page');
+      const outDoc = await composePages(
+        slices[i],
+        sources,
+        stamps,
+        watermark,
+        normalize,
+        nup,
+        job,
+        'Composing page'
+      );
       files[`${baseName}-${String(i + 1).padStart(pad, '0')}.pdf`] = await outDoc.save({
         useObjectStreams: true
       });

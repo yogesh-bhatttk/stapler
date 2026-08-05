@@ -1,0 +1,18 @@
+.overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  pointer-events: none; /* Let clicks pass through */
+  overflow: hidden;
+}
+
+.textContainer {
+  font-family: 'Helvetica', 'Arial', sans-serif;
+  font-weight: bold;
+  transform-origin: center center;
+  mix-blend-mode: multiply; /* Looks better on PDF */
+}

@@ -435,9 +435,12 @@ const api: RenderJob = {
 
         const target = targetSize(placement, decoded, targetDpi);
         const jpeg = await encodeJpeg(decoded, target, quality);
-        const maskBytes = decoded.mask
-          ? await encodeMask(decoded.mask, decoded.width, decoded.height, target)
-          : undefined;
+        const dimensionsChanged =
+          target.width !== decoded.width || target.height !== decoded.height;
+        const maskBytes =
+          decoded.mask && dimensionsChanged
+            ? await encodeMask(decoded.mask, decoded.width, decoded.height, target)
+            : undefined;
 
         out.push({
           objectNumber: decoded.objectNumber,

@@ -16,10 +16,14 @@ import { BlanksPanel } from '../tools/blanks/BlanksPanel';
 import { PdfToImagePanel } from '../tools/convert/PdfToImagePanel';
 import { ExtractPanel } from '../tools/extract/ExtractPanel';
 import { CompressPanel } from '../tools/compress/CompressPanel';
+import { CropPanel } from '../tools/crop/CropPanel';
+import { WatermarkPanel } from '../tools/watermark/WatermarkPanel';
 import { CleanupPanel } from '../tools/cleanup/CleanupPanel';
 import { SignPanel } from '../tools/sign/SignPanel';
 import { RedactPanel } from '../tools/redact/RedactPanel';
 import { MetadataPanel } from '../tools/metadata/MetadataPanel';
+import { NormalizePanel } from '../tools/normalize/NormalizePanel';
+import { NUpPanel } from '../tools/nup/NUpPanel';
 import styles from './OptionsPanel.module.css';
 
 const BODIES: Record<string, () => preact.JSX.Element | null> = {
@@ -31,10 +35,14 @@ const BODIES: Record<string, () => preact.JSX.Element | null> = {
   'pdf-to-img': PdfToImagePanel,
   extract: ExtractPanel,
   compress: CompressPanel,
+  crop: CropPanel,
+  watermark: WatermarkPanel,
   cleanup: CleanupPanel,
   sign: SignPanel,
   redact: RedactPanel,
-  metadata: MetadataPanel
+  metadata: MetadataPanel,
+  normalize: NormalizePanel,
+  nup: NUpPanel
 };
 
 export function OptionsPanel() {

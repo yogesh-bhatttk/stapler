@@ -18,9 +18,12 @@ import { EmptyState } from '../components/Feedback';
 import { PageGrid } from './PageGrid';
 import { SinglePageView } from './SinglePageView';
 import { AnnotationOverlay } from '../components/AnnotationOverlay';
+import { AcroFormOverlay } from '../tools/sign/AcroFormOverlay';
 import { RedactOverlay } from '../tools/redact/RedactOverlay';
+import { WatermarkOverlay } from '../tools/watermark/WatermarkOverlay';
 import { CleanupEditor } from '../tools/cleanup/CleanupEditor';
 import { CompressPreview } from '../tools/compress/CompressPreview';
+import { CropOverlay } from '../tools/crop/CropOverlay';
 
 export function Canvas() {
   const tool = useActiveTool();
@@ -80,8 +83,15 @@ export function Canvas() {
         overlay={({ width, height, page }) =>
           tool.id === 'redact' ? (
             <RedactOverlay page={page} pageIndex={pageIndex} width={width} height={height} />
+          ) : tool.id === 'crop' ? (
+            <CropOverlay page={page} width={width} height={height} />
+          ) : tool.id === 'watermark' ? (
+            <WatermarkOverlay pageIndex={pageIndex} width={width} height={height} />
           ) : (
-            <AnnotationOverlay docId={doc.id} pageKey={page.key} width={width} height={height} />
+            <>
+              <AcroFormOverlay page={page} width={width} height={height} />
+              <AnnotationOverlay docId={doc.id} pageKey={page.key} width={width} height={height} />
+            </>
           )
         }
       />

@@ -35,6 +35,8 @@ export interface Annotation {
   y: number;
   width: number;
   height: number;
+  /** Clockwise rotation in degrees (e.g. 0 to 359). */
+  rotation?: number;
   /** Signature id, or the literal text for text/date stamps. */
   data: string;
 }
@@ -337,3 +339,27 @@ export function deleteAnnotation(docId: string, annotationId: string): void {
     annotations: doc.annotations.filter(a => a.id !== annotationId)
   }));
 }
+
+export function duplicateAnnotationToAllPages(docId: string, annotationId: string): void {
+  const doc = documents.value.find(d => d.id === docId);
+  if (!doc) return;
+  const sourceAnnotation = doc.annotations.find(a => a.id === annotationId);
+  if (!sourceAnnotation) return;
+
+  commit();
+  mutateDoc(docId, doc => {
+    const newAnnotations: Annotation[] = [];
+    for (const page of doc.pages) {
+      if (page.key === sourceAnnotation.pageKey) continue;
+      newAnnotations.push({
+        ...sourceAnnotation,
+        id: crypto.randomUUID(),
+        pageKey: page.key
+      });
+    }
+    return { ...doc, annotations: [...doc.annotations, ...newAnnotations] };
+  });
+}
+
+/** The currently focused page index in SinglePageView or PageGrid. */
+export const activePageIndex = signal<number>(0);

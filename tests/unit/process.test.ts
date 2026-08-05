@@ -6,6 +6,7 @@ vi.mock('comlink', () => ({
   transfer: vi.fn(val => val)
 }));
 import { processWorkerImpl } from '../../src/core/workers/process.worker';
+import { silentJob } from '../../src/core/workers/protocol';
 
 describe('scrubMetadata', () => {
   it('strips all metadata by default', async () => {
@@ -86,5 +87,71 @@ describe('applyRedactions', () => {
     // Just verify the bytes are different from the source bytes, showing it rebuilt.
     expect(redactedBytes).not.toEqual(bytes);
     expect(redactedBytes.length).toBeGreaterThan(0);
+  });
+});
+
+
+describe('applyNUp layout', () => {
+  it('creates a 2-up grid from a simple document', async () => {
+    const { textPdf } = await import('../e2e/fixtures');
+    const bytes = await textPdf(4); // 4 page document
+    
+    // Create sources map
+    const sources = { 'doc1': bytes };
+    const pages = [
+      { key: 'p1', sourceDocId: 'doc1', sourceIndex: 0, rotation: 0 },
+      { key: 'p2', sourceDocId: 'doc1', sourceIndex: 1, rotation: 0 },
+      { key: 'p3', sourceDocId: 'doc1', sourceIndex: 2, rotation: 0 },
+      { key: 'p4', sourceDocId: 'doc1', sourceIndex: 3, rotation: 0 }
+    ];
+
+    const composedBytes = await processWorkerImpl.compose(
+      pages,
+      sources,
+      [],
+      null,
+      null,
+      { layout: '2-up', margin: 10, gutter: 10, drawBorders: true },
+      silentJob
+    );
+
+    const doc = await PDFDocument.load(composedBytes);
+    
+    // 4 pages placed 2-up should result in 2 sheets
+    expect(doc.getPageCount()).toBe(2);
+    
+    // Check orientation of the first sheet (should be standard PDF units)
+    const page = doc.getPage(0);
+    expect(page.getWidth()).toBeGreaterThan(0);
+    expect(page.getHeight()).toBeGreaterThan(0);
+  });
+  
+  it('creates a booklet layout from an 8 page document', async () => {
+    const { textPdf } = await import('../e2e/fixtures');
+    const bytes = await textPdf(8);
+    
+    const sources = { 'doc1': bytes };
+    const pages = Array.from({ length: 8 }, (_, i) => ({ key: `p${i}`, sourceDocId: 'doc1', sourceIndex: i, rotation: 0 }));
+
+    const composedBytes = await processWorkerImpl.compose(
+      pages,
+      sources,
+      [],
+      null,
+      null,
+      { layout: 'booklet', margin: 0, gutter: 0, drawBorders: false },
+      silentJob
+    );
+
+    const doc = await PDFDocument.load(composedBytes);
+    
+    // 8 pages placed in booklet (4 pages per sheet front/back equivalent) -> 4 logical sheets (as pages in PDF)
+    // Wait, applyNUp maps booklet into a saddle-stitch order onto 2-up spreads.
+    // 8 pages = 8 / 2 pages per sheet = 4 sheets.
+    expect(doc.getPageCount()).toBe(4);
+    
+    // Check orientation: booklet should rotate to landscape
+    const page = doc.getPage(0);
+    expect(page.getWidth()).toBeGreaterThan(page.getHeight());
   });
 });

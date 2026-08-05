@@ -1,3 +1,4 @@
+import { cropBoxes } from '../ui/tools/crop/state';
 /**
  * Tool operations, orchestrated on the main thread but executed in workers.
  *
@@ -15,8 +16,16 @@ import {
   estimateSavings,
   type CompressionPlan
 } from './compress-plan';
-import { activeDoc, bytesForPages, sources, type Annotation, type PageRef } from './store';
+import {
+  activeDoc,
+  bytesForPages,
+  sources,
+  activePageIndex,
+  type Annotation,
+  type PageRef
+} from './store';
 import { getSignature } from './signatures';
+import { watermarkSettings } from '../ui/tools/watermark/state';
 import { internal, unsupported } from './errors';
 
 /** Resolves signature stamps to bytes so the worker never touches IndexedDB. */
@@ -48,6 +57,7 @@ async function resolveStamps(pages: PageRef[], annotations: Annotation[]): Promi
       y: annotation.y,
       width: annotation.width,
       height: annotation.height,
+      rotation: annotation.rotation,
       text: annotation.type === 'signature' ? undefined : annotation.data,
       imagePng
     });
@@ -58,6 +68,10 @@ async function resolveStamps(pages: PageRef[], annotations: Annotation[]): Promi
 export interface ComposeRequest {
   pages: PageRef[];
   annotations: Annotation[];
+  cropBoxes?: Record<string, { x: number; y: number; width: number; height: number }>;
+  watermark?: import('../ui/tools/watermark/state').WatermarkSettings;
+  normalize?: import('../ui/tools/normalize/state').NormalizeSettings | null;
+  nup?: import('../ui/tools/nup/state').NUpSettings | null;
 }
 
 /** DOC-05 — compose the current model into output bytes. */
@@ -68,8 +82,20 @@ export async function composeDocument(
   if (request.pages.length === 0) throw internal('There are no pages to export.');
   const stamps = await resolveStamps(request.pages, request.annotations);
   const job = createJobHandle(options);
+  const mappedPages = request.pages.map(p => ({
+    ...p,
+    cropBox: request.cropBoxes?.[p.key]
+  }));
   return processWorker.lease(api =>
-    api.compose(request.pages, bytesForPages(request.pages), stamps, job)
+    api.compose(
+      mappedPages,
+      bytesForPages(request.pages),
+      stamps,
+      request.watermark,
+      request.normalize,
+      request.nup,
+      job
+    )
   );
 }
 
@@ -81,12 +107,19 @@ export interface SplitRequest extends ComposeRequest {
 export async function splitDocument(request: SplitRequest, options: JobOptions = {}) {
   const stamps = await resolveStamps(request.pages, request.annotations);
   const job = createJobHandle(options);
+  const mappedPages = request.pages.map(p => ({
+    ...p,
+    cropBox: request.cropBoxes?.[p.key]
+  }));
   return processWorker.lease(api =>
     api.composeSplit(
-      request.pages,
+      mappedPages,
       bytesForPages(request.pages),
       request.boundaries,
       stamps,
+      request.watermark,
+      request.normalize,
+      request.nup,
       request.baseName,
       job
     )
@@ -128,6 +161,18 @@ export function splitBoundaries(
         .filter(n => Number.isInteger(n) && n > 0 && n < pageCount)
     )
   ].sort((a, b) => a - b);
+}
+
+export async function getFormFields(bytes: Uint8Array) {
+  return processWorker.lease(api => api.getFormFields(bytes));
+}
+
+export async function fillFormFields(
+  bytes: Uint8Array,
+  values: Record<string, string | string[] | boolean>,
+  flatten: boolean
+) {
+  return processWorker.lease(api => api.fillFormFields(bytes, values, flatten));
 }
 
 /* ------------------------------------------------------------------ *
@@ -523,23 +568,123 @@ export async function pagesToImageArchive(
   return zipSync(files, { level: 0 });
 }
 
-/** The bytes the current workspace document represents, composed on demand. */
+import { normalizeSettings } from '../ui/tools/normalize/state';
+import { nupSettings } from '../ui/tools/nup/state';
+
 export async function currentDocumentBytes(options: JobOptions = {}): Promise<Uint8Array> {
   const doc = activeDoc.value;
   if (!doc) throw internal('No document is open.');
-  // A single-source document with no stamps and no reordering is already exactly
-  // its source bytes; composing it would be a pointless re-encode.
-  const single = sources.value[doc.pages[0]?.sourceDocId ?? ''];
-  const untouched =
-    single &&
-    doc.annotations.length === 0 &&
-    doc.pages.length === single.pageCount &&
-    doc.pages.every(
-      (p, i) => p.sourceDocId === single.id && p.sourceIndex === i && p.rotation === 0
-    );
-  if (untouched) return single.bytes;
 
-  return composeDocument({ pages: doc.pages, annotations: doc.annotations }, options);
+  const untouched =
+    doc.annotations.length === 0 &&
+    doc.pages.length > 0 &&
+    doc.pages.every((p, _i, a) => p.sourceDocId === a[0].sourceDocId) &&
+    Object.values(sources.value).find(s => s.id === doc.pages[0].sourceDocId) &&
+    doc.pages.length ===
+      Object.values(sources.value).find(s => s.id === doc.pages[0].sourceDocId)?.pageCount &&
+    doc.pages.every((p, i) => p.sourceIndex === i && p.rotation === 0) &&
+    Object.keys(cropBoxes.value).length === 0 &&
+    !watermarkSettings.value?.text;
+  if (untouched) {
+    const single = Object.values(sources.value).find(s => s.id === doc.pages[0].sourceDocId);
+    if (single) return single.bytes;
+  }
+
+  return composeDocument(
+    {
+      pages: doc.pages,
+      annotations: doc.annotations,
+      cropBoxes: cropBoxes.value,
+      watermark: watermarkSettings.value,
+      normalize: normalizeSettings.value,
+      nup: nupSettings.value
+    },
+    options
+  );
 }
 
 export { unsupported };
+
+export async function autoTrimDocument(
+  doc: { pages: PageRef[]; annotations: Annotation[] },
+  allPages: boolean,
+  options?: import('./workers/protocol').JobOptions
+) {
+  const pagesToTrim = allPages ? doc.pages : [doc.pages[activePageIndex.value]];
+  if (!pagesToTrim[0]) return;
+
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('No 2d context');
+
+  const updates: Record<string, { x: number; y: number; width: number; height: number }> = {};
+
+  for (let i = 0; i < pagesToTrim.length; i++) {
+    const page = pagesToTrim[i];
+    if (options?.onProgress) options.onProgress(i / pagesToTrim.length, `Scanning page ${i + 1}`);
+
+    const composedBytes = await composeDocument({ pages: [page], annotations: [] });
+    const handle = await renderWorker
+      .lease(api => api.loadDocument(composedBytes))
+      .then(res => res.handle);
+
+    try {
+      const scale = 1.0; // 72 DPI is enough for finding a bounding box
+      const bitmap = await renderWorker.lease(api => api.renderPage(handle, 0, scale));
+
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(bitmap, 0, 0);
+      bitmap.close();
+
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imageData.data;
+
+      let minX = canvas.width;
+      let minY = canvas.height;
+      let maxX = 0;
+      let maxY = 0;
+
+      for (let y = 0; y < canvas.height; y++) {
+        for (let x = 0; x < canvas.width; x++) {
+          const idx = (y * canvas.width + x) * 4;
+          const r = data[idx];
+          const g = data[idx + 1];
+          const b = data[idx + 2];
+          const a = data[idx + 3];
+
+          // Treat transparent or near-white as background
+          if (a > 10 && (r < 250 || g < 250 || b < 250)) {
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+          }
+        }
+      }
+
+      if (maxX >= minX && maxY >= minY) {
+        // Add 1% padding so we don't clip exact edges tightly
+        const padding = 0.01;
+        const normMinX = Math.max(0, minX / canvas.width - padding);
+        const normMinY = Math.max(0, minY / canvas.height - padding);
+        const normMaxX = Math.min(1, maxX / canvas.width + padding);
+        const normMaxY = Math.min(1, maxY / canvas.height + padding);
+
+        updates[page.key] = {
+          x: normMinX,
+          y: normMinY,
+          width: normMaxX - normMinX,
+          height: normMaxY - normMinY
+        };
+      } else {
+        // blank page, don't crop or maybe reset crop
+      }
+    } finally {
+      await renderWorker.lease(api => api.closeDocument(handle));
+    }
+  }
+
+  cropBoxes.value = { ...cropBoxes.value, ...updates };
+}

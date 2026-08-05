@@ -78,6 +78,27 @@
   display: flex;
 }
 
+.duplicate {
+  position: absolute;
+  top: -8px;
+  left: -8px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--primary);
+  color: var(--on-primary);
+  cursor: pointer;
+}
+
+.stamp:hover .duplicate,
+.stamp:focus-within .duplicate {
+  display: flex;
+}
+
 .handle {
   position: absolute;
   right: -5px;
@@ -92,6 +113,37 @@
 
 .stamp:hover .handle,
 .stamp:focus-within .handle {
+  display: block;
+}
+
+.rotateHandle {
+  position: absolute;
+  top: -24px;
+  left: calc(50% - 6px);
+  width: 12px;
+  height: 12px;
+  border-radius: var(--radius-pill);
+  background: var(--primary);
+  cursor: grab;
+  display: none;
+}
+
+.rotateHandle:active {
+  cursor: grabbing;
+}
+
+.rotateHandle::after {
+  content: '';
+  position: absolute;
+  top: 12px;
+  left: 5px;
+  width: 2px;
+  height: 12px;
+  background: var(--primary);
+}
+
+.stamp:hover .rotateHandle,
+.stamp:focus-within .rotateHandle {
   display: block;
 }
 

@@ -19,9 +19,13 @@ export type ToolId =
   | 'pdf-to-img'
   | 'extract'
   | 'compress'
+  | 'crop'
+  | 'watermark'
   | 'sign'
   | 'redact'
-  | 'metadata';
+  | 'metadata'
+  | 'normalize'
+  | 'nup';
 
 export type ToolGroup = 'Organize' | 'Convert' | 'Optimize' | 'Document';
 
@@ -95,6 +99,17 @@ export const TOOLS: readonly ToolDefinition[] = [
     selectable: true
   },
   {
+    id: 'nup',
+    title: 'N-up & Booklet',
+    group: 'Organize',
+    summary: 'Impose pages into 2-up, 4-up, or booklet layouts.',
+    icon: 'BookOpen',
+    canvasMode: 'grid',
+    needsOptionsPanel: true,
+    commitLabel: 'Export layout',
+    selectable: false
+  },
+  {
     id: 'cleanup',
     title: 'Scan cleanup',
     group: 'Optimize',
@@ -114,6 +129,39 @@ export const TOOLS: readonly ToolDefinition[] = [
     canvasMode: 'single',
     needsOptionsPanel: true,
     commitLabel: 'Compress & export',
+    selectable: false
+  },
+  {
+    id: 'crop',
+    title: 'Crop',
+    group: 'Organize',
+    summary: 'Crop margins manually or automatically trim white space.',
+    icon: 'Crop',
+    canvasMode: 'single',
+    needsOptionsPanel: true,
+    commitLabel: 'Export PDF',
+    selectable: false
+  },
+  {
+    id: 'watermark',
+    title: 'Watermark',
+    group: 'Organize',
+    summary: 'Add text watermarks or page numbers.',
+    icon: 'Stamp',
+    canvasMode: 'single',
+    needsOptionsPanel: true,
+    commitLabel: 'Export PDF',
+    selectable: false
+  },
+  {
+    id: 'normalize',
+    title: 'Normalize',
+    group: 'Organize',
+    summary: 'Resize documents with mixed page sizes to a uniform standard size.',
+    icon: 'Scaling',
+    canvasMode: 'single',
+    needsOptionsPanel: true,
+    commitLabel: 'Normalize & export',
     selectable: false
   },
   {

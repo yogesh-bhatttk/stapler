@@ -10,10 +10,11 @@
  *  • `alert()` when nothing was armed.
  */
 import { useRef, useState } from 'preact/hooks';
-import { X } from 'lucide-preact';
+import { X, Copy } from 'lucide-preact';
 import {
   addAnnotation,
   deleteAnnotation,
+  duplicateAnnotationToAllPages,
   documents,
   updateAnnotation,
   type Annotation
@@ -52,21 +53,22 @@ export function AnnotationOverlay({ docId, pageKey, width, height }: AnnotationO
   const suggestions = signatureSuggestions.value.filter(s => s.pageIndex === pageIndex);
 
   const place = (x: number, y: number) => {
-    if (!armed) return;
-    const size = DEFAULT_SIZE[armed.type];
+    const currentStamp = activeStamp.value;
+    if (!currentStamp) return;
+    const size = DEFAULT_SIZE[currentStamp.type];
     addAnnotation(docId, {
       id: crypto.randomUUID(),
       pageKey,
-      type: armed.type,
+      type: currentStamp.type,
       x: Math.max(0, Math.min(1 - size.width, x - size.width / 2)),
       y: Math.max(0, Math.min(1 - size.height, y - size.height / 2)),
       ...size,
       data:
-        armed.type === 'signature'
-          ? (armed.signatureId ?? '')
-          : armed.type === 'date'
+        currentStamp.type === 'signature'
+          ? (currentStamp.signatureId ?? '')
+          : currentStamp.type === 'date'
             ? new Date().toLocaleDateString()
-            : armed.type === 'check'
+            : currentStamp.type === 'check'
               ? '✓'
               : ''
     });
@@ -80,11 +82,15 @@ export function AnnotationOverlay({ docId, pageKey, width, height }: AnnotationO
       className={`${styles.layer} ${armed ? styles.armed : ''}`}
       style={{ width: `${width}px`, height: `${height}px` }}
       onClick={event => {
-        // Only a click on the empty layer places a stamp; a click on an existing one
-        // is a selection, not a new placement.
         const layer = layerRef.current;
-        if (!layer || event.target !== layer || !armed) return;
+        console.log("ON CLICK TRIGGERED", { target: event.target, layer: layer, activeStamp: activeStamp.value });
+        if (!layer || (!activeStamp.value && event.target !== layer)) return;
+        if (event.target !== layer) {
+          console.log("Target is not layer, but forcing anyway for testing");
+        }
+        if (!activeStamp.value) return;
         const rect = layer.getBoundingClientRect();
+        console.log("PLACING STAMP AT", (event.clientX - rect.left) / rect.width, (event.clientY - rect.top) / rect.height);
         place((event.clientX - rect.left) / rect.width, (event.clientY - rect.top) / rect.height);
       }}
     >
@@ -149,11 +155,60 @@ function Stamp({
     const tx = beginTransaction(`stamp-${stamp.id}`);
 
     const move = (moveEvent: PointerEvent) => {
-      updateAnnotation(
-        docId,
-        stamp.id,
-        apply((moveEvent.clientX - startX) / rect.width, (moveEvent.clientY - startY) / rect.height)
+      const next = apply(
+        (moveEvent.clientX - startX) / rect.width,
+        (moveEvent.clientY - startY) / rect.height
       );
+
+      // Snapping logic for movement
+      if (next.x !== undefined && stamp.width) {
+        const cx = next.x + stamp.width / 2;
+        if (Math.abs(cx - 0.5) < 0.02) next.x = 0.5 - stamp.width / 2;
+        if (Math.abs(next.x - 0.05) < 0.02) next.x = 0.05;
+        if (Math.abs(next.x + stamp.width - 0.95) < 0.02) next.x = 0.95 - stamp.width;
+      }
+      if (next.y !== undefined && stamp.height) {
+        const cy = next.y + stamp.height / 2;
+        if (Math.abs(cy - 0.5) < 0.02) next.y = 0.5 - stamp.height / 2;
+        if (Math.abs(next.y - 0.05) < 0.02) next.y = 0.05;
+        if (Math.abs(next.y + stamp.height - 0.95) < 0.02) next.y = 0.95 - stamp.height;
+      }
+
+      updateAnnotation(docId, stamp.id, next);
+    };
+    const end = () => {
+      setDragging(false);
+      tx.end();
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', end);
+      window.removeEventListener('pointercancel', end);
+    };
+
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', end);
+    window.addEventListener('pointercancel', end);
+  };
+
+  const startRotateDrag = (event: PointerEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = layerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const cx = rect.left + (stamp.x + stamp.width / 2) * rect.width;
+    const cy = rect.top + (stamp.y + stamp.height / 2) * rect.height;
+
+    setDragging(true);
+    const tx = beginTransaction(`stamp-${stamp.id}`);
+
+    const move = (moveEvent: PointerEvent) => {
+      const angle = Math.atan2(moveEvent.clientY - cy, moveEvent.clientX - cx);
+      // atan2 is 0 at right, PI/2 at bottom, -PI/2 at top. We want 0 at top.
+      let deg = (angle * 180) / Math.PI + 90;
+      if (deg < 0) deg += 360;
+      if (moveEvent.shiftKey) {
+        deg = Math.round(deg / 45) * 45;
+      }
+      updateAnnotation(docId, stamp.id, { rotation: deg });
     };
     const end = () => {
       setDragging(false);
@@ -201,7 +256,8 @@ function Stamp({
         left: `${stamp.x * 100}%`,
         top: `${stamp.y * 100}%`,
         width: `${stamp.width * 100}%`,
-        height: `${stamp.height * 100}%`
+        height: `${stamp.height * 100}%`,
+        transform: stamp.rotation ? `rotate(${stamp.rotation}deg)` : undefined
       }}
       tabIndex={0}
       role="group"
@@ -249,16 +305,45 @@ function Stamp({
         <X size={10} aria-hidden="true" />
       </button>
 
+      <button
+        type="button"
+        className={styles.duplicate}
+        aria-label="Duplicate to all pages"
+        title="Duplicate to all pages"
+        onClick={event => {
+          event.stopPropagation();
+          duplicateAnnotationToAllPages(docId, stamp.id);
+        }}
+      >
+        <Copy size={10} aria-hidden="true" />
+      </button>
+
       <span
         className={styles.handle}
         role="presentation"
-        onPointerDown={event =>
-          startDrag(event, (dx, dy) => ({
-            width: Math.max(0.02, Math.min(1 - stamp.x, stamp.width + dx)),
-            height: Math.max(0.015, Math.min(1 - stamp.y, stamp.height + dy))
-          }))
-        }
+        onPointerDown={event => {
+          const aspect = stamp.width / stamp.height;
+          startDrag(event, (dx, dy) => {
+            let newWidth = stamp.width + dx;
+            let newHeight = stamp.height + dy;
+
+            if (stamp.type === 'signature' || stamp.type === 'check') {
+              if (Math.abs(dx) > Math.abs(dy)) {
+                newHeight = newWidth / aspect;
+              } else {
+                newWidth = newHeight * aspect;
+              }
+            }
+
+            newWidth = Math.max(0.02, Math.min(1 - stamp.x, newWidth));
+            newHeight = Math.max(0.015, Math.min(1 - stamp.y, newHeight));
+
+            return { width: newWidth, height: newHeight };
+          });
+        }}
       />
+
+      <span className={styles.rotateHandle} role="presentation" onPointerDown={startRotateDrag} />
     </div>
   );
 }

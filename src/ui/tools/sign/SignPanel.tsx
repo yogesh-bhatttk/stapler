@@ -8,7 +8,11 @@ import { useEffect } from 'preact/hooks';
 import { Calendar, Check, Plus, ScanSearch, Trash2, Type } from 'lucide-preact';
 import { useState } from 'preact/hooks';
 import { activeDoc } from '../../../core/store';
-import { currentDocumentBytes, detectSignatureLines } from '../../../core/operations';
+import {
+  currentDocumentBytes,
+  detectSignatureLines,
+  getFormFields
+} from '../../../core/operations';
 import {
   deleteSignature,
   loadSignatures,
@@ -20,7 +24,7 @@ import { Button } from '../../components/Button';
 import { IconButton } from '../../components/IconButton';
 import { panelStyles } from '../../shell/OptionsPanel';
 import { SignatureModal } from './SignatureModal';
-import { activeStamp, signatureSuggestions, type StampType } from './state';
+import { activeStamp, signatureSuggestions, formFields, type StampType } from './state';
 import { useJob } from '../../useJob';
 import styles from './SignPanel.module.css';
 
@@ -31,7 +35,7 @@ const STAMPS: { type: StampType; label: string; icon: typeof Type }[] = [
 ];
 
 export function SignPanel() {
-  const [showModal, setShowModal] = useState(false);
+  const [modalType, setModalType] = useState<'signature' | 'initials' | null>(null);
   const armed = activeStamp.value;
   const { run } = useJob();
   const doc = activeDoc.value;
@@ -39,6 +43,23 @@ export function SignPanel() {
   useEffect(() => {
     void loadSignatures();
   }, []);
+
+  useEffect(() => {
+    if (!doc) {
+      formFields.value = null;
+      return;
+    }
+    // Only query fields if the document properties imply they exist
+    void currentDocumentBytes().then(bytes => {
+      getFormFields(bytes)
+        .then(fields => {
+          formFields.value = fields;
+        })
+        .catch(() => {
+          formFields.value = null;
+        });
+    });
+  }, [doc]);
 
   const detect = () =>
     run({ label: 'Looking for signature lines', scope: 'sign.detect' }, async job => {
@@ -61,50 +82,114 @@ export function SignPanel() {
 
   return (
     <>
+      {formFields.value?.isXfa && (
+        <p className={`${panelStyles.note} ${panelStyles.noteWarning}`}>
+          This is an XFA form. Interactive filling is not supported. Use the stamp tools below to
+          place text and signatures instead.
+        </p>
+      )}
+      {!formFields.value?.isXfa && (formFields.value?.fields.length ?? 0) > 0 && (
+        <p className={`${panelStyles.note} ${panelStyles.noteInfo}`}>
+          This document contains interactive form fields. You can click on them in the page to type
+          and fill them out.
+        </p>
+      )}
+
       <div className={panelStyles.section}>
         <h3 className={panelStyles.title}>Signatures</h3>
         <div className={styles.list}>
-          {signatures.value.map(signature => {
-            const active = armed?.type === 'signature' && armed.signatureId === signature.id;
-            return (
-              <div
-                key={signature.id}
-                className={`${styles.card} ${active ? styles.cardActive : ''}`}
-                role="button"
-                tabIndex={0}
-                aria-pressed={active}
-                aria-label={`Use this ${signature.kind} signature`}
-                onClick={() =>
-                  (activeStamp.value = active
-                    ? null
-                    : { type: 'signature', signatureId: signature.id })
-                }
-                onKeyDown={event => {
-                  if (event.key !== 'Enter' && event.key !== ' ') return;
-                  event.preventDefault();
-                  activeStamp.value = active
-                    ? null
-                    : { type: 'signature', signatureId: signature.id };
-                }}
-              >
-                <img src={signaturePreviewUrl(signature)} alt="" />
-                <span className={styles.cardRemove}>
-                  <IconButton
-                    icon={Trash2}
-                    size="compact"
-                    aria-label="Delete this signature"
-                    onClick={event => {
-                      event.stopPropagation();
-                      void deleteSignature(signature.id);
-                    }}
-                  />
-                </span>
-              </div>
-            );
-          })}
+          {signatures.value
+            .filter(s => s.purpose !== 'initials')
+            .map(signature => {
+              const active = armed?.type === 'signature' && armed.signatureId === signature.id;
+              return (
+                <div
+                  key={signature.id}
+                  className={`${styles.card} ${active ? styles.cardActive : ''}`}
+                  role="button"
+                  tabIndex={0}
+                  aria-pressed={active}
+                  aria-label={`Use this ${signature.kind} signature`}
+                  onClick={() =>
+                    (activeStamp.value = active
+                      ? null
+                      : { type: 'signature', signatureId: signature.id })
+                  }
+                  onKeyDown={event => {
+                    if (event.key !== 'Enter' && event.key !== ' ') return;
+                    event.preventDefault();
+                    activeStamp.value = active
+                      ? null
+                      : { type: 'signature', signatureId: signature.id };
+                  }}
+                >
+                  <img src={signaturePreviewUrl(signature)} alt="" />
+                  <span className={styles.cardRemove}>
+                    <IconButton
+                      icon={Trash2}
+                      size="compact"
+                      aria-label="Delete this signature"
+                      onClick={event => {
+                        event.stopPropagation();
+                        void deleteSignature(signature.id);
+                      }}
+                    />
+                  </span>
+                </div>
+              );
+            })}
         </div>
-        <Button variant="secondary" icon={Plus} onClick={() => setShowModal(true)}>
+        <Button variant="secondary" icon={Plus} onClick={() => setModalType('signature')}>
           Create a signature
+        </Button>
+      </div>
+
+      <div className={panelStyles.section}>
+        <h3 className={panelStyles.title}>Initials</h3>
+        <div className={styles.list}>
+          {signatures.value
+            .filter(s => s.purpose === 'initials')
+            .map(signature => {
+              const active = armed?.type === 'signature' && armed.signatureId === signature.id;
+              return (
+                <div
+                  key={signature.id}
+                  className={`${styles.card} ${active ? styles.cardActive : ''}`}
+                  role="button"
+                  tabIndex={0}
+                  aria-pressed={active}
+                  aria-label={`Use this ${signature.kind} initial`}
+                  onClick={() =>
+                    (activeStamp.value = active
+                      ? null
+                      : { type: 'signature', signatureId: signature.id })
+                  }
+                  onKeyDown={event => {
+                    if (event.key !== 'Enter' && event.key !== ' ') return;
+                    event.preventDefault();
+                    activeStamp.value = active
+                      ? null
+                      : { type: 'signature', signatureId: signature.id };
+                  }}
+                >
+                  <img src={signaturePreviewUrl(signature)} alt="" />
+                  <span className={styles.cardRemove}>
+                    <IconButton
+                      icon={Trash2}
+                      size="compact"
+                      aria-label="Delete these initials"
+                      onClick={event => {
+                        event.stopPropagation();
+                        void deleteSignature(signature.id);
+                      }}
+                    />
+                  </span>
+                </div>
+              );
+            })}
+        </div>
+        <Button variant="secondary" icon={Plus} onClick={() => setModalType('initials')}>
+          Create initials
         </Button>
       </div>
 
@@ -143,7 +228,9 @@ export function SignPanel() {
         These are stamped signature images. Stapler makes no claim about legal validity.
       </p>
 
-      {showModal && <SignatureModal onClose={() => setShowModal(false)} />}
+      {modalType && (
+        <SignatureModal onClose={() => setModalType(null)} isInitials={modalType === 'initials'} />
+      )}
     </>
   );
 }
