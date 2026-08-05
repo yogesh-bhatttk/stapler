@@ -16,3 +16,6 @@ tests/fixtures/*
 !tests/fixtures/cjk.pdf
 !tests/fixtures/rtl.pdf
 !tests/fixtures/xfa.pdf
+
+# Throwaway probe scripts (see eslint.config.js ignores).
+.scratch/

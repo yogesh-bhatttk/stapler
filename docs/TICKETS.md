@@ -320,7 +320,9 @@ tests, verified end-to-end against a live instance.
 
 ### OPS-08 · Page numbers, watermark, header/footer — `M` `P1`
 
-**Status: Not started** — P1.
+**Status: Partial** — Text watermark supports the 9-point grid, font size, opacity,
+colour, rotation, start-at numbering, and a comma-separated page range. Image watermarks,
+real header/footer, and CJK-safe embedding are still missing.
 
 - **Requirements:** Position (9-point grid), font size, opacity, colour, start-at value,
   page-range targeting, and a text or image watermark with rotation.
@@ -407,7 +409,7 @@ tests, verified end-to-end against a live instance.
 
 ### SGN-03 · Fill interactive AcroForms — `M` `P0`
 
-**Status: Partial** — Enumeration and filling exist in the worker, XFA refused and explained. **No UI renders the fields**, so a form cannot be filled.
+**Status: Done** — Four separate faults, each of which alone made a form unfillable while the UI reported success: field kinds were identified by `field.constructor.name`, which a minified build renames, so every field came back `Unknown` and rendered as "Unsupported"; `/AcroForm` did not survive the `copyPages` compose, so filling the source bytes had its `/V` values dropped by the export; the stamp overlay covered the field inputs; and `.stage` centred with `align-items` under `overflow: auto`, leaving the top sixth of the page permanently unreachable. XFA is now decided on raw bytes before any parse.
 
 - **Requirements:** Detect and enumerate AcroForm fields; render native inputs for text,
   checkbox, radio, dropdown; fill and optionally flatten. **XFA forms detected and clearly

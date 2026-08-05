@@ -83,14 +83,8 @@ export function AnnotationOverlay({ docId, pageKey, width, height }: AnnotationO
       style={{ width: `${width}px`, height: `${height}px` }}
       onClick={event => {
         const layer = layerRef.current;
-        console.log("ON CLICK TRIGGERED", { target: event.target, layer: layer, activeStamp: activeStamp.value });
-        if (!layer || (!activeStamp.value && event.target !== layer)) return;
-        if (event.target !== layer) {
-          console.log("Target is not layer, but forcing anyway for testing");
-        }
-        if (!activeStamp.value) return;
+        if (!layer || event.target !== layer || !armed) return;
         const rect = layer.getBoundingClientRect();
-        console.log("PLACING STAMP AT", (event.clientX - rect.left) / rect.width, (event.clientY - rect.top) / rect.height);
         place((event.clientX - rect.left) / rect.width, (event.clientY - rect.top) / rect.height);
       }}
     >

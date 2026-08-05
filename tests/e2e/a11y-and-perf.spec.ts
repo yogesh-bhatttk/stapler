@@ -12,7 +12,19 @@ import { gotoTool, openApp } from './helpers';
  * never quietly widened.
  */
 
-const TOOLS = ['merge', 'organize', 'split', 'compress', 'sign', 'redact', 'extract'];
+const TOOLS = [
+  'merge',
+  'organize',
+  'split',
+  'nup',
+  'compress',
+  'crop',
+  'watermark',
+  'normalize',
+  'sign',
+  'redact',
+  'extract'
+];
 
 /** Kept in step with src/core/tools.ts by the palette assertion below. */
 const TOOL_TITLES = [
@@ -20,8 +32,12 @@ const TOOL_TITLES = [
   'Organize',
   'Split & extract',
   'Remove blanks',
+  'N-up & Booklet',
   'Scan cleanup',
   'Compress',
+  'Crop',
+  'Watermark',
+  'Normalize',
   'PDF to images',
   'Extract text',
   'Sign & fill',

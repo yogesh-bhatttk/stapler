@@ -1,8 +1,9 @@
 import { expect, test } from '@playwright/test';
-import { PDFDict, PDFDocument, PDFName, PDFRawStream, PDFRef, PDFStream } from 'pdf-lib';
+import { PDFArray, PDFDict, PDFDocument, PDFName, PDFRawStream, PDFRef, PDFStream } from 'pdf-lib';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import {
+  acroformPdf,
   ensureFixture,
   mixedSizePdf,
   mixedTextImagePdf,
@@ -106,6 +107,55 @@ async function contentDigests(bytes: Uint8Array): Promise<string[]> {
     }
     return hash.digest('hex');
   });
+}
+
+/**
+ * Every string a document draws on page 0, including inside the form XObjects the
+ * page invokes — which is where a flattened form field's value ends up.
+ *
+ * Show-text operands may be literal `(text)` or hex `<hex>`, and the hex code width
+ * depends on the font, so all readings are concatenated and the caller asserts a
+ * substring. The point is to check the value is *drawn*, not merely stored in /V.
+ */
+async function drawnText(bytes: Uint8Array): Promise<string> {
+  const { inflateSync } = await import('node:zlib');
+  const doc = await PDFDocument.load(bytes);
+  const page = doc.getPage(0);
+
+  const decode = (stream: unknown): string => {
+    if (!(stream instanceof PDFStream)) return '';
+    const raw = Buffer.from((stream as PDFRawStream).contents ?? []);
+    const isFlate = String(stream.dict.get(PDFName.of('Filter'))) === '/FlateDecode';
+    let text: string;
+    try {
+      text = (isFlate ? inflateSync(raw) : raw).toString('latin1');
+    } catch {
+      return '';
+    }
+    // Append both decodings of every hex literal alongside the raw operators.
+    let decoded = text;
+    for (const match of text.matchAll(/<([0-9A-Fa-f\s]+)>/g)) {
+      const hex = match[1].replace(/\s+/g, '');
+      for (const width of [2, 4]) {
+        if (hex.length % width !== 0) continue;
+        let out = '';
+        for (let i = 0; i < hex.length; i += width) {
+          out += String.fromCharCode(parseInt(hex.slice(i, i + width), 16));
+        }
+        decoded += `\n${out}`;
+      }
+    }
+    return decoded;
+  };
+
+  let all = '';
+  const contents = page.node.Contents();
+  const streams = contents instanceof PDFArray ? contents.asArray() : contents ? [contents] : [];
+  for (const stream of streams) all += decode(doc.context.lookup(stream));
+
+  const xobjects = page.node.Resources()?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+  for (const [, ref] of xobjects?.entries() ?? []) all += decode(doc.context.lookup(ref));
+  return all;
 }
 
 /**
@@ -405,6 +455,13 @@ test.describe('tool flows', () => {
     expect(before[0].smask).not.toBeNull();
     expect(after[0].filter).toBe('/DCTDecode');
     expect(after[0].smask).not.toBeNull();
+    // A downscaled colour image needs a matching downscaled alpha mask. Presence
+    // alone would pass with a stale full-resolution mask; matching dimensions,
+    // together with the rendered alpha/pixel checks below, catches both stale and
+    // incorrectly encoded masks without requiring an intentionally-resampled
+    // stream to have its old byte digest.
+    expect(after[0].smask!.width).toBe(after[0].width);
+    expect(after[0].smask!.height).toBe(after[0].height);
 
     // And the rendered result: reload — so the workspace holds the compressed
     // file and nothing else — then sample the same four points.
@@ -472,28 +529,66 @@ test.describe('tool flows', () => {
   });
 
   test('sign: adding a text annotation and exporting embeds the text', async ({ page }) => {
-    page.on('pageerror', err => console.log('PAGE ERROR:', err));
-    page.on('console', msg => console.log('PAGE LOG:', msg.text()));
     const file = await ensureFixture('text-6.pdf', () => textPdf(6));
     await importFixture(page, file);
     await gotoTool(page, 'sign');
 
     await page.getByRole('button', { name: 'Text', exact: true }).click();
-    console.log('Button clicked');
-    const count = await page.locator('[data-index="0"]').count();
-    console.log('Count of data-index=0:', count);
-    
-    await page.waitForTimeout(500);
-
-    const pageHtml = await page.locator('[data-index="0"]').innerHTML();
-    console.log("PAGE HTML:", pageHtml);
-    await page.locator('[data-index="0"] > div').last().click({ position: { x: 300, y: 300 } });
+    await page.locator('[data-index="0"]').click({ position: { x: 300, y: 300 } });
 
     await page.getByLabel('Stamp text').fill('Test signature text');
 
     const bytes = await commitAndRead(page, 'Export signed PDF');
-    const digests = await contentDigests(bytes);
-    expect(digests.length).toBe(6);
+    expect(await drawnText(bytes)).toContain('Test signature text');
+  });
+
+  /**
+   * SGN-03. Two separate failures met here, and both were invisible from the UI:
+   * the rendered field could not be clicked (the stamp overlay sat on top of it),
+   * and a value that did get typed was dropped by the compose that followed the
+   * fill. So this test types through the real overlay and then reads the value out
+   * of the exported bytes — the only place a viewer would look.
+   */
+  test('sign: a typed AcroForm value reaches the exported bytes', async ({ page }) => {
+    const file = await ensureFixture('acroform.pdf', () => acroformPdf());
+    await importFixture(page, file);
+    await gotoTool(page, 'sign');
+
+    // The overlay renders one box per widget; title is the field name.
+    const field = page.locator('[data-index="0"] textarea').first();
+    await expect(field).toBeVisible({ timeout: 30_000 });
+
+    // `click` fails outright if any layer covers the input, which is the z-order
+    // regression this guards; `fill` alone would dispatch input synthetically.
+    await field.click();
+    await field.fill('Ada Lovelace');
+    await expect(field).toHaveValue('Ada Lovelace');
+
+    const bytes = await commitAndRead(page, 'Export signed PDF');
+    // The sign tool flattens, so the value is drawn into the page rather than left
+    // in /V. Its appearance stream must carry the text.
+    const doc = await PDFDocument.load(bytes);
+    expect(doc.getPageCount()).toBe(1);
+    expect(await drawnText(bytes)).toContain('Ada Lovelace');
+  });
+
+  /**
+   * SGN-03's second criterion. The XFA fixture must be *explained*, and no field of
+   * it may ever be offered — half-filling an XFA form writes values into shadow
+   * fields that the viewer ignores, which looks like success and is data loss.
+   */
+  test('sign: the XFA fixture is explained and offers nothing to fill', async ({ page }) => {
+    await importFixture(page, 'tests/fixtures/xfa.pdf');
+    await gotoTool(page, 'sign');
+
+    await expect(page.getByText(/XFA form/i).first()).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText(/stamp tools/i).first()).toBeVisible();
+
+    // No field boxes at all: the overlay refuses to render for an XFA document, so
+    // there is no way for a value to be entered and then silently dropped.
+    await expect(page.locator('[data-index="0"] textarea')).toHaveCount(0);
+    await expect(page.locator('[data-index="0"] input')).toHaveCount(0);
+    await expect(page.locator('[data-index="0"] select')).toHaveCount(0);
   });
 
   test('redact: drawing a redaction rectangle physically removes content', async ({ page }) => {
@@ -501,16 +596,11 @@ test.describe('tool flows', () => {
     await importFixture(page, file);
     await gotoTool(page, 'redact');
 
-    await page.on('console', msg => console.log('PAGE LOG:', msg.text()));
-    const layer = page.locator('[data-index="0"]');
-    // Use mouse to drag
-    const box = await layer.boundingBox();
-    if (!box) throw new Error('no box');
-
-    await page.mouse.move(box.x + 300, box.y + 300);
-    await page.mouse.down();
-    await page.mouse.move(box.x + 450, box.y + 450);
-    await page.mouse.up();
+    // Use the text finder so the test is independent of viewport geometry and
+    // also proves the search-to-mark path produces a correctly-sized region.
+    await page.getByLabel('Find and mark text').fill('Line 1 of body text on page 1.');
+    await page.getByRole('button', { name: 'Mark every occurrence' }).click();
+    await expect(page.getByText('Marks (1)')).toBeVisible();
 
     await page.getByRole('button', { name: 'Verify & apply' }).click();
     // Wait for the success notification
@@ -521,8 +611,10 @@ test.describe('tool flows', () => {
 
     await gotoTool(page, 'organize');
     const bytes = await commitAndRead(page, 'Export PDF');
-    const digests = await contentDigests(bytes);
-    expect(digests.length).toBe(6);
+    const output = await PDFDocument.load(bytes);
+    expect(await drawnText(bytes)).not.toContain('Line 1 of body text on page 1.');
+    expect(await drawnText(bytes)).toContain('Line 2 of body text on page 1.');
+    expect(output.getPageCount()).toBe(6);
   });
 
   test('cleanup: applying b&w preset alters the page', async ({ page }) => {
@@ -532,11 +624,23 @@ test.describe('tool flows', () => {
     await gotoTool(page, 'cleanup');
 
     await page.getByRole('radio', { name: 'B&W document' }).check();
+    await page.getByRole('button', { name: 'Apply to this page' }).click();
+    await expect(page.getByText('Page cleaned.')).toBeVisible({ timeout: 30_000 });
 
     const bytes = await commitAndRead(page, 'Apply & export');
-    const digests = await contentDigests(bytes);
-    // B&W re-renders everything, so the content digests should change.
-    expect(digests.length).toBe(1);
+    // Cleanup must rasterize the page; preserving the source text would mean the
+    // preview was never applied. Reload and inspect a photo pixel as well: B&W
+    // output has equal RGB channels rather than merely a different PDF stream.
+    expect(await drawnText(bytes)).not.toContain('Mixed text and image');
+    await openApp(page);
+    await page.locator('input[type="file"]').setInputFiles({
+      name: 'cleaned.pdf',
+      mimeType: 'application/pdf',
+      buffer: Buffer.from(bytes)
+    });
+    await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
+    const [pixel] = await samplePage(page, [[0.5, 0.6]]);
+    expect(Math.max(...pixel.slice(0, 3)) - Math.min(...pixel.slice(0, 3))).toBeLessThanOrEqual(2);
   });
 
   test('a corrupt file is refused with a reason and does not break the tab', async ({ page }) => {
@@ -566,8 +670,10 @@ test.describe('tool flows', () => {
     await page.mouse.up();
 
     const result = await commitAndRead(page, /Export PDF/i);
-    expect(result.length).toBeGreaterThan(0);
-    // Could parse PDF to verify crop box, but size check is enough for now.
+    const output = await PDFDocument.load(result);
+    const cropBox = output.getPage(0).getCropBox();
+    expect(cropBox.width).toBeLessThan(output.getPage(0).getWidth());
+    expect(cropBox.height).toBeLessThan(output.getPage(0).getHeight());
   });
 
   test('watermark: adding a watermark and exporting embeds the text', async ({ page }) => {
@@ -582,10 +688,12 @@ test.describe('tool flows', () => {
     await page.getByLabel('Position').selectOption('bottom-center');
 
     const bytes = await commitAndRead(page, /Export PDF/i);
-    const digests = await contentDigests(bytes);
+    const output = await PDFDocument.load(bytes);
 
-    // Since we watermark all pages, every digest should be different from the original untouched pages.
-    expect(digests.length).toBe(6);
+    // The former assertion only proved that the export still had six pages. This
+    // reads the actual content stream, so it fails if the watermark is ignored.
+    expect(await drawnText(bytes)).toContain('CONFIDENTIAL TEST');
+    expect(output.getPageCount()).toBe(6);
   });
 
   test('nup: generates a 2-up layout', async ({ page }) => {
@@ -595,7 +703,7 @@ test.describe('tool flows', () => {
 
     // Select 2-up
     await page.getByLabel('Layout', { exact: true }).selectOption('2-up');
-    
+
     // Select draw borders
     await page.getByLabel(/Draw borders/i).check();
 
@@ -612,7 +720,7 @@ test.describe('tool flows', () => {
     await gotoTool(page, 'nup');
 
     await page.getByLabel('Layout', { exact: true }).selectOption('booklet');
-    
+
     const result = await commitAndRead(page, /Export layout/i);
     expect(result.length).toBeGreaterThan(0);
     const doc = await PDFDocument.load(result);

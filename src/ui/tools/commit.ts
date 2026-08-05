@@ -36,7 +36,8 @@ import type { ToolId } from '../../core/tools';
 import { compressSettings } from './compress/state';
 import { pdfToImageSettings, removeBlanksThreshold, splitSettings } from './state';
 import { extractSettings } from './extract/state';
-import { formValues } from './sign/state';
+import { formFields, formValues } from './sign/state';
+import { XFA_MESSAGE } from '../../core/pdf/xfa';
 import { pendingRedactions, redactionReport } from './redact/state';
 import { scrubSettings } from './metadata/state';
 import { renderWorker } from '../../core/workers';
@@ -92,8 +93,12 @@ type CommitHandler = (context: CommitContext) => Promise<void>;
 import { cropBoxes } from './crop/state';
 import { watermarkSettings } from './watermark/state';
 import { nupSettings } from './nup/state';
-import { normalizeSettings } from './normalize/state';
 
+// Normalize is deliberately not read here: it is its own tool, applied only via
+// `currentDocumentBytes(job, true)` in its own handler below. Reading the global
+// `normalizeSettings` signal in every tool's export was OPS-09 — it silently
+// resized pages on merge/organize/crop/watermark/etc. once the Normalize panel
+// had ever been opened, since the signal defaults to non-null on first mount.
 const exportComposed: CommitHandler = async ({ doc, job }) => {
   const bytes = await composeDocument(
     {
@@ -101,8 +106,7 @@ const exportComposed: CommitHandler = async ({ doc, job }) => {
       annotations: doc.annotations,
       cropBoxes: cropBoxes.value,
       watermark: watermarkSettings.value,
-      nup: nupSettings.value,
-      normalize: normalizeSettings.value
+      nup: nupSettings.value
     },
     job
   );
@@ -247,6 +251,25 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       });
       return;
     }
+
+    if (hasValues && formFields.value?.isXfa) {
+      // Belt and braces: the overlay never renders fields for an XFA form, so
+      // there should be no values — but if any exist, filling them would write to
+      // shadow fields the viewer ignores. Refuse before anything is written.
+      notify('danger', 'This is an XFA form — nothing was saved.', {
+        detail: XFA_MESSAGE,
+        timeout: 0
+      });
+      return;
+    }
+
+    // Order matters, and it is the reason SGN-03 lost data. `composeDocument`
+    // rebuilds the document with `copyPages`, which does not carry the catalog's
+    // /AcroForm; filling the *source* bytes first therefore had its /V values
+    // dropped by the compose that followed. Values are written into the final
+    // composed document, and `composePages` rebuilds /AcroForm on it so the
+    // fields are there to write to. `fillFormFields` now throws if a name is
+    // missing, so a regression here fails loudly instead of saving a blank form.
     let bytes = await composeDocument({ pages: doc.pages, annotations: doc.annotations }, job);
     if (hasValues) {
       bytes = await fillFormFields(bytes, formValues.value, true);
@@ -255,7 +278,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   },
 
   normalize: async ({ doc, job }) => {
-    const bytes = await currentDocumentBytes(job);
+    const bytes = await currentDocumentBytes(job, true);
     await save(doc, bytes, `${stem(doc.name)}-normalized.pdf`);
   },
 

@@ -1,4 +1,5 @@
 import { cropBoxes } from '../ui/tools/crop/state';
+import { commit } from './history';
 /**
  * Tool operations, orchestrated on the main thread but executed in workers.
  *
@@ -571,9 +572,20 @@ export async function pagesToImageArchive(
 import { normalizeSettings } from '../ui/tools/normalize/state';
 import { nupSettings } from '../ui/tools/nup/state';
 
-export async function currentDocumentBytes(options: JobOptions = {}): Promise<Uint8Array> {
+/**
+ * `applyNormalize` is only true for the normalize tool's own export — every other
+ * caller (redact, compress, split, metadata) must ignore `normalizeSettings`
+ * entirely, or visiting the Normalize panel once would silently resize pages on
+ * every other tool's export from then on (OPS-09).
+ */
+export async function currentDocumentBytes(
+  options: JobOptions = {},
+  applyNormalize = false
+): Promise<Uint8Array> {
   const doc = activeDoc.value;
   if (!doc) throw internal('No document is open.');
+
+  const normalize = applyNormalize ? normalizeSettings.value : null;
 
   const untouched =
     doc.annotations.length === 0 &&
@@ -584,7 +596,8 @@ export async function currentDocumentBytes(options: JobOptions = {}): Promise<Ui
       Object.values(sources.value).find(s => s.id === doc.pages[0].sourceDocId)?.pageCount &&
     doc.pages.every((p, i) => p.sourceIndex === i && p.rotation === 0) &&
     Object.keys(cropBoxes.value).length === 0 &&
-    !watermarkSettings.value?.text;
+    !watermarkSettings.value?.text &&
+    !normalize;
   if (untouched) {
     const single = Object.values(sources.value).find(s => s.id === doc.pages[0].sourceDocId);
     if (single) return single.bytes;
@@ -596,7 +609,7 @@ export async function currentDocumentBytes(options: JobOptions = {}): Promise<Ui
       annotations: doc.annotations,
       cropBoxes: cropBoxes.value,
       watermark: watermarkSettings.value,
-      normalize: normalizeSettings.value,
+      normalize,
       nup: nupSettings.value
     },
     options
@@ -686,5 +699,6 @@ export async function autoTrimDocument(
     }
   }
 
+  commit();
   cropBoxes.value = { ...cropBoxes.value, ...updates };
 }

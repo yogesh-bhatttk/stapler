@@ -18,6 +18,7 @@
  * {@link commit}.
  */
 import { activeDocId, documents, selectedPageKeys, type StaplerDoc } from './store';
+import { cropBoxes, type CropBox } from '../ui/tools/crop/state';
 
 const MAX_DEPTH = 50;
 
@@ -25,6 +26,7 @@ interface Snapshot {
   docs: StaplerDoc[];
   activeId: string | null;
   selection: Set<string>;
+  cropBoxes: Record<string, CropBox>;
 }
 
 let undoStack: Snapshot[] = [];
@@ -37,7 +39,8 @@ function snapshot(): Snapshot {
   return {
     docs: documents.value,
     activeId: activeDocId.value,
-    selection: new Set(selectedPageKeys.value)
+    selection: new Set(selectedPageKeys.value),
+    cropBoxes: cropBoxes.value
   };
 }
 
@@ -51,6 +54,7 @@ function restore(state: Snapshot) {
   documents.value = state.docs;
   activeDocId.value = state.activeId;
   selectedPageKeys.value = new Set(state.selection);
+  cropBoxes.value = state.cropBoxes;
 }
 
 /**

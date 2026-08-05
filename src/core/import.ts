@@ -13,6 +13,7 @@ import { createJobHandle, type JobOptions } from './workers/protocol';
 import { corrupt, fromUnknown, unsupported } from './errors';
 import { makePageRefs, registerSource, type PageRef, type SourceDocument } from './store';
 import { imageFileToJpeg, isSupportedImage } from './image';
+import { hasXfaMarker, XFA_MESSAGE } from './pdf/xfa';
 
 /** Warn rather than refuse — the plan has no size limit, only a warning (§5.1). */
 export const LARGE_FILE_BYTES = 100 * 1024 * 1024;
@@ -58,6 +59,13 @@ async function importPdf(file: File, options: JobOptions): Promise<ImportedFile>
   }
 
   const warnings: string[] = [];
+
+  // SGN-03: XFA is decided here, on the raw bytes, before pdf.js or pdf-lib gets a
+  // say. Both parsers answer a narrower question than "is this an XFA form" — see
+  // `core/pdf/xfa.ts` — and both answer it only after a parse that may have
+  // dropped the evidence.
+  const rawXfa = hasXfaMarker(bytes);
+
   if (bytes.length > LARGE_FILE_BYTES) {
     warnings.push(
       `${(bytes.length / 1024 / 1024).toFixed(0)}MB is a large document — operations on it will be slower.`
@@ -69,15 +77,13 @@ async function importPdf(file: File, options: JobOptions): Promise<ImportedFile>
   const info = await renderWorker.lease(api => api.loadDocument(bytes));
   try {
     if (info.pageCount === 0) throw corrupt('The document contains no pages.');
-    if (info.isXfa) {
-      warnings.push(
-        'This is an XFA form. Its interactive fields cannot be filled — use the stamp ' +
-          'tools to place text and signatures on top instead.'
-      );
-    }
+    const isXfa = rawXfa || info.isXfa;
+    if (isXfa) warnings.push(XFA_MESSAGE);
 
     const facts = await processWorker.lease(api => api.inspect(bytes));
-    if (facts.hasAcroForm) {
+    // An XFA document's AcroForm shadow fields are not fillable, so they are never
+    // advertised as such — offering them is how the fill path got entered at all.
+    if (facts.hasAcroForm && !isXfa) {
       warnings.push(`Contains ${facts.fieldCount} fillable form field(s).`);
     }
 

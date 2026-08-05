@@ -5,7 +5,16 @@ export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    ignores: ['.claude/**', 'dist/**', 'scripts/**', 'tests/fixtures/**', 'playwright-report/**']
+    // `.scratch/` is throwaway probe scripts, not shipped code — linting it only ever
+    // fails the build on a file nobody intends to keep.
+    ignores: [
+      '.claude/**',
+      '.scratch/**',
+      'dist/**',
+      'scripts/**',
+      'tests/fixtures/**',
+      'playwright-report/**'
+    ]
   },
   {
     // F-04: the layer boundary. `core/` and `ui/` reach the platform only through the

@@ -15,6 +15,12 @@ function run(cmd, tool) {
   }
 }
 
+/** US Letter. Every raw Page dict must carry one: /MediaBox is a required Page attribute,
+ *  and pdf-lib's `page.getSize()` throws ("Expected instance of PDFArray") rather than
+ *  defaulting when it is absent from both the Page and its Pages ancestry — which crashed
+ *  CMP-01's classifier on these fixtures instead of routing/skipping the page. */
+const MEDIA_BOX = '/MediaBox [ 0 0 612 792 ]';
+
 /**
  * Hand-built minimal PDFs for filter/structure detection fixtures. These declare the
  * relevant filter or dictionary key but carry no real decodable payload — sufficient for
@@ -23,6 +29,14 @@ function run(cmd, tool) {
  * stream without a specialised library, and none is worth adding for a skip-path test.
  */
 function createRawPdf(name, objects) {
+  // Guard so a future stub cannot reintroduce a MediaBox-less page: catch it at generation
+  // time here, rather than as an unhandled throw deep inside the classifier.
+  for (const obj of objects) {
+    if (/\/Type\s*\/Page(?![s\w])/.test(obj) && !obj.includes('/MediaBox')) {
+      throw new Error(`Raw fixture "${name}" has a /Type /Page object with no /MediaBox: ${obj}`);
+    }
+  }
+
   const file = path.join(FIXTURES_DIR, name);
   if (existsSync(file)) return;
   const header = '%PDF-1.7\n%\xe2\xe3\xcf\xd3\n';
@@ -51,7 +65,7 @@ function generateRawStubs() {
   createRawPdf('jpx.pdf', [
     '<< /Type /Catalog /Pages 2 0 R >>',
     '<< /Type /Pages /Count 1 /Kids [ 3 0 R ] >>',
-    '<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Im1 4 0 R >> >> >>',
+    `<< /Type /Page /Parent 2 0 R ${MEDIA_BOX} /Resources << /XObject << /Im1 4 0 R >> >> >>`,
     '<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /JPXDecode /Length 0 >> stream\nendstream'
   ]);
 
@@ -59,7 +73,7 @@ function generateRawStubs() {
   createRawPdf('jbig2.pdf', [
     '<< /Type /Catalog /Pages 2 0 R >>',
     '<< /Type /Pages /Count 1 /Kids [ 3 0 R ] >>',
-    '<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Im1 4 0 R >> >> >>',
+    `<< /Type /Page /Parent 2 0 R ${MEDIA_BOX} /Resources << /XObject << /Im1 4 0 R >> >> >>`,
     '<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /JBIG2Decode /Length 0 >> stream\nendstream'
   ]);
 
@@ -68,7 +82,7 @@ function generateRawStubs() {
   createRawPdf('xfa.pdf', [
     '<< /Type /Catalog /Pages 2 0 R /AcroForm << /XFA [ (template) 4 0 R ] >> >>',
     '<< /Type /Pages /Count 1 /Kids [ 3 0 R ] >>',
-    '<< /Type /Page /Parent 2 0 R >>',
+    `<< /Type /Page /Parent 2 0 R ${MEDIA_BOX} >>`,
     '<< /Length 10 >> stream\n<xfa/>\nendstream'
   ]);
 
@@ -78,7 +92,7 @@ function generateRawStubs() {
   createRawPdf('cjk.pdf', [
     '<< /Type /Catalog /Pages 2 0 R >>',
     '<< /Type /Pages /Count 1 /Kids [ 3 0 R ] >>',
-    '<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+    `<< /Type /Page /Parent 2 0 R ${MEDIA_BOX} /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>`,
     '<< /Type /Font /Subtype /Type0 /BaseFont /HeiseiMin-W3 /Encoding /UniJIS-UTF16-H /DescendantFonts [ 6 0 R ] >>',
     '<< /Length 29 >> stream\nBT /F1 12 Tf <4E2D6587> Tj ET\nendstream',
     '<< /Type /Font /Subtype /CIDFontType0 /BaseFont /HeiseiMin-W3 /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 2 >> >>'
@@ -89,7 +103,7 @@ function generateRawStubs() {
   createRawPdf('rtl.pdf', [
     '<< /Type /Catalog /Pages 2 0 R >>',
     '<< /Type /Pages /Count 1 /Kids [ 3 0 R ] >>',
-    '<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+    `<< /Type /Page /Parent 2 0 R ${MEDIA_BOX} /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>`,
     '<< /Type /Font /Subtype /Type0 /BaseFont /Arial /Encoding /Identity-H /DescendantFonts [ 6 0 R ] >>',
     '<< /Length 29 >> stream\nBT /F1 12 Tf <06450631> Tj ET\nendstream',
     '<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Arial /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> >>'

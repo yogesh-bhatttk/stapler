@@ -66,6 +66,12 @@ git-ignored — deterministic, so re-running tests reproduces them identically:
 - `shared-image.pdf` — the same image on ten text pages (`sharedImagePdf`). **Must not
   regress:** the output holds exactly one image object, referenced from all ten pages.
 
+- `acroform.pdf` — a fillable text field with a hierarchical name (`name.first`) and a
+  checkbox (`acroformPdf`). The hierarchy is the point: pdf-lib joins the `/T` of every node
+  to name a field, so a two-level name is what catches a `/AcroForm` rebuild that dedupes
+  only at the tree root. **Must not regress:** after an export the field is still enumerable
+  and its typed value is drawn into the page, on every page it appears on (`SGN-03`).
+
 `tests/e2e/fixtures.ts` also exports `largePdf` (300 pages), `rotatedPdf` (90/180/270°
 pages), `acroformPdf` (fillable text field + checkbox), and `corruptPdf` (truncated PDF) —
 each written under the fixture name passed to `ensureFixture` by the test that needs it,

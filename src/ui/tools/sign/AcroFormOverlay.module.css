@@ -3,6 +3,13 @@
   top: 0;
   left: 0;
   pointer-events: none; /* Let clicks pass through empty areas */
+  /* The annotation (stamp) layer is a later sibling covering the whole page with
+     `inset: 0`, so with both at `z-index: auto` it painted on top and swallowed
+     every click meant for a form input — the fields rendered but could not be
+     typed into. This layer is only pointer-transparent where there is no field,
+     so lifting it above the stamp layer keeps stamp placement working everywhere
+     else. */
+  z-index: 2;
 }
 
 .field {

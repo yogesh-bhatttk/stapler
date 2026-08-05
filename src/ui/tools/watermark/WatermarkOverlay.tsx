@@ -1,5 +1,5 @@
 import { watermarkSettings } from './state';
-import { activeDoc } from '../../../core/store';
+import { activeDoc, sources } from '../../../core/store';
 import styles from './WatermarkOverlay.module.css';
 
 export interface WatermarkOverlayProps {
@@ -8,14 +8,20 @@ export interface WatermarkOverlayProps {
   height: number;
 }
 
-export function WatermarkOverlay({ pageIndex }: WatermarkOverlayProps) {
+export function WatermarkOverlay({ pageIndex, width }: WatermarkOverlayProps) {
   const doc = activeDoc.value;
   const settings = watermarkSettings.value;
   if (!doc || !settings.text) return null;
 
+  const page = doc.pages[pageIndex];
+  const pageWidth = page
+    ? sources.value[page.sourceDocId]?.pageSizes[page.sourceIndex]?.width
+    : undefined;
+  const scale = pageWidth ? width / pageWidth : 1;
+
   const totalPages = doc.pages.length;
   const displayText = settings.text
-    .replace(/{n}/g, String(pageIndex + 1))
+    .replace(/{n}/g, String(settings.startAt + pageIndex))
     .replace(/{total}/g, String(totalPages));
 
   const [vertical, horizontal] = settings.position.split('-');
@@ -23,13 +29,19 @@ export function WatermarkOverlay({ pageIndex }: WatermarkOverlayProps) {
   const hAlign =
     horizontal === 'left' ? 'flex-start' : horizontal === 'right' ? 'flex-end' : 'center';
 
-  // Calculate CSS scale based on a reference width of 8.5 * 72 = 612 units
-  // so that the preview matches the physical pdf roughly.
-  // Actually, we can just use the provided width. The page in SinglePageView is scaled.
-  // But wait, the font size is in physical points.
-  // We can't perfectly match PDF units if the canvas is zoomed, but let's assume
-  // the overlay container is exactly the physical width, or scaled?
-  // Usually, the overlay container scales with the page.
+  const inRange = (() => {
+    const value = settings.pageRange.trim().toLowerCase();
+    if (!value || value === 'all') return true;
+    return value.split(',').some(part => {
+      const match = part.trim().match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+      if (!match) return false;
+      const from = Number(match[1]);
+      const to = Number(match[2] ?? match[1]);
+      const current = pageIndex + 1;
+      return current >= Math.min(from, to) && current <= Math.max(from, to);
+    });
+  })();
+  if (!inRange) return null;
 
   return (
     <div
@@ -37,7 +49,7 @@ export function WatermarkOverlay({ pageIndex }: WatermarkOverlayProps) {
       style={{
         alignItems: hAlign,
         justifyContent: vAlign,
-        padding: '36px' // 0.5 inch padding
+        padding: `${Math.max(12, Math.round(36 * scale))}px`
       }}
     >
       <div
@@ -46,7 +58,7 @@ export function WatermarkOverlay({ pageIndex }: WatermarkOverlayProps) {
           opacity: settings.opacity,
           color: settings.color,
           transform: `rotate(${settings.rotation}deg)`,
-          fontSize: `${settings.fontSize}px`,
+          fontSize: `${Math.max(8, settings.fontSize * scale)}px`,
           whiteSpace: 'pre-wrap',
           textAlign: hAlign === 'flex-start' ? 'left' : hAlign === 'flex-end' ? 'right' : 'center'
         }}

@@ -1,5 +1,6 @@
 import { useRef, useState } from 'preact/hooks';
 import type { PageRef } from '../../../core/store';
+import { commit } from '../../../core/history';
 import { cropBoxes } from './state';
 import styles from './CropOverlay.module.css';
 
@@ -62,6 +63,7 @@ export function CropOverlay({ page, width, height }: CropOverlayProps) {
         if (!draft) return;
         const rect = getRect(draft);
         setDraft(null);
+        commit();
         if (rect.width < MIN_SIZE || rect.height < MIN_SIZE) {
           // If they just clicked, clear the crop box
           const next = { ...cropBoxes.value };

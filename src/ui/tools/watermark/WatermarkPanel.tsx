@@ -58,6 +58,33 @@ export function WatermarkPanel() {
         )}
       </Field>
 
+      <Field label="Pages" hint="All pages, or a list such as 1-3, 6.">
+        {id => (
+          <input
+            id={id}
+            type="text"
+            value={settings.pageRange}
+            onInput={e => update({ pageRange: e.currentTarget.value })}
+            placeholder="all"
+            className={styles.input}
+          />
+        )}
+      </Field>
+
+      <Field label="Start page number">
+        {id => (
+          <input
+            id={id}
+            type="number"
+            min="1"
+            step="1"
+            value={settings.startAt}
+            onInput={e => update({ startAt: Math.max(1, Number(e.currentTarget.value) || 1) })}
+            className={styles.input}
+          />
+        )}
+      </Field>
+
       <Field label={`Opacity (${Math.round(settings.opacity * 100)}%)`}>
         {id => (
           <input

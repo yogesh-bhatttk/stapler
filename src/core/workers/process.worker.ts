@@ -5,6 +5,8 @@ export interface WatermarkData {
   rotation: number;
   fontSize: number;
   color: string;
+  startAt: number;
+  pageRange: string;
 }
 /**
  * The pdf-lib worker: everything that *writes* a PDF.
@@ -24,17 +26,26 @@ import * as Comlink from 'comlink';
 import {
   PDFArray,
   PDFBool,
+  PDFButton,
+  PDFCheckBox,
   PDFDict,
   PDFDocument,
+  PDFDropdown,
   PDFName,
   PDFNumber,
+  PDFObjectCopier,
+  PDFOptionList,
+  PDFRadioGroup,
   PDFRawStream,
   PDFRef,
+  PDFSignature,
   PDFStream,
+  PDFTextField,
   degrees,
   StandardFonts,
   rgb
 } from 'pdf-lib';
+import type { PDFField } from 'pdf-lib';
 import { zipSync } from 'fflate';
 import { checkpoint, type JobHandle } from './protocol';
 import { corrupt, encrypted, internal, unsupported } from '../errors';
@@ -48,6 +59,7 @@ import {
   decodeStream
 } from '../pdf/interpreter';
 import type { Rect } from '../pdf/interpreter';
+import { hasXfaMarker, XFA_MESSAGE } from '../pdf/xfa';
 
 /** A page in the output, pointing back at the bytes it came from. */
 export interface PageSource {
@@ -545,6 +557,263 @@ async function applyNUp(
   return finalDoc;
 }
 
+/* ------------------------------------------------------------------ *
+ * AcroForm survival across a compose (SGN-03)
+ * ------------------------------------------------------------------ */
+
+/** Keys that belong to the *field*, and are inherited by its widget kids. */
+const FIELD_KEYS = ['T', 'TU', 'TM', 'FT', 'Ff', 'V', 'DV', 'Q', 'MaxLen', 'Opt', 'AA'] as const;
+
+function acroFormDictOf(doc: PDFDocument): PDFDict | undefined {
+  return doc.catalog.lookupMaybe(PDFName.of('AcroForm'), PDFDict);
+}
+
+function textOf(value: unknown): string | undefined {
+  // PDFString and PDFHexString both expose decodeText(); neither is exported as a
+  // common base, so this is duck-typed rather than instanceof-checked.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const anyValue = value as any;
+  return typeof anyValue?.decodeText === 'function' ? String(anyValue.decodeText()) : undefined;
+}
+
+/** Walks /Parent to the top of a field chain, returning the outermost ref. */
+function fieldRootRef(doc: PDFDocument, widgetRef: PDFRef, widget: PDFDict): PDFRef {
+  let rootRef = widgetRef;
+  let dict = widget;
+  const seen = new Set<string>([widgetRef.toString()]);
+  for (;;) {
+    const parent = dict.get(PDFName.of('Parent'));
+    if (!(parent instanceof PDFRef) || seen.has(parent.toString())) return rootRef;
+    const parentDict = doc.context.lookupMaybe(parent, PDFDict);
+    if (!parentDict) return rootRef;
+    seen.add(parent.toString());
+    rootRef = parent;
+    dict = parentDict;
+  }
+}
+
+/**
+ * Makes `ref` a pure widget under a freshly created field parent, moving the
+ * inherited field keys up. Needed when two copies of the same field must become
+ * two widgets of one field: a field that has /Kids may not itself be a widget.
+ */
+function splitTerminalField(doc: PDFDocument, ref: PDFRef, dict: PDFDict): PDFRef {
+  const parent = doc.context.obj({}) as PDFDict;
+  for (const key of FIELD_KEYS) {
+    const name = PDFName.of(key);
+    const value = dict.get(name);
+    if (value === undefined) continue;
+    parent.set(name, value);
+    // /FT and /V must live on exactly one node or a viewer may read a stale copy.
+    dict.delete(name);
+  }
+  const parentRef = doc.context.register(parent);
+  parent.set(PDFName.of('Kids'), doc.context.obj([ref]) as PDFArray);
+  dict.set(PDFName.of('Parent'), parentRef);
+  return parentRef;
+}
+
+/**
+ * The *field* kids of a field node. A field node's `/Kids` may hold either child
+ * fields or widget annotations; a child field carries `/T` (its partial name),
+ * a widget does not.
+ */
+function childFieldsOf(
+  doc: PDFDocument,
+  dict: PDFDict
+): { ref: PDFRef; dict: PDFDict; name: string }[] {
+  const kids = dict.lookupMaybe(PDFName.of('Kids'), PDFArray);
+  if (!kids) return [];
+  const out: { ref: PDFRef; dict: PDFDict; name: string }[] = [];
+  for (let i = 0; i < kids.size(); i++) {
+    const ref = kids.get(i);
+    if (!(ref instanceof PDFRef)) continue;
+    const kid = doc.context.lookupMaybe(ref, PDFDict);
+    if (!kid) continue;
+    const name = textOf(kid.get(PDFName.of('T')));
+    if (name === undefined) continue; // a widget, not a field
+    out.push({ ref, dict: kid, name });
+  }
+  return out;
+}
+
+/** Ensures `ref`/`dict` is a node that can host `/Kids`, returning the host ref. */
+function hostForKids(doc: PDFDocument, ref: PDFRef, dict: PDFDict): PDFRef {
+  if (dict.lookupMaybe(PDFName.of('Kids'), PDFArray)) return ref;
+  // A dict that is both field and widget cannot take kids; split it so the field
+  // half can. Otherwise it is simply a field with no kids yet.
+  if (nameOf(dict.get(PDFName.of('Subtype'))) === 'Widget') {
+    return splitTerminalField(doc, ref, dict);
+  }
+  dict.set(PDFName.of('Kids'), doc.context.obj([]) as PDFArray);
+  return ref;
+}
+
+/**
+ * Merges `dupRef` into `keepRef` — two field nodes at the same depth carrying the
+ * same partial name, so by definition the same field.
+ *
+ * Moving every kid across in one step is not enough, and that shortcut is how a
+ * hierarchical field name survived a compose twice. pdf-lib names a field by
+ * joining the `/T` of every node from the root down, so `name.first` is two nodes
+ * deep. Deduping only at the root leaves one `name` node with two `first` kids —
+ * two terminal fields with an identical fully-qualified name, which is exactly the
+ * state where filling by name reaches one of them and drops the other's value
+ * without saying so. The merge therefore recurses to the terminal node, where the
+ * two nodes' widget annotations finally combine into one field with two widgets.
+ */
+function mergeFieldNode(doc: PDFDocument, keepRef: PDFRef, dupRef: PDFRef): void {
+  const keep = doc.context.lookupMaybe(keepRef, PDFDict);
+  const dup = doc.context.lookupMaybe(dupRef, PDFDict);
+  if (!keep || !dup) return;
+
+  const dupChildren = childFieldsOf(doc, dup);
+  if (dupChildren.length === 0) {
+    mergeTerminalWidgets(doc, keepRef, dupRef);
+    return;
+  }
+
+  const byName = new Map<string, PDFRef>();
+  for (const child of childFieldsOf(doc, keep)) byName.set(child.name, child.ref);
+
+  const hostRef = hostForKids(doc, keepRef, keep);
+  const host = doc.context.lookup(hostRef, PDFDict);
+  const hostKids = host.lookupMaybe(PDFName.of('Kids'), PDFArray);
+  if (!hostKids) return;
+
+  for (const child of dupChildren) {
+    const existing = byName.get(child.name);
+    if (existing) {
+      mergeFieldNode(doc, existing, child.ref);
+      continue;
+    }
+    hostKids.push(child.ref);
+    child.dict.set(PDFName.of('Parent'), hostRef);
+    byName.set(child.name, child.ref);
+  }
+}
+
+/** Moves every widget under `dupRef`'s terminal field into `keepRef`'s field. */
+function mergeTerminalWidgets(doc: PDFDocument, keepRef: PDFRef, dupRef: PDFRef): void {
+  const keep = doc.context.lookupMaybe(keepRef, PDFDict);
+  const dup = doc.context.lookupMaybe(dupRef, PDFDict);
+  if (!keep || !dup) return;
+
+  const kidsToMove: PDFRef[] = [];
+  const dupKids = dup.lookupMaybe(PDFName.of('Kids'), PDFArray);
+  if (dupKids) {
+    for (let i = 0; i < dupKids.size(); i++) {
+      const kid = dupKids.get(i);
+      if (kid instanceof PDFRef) kidsToMove.push(kid);
+    }
+  } else {
+    // The duplicate is a merged field+widget dict: it becomes a widget kid, so
+    // the field keys it carries must not stay behind to shadow the survivor's.
+    for (const key of FIELD_KEYS) dup.delete(PDFName.of(key));
+    kidsToMove.push(dupRef);
+  }
+  if (kidsToMove.length === 0) return;
+
+  let keepKids = keep.lookupMaybe(PDFName.of('Kids'), PDFArray);
+  if (!keepKids) {
+    // The survivor is a merged field+widget dict too, so it cannot host kids.
+    const splitRef = splitTerminalField(doc, keepRef, keep);
+    const split = doc.context.lookup(splitRef, PDFDict);
+    keepKids = split.lookupMaybe(PDFName.of('Kids'), PDFArray);
+    if (!keepKids) return;
+    keepRef = splitRef;
+  }
+  for (const kid of kidsToMove) {
+    keepKids.push(kid);
+    doc.context.lookupMaybe(kid, PDFDict)?.set(PDFName.of('Parent'), keepRef);
+  }
+}
+
+/**
+ * Rebuilds `/AcroForm` on a composed document.
+ *
+ * `copyPages` copies each page's `/Annots`, so widget annotations and their
+ * `/Parent` field dicts do survive a compose — but `/AcroForm` lives in the
+ * *catalog*, which is not copied, and every copied widget's `/P` still points at
+ * the source page object. The result is a document whose fields are invisible to
+ * every consumer: `getForm().getFields()` returns `[]`, so filling it afterwards
+ * matched nothing and threw the user's typed values away while reporting success.
+ * That is the SGN-03 data-loss bug.
+ *
+ * This walks the composed pages, re-points each widget's `/P`, collects the field
+ * roots into a fresh `/Fields`, and copies the source form's `/DA`/`/DR` across so
+ * appearance generation still has its default font resources.
+ *
+ * XFA is never carried: a composed document is a new page tree, and the XML
+ * payload's page references would no longer mean anything. Callers detect XFA up
+ * front and refuse (see `core/pdf/xfa.ts`), so reaching here with one is already
+ * a refusal path.
+ */
+function reattachAcroForm(outDoc: PDFDocument, contributors: PDFDocument[]): void {
+  const fields: PDFRef[] = [];
+  const seenRoots = new Set<string>();
+  const rootByName = new Map<string, PDFRef>();
+
+  for (const page of outDoc.getPages()) {
+    const annots = page.node.Annots();
+    if (!annots) continue;
+    for (let i = 0; i < annots.size(); i++) {
+      const ref = annots.get(i);
+      if (!(ref instanceof PDFRef)) continue;
+      const widget = outDoc.context.lookupMaybe(ref, PDFDict);
+      if (!widget) continue;
+      if (nameOf(widget.get(PDFName.of('Subtype'))) !== 'Widget') continue;
+
+      // /P survived the copy pointing at the *source* page object, which is not
+      // in the output page tree. Left alone, viewers and our own field-geometry
+      // lookup cannot tell which page a field is on.
+      widget.set(PDFName.of('P'), page.ref);
+
+      const rootRef = fieldRootRef(outDoc, ref, widget);
+      if (seenRoots.has(rootRef.toString())) continue;
+      const rootDict = outDoc.context.lookupMaybe(rootRef, PDFDict);
+      if (!rootDict) continue;
+
+      // pdf-lib builds a fresh object copier per `copyPages` call, so a field
+      // with widgets on two output pages arrives as two independent field dicts
+      // with the same name. Two same-named entries in /Fields is a form where
+      // filling by name reaches only one of them — merge them into one field.
+      const name = textOf(rootDict.get(PDFName.of('T')));
+      const existing = name === undefined ? undefined : rootByName.get(name);
+      if (existing) {
+        mergeFieldNode(outDoc, existing, rootRef);
+        seenRoots.add(rootRef.toString());
+        continue;
+      }
+
+      seenRoots.add(rootRef.toString());
+      if (name !== undefined) rootByName.set(name, rootRef);
+      fields.push(rootRef);
+    }
+  }
+
+  if (fields.length === 0) return;
+
+  const form = outDoc.context.obj({}) as PDFDict;
+  form.set(PDFName.of('Fields'), outDoc.context.obj(fields) as PDFArray);
+
+  // /DR (the default resource dictionary) is referenced only from /AcroForm, so
+  // it was never copied with the pages. Without it pdf-lib cannot resolve the
+  // font named in a field's /DA and appearance generation fails on flatten.
+  for (const contributor of contributors) {
+    const srcForm = acroFormDictOf(contributor);
+    if (!srcForm) continue;
+    const copier = PDFObjectCopier.for(contributor.context, outDoc.context);
+    for (const key of ['DA', 'DR', 'Q', 'NeedAppearances', 'SigFlags'] as const) {
+      const value = srcForm.get(PDFName.of(key));
+      if (value === undefined || form.get(PDFName.of(key)) !== undefined) continue;
+      form.set(PDFName.of(key), copier.copy(srcForm.lookup(PDFName.of(key))!));
+    }
+  }
+
+  outDoc.catalog.set(PDFName.of('AcroForm'), outDoc.context.register(form));
+}
+
 async function composePages(
   pages: PageSource[],
   sources: Record<string, Uint8Array>,
@@ -565,6 +834,8 @@ async function composePages(
     watermarkFont = await outDoc.embedStandardFont(StandardFonts.HelveticaBold);
   }
 
+  const watermarkPages = watermark ? parsePageRange(watermark.pageRange, pages.length) : null;
+
   const stampsByPage = new Map<string, StampSource[]>();
   for (const stamp of stamps) {
     const list = stampsByPage.get(stamp.pageKey);
@@ -572,11 +843,15 @@ async function composePages(
     else stampsByPage.set(stamp.pageKey, [stamp]);
   }
 
+  /** Every source document that contributed a page, for the /AcroForm rebuild. */
+  const contributors: PDFDocument[] = [];
+
   for (let i = 0; i < pages.length; i++) {
     const ref = pages[i];
     await checkpoint(job, i / pages.length, `${label} ${i + 1} of ${pages.length}`);
 
     const srcDoc = await getSource(ref.sourceDocId);
+    if (!contributors.includes(srcDoc)) contributors.push(srcDoc);
     if (ref.sourceIndex < 0 || ref.sourceIndex >= srcDoc.getPageCount()) {
       throw internal('A page refers to an index outside its source document', {
         sourceIndex: ref.sourceIndex,
@@ -652,10 +927,10 @@ async function composePages(
       copied.setCropBox(cropX, cropY, cropW, cropH);
     }
 
-    if (watermark?.text && watermarkFont) {
+    if (watermark?.text && watermarkFont && (watermarkPages === null || watermarkPages.has(i))) {
       const { width, height } = copied.getSize();
       const displayText = watermark.text
-        .replace(/{n}/g, String(i + 1))
+        .replace(/{n}/g, String(watermark.startAt + i))
         .replace(/{total}/g, String(pages.length));
 
       const textWidth = watermarkFont.widthOfTextAtSize(displayText, watermark.fontSize);
@@ -698,10 +973,39 @@ async function composePages(
   }
 
   if (nup) {
+    // N-up rebuilds every page as an embedded form XObject, so widgets no longer
+    // have a page of their own to sit on. Carrying /AcroForm there would point
+    // fields at pages that no longer exist — worse than losing them.
     return applyNUp(outDoc, nup, job);
   }
 
+  reattachAcroForm(outDoc, contributors);
   return outDoc;
+}
+
+/**
+ * Converts a user-facing 1-based page list into output page indexes. Invalid
+ * fragments are ignored: an empty/invalid list must not silently watermark every
+ * page, while ranges are clamped to the document that is actually being exported.
+ */
+function parsePageRange(value: string | undefined, pageCount: number): Set<number> | null {
+  if (!value || value.trim().toLowerCase() === 'all') return null;
+  const selected = new Set<number>();
+  for (const part of value.split(',')) {
+    const match = part.trim().match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+    if (!match) continue;
+    const from = Number(match[1]);
+    const to = Number(match[2] ?? match[1]);
+    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to)) continue;
+    for (
+      let page = Math.max(1, Math.min(from, to));
+      page <= Math.min(pageCount, Math.max(from, to));
+      page++
+    ) {
+      selected.add(page - 1);
+    }
+  }
+  return selected;
 }
 
 /* ------------------------------------------------------------------ *
@@ -737,6 +1041,24 @@ function maskKindOf(smask: PDFStream | undefined, mask: unknown): ImageFacts['ma
  * Metadata (RED-04)
  * ------------------------------------------------------------------ */
 
+/**
+ * Names a field kind for a user-facing message.
+ *
+ * Deliberately a lookup against pdf-lib's exported classes rather than
+ * `field.constructor.name`. That property was how the whole form path used to
+ * identify a field, and it is empty of meaning in a production build: the bundler
+ * renames the class, so `constructor.name` is a mangled identifier that matches no
+ * expected string. Every field therefore came back `Unknown` — the overlay drew a
+ * box reading "Unsupported" over each one and nothing could be typed into it, and
+ * a fill would have refused every field. It worked in tests and in dev only
+ * because neither minifies. `instanceof` survives minification.
+ */
+function describeFieldKind(field: PDFField): string {
+  if (field instanceof PDFSignature) return 'a signature field';
+  if (field instanceof PDFButton) return 'a button';
+  return 'an unrecognised field type';
+}
+
 const JS_KEYS = ['JavaScript', 'JS'] as const;
 
 function catalogHas(doc: PDFDocument, key: string): boolean {
@@ -753,7 +1075,9 @@ const api: ProcessJob = {
     // the one place encryption is tolerated — read-only, and reported.
     const doc = await load(bytes, true);
     const form = doc.getForm();
-    const isXfa = form.hasXFA();
+    // Raw-byte evidence first: see `core/pdf/xfa.ts` for why the parsed answer
+    // alone lets hybrid XFA forms through as ordinary AcroForms.
+    const isXfa = hasXfaMarker(bytes) || form.hasXFA();
     return {
       pageCount: doc.getPageCount(),
       isXfa,
@@ -817,6 +1141,10 @@ const api: ProcessJob = {
   },
 
   async getFormFields(bytes) {
+    // Checked before the parse, and before any field is reported: enumerating an
+    // XFA form's shadow fields is what led the UI to offer them as fillable.
+    if (hasXfaMarker(bytes)) return { isXfa: true, fields: [] };
+
     const doc = await load(bytes, true);
     const form = doc.getForm();
     if (form.hasXFA()) return { isXfa: true, fields: [] };
@@ -825,33 +1153,28 @@ const api: ProcessJob = {
     const fields: FormFieldData[] = [];
 
     for (const field of form.getFields()) {
-      const kind = field.constructor.name;
       let type: FormFieldData['type'] = 'Unknown';
       let value: string | string[] | boolean = '';
       let options: string[] | undefined;
 
-      // pdf-lib exposes value accessors only on the subclasses, and its exported
-      // union type does not narrow by constructor name.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const anyField = field as any;
-      if (kind === 'PDFTextField') {
+      if (field instanceof PDFTextField) {
         type = 'TextField';
-        value = anyField.getText() ?? '';
-      } else if (kind === 'PDFCheckBox') {
+        value = field.getText() ?? '';
+      } else if (field instanceof PDFCheckBox) {
         type = 'CheckBox';
-        value = anyField.isChecked();
-      } else if (kind === 'PDFRadioGroup') {
+        value = field.isChecked();
+      } else if (field instanceof PDFRadioGroup) {
         type = 'RadioGroup';
-        value = anyField.getSelected() ?? '';
-        options = anyField.getOptions();
-      } else if (kind === 'PDFDropdown') {
+        value = field.getSelected() ?? '';
+        options = field.getOptions();
+      } else if (field instanceof PDFDropdown) {
         type = 'Dropdown';
-        value = anyField.getSelected() ?? [];
-        options = anyField.getOptions();
-      } else if (kind === 'PDFOptionList') {
+        value = field.getSelected() ?? [];
+        options = field.getOptions();
+      } else if (field instanceof PDFOptionList) {
         type = 'OptionList';
-        value = anyField.getSelected() ?? [];
-        options = anyField.getOptions();
+        value = field.getSelected() ?? [];
+        options = field.getOptions();
       }
 
       const rects: FormFieldData['rects'] = [];
@@ -884,32 +1207,66 @@ const api: ProcessJob = {
   },
 
   async fillFormFields(bytes, values, flatten) {
+    // XFA is checked on the raw bytes *first*: a hybrid form answers `false` to
+    // every parsed check while its real fields live in XML we cannot write.
+    if (hasXfaMarker(bytes)) throw unsupported(XFA_MESSAGE);
+
     const doc = await load(bytes);
     const form = doc.getForm();
-    if (form.hasXFA()) {
-      throw unsupported(
-        'This is an XFA form. Its fields live in an XML payload that pdf-lib cannot ' +
-          'fill. Use the stamp tools to place text and signatures on top instead.'
-      );
-    }
+    if (form.hasXFA()) throw unsupported(XFA_MESSAGE);
+
+    // A name we were asked to fill but cannot find is silent data loss: the user
+    // typed a value, the export "succeeded", and the value is nowhere in the
+    // output. Collect them and refuse rather than saving a lie.
+    const missing: string[] = [];
+    const unsupportedKinds: string[] = [];
 
     for (const [name, value] of Object.entries(values)) {
       const field = form.getFieldMaybe(name);
-      if (!field) continue;
-      const kind = field.constructor.name;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const anyField = field as any;
-      if (kind === 'PDFTextField') anyField.setText(String(value));
-      else if (kind === 'PDFCheckBox') {
-        if (value) anyField.check();
-        else anyField.uncheck();
-      } else if (kind === 'PDFRadioGroup') anyField.select(String(value));
-      else if (kind === 'PDFDropdown' || kind === 'PDFOptionList') {
-        anyField.select(Array.isArray(value) ? value : [String(value)]);
+      if (!field) {
+        missing.push(name);
+        continue;
+      }
+      if (field instanceof PDFTextField) field.setText(String(value));
+      else if (field instanceof PDFCheckBox) {
+        if (value) field.check();
+        else field.uncheck();
+      } else if (field instanceof PDFRadioGroup) field.select(String(value));
+      else if (field instanceof PDFDropdown || field instanceof PDFOptionList) {
+        field.select(Array.isArray(value) ? value : [String(value)]);
+      } else {
+        unsupportedKinds.push(`${name} (${describeFieldKind(field)})`);
       }
     }
 
-    if (flatten) form.flatten();
+    if (missing.length > 0) {
+      throw corrupt(
+        `The document has no form field named ${missing.map(n => `"${n}"`).join(', ')}, so ` +
+          'those values could not be written. Nothing was saved — your document is untouched.',
+        { missingFields: missing.join(', ') }
+      );
+    }
+    if (unsupportedKinds.length > 0) {
+      throw unsupported(
+        `Stapler cannot write to ${unsupportedKinds.join(', ')}. Nothing was saved. Use the ` +
+          'stamp tools to place text on top of the page instead.'
+      );
+    }
+
+    if (flatten) {
+      try {
+        form.flatten();
+      } catch (err) {
+        // Flatten generates an appearance stream per field; a form with a broken
+        // /DA or a missing /DR font throws here. Half a flatten is a mangled
+        // document, so this is a refusal, not a fallback.
+        throw corrupt(
+          'The filled values could not be drawn into the page (the form’s default ' +
+            `appearance is unusable): ${err instanceof Error ? err.message : String(err)}. ` +
+            'Nothing was saved.'
+        );
+      }
+    }
     return transfer(await doc.save({ useObjectStreams: true }));
   },
 
@@ -1317,11 +1674,15 @@ const api: ProcessJob = {
         // previous code only filtered get(0), silently leaving all other streams
         // intact — a bypass. Collect every stream, filter each, then collapse
         // them into one new FlateDecode stream so the output is always a scalar.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const rawContents: any = copied.node.Contents();
+        //
+        // The type tests here are `instanceof`, not `constructor.name`. A minified
+        // build renames the class, so a name comparison is false for every object
+        // it is meant to match: in a production bundle this loop skipped every
+        // content stream and redaction quietly filtered nothing.
+        const rawContents = copied.node.Contents();
         const streamRefs: unknown[] = [];
         if (rawContents) {
-          if (rawContents.constructor.name === 'PDFArray') {
+          if (rawContents instanceof PDFArray) {
             for (let k = 0; k < rawContents.size(); k++) {
               streamRefs.push(rawContents.get(k));
             }
@@ -1334,17 +1695,15 @@ const api: ProcessJob = {
           const filteredChunks: Uint8Array[] = [];
 
           for (const ref of streamRefs) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const stream: any = source.context.lookup(ref as never);
-            if (
-              !stream ||
-              (stream.constructor.name !== 'PDFRawStream' &&
-                stream.constructor.name !== 'PDFStream')
-            ) {
-              continue;
-            }
+            // `copyPages` registers a fresh object graph in `out.context`.
+            // Looking this ref up in `source.context` can resolve an unrelated
+            // object with the same number (or no stream at all), leaving the
+            // copied page's original content untouched.
+            const stream = out.context.lookup(ref as never);
+            // PDFRawStream extends PDFStream, so one check covers both.
+            if (!(stream instanceof PDFStream)) continue;
 
-            let rawBytes: Uint8Array = stream.getContents ? stream.getContents() : stream.contents;
+            let rawBytes: Uint8Array = stream.getContents();
 
             // Decompress if needed. decodeStream tries both zlib-wrapped and
             // raw-deflate and throws on anything else — we propagate the error

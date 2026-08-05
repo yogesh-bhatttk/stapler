@@ -9,15 +9,22 @@
 .stage {
   flex: 1;
   display: flex;
-  align-items: center;
-  justify-content: center;
   padding: var(--space-lg);
   overflow: auto;
   min-height: 0;
+  /* Centring is `margin: auto` on the child, not `align-items`/`justify-content`
+     here. With those, a page larger than the stage overflows in *both* directions
+     and the part above/left of the scroll origin is unreachable: `scrollTop` is
+     already 0 while the page's top edge sits at a negative viewport coordinate.
+     At 1280×720 that hid the top 135px of a Letter page behind the top bar, so a
+     form field or signature line in the upper sixth of the page could never be
+     clicked — the fields rendered and typing into them was impossible. Auto
+     margins centre the same way but do not create unreachable overflow. */
 }
 
 .page {
   position: relative;
+  margin: auto;
   background: var(--doc-page);
   box-shadow: var(--doc-shadow);
   border: 1px solid var(--hairline-strong);

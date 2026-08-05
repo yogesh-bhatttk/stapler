@@ -19,6 +19,10 @@ export interface WatermarkSettings {
   rotation: number;
   fontSize: number;
   color: string;
+  /** Number substituted for `{n}` on the first document page. */
+  startAt: number;
+  /** `all` or a comma-separated list such as `1-3, 6`. */
+  pageRange: string;
 }
 
 export const watermarkSettings = signal<WatermarkSettings>({
@@ -27,5 +31,7 @@ export const watermarkSettings = signal<WatermarkSettings>({
   opacity: 0.5,
   rotation: 45,
   fontSize: 72,
-  color: DOC_SIGNATURE_STROKE
+  color: DOC_SIGNATURE_STROKE,
+  startAt: 1,
+  pageRange: 'all'
 });

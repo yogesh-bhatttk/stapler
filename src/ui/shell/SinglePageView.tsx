@@ -97,6 +97,9 @@ export function SinglePageView({
 
   if (!page || !pageSize) return null;
 
+  const displayWidth = size.width || pageSize.width * zoom;
+  const displayHeight = size.height || pageSize.height * zoom;
+
   return (
     <div className={styles.wrapper}>
       <div className={styles.stage}>
@@ -104,12 +107,12 @@ export function SinglePageView({
           className={styles.page}
           data-index={pageIndex}
           style={{
-            width: `${size.width || pageSize.width}px`,
-            height: `${size.height || pageSize.height}px`
+            width: `${displayWidth}px`,
+            height: `${displayHeight}px`
           }}
         >
           <canvas ref={canvasRef} className={styles.canvas} aria-label={`Page ${pageIndex + 1}`} />
-          {overlay?.({ width: size.width, height: size.height, page })}
+          {overlay?.({ width: displayWidth, height: displayHeight, page })}
         </div>
       </div>
 
