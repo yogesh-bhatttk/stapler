@@ -1,0 +1,22 @@
+.overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.line {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  font-family: 'Helvetica', 'Arial', sans-serif;
+  font-size: 11px;
+  color: var(--ink-muted);
+  padding: 6px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

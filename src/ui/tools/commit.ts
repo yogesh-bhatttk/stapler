@@ -91,7 +91,7 @@ export interface CommitContext {
 type CommitHandler = (context: CommitContext) => Promise<void>;
 
 import { cropBoxes } from './crop/state';
-import { watermarkSettings } from './watermark/state';
+import { watermarkSettings, headerFooterSettings } from './watermark/state';
 import { nupSettings } from './nup/state';
 
 // Normalize is deliberately not read here: it is its own tool, applied only via
@@ -106,6 +106,7 @@ const exportComposed: CommitHandler = async ({ doc, job }) => {
       annotations: doc.annotations,
       cropBoxes: cropBoxes.value,
       watermark: watermarkSettings.value,
+      headerFooter: headerFooterSettings.value,
       nup: nupSettings.value
     },
     job

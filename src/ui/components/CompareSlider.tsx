@@ -4,9 +4,15 @@ import styles from './CompareSlider.module.css';
 interface CompareSliderProps {
   before: preact.ComponentChildren;
   after: preact.ComponentChildren;
+  /** Describes the two visual states controlled by the divider. */
+  label?: string;
 }
 
-export function CompareSlider({ before, after }: CompareSliderProps) {
+export function CompareSlider({
+  before,
+  after,
+  label = 'Compare before and after'
+}: CompareSliderProps) {
   const [position, setPosition] = useState(50);
   const containerRef = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -35,6 +41,18 @@ export function CompareSlider({ before, after }: CompareSliderProps) {
     setPosition((x / rect.width) * 100);
   };
 
+  const onKeyDown = (event: preact.JSX.TargetedKeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 10 : 1;
+    let next: number | null = null;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') next = position - step;
+    if (event.key === 'ArrowRight' || event.key === 'ArrowUp') next = position + step;
+    if (event.key === 'Home') next = 0;
+    if (event.key === 'End') next = 100;
+    if (next === null) return;
+    event.preventDefault();
+    setPosition(Math.max(0, Math.min(100, next)));
+  };
+
   return (
     <div
       ref={containerRef}
@@ -51,7 +69,18 @@ export function CompareSlider({ before, after }: CompareSliderProps) {
       >
         {after}
       </div>
-      <div className={styles.scrubber} style={{ left: `${position}%` }}>
+      <div
+        className={styles.scrubber}
+        style={{ left: `${position}%` }}
+        role="slider"
+        tabIndex={0}
+        aria-label={label}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(position)}
+        aria-valuetext={`${Math.round(position)}% after image visible`}
+        onKeyDown={onKeyDown}
+      >
         <div className={styles.handle}>
           <svg
             width="18"

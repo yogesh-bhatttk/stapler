@@ -76,11 +76,26 @@ export function AnnotationOverlay({ docId, pageKey, width, height }: AnnotationO
     activeStamp.value = null;
   };
 
+  const onLayerKeyDown = (event: KeyboardEvent) => {
+    // A real keyboard alternative to the pointer-only initial placement path.
+    // Suggestions are buttons already, but an empty page needs an equally usable
+    // route: focus the page, choose a stamp, then press Enter or Space to place it
+    // in the centre where it can be nudged or resized afterwards.
+    if (!activeStamp.value || event.target !== layerRef.current) return;
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    place(0.5, 0.5);
+  };
+
   return (
     <div
       ref={layerRef}
       className={`${styles.layer} ${armed ? styles.armed : ''}`}
       style={{ width: `${width}px`, height: `${height}px` }}
+      tabIndex={armed ? 0 : -1}
+      role={armed ? 'group' : undefined}
+      aria-label={armed ? 'Stamp placement area. Press Enter to place in the centre.' : undefined}
+      onKeyDown={onLayerKeyDown}
       onClick={event => {
         const layer = layerRef.current;
         if (!layer || event.target !== layer || !armed) return;
@@ -219,6 +234,34 @@ function Stamp({
 
   const onKeyDown = (event: KeyboardEvent) => {
     const step = event.shiftKey ? NUDGE_COARSE : NUDGE;
+    const resizeStep = event.shiftKey ? 0.04 : 0.01;
+    if (event.altKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+      event.preventDefault();
+      const rotationStep = event.shiftKey ? 45 : 5;
+      const rotation =
+        (stamp.rotation ?? 0) + (event.key === 'ArrowLeft' ? -rotationStep : rotationStep);
+      updateAnnotation(docId, stamp.id, { rotation: ((rotation % 360) + 360) % 360 });
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && /^Arrow/.test(event.key)) {
+      event.preventDefault();
+      let width = stamp.width;
+      let height = stamp.height;
+      if (event.key === 'ArrowLeft') width -= resizeStep;
+      if (event.key === 'ArrowRight') width += resizeStep;
+      if (event.key === 'ArrowUp') height -= resizeStep;
+      if (event.key === 'ArrowDown') height += resizeStep;
+      if (stamp.type === 'signature' || stamp.type === 'check') {
+        const aspect = stamp.width / stamp.height;
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') height = width / aspect;
+        else width = height * aspect;
+      }
+      updateAnnotation(docId, stamp.id, {
+        width: Math.max(0.02, Math.min(1 - stamp.x, width)),
+        height: Math.max(0.015, Math.min(1 - stamp.y, height))
+      });
+      return;
+    }
     const deltas: Record<string, [number, number]> = {
       ArrowLeft: [-step, 0],
       ArrowRight: [step, 0],
@@ -255,7 +298,7 @@ function Stamp({
       }}
       tabIndex={0}
       role="group"
-      aria-label={`${stamp.type} stamp. Arrow keys move it, Shift for larger steps, Delete removes it.`}
+      aria-label={`${stamp.type} stamp. Arrow keys move it; Control plus arrows resizes; Alt plus left or right rotates; Delete removes it.`}
       onKeyDown={onKeyDown}
       onPointerDown={event => {
         if ((event.target as HTMLElement).closest('button, input')) return;

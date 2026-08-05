@@ -16,3 +16,9 @@
   transform-origin: center center;
   mix-blend-mode: multiply; /* Looks better on PDF */
 }
+
+.imageWatermark {
+  transform-origin: center center;
+  max-width: 100%;
+  height: auto;
+}

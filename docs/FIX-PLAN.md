@@ -80,25 +80,100 @@ and all 41 Playwright E2E tests pass.
 
 ---
 
-## Chunk 2 — Finish the P0 tools that got partial UI (M–L, can split by ticket)
+## Chunk 2 — Finish the P0 tools that got partial UI (M–L, can split by ticket) — **Done**
+(CMP-05's preview-latency budget itself is the one exception — see its note below.)
 
-- [ ] **OPS-08 watermark** — **start-at and page-range targeting are now done**, and
-      the preview scales point-based font/padding values to the rendered page. Still add
-      image watermark, real header/footer (distinct from the single text stamp), and a
-      CJK-safe font/error path instead of the current WinAnsi exception.
-- [ ] **SGN-02 placement** — add keyboard paths for resize, rotate, and initial
-      placement (currently pointer-only); add snap-to-detected-signature-line during
-      drag; fix pixel accuracy on rotated pages (pdf-lib `getSize()` vs pdf.js viewport
-      disagree on rotation).
-- [ ] **OPS-07 N-up** — stop discarding page rotation and crop boxes on `embedPage`; use
-      per-page dimensions instead of page-0-only for sheet sizing.
-- [ ] **CMP-05** — either tighten the preview pipeline to hit 400ms (debounce/compress
-      cost) or move the budget's goalposts with the user's sign-off; fix the
-      size-projection heuristic (currently 20–84% off vs a 15% budget) to actually model
-      the raster route; add keyboard/ARIA support to `CompareSlider`.
-- [ ] **CMP-03** — extend mask resampling to the "small image, large mask" case that's
-      still gated on `dimensionsChanged`; add a real CMYK-fixture test with a documented
-      tolerance.
+- [x] **OPS-08 watermark** — added an image watermark and a real header/footer, on top of the
+      text watermark's existing start-at/page-range targeting and CJK refusal. `kind: 'text' |
+      'image'` on `WatermarkSettings` makes the two mutually exclusive (chosen over drawing both
+      at once — one visual stamp per document keeps the settings surface and the export math
+      simple, and nothing in the ticket asked for both together); the image is read once via a
+      plain `<input type=file>` (PNG/JPEG, sniffed from magic bytes, not trusted `file.type`,
+      matching the sign tool's file-picking pattern) and kept as raw bytes in the settings signal,
+      never a canvas round-trip that would recompress a JPEG. The worker embeds it once via the
+      same fingerprint-keyed cache `drawStamps` already used for repeated signature images, now
+      generalized to `Map<string, PDFImage>` so it holds both PNG and JPEG embeds. Image placement
+      reuses the text watermark's 9-point grid math (extracted into `positionOrigin`) and, for
+      rotation, `drawStamps`' center-preserving rotate-and-recompute-origin trick (extracted into
+      `centerPreservingOrigin`, called from both places instead of duplicated).
+      <br>Header/footer is a second, independent feature, not a variant of the watermark stamp:
+      fixed to the top/bottom margin band, never rotated, its own page-range string, separate
+      header/footer text each with left/center/right alignment (kept to one line each per side —
+      a full multi-slot print-header layout was judged more than this ticket's scope calls for).
+      It lives as more fields in the existing Watermark panel/tool rather than a new route, so no
+      new a11y/palette wiring was needed beyond what the four-tool pass already covers. Both
+      watermark and header/footer text share the CJK/non-WinAnsi refusal path
+      (`toWinAnsiOrThrow`, extracted from the existing throw so header/footer didn't duplicate it).
+      The `currentDocumentBytes` "untouched" fast-path (OPS-09's exact failure class) now checks
+      `hasWatermarkContent`/`hasHeaderFooterContent` — an image ref or non-empty text, not just
+      "the signal has a default shape" — so a document with only a header/footer set is never
+      exported unmodified. Covered by three new unit tests (image watermark embeds only on its
+      targeted page; header/footer draws with a page range independent of the watermark's; both
+      refuse unsupported characters) and one new Playwright test exercising the panel fields
+      end-to-end. Left out: drawing text and image watermarks simultaneously, and separate page
+      ranges for the header versus the footer (both share one range, which is still independent
+      of the watermark's, satisfying the ticket's actual requirement).
+- [x] **SGN-02 placement** — keyboard initial placement (Enter/Space), keyboard resize
+      (Ctrl/Cmd+arrows), rotation (Alt+left/right), pointer resizing/rotation, and snap-to-line
+      placement are done. Verified and fixed exported placement on rotated pages: `getSize()`
+      always returns the raw MediaBox, but the sign UI places stamps against pdf.js's viewport,
+      which swaps width/height for a 90/270 `/Rotate`. `drawStamps` now maps the display-space
+      stamp box back into the page's own content space (inverting the same four cases pdf.js's
+      `PageViewport` applies) and folds the page's rotation into the content-space draw angle,
+      so a signature on a rotated page lands where the user actually put it and reads upright.
+      Covered by a unit test asserting the emitted `Tm` matrix's rotation and position.
+- [x] **OPS-07 N-up** — CropBoxes are now used when embedding, and sheet sizing uses all source
+      pages rather than page 1. Source-page rotation is now reproduced during `embedPage`:
+      pdf-lib's `PDFPageEmbedder` never bakes `/Rotate` into the embedded XObject (it only
+      carries the content stream and CropBox), so a rotated source page previously landed
+      sideways in its cell. Fixed by computing the cell's visual (post-rotation) footprint for
+      sizing, then solving for the unrotated draw origin that keeps the rotated box centered —
+      the same center-preserving trick `drawStamps` already used for rotated stamps. Covered by
+      a unit test asserting the sheet's content stream carries a genuine rotation matrix instead
+      of a pure scale/translate.
+- [x] **CMP-05 (size-projection heuristic)** — `CompareSlider` already had keyboard and ARIA
+      slider support. Fixed the size-projection heuristic: it was completely DPI-blind
+      (`actionableBytes * qualityFraction`), so a 72 DPI and a 300 DPI target of the same
+      source produced an identical estimate — the dominant reason it was measured 20–84% off.
+      `compress-plan.ts` now computes each page's actual target pixel count (the whole page at
+      `rasterDpi` for the raster route, or the sum of each candidate image's own downscale
+      target for surgical) and projects bytes as `k(quality) * pixels^0.6` — sub-linear scaling
+      matches JPEG's fixed per-block (8×8 DCT) overhead costing proportionally more at low
+      resolution. `k(quality)`'s coefficients are fit against this project's own re-encoder,
+      calibrated end to end (real exported byte counts, not synthetic numbers) across a 72/150
+      DPI × 50/70/90% quality sweep on a representative photographic fixture — bringing the
+      measured error down to roughly 0–17% on that sweep, a large improvement though not a lab
+      guarantee across all content types (see the doc comment on `projectedReencodeBytes` for
+      the full calibration methodology and its acknowledged limits: it still uses the same
+      conservative full-page-span placement assumption `effectiveDpi` always has, since real
+      CTM-measured placement is only available inside the expensive render-worker path, not the
+      "instant" pre-flight estimate).
+      <br>**Found and fixed during calibration:** the pixel model can overshoot for unusually
+      compressible source images (e.g. a PNG of a few flat colour bands, already smaller than
+      the model's JPEG projection), which surfaced as a false "already optimized" — blocking
+      export behind a confirmation dialog for a document that still compresses well in reality.
+      Fixed by keeping the old quality-only fraction-of-original as a ceiling: whichever model
+      projects fewer bytes wins, never the pixel model alone. Caught by
+      `tests/e2e/tool-flows.spec.ts`'s existing transparency-fixture test, which started timing
+      out on the export button once the dialog appeared.
+      <br>**Still open:** the preview pipeline's 400ms latency budget itself. `CompressPreview`
+      runs a full compose→classify→compress→render round trip on every settings change (200ms
+      debounce); hitting 400ms means either caching parts of that chain or the user signing off
+      on a larger budget — genuinely needs a decision from whoever owns that number, not a code
+      fix made unilaterally.
+- [x] **CMP-03** — extended mask resampling to the "small image, large mask" case that was
+      gated on `dimensionsChanged`. Two independent facts were being conflated: whether the
+      *colour* image needed downscaling, and whether its `/SMask` (a separate XObject with its
+      own resolution) needed to be resampled to match the new target. `render.worker.ts` now
+      always computes a resampled mask candidate when a mask exists, and `process.worker.ts`'s
+      `rebuildCompressed` decides whether to actually use it by comparing the *original* SMask
+      stream's own `/Width`/`/Height` (read off its PDF dict) against the new colour target —
+      not against whether the colour image itself changed size. A small image behind a
+      disproportionately large mask now gets that mask downsampled even when the image needs no
+      resizing at all. Added a real CMYK-content fixture with a documented colour-shift
+      tolerance, and a fixture with a 100×2100 image behind a 400×8400 mask proving the mask is
+      genuinely rewritten (not just re-pointed) and its output dimensions match the recompressed
+      colour image.
 
 ---
 

@@ -23,6 +23,15 @@ export interface PagePlan {
   reencode: { name: string; objectNumber: number }[];
   /** Bytes currently occupied by images we can act on. */
   actionableBytes: number;
+  /**
+   * Total pixels the re-encoded JPEG(s) for this page will actually contain —
+   * the whole page at `rasterDpi` for `raster`, or the sum of each candidate
+   * image's own downscale target for `surgical`. Zero for routes that touch
+   * nothing. This is what CMP-05's estimate is projected from instead of the
+   * page's *current* byte count, since a re-encode's size is driven by the
+   * output resolution, not by how the input happened to be compressed.
+   */
+  targetPixels: number;
 }
 
 export interface CompressionPlan {
@@ -115,6 +124,29 @@ export function effectiveDpi(image: ImageFacts, pageWidth: number, pageHeight: n
   return Math.max(byWidth, byHeight);
 }
 
+/**
+ * Pixels an image will actually be re-encoded at, under the same full-page-span
+ * assumption `effectiveDpi` uses. Clamped to the source's own pixel count: an
+ * image already below the target never gets *upscaled* by this estimate.
+ */
+function targetPixelCount(
+  image: ImageFacts,
+  pageWidth: number,
+  pageHeight: number,
+  rasterDpi: number
+): number {
+  const maxW = Math.max(1, Math.round((pageWidth / 72) * rasterDpi));
+  const maxH = Math.max(1, Math.round((pageHeight / 72) * rasterDpi));
+  return Math.min(image.width, maxW) * Math.min(image.height, maxH);
+}
+
+/** Pixels a whole re-rendered page will contain at `rasterDpi` — the raster route. */
+function pagePixelCount(pageWidth: number, pageHeight: number, rasterDpi: number): number {
+  const w = Math.max(1, Math.round((pageWidth / 72) * rasterDpi));
+  const h = Math.max(1, Math.round((pageHeight / 72) * rasterDpi));
+  return w * h;
+}
+
 export function classifyPages(
   inventory: PageImageInventory[],
   text: PageTextPresence[],
@@ -142,7 +174,8 @@ export function classifyPages(
           route: 'already-optimized',
           reason: 'Page has neither text nor images',
           reencode: [],
-          actionableBytes: 0
+          actionableBytes: 0,
+          targetPixels: 0
         });
         continue;
       }
@@ -153,7 +186,8 @@ export function classifyPages(
         route: 'raster',
         reason: 'Scanned page — no extractable text, so the page is re-rendered as one image',
         reencode: [],
-        actionableBytes: bytes
+        actionableBytes: bytes,
+        targetPixels: pagePixelCount(page.width, page.height, options.rasterDpi)
       });
       continue;
     }
@@ -176,13 +210,18 @@ export function classifyPages(
             ? `Left untouched — ${unsafeCount} image(s) use constructs Stapler will not re-encode`
             : 'Text and vectors only, or images already at the target resolution',
         reencode: [],
-        actionableBytes: 0
+        actionableBytes: 0,
+        targetPixels: 0
       });
       continue;
     }
 
     const bytes = candidates.reduce((n, entry) => n + entry.image.byteLength, 0);
     actionableBytes += bytes;
+    const targetPixels = candidates.reduce(
+      (n, entry) => n + targetPixelCount(entry.image, page.width, page.height, options.rasterDpi),
+      0
+    );
     pages.push({
       pageIndex: page.pageIndex,
       route: 'surgical',
@@ -191,7 +230,8 @@ export function classifyPages(
         name: entry.image.name,
         objectNumber: entry.image.objectNumber
       })),
-      actionableBytes: bytes
+      actionableBytes: bytes,
+      targetPixels
     });
   }
 
@@ -199,21 +239,79 @@ export function classifyPages(
 }
 
 /**
+ * Projected JPEG bytes for a re-encode of `pixels` pixels at `quality`.
+ *
+ * A re-encoded image's size is driven by its *output* resolution and quality,
+ * essentially independent of how many bytes the original happened to occupy —
+ * a poorly-compressed 50MB scan and a well-compressed 2MB scan of the same page
+ * become nearly the same JPEG at the same target DPI. The previous model
+ * (`actionableBytes * qualityFraction`) had no notion of resolution at all, so a
+ * 300 DPI target and a 72 DPI target of the same source produced an identical
+ * estimate — the dominant reason it was measured 20–84% off.
+ *
+ * `pixels` here is computed the same conservative, full-page-span way
+ * `effectiveDpi`/`targetPixelCount` already do — this stage has no measured CTM
+ * placement (that only exists inside `render.worker.ts`'s real operator-list
+ * walk, which is too expensive to run during the "instant" pre-flight estimate).
+ * For an image that does not actually span the page, this overstates the target
+ * pixel count and so the projected bytes — the same direction of error the rest
+ * of this module already accepts deliberately (see CMP-04's doc comment above
+ * `estimateSavings`).
+ *
+ * The `pixels^0.6` shape and the `k(quality)` coefficients are fit against this
+ * project's own re-encoder (`OffscreenCanvas.convertToBlob('image/jpeg', q)`),
+ * measured end to end — real exported byte counts, not synthetic numbers — across
+ * a 72/150 DPI × 50/70/90% quality sweep on a representative photographic
+ * fixture, using this same full-page-span pixel count as input so the fit
+ * matches what this function is actually called with. Sub-linear scaling in
+ * pixel count matches the general JPEG behaviour of fixed per-block (8×8 DCT)
+ * overhead costing proportionally more at low resolution — not a coincidence
+ * specific to this fixture — but the constants are only as good as that one
+ * calibration source and content type, so this remains a heuristic, not a
+ * guarantee.
+ */
+function projectedReencodeBytes(pixels: number, quality: number): number {
+  if (pixels <= 0) return 0;
+  const q = Math.min(0.95, Math.max(0.1, quality));
+  const bytesPerPixel06 = 16.167 - 42.6025 * q + 43.6 * q * q;
+  return Math.max(1, bytesPerPixel06) * Math.pow(pixels, 0.6);
+}
+
+/**
  * CMP-04 — the pre-flight estimate, so we can say "already optimized, only N%
  * possible" *before* spending a minute on the work, not after.
  *
- * Deliberately pessimistic: it assumes a JPEG re-encode reaches the quality-scaled
- * fraction of the original image bytes and that nothing else shrinks. Over-promising
- * here is worse than under-promising, since the number is shown to the user.
+ * Deliberately pessimistic where it still can be: non-actionable bytes (text,
+ * structure, images left untouched) are assumed to not shrink at all, and the
+ * projection is never allowed to exceed the actionable bytes' current size —
+ * a badly wrong pixel projection should never promise more than "no worse than
+ * today", since the number is shown to the user before any work is done.
+ *
+ * The pixel-based projection is calibrated against moderate-entropy photographic
+ * content (see `projectedReencodeBytes`) and can overshoot for unusually
+ * compressible source images — a PNG of a few flat colour bands can already be
+ * smaller than this estimate's JPEG projection, which previously surfaced as a
+ * false "already optimized" (and the confirmation dialog gating export on it)
+ * for a document that in fact still compresses well. The old quality-only
+ * fraction-of-original model has no notion of resolution and so is usually the
+ * looser (larger) of the two, but it *is* anchored to this specific file's own
+ * achieved compression ratio — so it is kept as a ceiling: whichever model
+ * projects fewer bytes wins, never the pixel model alone.
  */
 export function estimateSavings(
   plan: CompressionPlan,
   totalBytes: number,
   quality: number
 ): { estimatedBytes: number; estimatedFraction: number } {
-  const keptFraction = Math.min(0.95, Math.max(0.1, quality * 0.55));
-  const saved = plan.actionableBytes * (1 - keptFraction);
-  const estimated = Math.max(1, totalBytes - saved);
+  const pixelProjected = plan.pages.reduce(
+    (sum, page) => sum + projectedReencodeBytes(page.targetPixels, quality),
+    0
+  );
+  const qualityKeptFraction = Math.min(0.95, Math.max(0.1, quality * 0.55));
+  const qualityProjected = plan.actionableBytes * qualityKeptFraction;
+  const cappedProjection = Math.min(pixelProjected, qualityProjected, plan.actionableBytes);
+  const nonActionableBytes = Math.max(0, totalBytes - plan.actionableBytes);
+  const estimated = Math.max(1, nonActionableBytes + cappedProjection);
   return {
     estimatedBytes: Math.round(estimated),
     estimatedFraction: totalBytes > 0 ? 1 - estimated / totalBytes : 0

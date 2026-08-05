@@ -21,6 +21,7 @@ import { AnnotationOverlay } from '../components/AnnotationOverlay';
 import { AcroFormOverlay } from '../tools/sign/AcroFormOverlay';
 import { RedactOverlay } from '../tools/redact/RedactOverlay';
 import { WatermarkOverlay } from '../tools/watermark/WatermarkOverlay';
+import { HeaderFooterOverlay } from '../tools/watermark/HeaderFooterOverlay';
 import { CleanupEditor } from '../tools/cleanup/CleanupEditor';
 import { CompressPreview } from '../tools/compress/CompressPreview';
 import { CropOverlay } from '../tools/crop/CropOverlay';
@@ -86,7 +87,10 @@ export function Canvas() {
           ) : tool.id === 'crop' ? (
             <CropOverlay page={page} width={width} height={height} />
           ) : tool.id === 'watermark' ? (
-            <WatermarkOverlay pageIndex={pageIndex} width={width} height={height} />
+            <>
+              <WatermarkOverlay pageIndex={pageIndex} width={width} height={height} />
+              <HeaderFooterOverlay pageIndex={pageIndex} />
+            </>
           ) : (
             <>
               <AcroFormOverlay page={page} width={width} height={height} />

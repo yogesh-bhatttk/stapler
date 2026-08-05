@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { PDFDocument, PDFArray, PDFName, PDFString, PDFDict } from 'pdf-lib';
+import { PDFDocument, PDFArray, PDFName, PDFString, PDFDict, degrees } from 'pdf-lib';
 
 /**
  * Reads a PDF text object's value without going through pdf-lib's field
@@ -175,7 +175,9 @@ describe('watermark composition', () => {
       { source },
       [],
       {
+        kind: 'text',
         text: 'Page {n} of {total}',
+        imageScale: 0.35,
         position: 'bottom-center',
         opacity: 0.5,
         rotation: 0,
@@ -184,6 +186,7 @@ describe('watermark composition', () => {
         startAt: 10,
         pageRange: '2-3'
       },
+      undefined,
       null,
       null,
       silentJob
@@ -194,6 +197,176 @@ describe('watermark composition', () => {
     await expect(pageContentText(output, 1)).resolves.toContain('Page 11 of 4');
     await expect(pageContentText(output, 2)).resolves.toContain('Page 12 of 4');
     await expect(pageContentText(output, 3)).resolves.not.toContain('Page 13 of 4');
+  });
+
+  it('refuses unsupported watermark characters instead of corrupting them', async () => {
+    const { textPdf } = await import('../e2e/fixtures');
+    const source = await textPdf(1);
+
+    await expect(
+      processWorkerImpl.compose(
+        [{ key: 'p0', sourceDocId: 'source', sourceIndex: 0, rotation: 0 }],
+        { source },
+        [],
+        {
+          kind: 'text',
+          text: '中文',
+          imageScale: 0.35,
+          position: 'center',
+          opacity: 0.5,
+          rotation: 0,
+          fontSize: 18,
+          color: '#111111',
+          startAt: 1,
+          pageRange: 'all'
+        },
+        undefined,
+        null,
+        null,
+        silentJob
+      )
+    ).rejects.toMatchObject({ kind: 'UnsupportedFeature' });
+  });
+});
+
+// A minimal 1x1 PNG, hand-picked so the test needs no canvas (vitest runs in
+// the `node` environment, which has none): `createImageBitmap`/`document`
+// aren't available here the way they are in the browser-side image picker.
+const ONE_PIXEL_PNG = Uint8Array.from(
+  Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'
+  )
+);
+
+function hasImageXObject(doc: PDFDocument, pageIndex: number): boolean {
+  const xobjects = doc
+    .getPage(pageIndex)
+    .node.Resources()
+    ?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+  if (!xobjects) return false;
+  return [...xobjects.entries()].some(([, ref]) => {
+    const obj = doc.context.lookup(ref) as unknown as { dict?: PDFDict };
+    return String(obj?.dict?.get(PDFName.of('Subtype'))) === '/Image';
+  });
+}
+
+describe('image watermark composition', () => {
+  it('embeds the picked image only on the targeted pages', async () => {
+    const { textPdf } = await import('../e2e/fixtures');
+    const source = await textPdf(3);
+    const pages = Array.from({ length: 3 }, (_, i) => ({
+      key: `p${i}`,
+      sourceDocId: 'source',
+      sourceIndex: i,
+      rotation: 0
+    }));
+
+    const bytes = await processWorkerImpl.compose(
+      pages,
+      { source },
+      [],
+      {
+        kind: 'image',
+        text: '',
+        image: { bytes: ONE_PIXEL_PNG, format: 'png', width: 1, height: 1 },
+        imageScale: 0.3,
+        position: 'center',
+        opacity: 0.5,
+        rotation: 30,
+        fontSize: 18,
+        color: '#111111',
+        startAt: 1,
+        pageRange: '2'
+      },
+      undefined,
+      null,
+      null,
+      silentJob
+    );
+
+    const output = await PDFDocument.load(bytes);
+    expect(hasImageXObject(output, 0)).toBe(false);
+    expect(hasImageXObject(output, 1)).toBe(true);
+    expect(hasImageXObject(output, 2)).toBe(false);
+  });
+});
+
+describe('header and footer composition', () => {
+  it('draws header and footer text, respecting a page range independent of the watermark', async () => {
+    const { textPdf } = await import('../e2e/fixtures');
+    const source = await textPdf(3);
+    const pages = Array.from({ length: 3 }, (_, i) => ({
+      key: `p${i}`,
+      sourceDocId: 'source',
+      sourceIndex: i,
+      rotation: 0
+    }));
+
+    const bytes = await processWorkerImpl.compose(
+      pages,
+      { source },
+      [],
+      {
+        kind: 'text',
+        text: 'DRAFT',
+        imageScale: 0.35,
+        position: 'center',
+        opacity: 0.5,
+        rotation: 0,
+        fontSize: 18,
+        color: '#111111',
+        startAt: 1,
+        pageRange: '1' // watermark only on page 1
+      },
+      {
+        headerText: 'ACME Corp',
+        headerAlign: 'left',
+        footerText: 'Page {n} of {total}',
+        footerAlign: 'right',
+        fontSize: 10,
+        pageRange: '2-3' // header/footer only on pages 2-3, independent of the watermark
+      },
+      null,
+      null,
+      silentJob
+    );
+
+    const output = await PDFDocument.load(bytes);
+    await expect(pageContentText(output, 0)).resolves.toContain('DRAFT');
+    await expect(pageContentText(output, 0)).resolves.not.toContain('ACME Corp');
+
+    await expect(pageContentText(output, 1)).resolves.not.toContain('DRAFT');
+    await expect(pageContentText(output, 1)).resolves.toContain('ACME Corp');
+    await expect(pageContentText(output, 1)).resolves.toContain('Page 2 of 3');
+
+    await expect(pageContentText(output, 2)).resolves.toContain('ACME Corp');
+    await expect(pageContentText(output, 2)).resolves.toContain('Page 3 of 3');
+  });
+
+  it('refuses unsupported header/footer characters instead of corrupting them', async () => {
+    const { textPdf } = await import('../e2e/fixtures');
+    const source = await textPdf(1);
+
+    await expect(
+      processWorkerImpl.compose(
+        [{ key: 'p0', sourceDocId: 'source', sourceIndex: 0, rotation: 0 }],
+        { source },
+        [],
+        undefined,
+        {
+          headerText: '中文',
+          headerAlign: 'center',
+          footerText: '',
+          footerAlign: 'center',
+          fontSize: 10,
+          pageRange: 'all'
+        },
+        null,
+        null,
+        silentJob
+      )
+    ).rejects.toMatchObject({ kind: 'UnsupportedFeature' });
   });
 });
 
@@ -216,6 +389,7 @@ describe('applyNUp layout', () => {
       sources,
       [],
       null,
+      undefined,
       null,
       { layout: '2-up', margin: 10, gutter: 10, drawBorders: true },
       silentJob
@@ -249,6 +423,7 @@ describe('applyNUp layout', () => {
       sources,
       [],
       null,
+      undefined,
       null,
       { layout: 'booklet', margin: 0, gutter: 0, drawBorders: false },
       silentJob
@@ -264,6 +439,135 @@ describe('applyNUp layout', () => {
     // Check orientation: booklet should rotate to landscape
     const page = doc.getPage(0);
     expect(page.getWidth()).toBeGreaterThan(page.getHeight());
+  });
+
+  it('reproduces a rotated source page instead of embedding it sideways', async () => {
+    // embedPage's XObject carries only the content stream + CropBox — pdf-lib never
+    // bakes /Rotate into it. A page stored portrait but displayed landscape via
+    // /Rotate 90 previously landed in its N-up cell unrotated.
+    const { textPdf } = await import('../e2e/fixtures');
+    const bytes = await textPdf(1);
+    const rotatedDoc = await PDFDocument.load(bytes);
+    rotatedDoc.getPage(0).setRotation(degrees(90));
+    const rotatedBytes = await rotatedDoc.save();
+
+    const composedBytes = await processWorkerImpl.compose(
+      [{ key: 'p1', sourceDocId: 'doc1', sourceIndex: 0, rotation: 0 }],
+      { doc1: rotatedBytes },
+      [],
+      null,
+      undefined,
+      null,
+      { layout: '2-up', margin: 0, gutter: 0, drawBorders: false },
+      silentJob
+    );
+
+    const doc = await PDFDocument.load(composedBytes);
+    const page = doc.getPage(0);
+    const contents = page.node.Contents();
+    const streams =
+      contents instanceof PDFArray
+        ? contents.asArray().map(ref => doc.context.lookup(ref))
+        : [contents];
+    const { decodeStream } = await import('../../src/core/pdf/interpreter');
+    let raw = '';
+    for (const stream of streams as any[]) {
+      const bytesOut: Uint8Array = stream.getContents();
+      const isFlate = String(stream.dict?.get(PDFName.of('Filter'))) === '/FlateDecode';
+      raw += new TextDecoder('latin1').decode(isFlate ? await decodeStream(bytesOut) : bytesOut);
+    }
+
+    // Every `cm` matrix drawPage emits for an unrotated placement is either a pure
+    // translation or a pure (non-negative) scale — `a`/`d` stay positive and `b`/`c`
+    // stay zero. A 90-degree rotation must produce at least one matrix where the
+    // off-diagonal terms dominate instead.
+    const matrices = [
+      ...raw.matchAll(/(-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) cm/g)
+    ].map(m => m.slice(1, 5).map(Number));
+    const hasRotation = matrices.some(
+      ([a, b, c, d]) =>
+        Math.abs(b) > 0.9 && Math.abs(c) > 0.9 && Math.abs(a) < 0.1 && Math.abs(d) < 0.1
+    );
+    expect(hasRotation).toBe(true);
+  });
+});
+
+/**
+ * SGN-02 — stamp placement on a rotated page.
+ *
+ * `page.getSize()` always returns the raw, unrotated MediaBox; pdf.js's viewport
+ * (what the sign UI places stamps against) swaps width/height for a 90/270-degree
+ * `/Rotate`. Treating those as the same frame put every stamp at a transposed,
+ * wrong-sized position on a rotated page.
+ */
+describe('stamp placement on a rotated page (SGN-02)', () => {
+  it('maps a display-space stamp back into the unrotated content space', async () => {
+    const { textPdf } = await import('../e2e/fixtures');
+    const bytes = await textPdf(1);
+    const rotatedDoc = await PDFDocument.load(bytes);
+    const { width: rawWidth, height: rawHeight } = rotatedDoc.getPage(0).getSize();
+    rotatedDoc.getPage(0).setRotation(degrees(90));
+    const rotatedBytes = await rotatedDoc.save();
+
+    const composedBytes = await processWorkerImpl.compose(
+      [{ key: 'p1', sourceDocId: 'doc1', sourceIndex: 0, rotation: 0 }],
+      { doc1: rotatedBytes },
+      [
+        {
+          pageKey: 'p1',
+          type: 'text',
+          x: 0,
+          y: 0,
+          width: 0.2,
+          height: 0.1,
+          text: 'HI',
+          rotation: 0
+        }
+      ],
+      null,
+      undefined,
+      null,
+      null,
+      silentJob
+    );
+
+    const doc = await PDFDocument.load(composedBytes);
+    const page = doc.getPage(0);
+    // The composed page keeps the source's /Rotate — only the content position
+    // changes, so this is still the raw, unrotated MediaBox.
+    expect(page.getSize()).toEqual({ width: rawWidth, height: rawHeight });
+
+    const text = await pageContentText(doc, 0);
+    expect(text).toContain('HI');
+
+    const contents = page.node.Contents();
+    const streams =
+      contents instanceof PDFArray
+        ? contents.asArray().map(ref => doc.context.lookup(ref))
+        : [contents];
+    const { decodeStream } = await import('../../src/core/pdf/interpreter');
+    let raw = '';
+    for (const stream of streams as any[]) {
+      const bytesOut: Uint8Array = stream.getContents();
+      const isFlate = String(stream.dict?.get(PDFName.of('Filter'))) === '/FlateDecode';
+      raw += new TextDecoder('latin1').decode(isFlate ? await decodeStream(bytesOut) : bytesOut);
+    }
+
+    // `Tm` carries both the text's rotation and its position: cos(90)=0, sin(90)=1
+    // for the content-space rotation that cancels the page's own 90-degree
+    // /Rotate, and a content-space origin computed from the display-space stamp
+    // box mapped through the inverse of that rotation.
+    const matches = [
+      ...raw.matchAll(/(-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) Tm/g)
+    ];
+    expect(matches.length).toBeGreaterThan(0);
+    const [a, b, c, d, e, f] = matches[matches.length - 1].slice(1).map(Number);
+    expect(a).toBeCloseTo(0, 1);
+    expect(b).toBeCloseTo(1, 1);
+    expect(c).toBeCloseTo(-1, 1);
+    expect(d).toBeCloseTo(0, 1);
+    expect(e).toBeCloseTo(43.1, 0);
+    expect(f).toBeCloseTo(0, 0);
   });
 });
 
@@ -283,7 +587,16 @@ describe('AcroForm fill survives compose (SGN-03)', () => {
       sourceIndex: 0,
       rotation: 0
     }));
-    return processWorkerImpl.compose(pages, { doc1: bytes }, [], null, null, null, silentJob);
+    return processWorkerImpl.compose(
+      pages,
+      { doc1: bytes },
+      [],
+      null,
+      undefined,
+      null,
+      null,
+      silentJob
+    );
   }
 
   it('keeps /AcroForm and its fields through a compose', async () => {

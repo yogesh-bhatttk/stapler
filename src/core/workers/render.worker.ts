@@ -435,12 +435,15 @@ const api: RenderJob = {
 
         const target = targetSize(placement, decoded, targetDpi);
         const jpeg = await encodeJpeg(decoded, target, quality);
-        const dimensionsChanged =
-          target.width !== decoded.width || target.height !== decoded.height;
-        const maskBytes =
-          decoded.mask && dimensionsChanged
-            ? await encodeMask(decoded.mask, decoded.width, decoded.height, target)
-            : undefined;
+        // A mask is resampled to `target` whenever one exists, not only when the
+        // *colour* image's own dimensions changed. The colour image and its
+        // `/SMask` are independent XObjects — a small image can carry a
+        // disproportionately large soft mask (or vice versa) — and it is the
+        // caller (`rebuildCompressed`) that ultimately decides whether the
+        // original mask stream's own resolution actually warrants replacing it.
+        const maskBytes = decoded.mask
+          ? await encodeMask(decoded.mask, decoded.width, decoded.height, target)
+          : undefined;
 
         out.push({
           objectNumber: decoded.objectNumber,

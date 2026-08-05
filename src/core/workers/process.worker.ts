@@ -1,11 +1,38 @@
+/** A user-supplied raster for an image watermark, resolved to bytes by the caller. */
+export interface WatermarkImageData {
+  bytes: Uint8Array;
+  format: 'png' | 'jpeg';
+  /** Natural pixel dimensions, so the placed box keeps the image's aspect ratio. */
+  width: number;
+  height: number;
+}
+
 export interface WatermarkData {
+  /** `image` draws `image` instead of `text` — the two are mutually exclusive. */
+  kind: 'text' | 'image';
   text: string;
+  image?: WatermarkImageData;
+  /** Fraction of the page width the image should occupy (kind: 'image' only). */
+  imageScale: number;
   position: string;
   opacity: number;
   rotation: number;
   fontSize: number;
   color: string;
   startAt: number;
+  pageRange: string;
+}
+
+/**
+ * A running header and/or footer, distinct from `WatermarkData`: fixed to the
+ * top/bottom margin band, never rotated, and independently page-range targeted.
+ */
+export interface HeaderFooterData {
+  headerText: string;
+  headerAlign: 'left' | 'center' | 'right';
+  footerText: string;
+  footerAlign: 'left' | 'center' | 'right';
+  fontSize: number;
   pageRange: string;
 }
 /**
@@ -45,7 +72,7 @@ import {
   StandardFonts,
   rgb
 } from 'pdf-lib';
-import type { PDFField } from 'pdf-lib';
+import type { PDFField, PDFImage } from 'pdf-lib';
 import { zipSync } from 'fflate';
 import { checkpoint, type JobHandle } from './protocol';
 import { corrupt, encrypted, internal, unsupported } from '../errors';
@@ -218,6 +245,7 @@ export interface ProcessJob {
     sources: Record<string, Uint8Array>,
     stamps: StampSource[],
     watermark?: WatermarkData,
+    headerFooter?: HeaderFooterData,
     normalize?: import('../../ui/tools/normalize/state').NormalizeSettings | null,
     nup?: import('../../ui/tools/nup/state').NUpSettings | null,
     job?: JobHandle
@@ -228,6 +256,7 @@ export interface ProcessJob {
     boundaries: number[],
     stamps: StampSource[],
     watermark?: WatermarkData,
+    headerFooter?: HeaderFooterData,
     normalize?: import('../../ui/tools/normalize/state').NormalizeSettings | null,
     nup?: import('../../ui/tools/nup/state').NUpSettings | null,
     baseName?: string,
@@ -357,37 +386,103 @@ function toWinAnsi(text: string): { text: string; lostCharacters: boolean } {
   return { text: out, lostCharacters: lost };
 }
 
+/**
+ * `toWinAnsi`, but refusing outright instead of silently drawing `?` — shared by
+ * the watermark and header/footer text paths so a document with characters the
+ * built-in font cannot write is never half-corrupted into export.
+ */
+function toWinAnsiOrThrow(text: string, context: string): string {
+  const { text: out, lostCharacters } = toWinAnsi(text);
+  if (lostCharacters) {
+    throw unsupported(
+      `This ${context} contains characters that the built-in PDF font cannot write. ` +
+        'Use Latin text, or remove the unsupported characters before exporting.'
+    );
+  }
+  return out;
+}
+
+/**
+ * Given a box's center and its (unrotated) width/height, returns the bottom-left
+ * origin such that rotating the box by `angleDegrees` about that origin — as
+ * pdf-lib's `rotate` draw option does — leaves the box's center fixed at
+ * `(cx, cy)`. Shared by `drawStamps` (stamp rotation) and the image watermark,
+ * which both need a box to spin in place rather than around its bottom-left
+ * corner.
+ */
+function centerPreservingOrigin(
+  cx: number,
+  cy: number,
+  w: number,
+  h: number,
+  angleDegrees: number
+): { x: number; y: number } {
+  const rad = (angleDegrees * Math.PI) / 180;
+  const dx = (w / 2) * Math.cos(rad) - (h / 2) * Math.sin(rad);
+  const dy = (w / 2) * Math.sin(rad) + (h / 2) * Math.cos(rad);
+  return { x: cx - dx, y: cy - dy };
+}
+
 async function drawStamps(
   outDoc: PDFDocument,
   page: ReturnType<PDFDocument['addPage']>,
   stamps: StampSource[],
   fontCache: { font?: Awaited<ReturnType<PDFDocument['embedFont']>> },
-  imageCache: Map<string, Awaited<ReturnType<PDFDocument['embedPng']>>>
+  imageCache: Map<string, PDFImage>
 ) {
   if (stamps.length === 0) return;
+  // `page.getSize()` is always the raw, unrotated MediaBox — pdf-lib never factors
+  // in `/Rotate` there. Stamp coordinates come from the sign UI, which places them
+  // against the page as pdf.js *displays* it, i.e. already rotated. On a page whose
+  // total rotation (source + the rotate tool) is 90 or 270, treating those two
+  // frames as the same one put every stamp at a transposed, wrong-sized position.
   const { width, height } = page.getSize();
+  const pageRotation = normalizeRotation(page.getRotation().angle);
+  const swapped = pageRotation === 90 || pageRotation === 270;
+  const displayWidth = swapped ? height : width;
+  const displayHeight = swapped ? width : height;
 
   for (const stamp of stamps) {
-    // PDF space is bottom-left origin; stamp coordinates are top-left.
-    const x = stamp.x * width;
-    const y = height - stamp.y * height - stamp.height * height;
-    const w = stamp.width * width;
-    const h = stamp.height * height;
+    // PDF space is bottom-left origin; stamp coordinates are top-left, both in the
+    // *displayed* (post-rotation) frame.
+    const w = stamp.width * displayWidth;
+    const h = stamp.height * displayHeight;
+    const displayCenterX = stamp.x * displayWidth + w / 2;
+    const displayCenterY = stamp.y * displayHeight + h / 2;
+
+    // Map that display-space center back into the page's own unrotated content
+    // space — the inverse of the four `/Rotate` cases pdf.js's PageViewport
+    // applies (viewBox width/height, not the swapped display ones).
+    let cx: number, cy: number;
+    switch (pageRotation) {
+      case 90:
+        cx = displayCenterY;
+        cy = displayCenterX;
+        break;
+      case 180:
+        cx = width - displayCenterX;
+        cy = displayCenterY;
+        break;
+      case 270:
+        cx = width - displayCenterY;
+        cy = height - displayCenterX;
+        break;
+      default:
+        cx = displayCenterX;
+        cy = height - displayCenterY;
+    }
+
     const rot = stamp.rotation ?? 0;
 
-    // CSS clockwise rotation mapped to PDF counter-clockwise rotation
-    const rad = (-rot * Math.PI) / 180;
+    // The user's clockwise on-screen rotation `rot` must survive the page's own
+    // display rotation too: content drawn at angle (pageRotation - rot) here comes
+    // out as a clockwise `rot` once the viewer applies /Rotate on top of it. This
+    // reduces to the original `-rot` when pageRotation is 0.
+    const rad = ((pageRotation - rot) * Math.PI) / 180;
 
-    // Center of the unrotated stamp box
-    const cx = x + w / 2;
-    const cy = y + h / 2;
-
-    // Calculate the new bottom-left origin in page space such that
-    // the center of the rotated box remains at (cx, cy)
-    const dx = (w / 2) * Math.cos(rad) - (h / 2) * Math.sin(rad);
-    const dy = (w / 2) * Math.sin(rad) + (h / 2) * Math.cos(rad);
-    const drawX = cx - dx;
-    const drawY = cy - dy;
+    // The new bottom-left origin in page space such that the center of the
+    // rotated box remains at (cx, cy).
+    const { x: drawX, y: drawY } = centerPreservingOrigin(cx, cy, w, h, pageRotation - rot);
 
     if (stamp.type === 'signature') {
       if (!stamp.imagePng) continue;
@@ -398,7 +493,13 @@ async function drawStamps(
         image = await outDoc.embedPng(stamp.imagePng);
         imageCache.set(key, image);
       }
-      page.drawImage(image, { x: drawX, y: drawY, width: w, height: h, rotate: degrees(-rot) });
+      page.drawImage(image, {
+        x: drawX,
+        y: drawY,
+        width: w,
+        height: h,
+        rotate: degrees(pageRotation - rot)
+      });
       continue;
     }
 
@@ -445,7 +546,7 @@ async function drawStamps(
       size,
       font,
       color: DOC_INK,
-      rotate: degrees(-rot)
+      rotate: degrees(pageRotation - rot)
     });
   }
 }
@@ -468,10 +569,17 @@ async function applyNUp(
   const originalPages = outDoc.getPages();
   if (originalPages.length === 0) return outDoc;
 
-  const firstPage = originalPages[0];
-  const { width: pw, height: ph } = firstPage.getSize();
-  const W = Math.max(pw, ph);
-  const H = Math.min(pw, ph);
+  // Imposition must be sized from every source page, not page 1. A Letter cover
+  // followed by an A3 appendix previously scaled the appendix to a Letter-sized
+  // cell and clipped its CropBox. The CropBox is also the printed page boundary:
+  // embedding the MediaBox leaks margins that the user explicitly cropped away.
+  let W = 0;
+  let H = 0;
+  for (const original of originalPages) {
+    const crop = original.getCropBox();
+    W = Math.max(W, crop.width, crop.height);
+    H = Math.max(H, Math.min(crop.width, crop.height));
+  }
 
   const { layout, margin, gutter, drawBorders } = settings;
   const isBooklet = layout === 'booklet';
@@ -519,33 +627,54 @@ async function applyNUp(
         if (idx === undefined || idx >= originalPages.length) continue;
 
         const original = originalPages[idx];
-        const embedded = await finalDoc.embedPage(original);
+        const crop = original.getCropBox();
+        const embedded = await finalDoc.embedPage(original, {
+          left: crop.x,
+          bottom: crop.y,
+          right: crop.x + crop.width,
+          top: crop.y + crop.height
+        });
 
-        const scaleX = cellW / embedded.width;
-        const scaleY = cellH / embedded.height;
-        const scale = Math.min(scaleX, scaleY);
+        // embedPage's XObject carries only the content stream + CropBox — pdf-lib
+        // never bakes /Rotate into it (see PDFPageEmbedder). Without reproducing the
+        // rotation ourselves here, a rotated source page lands sideways in its cell.
+        const rotationDeg = normalizeRotation(original.getRotation().angle);
+        const swapped = rotationDeg === 90 || rotationDeg === 270;
+        const visualW = swapped ? embedded.height : embedded.width;
+        const visualH = swapped ? embedded.width : embedded.height;
 
-        const actualW = embedded.width * scale;
-        const actualH = embedded.height * scale;
+        const scale = Math.min(cellW / visualW, cellH / visualH);
+        const actualVisualW = visualW * scale;
+        const actualVisualH = visualH * scale;
+        const unrotW = embedded.width * scale;
+        const unrotH = embedded.height * scale;
 
-        // Center within cell
-        const x = margin + c * (cellW + gutter) + (cellW - actualW) / 2;
-        // In PDF coordinates, Y=0 is bottom. So row 0 is top.
-        const y = sheetH - margin - r * (cellH + gutter) - cellH + (cellH - actualH) / 2;
+        // Center of the cell, in sheet coordinates (Y=0 at the bottom; row 0 is top).
+        const cx = margin + c * (cellW + gutter) + cellW / 2;
+        const cy = sheetH - margin - r * (cellH + gutter) - cellH / 2;
+
+        // drawPage rotates its unrotated content about (x, y); solve for the origin
+        // that keeps the rotated box centered on the cell, same trick as drawStamps.
+        const rad = (-rotationDeg * Math.PI) / 180;
+        const dx = (unrotW / 2) * Math.cos(rad) - (unrotH / 2) * Math.sin(rad);
+        const dy = (unrotW / 2) * Math.sin(rad) + (unrotH / 2) * Math.cos(rad);
+        const x = cx - dx;
+        const y = cy - dy;
 
         sheet.drawPage(embedded, {
           x,
           y,
-          width: actualW,
-          height: actualH
+          width: unrotW,
+          height: unrotH,
+          rotate: degrees(-rotationDeg)
         });
 
         if (drawBorders) {
           sheet.drawRectangle({
-            x,
-            y,
-            width: actualW,
-            height: actualH,
+            x: cx - actualVisualW / 2,
+            y: cy - actualVisualH / 2,
+            width: actualVisualW,
+            height: actualVisualH,
             borderWidth: 1,
             borderColor: rgb(...DOC_HAIRLINE_RGB)
           });
@@ -814,11 +943,93 @@ function reattachAcroForm(outDoc: PDFDocument, contributors: PDFDocument[]): voi
   outDoc.catalog.set(PDFName.of('AcroForm'), outDoc.context.register(form));
 }
 
+/** True when a watermark is actually configured — not merely "the signal exists". */
+function hasWatermarkContent(watermark: WatermarkData | undefined): boolean {
+  if (!watermark) return false;
+  return watermark.kind === 'image' ? !!watermark.image : !!watermark.text;
+}
+
+/** True when a header or footer is actually configured. */
+function hasHeaderFooterContent(headerFooter: HeaderFooterData | undefined): boolean {
+  if (!headerFooter) return false;
+  return !!headerFooter.headerText.trim() || !!headerFooter.footerText.trim();
+}
+
+/**
+ * The bottom-left origin of a `boxWidth` x `boxHeight` box placed against the
+ * 9-point position grid, before any rotation. Shared by the text and image
+ * watermark so the two draw against the same grid rather than duplicating the
+ * center/edge math.
+ */
+function positionOrigin(
+  position: string,
+  pageWidth: number,
+  pageHeight: number,
+  boxWidth: number,
+  boxHeight: number,
+  padding: number
+): { x: number; y: number } {
+  const [vertical, horizontal] = position.split('-');
+
+  let x = padding;
+  if (horizontal === 'center' || (vertical === 'center' && !horizontal)) {
+    x = (pageWidth - boxWidth) / 2;
+  } else if (horizontal === 'right') {
+    x = pageWidth - boxWidth - padding;
+  }
+
+  let y = pageHeight - boxHeight - padding;
+  if (vertical === 'center') {
+    y = (pageHeight - boxHeight) / 2;
+  } else if (vertical === 'bottom') {
+    y = padding;
+  }
+
+  return { x, y };
+}
+
+/**
+ * Draws a fixed, unrotated header and/or footer line — small running text in the
+ * top/bottom margin band, distinct from the single positioned/rotatable
+ * watermark stamp above.
+ */
+function drawHeaderFooter(
+  page: ReturnType<PDFDocument['addPage']>,
+  font: import('pdf-lib').PDFFont,
+  settings: HeaderFooterData,
+  pageIndex: number,
+  totalPages: number
+): void {
+  const { width, height } = page.getSize();
+  const margin = 24; // ~1/3 inch band from the page edge
+  const size = settings.fontSize;
+
+  const draw = (raw: string, align: 'left' | 'center' | 'right', y: number, context: string) => {
+    if (!raw.trim()) return;
+    const displayText = raw
+      .replace(/{n}/g, String(pageIndex + 1))
+      .replace(/{total}/g, String(totalPages));
+    const text = toWinAnsiOrThrow(displayText, context);
+    const textWidth = font.widthOfTextAtSize(text, size);
+    const x =
+      align === 'center'
+        ? (width - textWidth) / 2
+        : align === 'right'
+          ? width - textWidth - margin
+          : margin;
+    page.drawText(text, { x, y, size, font, color: DOC_INK });
+  };
+
+  draw(settings.headerText, settings.headerAlign, height - margin - size * 0.8, 'header');
+  draw(settings.footerText, settings.footerAlign, margin, 'footer');
+}
+
 async function composePages(
   pages: PageSource[],
   sources: Record<string, Uint8Array>,
   stamps: StampSource[],
   watermark: WatermarkData | undefined,
+  headerFooter: HeaderFooterData | undefined,
   normalize: import('../../ui/tools/normalize/state').NormalizeSettings | undefined | null,
   nup: import('../../ui/tools/nup/state').NUpSettings | undefined | null,
   job: JobHandle | undefined,
@@ -827,14 +1038,29 @@ async function composePages(
   const outDoc = await PDFDocument.create();
   const getSource = sourceCache(sources);
   const fontCache: { font?: Awaited<ReturnType<PDFDocument['embedFont']>> } = {};
-  const imageCache = new Map<string, Awaited<ReturnType<PDFDocument['embedPng']>>>();
+  const imageCache = new Map<string, PDFImage>();
+
+  const watermarkActive = hasWatermarkContent(watermark);
+  const headerFooterActive = hasHeaderFooterContent(headerFooter);
 
   let watermarkFont: import('pdf-lib').PDFFont | undefined;
-  if (watermark?.text) {
+  if (watermarkActive && watermark?.kind !== 'image') {
     watermarkFont = await outDoc.embedStandardFont(StandardFonts.HelveticaBold);
   }
 
-  const watermarkPages = watermark ? parsePageRange(watermark.pageRange, pages.length) : null;
+  // A plain (non-bold) face, visually distinct from the diagonal watermark stamp —
+  // headers/footers read like print-document running text, not a stamp.
+  let headerFooterFont: import('pdf-lib').PDFFont | undefined;
+  if (headerFooterActive) {
+    headerFooterFont = await outDoc.embedStandardFont(StandardFonts.Helvetica);
+  }
+
+  const watermarkPages =
+    watermarkActive && watermark ? parsePageRange(watermark.pageRange, pages.length) : null;
+  const headerFooterPages =
+    headerFooterActive && headerFooter
+      ? parsePageRange(headerFooter.pageRange, pages.length)
+      : null;
 
   const stampsByPage = new Map<string, StampSource[]>();
   for (const stamp of stamps) {
@@ -927,46 +1153,80 @@ async function composePages(
       copied.setCropBox(cropX, cropY, cropW, cropH);
     }
 
-    if (watermark?.text && watermarkFont && (watermarkPages === null || watermarkPages.has(i))) {
+    if (watermarkActive && watermark && (watermarkPages === null || watermarkPages.has(i))) {
       const { width, height } = copied.getSize();
-      const displayText = watermark.text
-        .replace(/{n}/g, String(watermark.startAt + i))
-        .replace(/{total}/g, String(pages.length));
-
-      const textWidth = watermarkFont.widthOfTextAtSize(displayText, watermark.fontSize);
-      const textHeight = watermarkFont.heightAtSize(watermark.fontSize);
-
-      const [vertical, horizontal] = watermark.position.split('-');
-
       const padding = 36; // 0.5 inch
-      let x = padding;
-      if (horizontal === 'center' || (vertical === 'center' && !horizontal)) {
-        x = (width - textWidth) / 2;
-      } else if (horizontal === 'right') {
-        x = width - textWidth - padding;
+
+      if (watermark.kind === 'image' && watermark.image) {
+        const key = fingerprintBytes(watermark.image.bytes);
+        let image = imageCache.get(key);
+        if (!image) {
+          image =
+            watermark.image.format === 'jpeg'
+              ? await outDoc.embedJpg(watermark.image.bytes)
+              : await outDoc.embedPng(watermark.image.bytes);
+          imageCache.set(key, image);
+        }
+
+        const boxW = width * watermark.imageScale;
+        const boxH = boxW * (watermark.image.height / watermark.image.width);
+        const { x, y } = positionOrigin(watermark.position, width, height, boxW, boxH, padding);
+        const cx = x + boxW / 2;
+        const cy = y + boxH / 2;
+        const { x: drawX, y: drawY } =
+          watermark.rotation === 0
+            ? { x, y }
+            : centerPreservingOrigin(cx, cy, boxW, boxH, watermark.rotation);
+
+        copied.drawImage(image, {
+          x: drawX,
+          y: drawY,
+          width: boxW,
+          height: boxH,
+          opacity: watermark.opacity,
+          rotate: degrees(watermark.rotation)
+        });
+      } else if (watermarkFont && watermark.text) {
+        const requestedText = watermark.text
+          .replace(/{n}/g, String(watermark.startAt + i))
+          .replace(/{total}/g, String(pages.length));
+        const displayText = toWinAnsiOrThrow(requestedText, 'watermark');
+
+        const textWidth = watermarkFont.widthOfTextAtSize(displayText, watermark.fontSize);
+        const textHeight = watermarkFont.heightAtSize(watermark.fontSize);
+        const { x, y } = positionOrigin(
+          watermark.position,
+          width,
+          height,
+          textWidth,
+          textHeight,
+          padding
+        );
+
+        const hex = watermark.color.replace('#', '');
+        const r = parseInt(hex.substring(0, 2), 16) / 255;
+        const g = parseInt(hex.substring(2, 4), 16) / 255;
+        const b = parseInt(hex.substring(4, 6), 16) / 255;
+
+        copied.drawText(displayText, {
+          x,
+          y,
+          size: watermark.fontSize,
+          font: watermarkFont,
+          color: rgb(r, g, b),
+          opacity: watermark.opacity,
+          rotate: degrees(watermark.rotation)
+        });
       }
+    }
 
-      let y = height - textHeight - padding;
-      if (vertical === 'center') {
-        y = (height - textHeight) / 2;
-      } else if (vertical === 'bottom') {
-        y = padding;
-      }
-
-      const hex = watermark.color.replace('#', '');
-      const r = parseInt(hex.substring(0, 2), 16) / 255;
-      const g = parseInt(hex.substring(2, 4), 16) / 255;
-      const b = parseInt(hex.substring(4, 6), 16) / 255;
-
-      copied.drawText(displayText, {
-        x,
-        y,
-        size: watermark.fontSize,
-        font: watermarkFont,
-        color: rgb(r, g, b),
-        opacity: watermark.opacity,
-        rotate: degrees(watermark.rotation)
-      });
+    if (
+      headerFooterActive &&
+      headerFooter &&
+      headerFooterFont &&
+      (headerFooterPages === null || headerFooterPages.has(i))
+    ) {
+      drawHeaderFooter(copied, headerFooterFont, headerFooter, i, pages.length);
     }
 
     await drawStamps(outDoc, copied, stampsByPage.get(ref.key) ?? [], fontCache, imageCache);
@@ -1270,13 +1530,14 @@ const api: ProcessJob = {
     return transfer(await doc.save({ useObjectStreams: true }));
   },
 
-  async compose(pages, sources, stamps, watermark, normalize, nup, job) {
+  async compose(pages, sources, stamps, watermark, headerFooter, normalize, nup, job) {
     if (pages.length === 0) throw internal('Nothing to export: the page list is empty');
     const outDoc = await composePages(
       pages,
       sources,
       stamps,
       watermark,
+      headerFooter,
       normalize,
       nup,
       job,
@@ -1286,7 +1547,18 @@ const api: ProcessJob = {
     return transfer(await outDoc.save({ useObjectStreams: true }));
   },
 
-  async composeSplit(pages, sources, boundaries, stamps, watermark, normalize, nup, baseName, job) {
+  async composeSplit(
+    pages,
+    sources,
+    boundaries,
+    stamps,
+    watermark,
+    headerFooter,
+    normalize,
+    nup,
+    baseName,
+    job
+  ) {
     if (pages.length === 0) throw internal('Nothing to export: the page list is empty');
 
     const cuts = [...new Set(boundaries)]
@@ -1307,6 +1579,7 @@ const api: ProcessJob = {
         sources,
         stamps,
         watermark,
+        headerFooter,
         normalize,
         nup,
         job,
@@ -1328,6 +1601,7 @@ const api: ProcessJob = {
         sources,
         stamps,
         watermark,
+        headerFooter,
         normalize,
         nup,
         job,
@@ -1399,20 +1673,37 @@ const api: ProcessJob = {
         if (!(newStream instanceof PDFStream)) continue;
 
         let finalSmaskRef = smaskRef;
-        if (smaskRef && encoded.maskBytes) {
-          const smaskStream = source.context.flateStream(encoded.maskBytes, {
-            Type: 'XObject',
-            Subtype: 'Image',
-            Width: encoded.width,
-            Height: encoded.height,
-            ColorSpace: 'DeviceGray',
-            BitsPerComponent: 8
-          });
-          finalSmaskRef = source.context.register(smaskStream);
+        if (smaskRef instanceof PDFRef && encoded.maskBytes) {
+          // The colour image and its `/SMask` are independent XObjects with
+          // independent resolutions — a small image can carry a disproportionately
+          // large soft mask. Whether *this* image got downscaled says nothing about
+          // whether its mask needs to be; the mask's own stored size against the
+          // new colour target is what decides it.
+          const originalSmask = source.context.lookupMaybe(smaskRef, PDFStream);
+          const originalWidth = originalSmask?.dict
+            .lookupMaybe(PDFName.of('Width'), PDFNumber)
+            ?.asNumber();
+          const originalHeight = originalSmask?.dict
+            .lookupMaybe(PDFName.of('Height'), PDFNumber)
+            ?.asNumber();
+          const smaskOversized =
+            originalWidth !== encoded.width || originalHeight !== encoded.height;
+
+          if (smaskOversized) {
+            const smaskStream = source.context.flateStream(encoded.maskBytes, {
+              Type: 'XObject',
+              Subtype: 'Image',
+              Width: encoded.width,
+              Height: encoded.height,
+              ColorSpace: 'DeviceGray',
+              BitsPerComponent: 8
+            });
+            finalSmaskRef = source.context.register(smaskStream);
+          }
         }
 
-        // Re-attached untouched (or updated): the mask keeps its own resolution, filter and
-        // bytes, so only the colour data is ever rewritten, unless we explicitly resampled it.
+        // Re-attached untouched (or resampled to match the new colour target): the
+        // mask keeps its own resolution, filter and bytes unless it needed resizing.
         if (finalSmaskRef) newStream.dict.set(PDFName.of('SMask'), finalSmaskRef);
         if (maskRef) newStream.dict.set(PDFName.of('Mask'), maskRef);
 

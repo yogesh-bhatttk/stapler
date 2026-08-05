@@ -1,4 +1,15 @@
-import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
+import {
+  PDFDocument,
+  PDFName,
+  PDFRef,
+  StandardFonts,
+  concatTransformationMatrix,
+  degrees,
+  drawObject,
+  popGraphicsState,
+  pushGraphicsState,
+  rgb
+} from 'pdf-lib';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import path from 'node:path';
@@ -343,5 +354,209 @@ export async function smaskPdf(): Promise<Uint8Array> {
     height: 200
   });
 
+  return doc.save();
+}
+
+/* ------------------------------------------------------------------ *
+ * CMP-03 fixtures that pdf-lib cannot express through `embedPng`/`embedJpg`
+ *
+ * `embedPng` always writes a DeviceRGB/DeviceGray image, and always sizes an
+ * alpha `/SMask` identically to its base image. So neither a real DeviceCMYK
+ * image nor a colour/mask *resolution mismatch* is reachable through it — both
+ * are hand-registered as raw image XObjects and drawn with a hand-written
+ * `cm`/`Do` pair instead.
+ * ------------------------------------------------------------------ */
+
+const A4: [number, number] = [595.28, 841.89];
+
+/** Registers `samples` as an 8-bit image XObject and returns its reference. */
+function registerImageStream(
+  doc: PDFDocument,
+  samples: Uint8Array,
+  width: number,
+  height: number,
+  colorSpace: 'DeviceRGB' | 'DeviceGray' | 'DeviceCMYK',
+  extra: Record<string, PDFRef> = {}
+): PDFRef {
+  return doc.context.register(
+    doc.context.flateStream(samples, {
+      Type: 'XObject',
+      Subtype: 'Image',
+      Width: width,
+      Height: height,
+      ColorSpace: colorSpace,
+      BitsPerComponent: 8,
+      ...extra
+    })
+  );
+}
+
+/** Places an already-registered image XObject into `page` at a rectangle in points. */
+function drawRawImage(
+  page: ReturnType<PDFDocument['addPage']>,
+  ref: PDFRef,
+  name: string,
+  box: { x: number; y: number; width: number; height: number }
+): void {
+  page.node.setXObject(PDFName.of(name), ref);
+  page.pushOperators(
+    pushGraphicsState(),
+    concatTransformationMatrix(box.width, 0, 0, box.height, box.x, box.y),
+    drawObject(name),
+    popGraphicsState()
+  );
+}
+
+/**
+ * A smooth, deterministic scalar field in [-1, 1].
+ *
+ * Deliberately low-frequency, and varying along *both* axes: no two rows are
+ * alike, so Flate cannot crush a fixture built from it down to nothing, yet its
+ * gradient is a fraction of a level per pixel, so downscaling and JPEG both
+ * reproduce it almost exactly. That is what lets the colour-shift assertion use
+ * a tight tolerance instead of measuring resampling noise.
+ */
+function smoothField(fx: number, fy: number): number {
+  return 0.6 * Math.sin(fx * 11) * Math.cos(fy * 7) + 0.4 * Math.sin((fx + fy) * 5);
+}
+
+const clamp255 = (n: number) => Math.max(0, Math.min(255, Math.round(n)));
+
+/**
+ * Four vertical bands of known DeviceCMYK ink, for CMP-03's "the CMYK fixture
+ * has no colour shift beyond a documented tolerance" criterion.
+ *
+ * Components are 8-bit samples, so 255 is full ink. Every band deliberately
+ * keeps all four of its channels away from both ends of the range: a channel
+ * swap, an inverted `/K`, or a naive `1 - min(1, ink + k)` conversion then each
+ * move the rendered colour by tens of levels instead of hiding inside a
+ * saturated clip.
+ */
+export const CMYK_BANDS = [
+  { label: 'cyan', cmyk: [220, 34, 26, 24] },
+  { label: 'magenta', cmyk: [30, 215, 40, 24] },
+  { label: 'yellow', cmyk: [26, 40, 225, 24] },
+  { label: 'shadow', cmyk: [72, 62, 56, 138] }
+] as const;
+
+/** Ink modulation depth, in 8-bit sample levels, applied via `smoothField`. */
+const CMYK_BAND_MODULATION = 20;
+
+const BAND_IMAGE_BOX = { x: 40, y: 400, width: 400, height: 300 };
+
+/**
+ * The four band centres as page fractions, derived from `BAND_IMAGE_BOX` so the
+ * sampling points cannot drift away from the geometry they describe. Y is
+ * measured from the top, which is what `samplePage` wants.
+ */
+export const BAND_SAMPLE_POINTS: [number, number][] = [0, 1, 2, 3].map(band => [
+  (BAND_IMAGE_BOX.x + (BAND_IMAGE_BOX.width * (band + 0.5)) / 4) / A4[0],
+  (A4[1] - (BAND_IMAGE_BOX.y + BAND_IMAGE_BOX.height / 2)) / A4[1]
+]);
+
+/**
+ * A page of text plus one genuine DeviceCMYK image, over-sampled so the surgical
+ * path acts on it: 1600×1200 stored, drawn at 400×300pt, i.e. 288 DPI against a
+ * 150 DPI default.
+ */
+export async function cmykImagePdf(): Promise<Uint8Array> {
+  const width = 1600;
+  const height = 1200;
+  const samples = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const band = CMYK_BANDS[Math.floor((x / width) * CMYK_BANDS.length)];
+      const shift = CMYK_BAND_MODULATION * smoothField(x / width, y / height);
+      const i = (y * width + x) * 4;
+      for (let c = 0; c < 4; c++) samples[i + c] = clamp255(band.cmyk[c] + shift);
+    }
+  }
+
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage(A4);
+  page.drawText('CMYK fixture: cyan, magenta, yellow, and a K-built shadow.', {
+    x: 40,
+    y: 780,
+    size: 14,
+    font
+  });
+  page.drawText('Body text, so this page keeps a text layer and stays surgical.', {
+    x: 40,
+    y: 752,
+    size: 11,
+    font,
+    color: rgb(0, 0, 0)
+  });
+
+  const ref = registerImageStream(doc, samples, width, height, 'DeviceCMYK');
+  drawRawImage(page, ref, 'ImCmyk', BAND_IMAGE_BOX);
+  return doc.save();
+}
+
+/**
+ * The "small image, large mask" shape: a 100×2100 colour strip behind a 400×8400
+ * soft mask — an /SMask carrying 16× as many samples as the image it modulates.
+ * Nothing in the PDF spec ties the two resolutions together, and `embedPng`
+ * cannot produce the mismatch, so both streams are registered by hand.
+ *
+ * Drawn at 40×800pt, i.e. 180 DPI down the page, so the page is picked for the
+ * surgical route and the image is genuinely over-sampled for the 150 DPI default.
+ *
+ * Worth knowing when reading the assertions: pdf.js decodes an image at
+ * `max(image, smask, mask)` in each axis (`PDFImage.drawWidth`/`drawHeight`), so
+ * the pixels handed to the re-encoder for *this* fixture are 400×8400, not
+ * 100×2100 — the base image is upsampled to meet its mask before anything else
+ * happens. That is why the re-encoded output lands at the placement's target size
+ * rather than at either stored resolution.
+ */
+export const OVERSIZED_MASK_FIXTURE = {
+  colour: { width: 100, height: 2100 },
+  mask: { width: 400, height: 8400 },
+  box: { x: 40, y: 20, width: 40, height: 800 }
+} as const;
+
+export async function oversizedMaskPdf(): Promise<Uint8Array> {
+  const { colour, mask, box } = OVERSIZED_MASK_FIXTURE;
+  const colourSamples = photoPixels(colour.width, colour.height);
+
+  const maskSamples = new Uint8Array(mask.width * mask.height);
+  for (let y = 0; y < mask.height; y++) {
+    for (let x = 0; x < mask.width; x++) {
+      const fx = x / mask.width;
+      const fy = y / mask.height;
+      // Opaque down the left edge, then a soft horizontal ramp with a gentle
+      // wobble, so the mask has real structure to preserve at either resolution.
+      const alpha = 1.15 - fx * 0.9 + 0.2 * smoothField(fx * 3, fy);
+      maskSamples[y * mask.width + x] = clamp255(255 * Math.max(0, Math.min(1, alpha)));
+    }
+  }
+
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage(A4);
+  page.drawText('Small image, large soft mask.', { x: 130, y: 790, size: 16, font });
+  for (let line = 0; line < 12; line++) {
+    page.drawText(`Body line ${line + 1}: the text layer keeps this page on the surgical path.`, {
+      x: 130,
+      y: 760 - line * 18,
+      size: 11,
+      font,
+      color: rgb(0, 0, 0)
+    });
+  }
+
+  const maskRef = registerImageStream(doc, maskSamples, mask.width, mask.height, 'DeviceGray');
+  const colourRef = registerImageStream(
+    doc,
+    colourSamples,
+    colour.width,
+    colour.height,
+    'DeviceRGB',
+    {
+      SMask: maskRef
+    }
+  );
+  drawRawImage(page, colourRef, 'ImStrip', box);
   return doc.save();
 }

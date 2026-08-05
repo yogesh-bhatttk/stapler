@@ -26,8 +26,37 @@ import {
   type PageRef
 } from './store';
 import { getSignature } from './signatures';
-import { watermarkSettings } from '../ui/tools/watermark/state';
+import {
+  watermarkSettings,
+  headerFooterSettings,
+  hasWatermarkContent,
+  hasHeaderFooterContent,
+  type WatermarkSettings
+} from '../ui/tools/watermark/state';
+import type { WatermarkData } from './workers/process.worker';
 import { internal, unsupported } from './errors';
+
+/**
+ * Maps the UI's `WatermarkSettings` onto the worker's `WatermarkData`. The two
+ * are structurally close — this only exists because `image: WatermarkImage |
+ * null` needs to become `image?: WatermarkImageData`, which pdf-lib's worker
+ * boundary (Comlink, structured clone) is happy with but a strict `null` isn't.
+ */
+function toWatermarkData(settings: WatermarkSettings): WatermarkData {
+  return {
+    kind: settings.kind,
+    text: settings.text,
+    image: settings.image ?? undefined,
+    imageScale: settings.imageScale,
+    position: settings.position,
+    opacity: settings.opacity,
+    rotation: settings.rotation,
+    fontSize: settings.fontSize,
+    color: settings.color,
+    startAt: settings.startAt,
+    pageRange: settings.pageRange
+  };
+}
 
 /** Resolves signature stamps to bytes so the worker never touches IndexedDB. */
 async function resolveStamps(pages: PageRef[], annotations: Annotation[]): Promise<StampSource[]> {
@@ -70,7 +99,8 @@ export interface ComposeRequest {
   pages: PageRef[];
   annotations: Annotation[];
   cropBoxes?: Record<string, { x: number; y: number; width: number; height: number }>;
-  watermark?: import('../ui/tools/watermark/state').WatermarkSettings;
+  watermark?: WatermarkSettings;
+  headerFooter?: import('../ui/tools/watermark/state').HeaderFooterSettings;
   normalize?: import('../ui/tools/normalize/state').NormalizeSettings | null;
   nup?: import('../ui/tools/nup/state').NUpSettings | null;
 }
@@ -92,7 +122,12 @@ export async function composeDocument(
       mappedPages,
       bytesForPages(request.pages),
       stamps,
-      request.watermark,
+      request.watermark && hasWatermarkContent(request.watermark)
+        ? toWatermarkData(request.watermark)
+        : undefined,
+      request.headerFooter && hasHeaderFooterContent(request.headerFooter)
+        ? request.headerFooter
+        : undefined,
       request.normalize,
       request.nup,
       job
@@ -118,7 +153,12 @@ export async function splitDocument(request: SplitRequest, options: JobOptions =
       bytesForPages(request.pages),
       request.boundaries,
       stamps,
-      request.watermark,
+      request.watermark && hasWatermarkContent(request.watermark)
+        ? toWatermarkData(request.watermark)
+        : undefined,
+      request.headerFooter && hasHeaderFooterContent(request.headerFooter)
+        ? request.headerFooter
+        : undefined,
       request.normalize,
       request.nup,
       request.baseName,
@@ -596,7 +636,8 @@ export async function currentDocumentBytes(
       Object.values(sources.value).find(s => s.id === doc.pages[0].sourceDocId)?.pageCount &&
     doc.pages.every((p, i) => p.sourceIndex === i && p.rotation === 0) &&
     Object.keys(cropBoxes.value).length === 0 &&
-    !watermarkSettings.value?.text &&
+    !hasWatermarkContent(watermarkSettings.value) &&
+    !hasHeaderFooterContent(headerFooterSettings.value) &&
     !normalize;
   if (untouched) {
     const single = Object.values(sources.value).find(s => s.id === doc.pages[0].sourceDocId);
@@ -609,6 +650,7 @@ export async function currentDocumentBytes(
       annotations: doc.annotations,
       cropBoxes: cropBoxes.value,
       watermark: watermarkSettings.value,
+      headerFooter: headerFooterSettings.value,
       normalize,
       nup: nupSettings.value
     },

@@ -320,9 +320,11 @@ tests, verified end-to-end against a live instance.
 
 ### OPS-08 · Page numbers, watermark, header/footer — `M` `P1`
 
-**Status: Partial** — Text watermark supports the 9-point grid, font size, opacity,
-colour, rotation, start-at numbering, and a comma-separated page range. Image watermarks,
-real header/footer, and CJK-safe embedding are still missing.
+**Status: Done** — Text watermark supports the 9-point grid, font size, opacity, colour,
+rotation, start-at numbering, a comma-separated page range, and CJK-safe refusal. An image
+watermark (PNG/JPEG, same grid/opacity/rotation/page-range) and a real header/footer (fixed
+margin band, own page range, left/center/right alignment, `{n}`/`{total}`) were added in
+Chunk 2 — see `docs/FIX-PLAN.md` for exactly what shipped and what was deliberately left out.
 
 - **Requirements:** Position (9-point grid), font size, opacity, colour, start-at value,
   page-range targeting, and a text or image watermark with rotation.

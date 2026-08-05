@@ -4,9 +4,13 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import {
   acroformPdf,
+  BAND_SAMPLE_POINTS,
+  cmykImagePdf,
   ensureFixture,
   mixedSizePdf,
   mixedTextImagePdf,
+  OVERSIZED_MASK_FIXTURE,
+  oversizedMaskPdf,
   sharedImagePdf,
   textPdf,
   transparentImagePdf
@@ -53,8 +57,28 @@ interface ImageEntry {
   colorSpace: string;
   bytes: number;
   /** Digest of the /SMask stream, so "unchanged" can be asserted literally. */
-  smask: { ref: number; width: number; height: number; sha: string } | null;
+  smask: { ref: number; width: number; height: number; bytes: number; sha: string } | null;
 }
+
+/**
+ * Per-channel budget, in 8-bit levels, for the CMYK band assertion below.
+ *
+ * ±10 of 255 (≈4%). Both readings are rendered through the same pdf.js build, so
+ * the DeviceCMYK→sRGB conversion is common to both sides and is not part of this
+ * budget — the pipeline has no CMYK formula of its own to disagree with. What is
+ * left is the 1600→833px box resample plus JPEG quantisation and 4:2:0 chroma
+ * subsampling at the 75% default quality, sampled at a band's smooth interior
+ * where no edge ringing applies.
+ *
+ * The measured worst case on this fixture is **1 level**, across all four bands
+ * and all three channels, so the band is a 10× margin over observed codec noise
+ * rather than a number fitted to the result. It stays deliberately that loose
+ * because Chromium's JPEG encoder is free to change between versions. It is still
+ * far tighter than any real colour-management error: a channel swap, an inverted
+ * `/K`, a dropped black plate, or a naive `1 - min(1, ink + k)` conversion each
+ * move one of these bands by 40 levels or more.
+ */
+const CMYK_COLOUR_TOLERANCE = 10;
 
 /** Every image XObject in the document, with enough detail to diff two versions. */
 async function imageEntries(bytes: Uint8Array): Promise<ImageEntry[]> {
@@ -85,6 +109,7 @@ async function imageEntries(bytes: Uint8Array): Promise<ImageEntry[]> {
                 ref: smaskRef.objectNumber,
                 width: Number(String(smask.dict.get(PDFName.of('Width')))),
                 height: Number(String(smask.dict.get(PDFName.of('Height')))),
+                bytes: smask.contents.length,
                 sha: createHash('sha256').update(Buffer.from(smask.contents)).digest('hex')
               }
             : null
@@ -489,6 +514,133 @@ test.describe('tool flows', () => {
     }
   });
 
+  /**
+   * CMP-03's "small image, large mask" case: an /SMask whose own resolution has
+   * nothing to do with the colour image's, and is far above it.
+   *
+   * The criterion is that no such mask reaches the output at its original
+   * resolution — an image re-encoded down to a few hundred pixels must not still
+   * drag a 400×8400 alpha channel along with it. Both streams are inspected in the
+   * exported bytes, so a mask that was merely re-pointed rather than resampled
+   * fails.
+   */
+  test('compress: CMP-03 does not carry an oversized soft mask into the output', async ({
+    page
+  }) => {
+    test.setTimeout(180_000);
+    const file = await ensureFixture('oversized-mask.pdf', oversizedMaskPdf);
+    const original = new Uint8Array(readFileSync(file));
+
+    // The premise, asserted on the fixture rather than assumed: the colour image
+    // and its mask really do start at wildly different resolutions.
+    const before = await imageEntries(original);
+    expect(before).toHaveLength(1);
+    expect([before[0].width, before[0].height]).toEqual([
+      OVERSIZED_MASK_FIXTURE.colour.width,
+      OVERSIZED_MASK_FIXTURE.colour.height
+    ]);
+    expect(before[0].smask).not.toBeNull();
+    expect([before[0].smask!.width, before[0].smask!.height]).toEqual([
+      OVERSIZED_MASK_FIXTURE.mask.width,
+      OVERSIZED_MASK_FIXTURE.mask.height
+    ]);
+    expect(before[0].smask!.width * before[0].smask!.height).toBeGreaterThan(
+      before[0].width * before[0].height * 8
+    );
+
+    await importFixture(page, file);
+    await gotoTool(page, 'compress');
+    await page.getByRole('button', { name: /Analyse without changing/ }).click();
+    await expect(page.getByText(/Images re-encoded, text kept/i)).toBeVisible({ timeout: 60_000 });
+
+    const output = await commitAndRead(page, 'Compress & export');
+    // CMP-04: had the output not been smaller the original bytes would come back
+    // and every assertion below would be reading the fixture, not the result.
+    expect(output.length).toBeLessThan(original.length);
+
+    const after = await imageEntries(output);
+    expect(after).toHaveLength(1);
+    expect(after[0].filter).toBe('/DCTDecode');
+
+    // The mask is resampled to the re-encoded colour image, not left at 400×8400.
+    expect(after[0].smask).not.toBeNull();
+    expect(after[0].smask!.width).toBe(after[0].width);
+    expect(after[0].smask!.height).toBe(after[0].height);
+    expect(after[0].smask!.height).toBeLessThan(OVERSIZED_MASK_FIXTURE.mask.height);
+    // Genuinely rewritten, not re-pointed at the original stream.
+    expect(after[0].smask!.sha).not.toBe(before[0].smask!.sha);
+    expect(after[0].smask!.bytes).toBeLessThan(before[0].smask!.bytes);
+  });
+
+  /**
+   * CMP-03's "the CMYK fixture has no colour shift beyond a documented tolerance".
+   *
+   * Both readings come from the same pdf.js build that the compression pipeline
+   * decodes through — the pipeline does not implement a CMYK→RGB formula of its
+   * own, pdf.js resolves the colour space while decoding — so the conversion
+   * itself is common to both sides and contributes nothing to the measured
+   * difference. Writing an independent formula here would test the formula, not
+   * the pipeline.
+   */
+  test('compress: CMP-03 converts a DeviceCMYK image to RGB with no visible colour shift', async ({
+    page
+  }) => {
+    test.setTimeout(180_000);
+    const file = await ensureFixture('cmyk-image.pdf', cmykImagePdf);
+    const original = new Uint8Array(readFileSync(file));
+    await importFixture(page, file);
+
+    const beforePixels = await samplePage(page, BAND_SAMPLE_POINTS);
+
+    // Guard against a vacuous pass. A blank or all-white render would satisfy
+    // "before ≈ after" perfectly, so the four bands must first be four clearly
+    // distinct, clearly non-white colours.
+    for (const pixel of beforePixels) expect(Math.min(...pixel)).toBeLessThan(230);
+    for (let a = 0; a < beforePixels.length; a++) {
+      for (let b = a + 1; b < beforePixels.length; b++) {
+        const spread = Math.max(
+          ...beforePixels[a].map((channel, c) => Math.abs(channel - beforePixels[b][c]))
+        );
+        expect(spread).toBeGreaterThan(40);
+      }
+    }
+
+    await gotoTool(page, 'compress');
+    await page.getByRole('button', { name: /Analyse without changing/ }).click();
+    await expect(page.getByText(/Images re-encoded, text kept/i)).toBeVisible({ timeout: 60_000 });
+    const output = await commitAndRead(page, 'Compress & export');
+    expect(output.length).toBeLessThan(original.length);
+
+    // The conversion actually happened: DeviceCMYK in, a DeviceRGB JPEG out.
+    const before = await imageEntries(original);
+    const after = await imageEntries(output);
+    expect(before[0].colorSpace).toBe('/DeviceCMYK');
+    expect(before[0].filter).toBe('/FlateDecode');
+    expect(after[0].colorSpace).toBe('/DeviceRGB');
+    expect(after[0].filter).toBe('/DCTDecode');
+    expect(after[0].width).toBeLessThan(before[0].width);
+
+    // Reload so the workspace holds the compressed file and nothing else, then
+    // sample the same four band centres.
+    await openApp(page);
+    await page.locator('input[type="file"]').setInputFiles({
+      name: 'compressed.pdf',
+      mimeType: 'application/pdf',
+      buffer: Buffer.from(output)
+    });
+    await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
+    const afterPixels = await samplePage(page, BAND_SAMPLE_POINTS);
+
+    for (let band = 0; band < BAND_SAMPLE_POINTS.length; band++) {
+      for (let c = 0; c < 3; c++) {
+        expect(
+          Math.abs(afterPixels[band][c] - beforePixels[band][c]),
+          `band ${band} channel ${c}: ${beforePixels[band][c]} → ${afterPixels[band][c]}`
+        ).toBeLessThanOrEqual(CMYK_COLOUR_TOLERANCE);
+      }
+    }
+  });
+
   test('compress: CMP-03 stores one copy of an image shared by ten pages', async ({ page }) => {
     // Real compression work on a real document: the default 60s is not enough.
     test.setTimeout(180_000);
@@ -534,7 +686,9 @@ test.describe('tool flows', () => {
     await gotoTool(page, 'sign');
 
     await page.getByRole('button', { name: 'Text', exact: true }).click();
-    await page.locator('[data-index="0"]').click({ position: { x: 300, y: 300 } });
+    const placement = page.getByRole('group', { name: /Stamp placement area/ });
+    await placement.focus();
+    await page.keyboard.press('Enter');
 
     await page.getByLabel('Stamp text').fill('Test signature text');
 
@@ -681,8 +835,9 @@ test.describe('tool flows', () => {
     await importFixture(page, file);
     await gotoTool(page, 'watermark');
 
-    // Enter watermark text
-    await page.getByLabel('Text', { exact: true }).fill('CONFIDENTIAL TEST');
+    // Enter watermark text (the "Watermark type" segmented control also has a
+    // radio option named "Text", so this is scoped to the textbox specifically).
+    await page.getByRole('textbox', { name: 'Text', exact: true }).fill('CONFIDENTIAL TEST');
 
     // Choose bottom-center position
     await page.getByLabel('Position').selectOption('bottom-center');
@@ -693,6 +848,25 @@ test.describe('tool flows', () => {
     // The former assertion only proved that the export still had six pages. This
     // reads the actual content stream, so it fails if the watermark is ignored.
     expect(await drawnText(bytes)).toContain('CONFIDENTIAL TEST');
+    expect(output.getPageCount()).toBe(6);
+  });
+
+  test('watermark: header and footer text are drawn independently of the watermark stamp', async ({
+    page
+  }) => {
+    const file = await ensureFixture('text-6.pdf', () => textPdf(6));
+    await importFixture(page, file);
+    await gotoTool(page, 'watermark');
+
+    // Leave the watermark stamp itself empty — only the header/footer are set.
+    await page.getByLabel('Header text').fill('ACME Corp');
+    await page.getByLabel('Footer text').fill('Page {n} of {total}');
+
+    const bytes = await commitAndRead(page, /Export PDF/i);
+    const output = await PDFDocument.load(bytes);
+
+    expect(await drawnText(bytes)).toContain('ACME Corp');
+    expect(await drawnText(bytes)).toContain('Page 1 of 6');
     expect(output.getPageCount()).toBe(6);
   });
 
