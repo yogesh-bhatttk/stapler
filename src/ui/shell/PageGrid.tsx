@@ -51,12 +51,21 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
   const [focusIndex, setFocusIndex] = useState(0);
   const lastClickedRef = useRef<string | null>(null);
 
-  /** Aspect ratio of the first page, used to size every tile consistently. */
-  const aspect = useMemo(() => {
-    const first = doc.pages[0];
-    const source = first ? sources.value[first.sourceDocId] : undefined;
-    const size = source?.pageSizes[first?.sourceIndex ?? 0];
-    return size ? displayedAspectRatio(size.width, size.height, first.rotation) : 1 / 1.414;
+  /**
+   * The aspect ratio of the tallest page in the document, used to size the grid rows
+   * so no tile overflows. Each tile then renders at its own true aspect ratio.
+   */
+  const gridAspect = useMemo(() => {
+    let minAspect = 1 / 1.414; // Default to portrait if unknown
+    for (const page of doc.pages) {
+      const source = sources.value[page.sourceDocId];
+      const size = source?.pageSizes[page.sourceIndex];
+      if (size) {
+        const a = displayedAspectRatio(size.width, size.height, page.rotation);
+        if (a < minAspect) minAspect = a;
+      }
+    }
+    return minAspect;
   }, [doc.pages, sources.value]);
 
   useLayoutEffect(() => {
@@ -69,7 +78,7 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
       const columns = Math.max(1, Math.floor((available + GAP) / (MIN_TILE + GAP)));
       const width = (available - GAP * (columns - 1)) / columns;
       // Tile height is the thumbnail plus the page-number row beneath it.
-      setMetrics({ columns, width, height: width / aspect + 28 });
+      setMetrics({ columns, width, height: width / gridAspect + 28 });
       setViewportHeight(scroller.clientHeight);
     };
 
@@ -78,7 +87,7 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
     observer.observe(element);
     observer.observe(scroller);
     return () => observer.disconnect();
-  }, [aspect]);
+  }, [gridAspect]);
 
   const rowHeight = metrics.height + GAP;
   const rowCount = Math.ceil(doc.pages.length / metrics.columns);
@@ -225,7 +234,8 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
           className={styles.window}
           style={{
             transform: `translateY(${firstRow * rowHeight}px)`,
-            gridTemplateColumns: `repeat(${metrics.columns}, minmax(0, 1fr))`
+            gridTemplateColumns: `repeat(${metrics.columns}, minmax(0, 1fr))`,
+            gridAutoRows: `${metrics.height}px`
           }}
         >
           {visible.map((page, offset) => {
@@ -285,7 +295,7 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
                   page={page}
                   docId={doc.id}
                   width={metrics.width}
-                  aspect={aspect}
+                  aspect={gridAspect}
                   isSelected={isSelected}
                   selectable={selectable}
                 />

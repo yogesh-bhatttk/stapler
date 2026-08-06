@@ -36,11 +36,58 @@ export interface ScanSettings {
 export interface CVJob {
   detectCorners(imageData: ImageData): CornerDetection;
   processScan(imageData: ImageData, settings: ScanSettings, job?: JobHandle): Promise<ImageData>;
+  trimBox(imageData: ImageData): { x: number; y: number; width: number; height: number } | null;
 }
 
 const api: CVJob = {
   detectCorners(imageData) {
     return detectCorners(imageData);
+  },
+
+  trimBox(imageData) {
+    const data = imageData.data;
+    const width = imageData.width;
+    const height = imageData.height;
+
+    let minX = width;
+    let minY = height;
+    let maxX = 0;
+    let maxY = 0;
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const idx = (y * width + x) * 4;
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
+        const a = data[idx + 3];
+
+        // Treat transparent or near-white as background
+        if (a > 10 && (r < 250 || g < 250 || b < 250)) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+
+    if (maxX >= minX && maxY >= minY) {
+      // Add 1% padding so we don't clip exact edges tightly
+      const padding = 0.01;
+      const normMinX = Math.max(0, minX / width - padding);
+      const normMinY = Math.max(0, minY / height - padding);
+      const normMaxX = Math.min(1, maxX / width + padding);
+      const normMaxY = Math.min(1, maxY / height + padding);
+
+      return {
+        x: normMinX,
+        y: normMinY,
+        width: normMaxX - normMinX,
+        height: normMaxY - normMinY
+      };
+    }
+    return null;
   },
 
   async processScan(imageData, settings, job) {

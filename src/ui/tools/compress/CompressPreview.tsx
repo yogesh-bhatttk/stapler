@@ -63,39 +63,46 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
         });
         if (cancelled) return;
 
-        const handle = await renderWorker
-          .lease(api => api.loadDocument(composedBytes))
-          .then(info => info.handle);
-        if (cancelled) {
-          await renderWorker.lease(api => api.closeDocument(handle));
-          return;
-        }
+        // pin() keeps load/render/close on the same pool instance — separate
+        // lease() calls could land on different instances and leave the close
+        // a silent no-op on the wrong one, leaking the pdf.js document.
+        const client = renderWorker.pin();
+        let handle: string | undefined;
+        try {
+          handle = await client
+            .lease(api => api.loadDocument(composedBytes))
+            .then(info => info.handle);
+          if (cancelled) return;
 
-        const scale = Number(
-          (zoom * Math.min(2, typeof devicePixelRatio === 'number' ? devicePixelRatio : 1)).toFixed(
-            2
-          )
-        );
-        const bitmap = await renderWorker.lease(api => api.renderPage(handle, 0, scale));
+          const scale = Number(
+            (
+              zoom * Math.min(2, typeof devicePixelRatio === 'number' ? devicePixelRatio : 1)
+            ).toFixed(2)
+          );
+          const bitmap = await client.lease(api => api.renderPage(handle!, 0, scale));
 
-        if (cancelled) {
+          if (cancelled) {
+            bitmap.close();
+            return;
+          }
+
+          const canvas = beforeCanvasRef.current;
+          if (canvas) {
+            canvas.width = bitmap.width;
+            canvas.height = bitmap.height;
+            const ctx = canvas.getContext('2d');
+            ctx?.clearRect(0, 0, bitmap.width, bitmap.height);
+            ctx?.drawImage(bitmap, 0, 0);
+            setBeforeSize({ width: bitmap.width / scale, height: bitmap.height / scale });
+          }
+
           bitmap.close();
-          await renderWorker.lease(api => api.closeDocument(handle));
-          return;
+        } finally {
+          if (handle) {
+            await client.lease(api => api.closeDocument(handle!)).catch(() => {});
+          }
+          client.release();
         }
-
-        const canvas = beforeCanvasRef.current;
-        if (canvas) {
-          canvas.width = bitmap.width;
-          canvas.height = bitmap.height;
-          const ctx = canvas.getContext('2d');
-          ctx?.clearRect(0, 0, bitmap.width, bitmap.height);
-          ctx?.drawImage(bitmap, 0, 0);
-          setBeforeSize({ width: bitmap.width / scale, height: bitmap.height / scale });
-        }
-
-        bitmap.close();
-        await renderWorker.lease(api => api.closeDocument(handle));
       } catch (err) {
         if (!isCancellation(err)) logEvent('error', 'compress.preview', fromUnknown(err).message);
       }
@@ -130,39 +137,45 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
         const compressedResult = await compressDocument(composedBytes, settings, miniReport);
         if (cancelled) return;
 
-        const handle = await renderWorker
-          .lease(api => api.loadDocument(compressedResult.bytes))
-          .then(info => info.handle);
-        if (cancelled) {
-          await renderWorker.lease(api => api.closeDocument(handle));
-          return;
-        }
+        // pin() keeps load/render/close on the same pool instance — see the
+        // matching comment in the "before" preview effect above.
+        const client = renderWorker.pin();
+        let handle: string | undefined;
+        try {
+          handle = await client
+            .lease(api => api.loadDocument(compressedResult.bytes))
+            .then(info => info.handle);
+          if (cancelled) return;
 
-        const scale = Number(
-          (zoom * Math.min(2, typeof devicePixelRatio === 'number' ? devicePixelRatio : 1)).toFixed(
-            2
-          )
-        );
-        const bitmap = await renderWorker.lease(api => api.renderPage(handle, 0, scale));
+          const scale = Number(
+            (
+              zoom * Math.min(2, typeof devicePixelRatio === 'number' ? devicePixelRatio : 1)
+            ).toFixed(2)
+          );
+          const bitmap = await client.lease(api => api.renderPage(handle!, 0, scale));
 
-        if (cancelled) {
+          if (cancelled) {
+            bitmap.close();
+            return;
+          }
+
+          const canvas = afterCanvasRef.current;
+          if (canvas) {
+            canvas.width = bitmap.width;
+            canvas.height = bitmap.height;
+            const ctx = canvas.getContext('2d');
+            ctx?.clearRect(0, 0, bitmap.width, bitmap.height);
+            ctx?.drawImage(bitmap, 0, 0);
+            setAfterSize({ width: bitmap.width / scale, height: bitmap.height / scale });
+          }
+
           bitmap.close();
-          await renderWorker.lease(api => api.closeDocument(handle));
-          return;
+        } finally {
+          if (handle) {
+            await client.lease(api => api.closeDocument(handle!)).catch(() => {});
+          }
+          client.release();
         }
-
-        const canvas = afterCanvasRef.current;
-        if (canvas) {
-          canvas.width = bitmap.width;
-          canvas.height = bitmap.height;
-          const ctx = canvas.getContext('2d');
-          ctx?.clearRect(0, 0, bitmap.width, bitmap.height);
-          ctx?.drawImage(bitmap, 0, 0);
-          setAfterSize({ width: bitmap.width / scale, height: bitmap.height / scale });
-        }
-
-        bitmap.close();
-        await renderWorker.lease(api => api.closeDocument(handle));
       } catch (err) {
         if (!isCancellation(err)) logEvent('error', 'compress.preview', fromUnknown(err).message);
       } finally {

@@ -190,21 +190,28 @@ const api: RenderJob = {
     const handle = crypto.randomUUID();
     docs.set(handle, { doc, task });
 
-    const pageSizes: DocumentInfo['pageSizes'] = [];
-    for (let i = 1; i <= doc.numPages; i++) {
-      const page = await doc.getPage(i);
-      const { width, height } = page.getViewport({ scale: 1 });
-      pageSizes.push({ width, height });
-      page.cleanup();
-    }
+    try {
+      const pageSizes: DocumentInfo['pageSizes'] = [];
+      for (let i = 1; i <= doc.numPages; i++) {
+        const page = await doc.getPage(i);
+        const { width, height } = page.getViewport({ scale: 1 });
+        pageSizes.push({ width, height });
+        page.cleanup();
+      }
 
-    return {
-      handle,
-      pageCount: doc.numPages,
-      isXfa: Boolean(doc.isPureXfa),
-      fingerprint: doc.fingerprints[0] ?? handle,
-      pageSizes
-    };
+      return {
+        handle,
+        pageCount: doc.numPages,
+        isXfa: Boolean(doc.isPureXfa),
+        fingerprint: doc.fingerprints[0] ?? handle,
+        pageSizes
+      };
+    } catch (err) {
+      docs.delete(handle);
+      await doc.cleanup().catch(() => {});
+      await task.destroy().catch(() => {});
+      throw err;
+    }
   },
 
   async closeDocument(handle) {

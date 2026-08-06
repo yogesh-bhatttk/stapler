@@ -396,7 +396,7 @@ describe('golden: OPS-06 crop', () => {
 });
 
 describe('golden: OPS-09 normalize', () => {
-  it('resizes every page to the requested target size', async () => {
+  it('resizes every page to the requested target size and actually scales content', async () => {
     const { mixedSizePdf } = await import('../e2e/fixtures');
     const bytes = await mixedSizePdf();
     const source = await PDFDocument.load(bytes);
@@ -407,6 +407,10 @@ describe('golden: OPS-09 normalize', () => {
       sourceIndex: i,
       rotation: 0
     }));
+
+    const { PDFPage } = await import('pdf-lib');
+    const scaleSpy = vi.spyOn(PDFPage.prototype, 'scale');
+    const translateSpy = vi.spyOn(PDFPage.prototype, 'translateContent');
 
     const output = await processWorkerImpl.compose(
       pages,
@@ -420,11 +424,60 @@ describe('golden: OPS-09 normalize', () => {
       silentJob
     );
 
+    // SCN-01 vacuous test fix: assert that content was actually translated/scaled
+    // rather than just the MediaBox bounds being modified.
+    expect(scaleSpy).toHaveBeenCalled();
+    expect(translateSpy).toHaveBeenCalled();
+
+    scaleSpy.mockRestore();
+    translateSpy.mockRestore();
+
     const doc = await PDFDocument.load(output);
     expect(doc.getPageCount()).toBe(pageCount);
     for (const page of doc.getPages()) {
       expect(page.getWidth()).toBeCloseTo(612, 0);
       expect(page.getHeight()).toBeCloseTo(792, 0);
     }
+  });
+
+  it('picks the target orientation from the displayed (rotated) page, not the raw MediaBox', async () => {
+    const { mixedSizePdf } = await import('../e2e/fixtures');
+    const bytes = await mixedSizePdf();
+    // Page 0 of the fixture is a portrait MediaBox; /Rotate 90 makes it display
+    // as landscape even though width < height in raw content space.
+    const pages = [{ key: 'p0', sourceDocId: 'doc', sourceIndex: 0, rotation: 90 }];
+
+    const { PDFPage } = await import('pdf-lib');
+    const scaleSpy = vi.spyOn(PDFPage.prototype, 'scale');
+    const translateSpy = vi.spyOn(PDFPage.prototype, 'translateContent');
+
+    const output = await processWorkerImpl.compose(
+      pages,
+      { doc: bytes },
+      [],
+      undefined,
+      undefined,
+      { targetSize: 'Letter' as const, scaleMode: 'fit' as const },
+      null,
+      undefined,
+      silentJob
+    );
+
+    // SCN-01 vacuous test fix: assert that content was actually translated/scaled
+    expect(scaleSpy).toHaveBeenCalled();
+    expect(translateSpy).toHaveBeenCalled();
+
+    scaleSpy.mockRestore();
+    translateSpy.mockRestore();
+
+    const doc = await PDFDocument.load(output);
+    const page = doc.getPage(0);
+    expect(page.getRotation().angle).toBe(90);
+
+    // Raw MediaBox is portrait-shaped (612x792): once /Rotate 90 is applied by a
+    // viewer, it displays as landscape Letter (792x612) — the correct target for
+    // a page that displays landscape. The old code picked portrait Letter outright.
+    expect(page.getWidth()).toBeCloseTo(612, 0);
+    expect(page.getHeight()).toBeCloseTo(792, 0);
   });
 });

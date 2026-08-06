@@ -7,7 +7,7 @@ import { commit } from './history';
  * component has to, and it is where the honest-reporting rules live: nothing here
  * hands the user a file it cannot stand behind.
  */
-import { processWorker, renderWorker } from './workers';
+import { processWorker, renderWorker, cvWorker } from './workers';
 import { createJobHandle, type JobOptions } from './workers/protocol';
 import type { RedactionRegion, StampSource } from './workers/process.worker';
 import type { TextRegion } from './workers/render.worker';
@@ -34,7 +34,7 @@ import {
   type WatermarkSettings
 } from '../ui/tools/watermark/state';
 import type { WatermarkData } from './workers/process.worker';
-import { internal, unsupported } from './errors';
+import { internal, unsupported, cancelled } from './errors';
 
 /**
  * Maps the UI's `WatermarkSettings` onto the worker's `WatermarkData`. The two
@@ -528,7 +528,10 @@ export async function extractDocumentText(
     try {
       const parts: string[] = [];
       for (let i = 0; i < pageIndices.length; i++) {
-        if (options.signal?.aborted) break;
+        // `break` would exit quietly with whatever pages were already read, and
+        // the caller has no way to tell that from a complete extraction — it
+        // would display/save partial text as if the job had finished.
+        if (options.signal?.aborted) throw cancelled();
         const pageIndex = pageIndices[i];
         options.onProgress?.(i / pageIndices.length, `Reading page ${pageIndex + 1}`);
         const text = await api.extractText(handle, pageIndex, mode);
@@ -594,7 +597,10 @@ export async function pagesToImageArchive(
     const { handle } = await api.loadDocument(bytes);
     try {
       for (let i = 0; i < pageIndices.length; i++) {
-        if (options.signal?.aborted) break;
+        // `break` would exit quietly with whatever pages were already rendered,
+        // and the caller has no way to tell that from a real, complete export —
+        // it would save a truncated ZIP as if the job had finished.
+        if (options.signal?.aborted) throw cancelled();
         const pageIndex = pageIndices[i];
         options.onProgress?.(i / pageIndices.length, `Rendering page ${pageIndex + 1}`);
         const image = await api.pageToImageBytes(handle, pageIndex, format, dpi);
@@ -641,6 +647,7 @@ export async function currentDocumentBytes(
     Object.keys(cropBoxes.value).length === 0 &&
     !hasWatermarkContent(watermarkSettings.value) &&
     !hasHeaderFooterContent(headerFooterSettings.value) &&
+    !nupSettings.value &&
     !normalize;
   if (untouched) {
     const single = Object.values(sources.value).find(s => s.id === doc.pages[0].sourceDocId);
@@ -678,70 +685,35 @@ export async function autoTrimDocument(
   const updates: Record<string, { x: number; y: number; width: number; height: number }> = {};
 
   for (let i = 0; i < pagesToTrim.length; i++) {
+    if (options?.signal?.aborted) throw cancelled();
     const page = pagesToTrim[i];
     if (options?.onProgress) options.onProgress(i / pagesToTrim.length, `Scanning page ${i + 1}`);
 
     const composedBytes = await composeDocument({ pages: [page], annotations: [] });
-    const handle = await renderWorker
-      .lease(api => api.loadDocument(composedBytes))
-      .then(res => res.handle);
 
-    try {
-      const scale = 1.0; // 72 DPI is enough for finding a bounding box
-      const bitmap = await renderWorker.lease(api => api.renderPage(handle, 0, scale));
+    await renderWorker.lease(async api => {
+      const { handle } = await api.loadDocument(composedBytes);
+      try {
+        const scale = 1.0; // 72 DPI is enough for finding a bounding box
+        const bitmap = await api.renderPage(handle, 0, scale);
 
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(bitmap, 0, 0);
-      bitmap.close();
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(bitmap, 0, 0);
+        bitmap.close();
 
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const data = imageData.data;
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
-      let minX = canvas.width;
-      let minY = canvas.height;
-      let maxX = 0;
-      let maxY = 0;
+        const box = await cvWorker.lease(cv => cv.trimBox(imageData));
 
-      for (let y = 0; y < canvas.height; y++) {
-        for (let x = 0; x < canvas.width; x++) {
-          const idx = (y * canvas.width + x) * 4;
-          const r = data[idx];
-          const g = data[idx + 1];
-          const b = data[idx + 2];
-          const a = data[idx + 3];
-
-          // Treat transparent or near-white as background
-          if (a > 10 && (r < 250 || g < 250 || b < 250)) {
-            if (x < minX) minX = x;
-            if (x > maxX) maxX = x;
-            if (y < minY) minY = y;
-            if (y > maxY) maxY = y;
-          }
+        if (box) {
+          updates[page.key] = box;
         }
+      } finally {
+        await api.closeDocument(handle);
       }
-
-      if (maxX >= minX && maxY >= minY) {
-        // Add 1% padding so we don't clip exact edges tightly
-        const padding = 0.01;
-        const normMinX = Math.max(0, minX / canvas.width - padding);
-        const normMinY = Math.max(0, minY / canvas.height - padding);
-        const normMaxX = Math.min(1, maxX / canvas.width + padding);
-        const normMaxY = Math.min(1, maxY / canvas.height + padding);
-
-        updates[page.key] = {
-          x: normMinX,
-          y: normMinY,
-          width: normMaxX - normMinX,
-          height: normMaxY - normMinY
-        };
-      } else {
-        // blank page, don't crop or maybe reset crop
-      }
-    } finally {
-      await renderWorker.lease(api => api.closeDocument(handle));
-    }
+    });
   }
 
   commit();
@@ -749,7 +721,12 @@ export async function autoTrimDocument(
 }
 
 export interface ImagesToPdfOptions {
-  pageSize: 'original' | 'a4' | 'letter';
+  pageSize:
+    | 'original'
+    | 'a4'
+    | 'letter'
+    | { width: number; height: number }
+    | { width: number; height: number }[];
   orientation: 'auto' | 'portrait' | 'landscape';
   margin: number;
   quality: number;

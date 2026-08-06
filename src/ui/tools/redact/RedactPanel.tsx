@@ -99,7 +99,7 @@ export function RedactPanel() {
 
       <p className={panelStyles.note}>
         {t(
-          'Applying replaces each affected page with an image of itself, so no text, font, or image data survives underneath the marks. Text on those pages stops being selectable. Stapler verifies removal and refuses to save if it cannot.'
+          'Applying removes text operators, image references, and annotations inside each marked region at the PDF operator level, then draws an opaque block on top. Stapler verifies removal and refuses to save if any content survives.'
         )}
       </p>
 

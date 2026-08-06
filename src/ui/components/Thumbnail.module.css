@@ -1,6 +1,9 @@
 .frame {
   position: relative;
-  width: 100%;
+  max-width: 100%;
+  flex: 1;
+  min-height: 0;
+  margin: 0 auto;
   background: var(--doc-page);
   border: 1px solid var(--hairline-strong);
   border-radius: var(--radius-md);

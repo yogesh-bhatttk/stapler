@@ -11,6 +11,7 @@ import type { ComponentChildren } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-preact';
 import { sources, type PageRef } from '../../core/store';
+import { normalizeRotation } from '../../core/rotation';
 import { bitmapKey, renderHandleFor, thumbnailCache } from '../../core/render-cache';
 import { isCancellation, logEvent } from '../../core/errors';
 import { Button } from '../components/Button';
@@ -99,8 +100,14 @@ export function SinglePageView({
 
   if (!page || !pageSize) return null;
 
-  const displayWidth = size.width || pageSize.width * zoom;
-  const displayHeight = size.height || pageSize.height * zoom;
+  const rotation = normalizeRotation(page.rotation);
+  const swapped = rotation === 90 || rotation === 270;
+
+  const rawWidth = size.width || pageSize.width * zoom;
+  const rawHeight = size.height || pageSize.height * zoom;
+
+  const displayWidth = swapped ? rawHeight : rawWidth;
+  const displayHeight = swapped ? rawWidth : rawHeight;
 
   return (
     <div className={styles.wrapper}>
@@ -110,11 +117,27 @@ export function SinglePageView({
           data-index={pageIndex}
           style={{
             width: `${displayWidth}px`,
-            height: `${displayHeight}px`
+            height: `${displayHeight}px`,
+            position: 'relative'
           }}
         >
-          <canvas ref={canvasRef} className={styles.canvas} aria-label={`Page ${pageIndex + 1}`} />
-          {overlay?.({ width: displayWidth, height: displayHeight, page })}
+          <div
+            style={{
+              position: 'absolute',
+              top: '50%',
+              left: '50%',
+              width: `${rawWidth}px`,
+              height: `${rawHeight}px`,
+              transform: `translate(-50%, -50%) rotate(${rotation}deg)`
+            }}
+          >
+            <canvas
+              ref={canvasRef}
+              className={styles.canvas}
+              aria-label={`Page ${pageIndex + 1}`}
+            />
+            {overlay?.({ width: rawWidth, height: rawHeight, page })}
+          </div>
         </div>
       </div>
 

@@ -70,9 +70,19 @@ export function Thumbnail({ page, docId, width, aspect, isSelected, selectable }
     const draw = (bitmap: ImageBitmap) => {
       const canvas = canvasRef.current;
       if (cancelled || !canvas) return;
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
-      canvas.getContext('2d')?.drawImage(bitmap, 0, 0);
+
+      const rotation = normalizeRotation(page.rotation);
+      const swapped = rotation === 90 || rotation === 270;
+
+      canvas.width = swapped ? bitmap.height : bitmap.width;
+      canvas.height = swapped ? bitmap.width : bitmap.height;
+
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.translate(canvas.width / 2, canvas.height / 2);
+        ctx.rotate((rotation * Math.PI) / 180);
+        ctx.drawImage(bitmap, -bitmap.width / 2, -bitmap.height / 2);
+      }
       setState('ready');
     };
 
@@ -115,12 +125,17 @@ export function Thumbnail({ page, docId, width, aspect, isSelected, selectable }
   }, [visible, source, page.sourceIndex, scale]);
 
   const rotation = normalizeRotation(page.rotation);
+  const actualAspect = pageSize
+    ? rotation === 90 || rotation === 270
+      ? pageSize.height / pageSize.width
+      : pageSize.width / pageSize.height
+    : aspect;
 
   return (
     <div
       ref={frameRef}
       className={`${styles.frame} ${isSelected ? styles.selected : ''}`}
-      style={{ aspectRatio: `${aspect}` }}
+      style={{ aspectRatio: `${actualAspect}` }}
     >
       <canvas ref={canvasRef} className={styles.canvas} aria-hidden="true" />
 

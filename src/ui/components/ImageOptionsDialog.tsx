@@ -42,7 +42,7 @@ export function ImageOptionsDialog({ count, onConfirm, onCancel }: ImageOptionsD
           {id => (
             <Select
               id={id}
-              value={pageSize}
+              value={pageSize as string}
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               onChange={val => setPageSize(val as any)}
               options={[

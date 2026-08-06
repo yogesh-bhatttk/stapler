@@ -66,14 +66,23 @@ test.describe('zero network', () => {
         'merge',
         'organize',
         'split',
+        'insert',
         'remove-blanks',
         'cleanup',
-        'compress',
         'pdf-to-img',
         'extract',
+        'compress',
+        'crop',
+        'watermark',
         'sign',
         'redact',
-        'metadata'
+        'metadata',
+        'normalize',
+        'nup',
+        'compare',
+        'annotate',
+        'batch',
+        'md-to-pdf'
       ]) {
         await page.goto(`/#/tool/${tool}`);
         await expect(page.locator('header')).toBeVisible();

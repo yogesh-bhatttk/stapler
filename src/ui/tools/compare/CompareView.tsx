@@ -39,28 +39,37 @@ export function CompareView({ pages, pageIndex }: CompareViewProps) {
 
     let cancelled = false;
 
+    // Two documents are open at once here, each needs its own pinned instance —
+    // load and close must stay on the same pool instance, or the close is a
+    // silent no-op on the wrong one and the pdf.js document leaks.
+    const baseClient = renderWorker.pin();
+    const compareClient = renderWorker.pin();
+
     const runDiff = async () => {
       setIsProcessing(true);
+
+      let baseHandle: string | undefined;
+      let compareHandle: string | undefined;
+
       try {
-        const baseHandleInfo = await renderWorker.lease(api => api.loadDocument(source.bytes));
-        const compareHandleInfo = await renderWorker.lease(api =>
+        const baseHandleInfo = await baseClient.lease(api => api.loadDocument(source.bytes));
+        baseHandle = baseHandleInfo.handle;
+
+        const compareHandleInfo = await compareClient.lease(api =>
           api.loadDocument(compareSource.bytes)
         );
+        compareHandle = compareHandleInfo.handle;
 
-        if (cancelled) {
-          await renderWorker.lease(api => api.closeDocument(baseHandleInfo.handle));
-          await renderWorker.lease(api => api.closeDocument(compareHandleInfo.handle));
-          return;
-        }
+        if (cancelled) return;
 
         if (settings.diffMode === 'text') {
-          const baseText = await renderWorker.lease(api =>
-            api.extractText(baseHandleInfo.handle, page.sourceIndex, 'text')
+          const baseText = await baseClient.lease(api =>
+            api.extractText(baseHandle!, page.sourceIndex, 'text')
           );
           // try to get the same page index from compare document, otherwise empty
           const comparePageIndex = Math.min(page.sourceIndex, compareSource.pageCount - 1);
-          const compareText = await renderWorker.lease(api =>
-            api.extractText(compareHandleInfo.handle, comparePageIndex, 'text')
+          const compareText = await compareClient.lease(api =>
+            api.extractText(compareHandle!, comparePageIndex, 'text')
           );
 
           if (!cancelled) {
@@ -71,19 +80,17 @@ export function CompareView({ pages, pageIndex }: CompareViewProps) {
           const scale = Number(
             Math.min(2, typeof devicePixelRatio === 'number' ? devicePixelRatio : 1).toFixed(2)
           );
-          const baseBitmap = await renderWorker.lease(api =>
-            api.renderPage(baseHandleInfo.handle, page.sourceIndex, scale)
+          const baseBitmap = await baseClient.lease(api =>
+            api.renderPage(baseHandle!, page.sourceIndex, scale)
           );
           const comparePageIndex = Math.min(page.sourceIndex, compareSource.pageCount - 1);
-          const compareBitmap = await renderWorker.lease(api =>
-            api.renderPage(compareHandleInfo.handle, comparePageIndex, scale)
+          const compareBitmap = await compareClient.lease(api =>
+            api.renderPage(compareHandle!, comparePageIndex, scale)
           );
 
           if (cancelled) {
             baseBitmap.close();
             compareBitmap.close();
-            await renderWorker.lease(api => api.closeDocument(baseHandleInfo.handle));
-            await renderWorker.lease(api => api.closeDocument(compareHandleInfo.handle));
             return;
           }
 
@@ -146,17 +153,23 @@ export function CompareView({ pages, pageIndex }: CompareViewProps) {
           baseBitmap.close();
           compareBitmap.close();
         }
-
-        await renderWorker.lease(api => api.closeDocument(baseHandleInfo.handle));
-        await renderWorker.lease(api => api.closeDocument(compareHandleInfo.handle));
       } catch (err) {
         if (!isCancellation(err)) logEvent('error', 'compare.view', fromUnknown(err).message);
       } finally {
+        if (baseHandle) {
+          await baseClient.lease(api => api.closeDocument(baseHandle!)).catch(() => {});
+        }
+        if (compareHandle) {
+          await compareClient.lease(api => api.closeDocument(compareHandle!)).catch(() => {});
+        }
         if (!cancelled) setIsProcessing(false);
       }
     };
 
-    runDiff();
+    runDiff().finally(() => {
+      baseClient.release();
+      compareClient.release();
+    });
 
     return () => {
       cancelled = true;

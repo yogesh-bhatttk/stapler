@@ -24,7 +24,7 @@ import { signaturePreviewUrl, signatures } from '../../core/signatures';
 import { notify } from '../../core/notify';
 import { activeStamp, signatureSuggestions } from '../tools/sign/state';
 import styles from './AnnotationOverlay.module.css';
-import { useTranslation } from '../../core/i18n';
+import { useTranslation, currentLocale } from '../../core/i18n';
 
 export interface AnnotationOverlayProps {
   docId: string;
@@ -69,7 +69,11 @@ export function AnnotationOverlay({ docId, pageKey, width, height }: AnnotationO
         currentStamp.type === 'signature'
           ? (currentStamp.signatureId ?? '')
           : currentStamp.type === 'date'
-            ? new Date().toLocaleDateString()
+            ? // Use the app's active locale so the formatted date matches the language
+              // the user chose in Settings, not whatever the OS default happens to be.
+              // Fallback to 'en-CA' (ISO YYYY-MM-DD) when no locale is set — unambiguous
+              // and guaranteed to be WinAnsi-encodable by the PDF worker.
+              new Date().toLocaleDateString(currentLocale.value ?? 'en-CA')
             : currentStamp.type === 'check'
               ? '✓'
               : ''

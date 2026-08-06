@@ -1,7 +1,7 @@
 chrome.action.onClicked.addListener(() => {
   const editorUrl = chrome.runtime.getURL('editor.html');
 
-  chrome.tabs.query({ url: editorUrl }, tabs => {
+  chrome.tabs.query({ url: `${editorUrl}*` }, tabs => {
     if (tabs.length > 0) {
       // Focus existing tab
       const tabId = tabs[0].id;

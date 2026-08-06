@@ -110,7 +110,7 @@ export function Canvas() {
             </>
           ) : (
             <>
-              <AcroFormOverlay page={page} width={width} height={height} />
+              <AcroFormOverlay pageIndex={pageIndex} width={width} height={height} />
               <AnnotationOverlay docId={doc.id} pageKey={page.key} width={width} height={height} />
             </>
           )

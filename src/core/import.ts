@@ -74,36 +74,45 @@ async function importPdf(file: File, options: JobOptions): Promise<ImportedFile>
 
   // The render worker owns validation because pdf.js distinguishes encrypted from
   // corrupt from XFA, and it is the parse we need anyway for page sizes.
-  const info = await renderWorker.lease(api => api.loadDocument(bytes));
+  //
+  // load and close must go through the same pool instance — `pin()` guarantees
+  // that, where two independent `lease()` calls could land on different
+  // instances and leave the close a silent no-op on the wrong one.
+  const client = renderWorker.pin();
   try {
-    if (info.pageCount === 0) throw corrupt('The document contains no pages.');
-    const isXfa = rawXfa || info.isXfa;
-    if (isXfa) warnings.push(XFA_MESSAGE);
+    const info = await client.lease(api => api.loadDocument(bytes));
+    try {
+      if (info.pageCount === 0) throw corrupt('The document contains no pages.');
+      const isXfa = rawXfa || info.isXfa;
+      if (isXfa) warnings.push(XFA_MESSAGE);
 
-    const facts = await processWorker.lease(api => api.inspect(bytes));
-    // An XFA document's AcroForm shadow fields are not fillable, so they are never
-    // advertised as such — offering them is how the fill path got entered at all.
-    if (facts.hasAcroForm && !isXfa) {
-      warnings.push(`Contains ${facts.fieldCount} fillable form field(s).`);
+      const facts = await processWorker.lease(api => api.inspect(bytes));
+      // An XFA document's AcroForm shadow fields are not fillable, so they are never
+      // advertised as such — offering them is how the fill path got entered at all.
+      if (facts.hasAcroForm && !isXfa) {
+        warnings.push(`Contains ${facts.fieldCount} fillable form field(s).`);
+      }
+
+      const id = crypto.randomUUID();
+      const source: SourceDocument = {
+        id,
+        name: file.name,
+        bytes,
+        pageCount: info.pageCount,
+        pageSizes: info.pageSizes
+      };
+      registerSource(source);
+      // `makePageRefs` takes the same id the source was registered under; that
+      // coupling is the whole point of doing this in one function.
+      return { source, pages: makePageRefs(id, info.pageCount), warnings };
+    } finally {
+      // Release the pdf.js parse; the workspace re-opens documents on demand through
+      // the render cache, which knows how to evict them.
+      await client.lease(api => api.closeDocument(info.handle));
+      void options;
     }
-
-    const id = crypto.randomUUID();
-    const source: SourceDocument = {
-      id,
-      name: file.name,
-      bytes,
-      pageCount: info.pageCount,
-      pageSizes: info.pageSizes
-    };
-    registerSource(source);
-    // `makePageRefs` takes the same id the source was registered under; that
-    // coupling is the whole point of doing this in one function.
-    return { source, pages: makePageRefs(id, info.pageCount), warnings };
   } finally {
-    // Release the pdf.js parse; the workspace re-opens documents on demand through
-    // the render cache, which knows how to evict them.
-    await renderWorker.lease(api => api.closeDocument(info.handle));
-    void options;
+    client.release();
   }
 }
 
@@ -126,20 +135,25 @@ async function importImages(
   }
 
   const bytes = await processWorker.lease(api => api.imagesToPdf(jpegs, imageOptions, job));
-  const info = await renderWorker.lease(api => api.loadDocument(bytes));
+  const client = renderWorker.pin();
   try {
-    const id = crypto.randomUUID();
-    const source: SourceDocument = {
-      id,
-      name: files.length === 1 ? replaceExtension(files[0].name) : 'Images.pdf',
-      bytes,
-      pageCount: info.pageCount,
-      pageSizes: info.pageSizes
-    };
-    registerSource(source);
-    return { source, pages: makePageRefs(id, info.pageCount), warnings: [] };
+    const info = await client.lease(api => api.loadDocument(bytes));
+    try {
+      const id = crypto.randomUUID();
+      const source: SourceDocument = {
+        id,
+        name: files.length === 1 ? replaceExtension(files[0].name) : 'Images.pdf',
+        bytes,
+        pageCount: info.pageCount,
+        pageSizes: info.pageSizes
+      };
+      registerSource(source);
+      return { source, pages: makePageRefs(id, info.pageCount), warnings: [] };
+    } finally {
+      await client.lease(api => api.closeDocument(info.handle));
+    }
   } finally {
-    await renderWorker.lease(api => api.closeDocument(info.handle));
+    client.release();
   }
 }
 

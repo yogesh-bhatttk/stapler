@@ -22,8 +22,8 @@ These are the product, not preferences. A `PostToolUse` hook
    the File System Access API instead of the `downloads` permission.
 3. **No raw colours.** Every colour comes from `var(--token)` defined in
    `src/ui/styles/tokens.css`. No hex, `rgb()`, or `hsl()` literals anywhere else.
-4. **Layer boundary.** Only `src/platform/` may reference `chrome.*`. `core/` and `ui/` go
-   through the platform adapter so the same code builds as extension and website.
+4. **Layer boundary.** Only `src/platform/` and `src/service-worker.ts` may reference `chrome.*`. 
+   `core/` and `ui/` go through the platform adapter so the same code builds as extension and website.
 
 ## Conventions
 

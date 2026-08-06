@@ -339,10 +339,18 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       pageSizes: [] as { width: number; height: number }[]
     };
     // Re-read geometry from the rebuilt bytes: rasterised pages may differ.
-    const info = await renderWorker.lease(api => api.loadDocument(outcome.bytes));
-    source.pageCount = info.pageCount;
-    source.pageSizes = info.pageSizes;
-    await renderWorker.lease(api => api.closeDocument(info.handle));
+    // pin() keeps load and close on the same pool instance — two independent
+    // lease() calls could land on different instances and leave the close a
+    // silent no-op on the wrong one.
+    const client = renderWorker.pin();
+    try {
+      const info = await client.lease(api => api.loadDocument(outcome.bytes));
+      source.pageCount = info.pageCount;
+      source.pageSizes = info.pageSizes;
+      await client.lease(api => api.closeDocument(info.handle));
+    } finally {
+      client.release();
+    }
 
     registerSource(source);
     replaceWithSource(doc.id, source);

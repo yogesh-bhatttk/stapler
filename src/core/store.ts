@@ -14,8 +14,9 @@
  * specifies.
  */
 import { computed, signal } from '@preact/signals';
-import { commit } from './history';
+import { commit, resetHistory } from './history';
 import { normalizeRotation } from './rotation';
+import { pruneRenderHandles } from './render-cache';
 
 export interface PageRef {
   /** Stable across reorders, so thumbnails and selection survive a move. */
@@ -143,7 +144,14 @@ export function closeDocument(id: string): void {
     if (stillUsed.has(key)) kept[key] = value;
   }
   sources.value = kept;
+  pruneRenderHandles(stillUsed);
   clearPageSelection();
+  // Reset undo/redo: the history stack is a single global list (not keyed by
+  // document). Any snapshot that references the closed document's source bytes
+  // is now invalid — undoing into it produces a document that cannot be exported
+  // because its source bytes have been freed. A full reset is the safe choice
+  // and matches what happens on import (importDocument also calls resetHistory).
+  resetHistory();
 }
 
 /** Applies `mutate` to one document and marks it dirty. */

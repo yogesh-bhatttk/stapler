@@ -15,12 +15,14 @@ import {
   repointPage,
   replaceWithSource,
   sources,
-  type PageRef
+  type PageRef,
+  type SourceDocument
 } from '../../../core/store';
 import { renderHandleFor } from '../../../core/render-cache';
 import { cvWorker, processWorker, renderWorker } from '../../../core/workers';
 import { createJobHandle } from '../../../core/workers/protocol';
 import { frameQuad, type Quad } from '../../../core/cv/imageUtils';
+import { normalizeRotation } from '../../../core/rotation';
 import { notify } from '../../../core/notify';
 import { cancelled, logEvent } from '../../../core/errors';
 import { Button } from '../../components/Button';
@@ -71,10 +73,20 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
           return;
         }
 
-        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+        const rotation = normalizeRotation(page.rotation);
+        const swapped = rotation === 90 || rotation === 270;
+
+        const canvas = new OffscreenCanvas(
+          swapped ? bitmap.height : bitmap.width,
+          swapped ? bitmap.width : bitmap.height
+        );
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         if (!ctx) return;
-        ctx.drawImage(bitmap, 0, 0);
+
+        ctx.translate(canvas.width / 2, canvas.height / 2);
+        ctx.rotate((rotation * Math.PI) / 180);
+        ctx.drawImage(bitmap, -bitmap.width / 2, -bitmap.height / 2);
+
         bitmap.close();
         beforeRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
@@ -162,18 +174,39 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
       const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
       const jpeg = new Uint8Array(await blob.arrayBuffer());
 
+      const originalSize = source?.pageSizes[page.sourceIndex];
       const bytes = await processWorker.lease(api =>
-        api.imagesToPdf([jpeg], undefined, createJobHandle(job))
+        api.imagesToPdf(
+          [jpeg],
+          originalSize
+            ? {
+                pageSize: { width: originalSize.width, height: originalSize.height },
+                orientation: 'portrait',
+                margin: 0,
+                quality: 0.85
+              }
+            : undefined,
+          createJobHandle(job)
+        )
       );
-      const info = await renderWorker.lease(api => api.loadDocument(bytes));
-      const newSource = {
-        id: crypto.randomUUID(),
-        name: `${source?.name ?? 'page'} (cleaned)`,
-        bytes,
-        pageCount: info.pageCount,
-        pageSizes: info.pageSizes
-      };
-      await renderWorker.lease(api => api.closeDocument(info.handle));
+      // pin() keeps load and close on the same pool instance — two independent
+      // lease() calls could land on different instances and leave the close a
+      // silent no-op on the wrong one.
+      const client = renderWorker.pin();
+      let newSource: SourceDocument;
+      try {
+        const info = await client.lease(api => api.loadDocument(bytes));
+        newSource = {
+          id: crypto.randomUUID(),
+          name: `${source?.name ?? 'page'} (cleaned)`,
+          bytes,
+          pageCount: info.pageCount,
+          pageSizes: info.pageSizes
+        };
+        await client.lease(api => api.closeDocument(info.handle));
+      } finally {
+        client.release();
+      }
 
       registerSource(newSource);
       // A single-page document is replaced outright; in a longer document only this
@@ -192,6 +225,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
   const applyToAll = () =>
     run({ label: 'Cleaning all pages', scope: 'cleanup.applyToAll' }, async job => {
       const jpegs: Uint8Array[] = [];
+      const originalSizes: { width: number; height: number }[] = [];
 
       for (let i = 0; i < pages.length; i++) {
         // Checked at a per-page boundary, never mid-page — the same granularity
@@ -203,17 +237,27 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
 
         const p = pages[i];
         const s = sources.value[p.sourceDocId];
-        if (!s) continue;
+        if (!s) throw new Error(`Source not found for page ${i + 1}`);
 
         const { handle, client } = await renderHandleFor(s.id, s.bytes);
         const bitmap = await client.lease(api =>
           api.renderPage(handle, p.sourceIndex, WORK_DPI / 72)
         );
 
-        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+        const rotation = normalizeRotation(p.rotation);
+        const swapped = rotation === 90 || rotation === 270;
+
+        const canvas = new OffscreenCanvas(
+          swapped ? bitmap.height : bitmap.width,
+          swapped ? bitmap.width : bitmap.height
+        );
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        if (!ctx) continue;
-        ctx.drawImage(bitmap, 0, 0);
+        if (!ctx) throw new Error(`Failed to create 2d context for page ${i + 1}`);
+
+        ctx.translate(canvas.width / 2, canvas.height / 2);
+        ctx.rotate((rotation * Math.PI) / 180);
+        ctx.drawImage(bitmap, -bitmap.width / 2, -bitmap.height / 2);
+
         bitmap.close();
 
         const before = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -221,7 +265,11 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         let pageQuad = cornerOverrides.value[p.key];
         if (!pageQuad) {
           const detection = await cvWorker.lease(api => api.detectCorners(before));
-          pageQuad = detection.quad;
+          if (!detection.confident) {
+            pageQuad = frameQuad(before.width, before.height);
+          } else {
+            pageQuad = detection.quad;
+          }
         }
 
         const after = await cvWorker.lease(api =>
@@ -232,24 +280,48 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         afterCanvas.getContext('2d')?.putImageData(after, 0, 0);
         const blob = await afterCanvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
         jpegs.push(new Uint8Array(await blob.arrayBuffer()));
+
+        const origSize = s.pageSizes[p.sourceIndex];
+        originalSizes.push({
+          width: swapped ? origSize.height : origSize.width,
+          height: swapped ? origSize.width : origSize.height
+        });
       }
 
       if (jpegs.length === 0) return;
 
       const bytes = await processWorker.lease(api =>
-        api.imagesToPdf(jpegs, undefined, createJobHandle(job))
+        api.imagesToPdf(
+          jpegs,
+          {
+            pageSize: originalSizes,
+            orientation: 'portrait',
+            margin: 0,
+            quality: 0.85
+          },
+          createJobHandle(job)
+        )
       );
-      const info = await renderWorker.lease(api => api.loadDocument(bytes));
       const firstSource = sources.value[pages[0].sourceDocId];
 
-      const newSource = {
-        id: crypto.randomUUID(),
-        name: `${firstSource?.name ?? 'document'} (cleaned)`,
-        bytes,
-        pageCount: info.pageCount,
-        pageSizes: info.pageSizes
-      };
-      await renderWorker.lease(api => api.closeDocument(info.handle));
+      // pin() keeps load and close on the same pool instance — two independent
+      // lease() calls could land on different instances and leave the close a
+      // silent no-op on the wrong one.
+      const client = renderWorker.pin();
+      let newSource: SourceDocument;
+      try {
+        const info = await client.lease(api => api.loadDocument(bytes));
+        newSource = {
+          id: crypto.randomUUID(),
+          name: `${firstSource?.name ?? 'document'} (cleaned)`,
+          bytes,
+          pageCount: info.pageCount,
+          pageSizes: info.pageSizes
+        };
+        await client.lease(api => api.closeDocument(info.handle));
+      } finally {
+        client.release();
+      }
 
       registerSource(newSource);
       replaceWithSource(docId, newSource);

@@ -18,9 +18,27 @@ export async function runBatch() {
   const outDir = outputDirHandle.value;
   if (!inDir || !outDir) return;
 
+  // Safety: if the input and output directory are the same filesystem entry,
+  // a batch run would overwrite the source files in-place with no backup —
+  // the output handle is opened with { create: true } using the same filename,
+  // silently destroying the original. Reject upfront with a clear message.
+  if (await inDir.isSameEntry(outDir)) {
+    notify('danger', 'Input and output folders are the same', {
+      detail:
+        'Choose a different output folder. Running batch in-place would overwrite your originals.'
+    });
+    return;
+  }
+
   const recipe = activeRecipeId.value
     ? savedRecipes.value.find(r => r.id === activeRecipeId.value)
     : null;
+
+  // If a recipe is active, only the tools it lists are applied, in the order
+  // they appear in recipe.tools. Without this gate every tool was unconditionally
+  // applied even if the recipe was created for watermark-only or compress-only.
+  // Fall back to sensible defaults when no recipe is active.
+  const activeTools: string[] = recipe?.tools ?? ['watermark', 'compress'];
 
   const compress = recipe?.settings.compress ?? compressSettings.value;
   const watermark = recipe?.settings.watermark ?? watermarkSettings.value;
@@ -53,67 +71,108 @@ export async function runBatch() {
         const file = await fileHandle.getFile();
         const bytes = new Uint8Array(await file.arrayBuffer());
 
-        // Basic page setup for composeDocument
-        // Normally pages are extracted via the core/import.ts process, but for batch
-        // we can just load the document to get the number of pages.
-        // But `composeDocument` takes `pages: PageRef[]` which requires parsing the document.
-        // So we need to parse the document first.
+        // Load WITHOUT ignoreEncryption so encrypted files surface as an error
+        // rather than silently producing garbled output. The previous code used
+        // `ignoreEncryption: true`, which caused compose to write empty or
+        // corrupted pages for password-protected files without any warning.
         const { PDFDocument } = await import('pdf-lib');
-        const doc = await PDFDocument.load(bytes, { ignoreEncryption: true });
+        let doc: Awaited<ReturnType<typeof PDFDocument.load>>;
+        try {
+          doc = await PDFDocument.load(bytes);
+        } catch (loadErr) {
+          const msg = String(loadErr);
+          const isEncrypted = msg.toLowerCase().includes('encrypt') || msg.includes('password');
+          if (isEncrypted) {
+            throw new Error(`${fileHandle.name} is password-protected — skipping.`, {
+              cause: loadErr
+            });
+          }
+          throw loadErr;
+        }
         const pageCount = doc.getPageCount();
 
         const pages = Array.from({ length: pageCount }).map((_, i) => ({
           key: `${fileHandle.name}-${i}`,
-          sourceDocId: fileHandle.name, // Mock document ID
+          sourceDocId: fileHandle.name,
           sourceIndex: i,
           rotation: 0
         }));
 
-        // We need the raw bytes accessible to the worker by 'sourceDocId'
-        // Normally `bytesForPages` retrieves this from `currentDocumentBytes`.
-        // However, we are in a batch context where documents are not in the main store workspace.
-
-        // This makes `composeDocument` slightly unsuitable directly, because it assumes `store`.
-        // Let's call the `processWorker` directly.
         const { processWorker } = await import('../../../core/workers');
         const { hasWatermarkContent } = await import('../watermark/state');
         const { hasHeaderFooterContent } = await import('../watermark/state');
 
-        const composedBytes = await processWorker.lease(api =>
-          api.compose(
-            pages,
-            { [fileHandle.name]: bytes }, // Pass sources directly
-            [], // stamps
-            watermark && hasWatermarkContent(watermark)
-              ? (watermark as unknown as WatermarkData)
-              : undefined, // simplify toWatermarkData
-            headerFooter && hasHeaderFooterContent(headerFooter) ? headerFooter : undefined,
-            normalize,
-            nup,
-            [], // layerAnnotations
-            undefined // job
-          )
-        );
+        let currentBytes = bytes;
 
-        let finalBytes = composedBytes;
-
-        // Apply compression if enabled
-        // Wait, how do we know if compression is enabled?
-        // For simplicity, we could assume if compress mode !== 'none' it's enabled.
-        if (compress) {
-          const report = await planCompression(composedBytes, compress);
-          if (!report.alreadyOptimized) {
-            const res = await compressDocument(composedBytes, compress, report);
-            if (!res.keptOriginal) {
-              finalBytes = res.bytes;
+        // Apply tools in the order declared by recipe.tools (or defaults).
+        // Previously every tool was always applied in a hardcoded compose→compress
+        // sequence, ignoring recipe.tools entirely.
+        for (const toolId of activeTools) {
+          if (toolId === 'watermark') {
+            // Watermark and header/footer share the compose call.
+            const applyWatermark = watermark && hasWatermarkContent(watermark);
+            const applyHF = headerFooter && hasHeaderFooterContent(headerFooter);
+            if (applyWatermark || applyHF) {
+              currentBytes = await processWorker.lease(api =>
+                api.compose(
+                  pages,
+                  { [fileHandle.name]: currentBytes },
+                  [],
+                  applyWatermark ? (watermark as unknown as WatermarkData) : undefined,
+                  applyHF ? headerFooter : undefined,
+                  undefined, // normalize — handled separately
+                  undefined, // nup — handled separately
+                  [],
+                  undefined
+                )
+              );
+            }
+          } else if (toolId === 'normalize') {
+            currentBytes = await processWorker.lease(api =>
+              api.compose(
+                pages,
+                { [fileHandle.name]: currentBytes },
+                [],
+                undefined,
+                undefined,
+                normalize,
+                undefined,
+                [],
+                undefined
+              )
+            );
+          } else if (toolId === 'nup') {
+            currentBytes = await processWorker.lease(api =>
+              api.compose(
+                pages,
+                { [fileHandle.name]: currentBytes },
+                [],
+                undefined,
+                undefined,
+                undefined,
+                nup,
+                [],
+                undefined
+              )
+            );
+          } else if (toolId === 'compress' && compress) {
+            const report = await planCompression(currentBytes, compress);
+            if (!report.alreadyOptimized) {
+              const res = await compressDocument(currentBytes, compress, report);
+              if (!res.keptOriginal) {
+                currentBytes = res.bytes;
+              }
             }
           }
+          // Other tool IDs (redact, sign, etc.) are not batch-applicable yet
+          // and are silently skipped — the recipe will still apply whatever
+          // tools it does support.
         }
 
-        // Save output
+        // Save output — safe because we verified inDir !== outDir above.
         const outHandle = await outDir.getFileHandle(fileHandle.name, { create: true });
         const writable = await outHandle.createWritable();
-        await writable.write(finalBytes);
+        await writable.write(currentBytes);
         await writable.close();
 
         batchProgress.value = {

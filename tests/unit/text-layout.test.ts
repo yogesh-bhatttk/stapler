@@ -179,3 +179,21 @@ describe('inkCoverage and blankCoverageLimit', () => {
     expect(blankCoverageLimit(1000)).toBeCloseTo(0.01);
   });
 });
+
+import { sanitizeWinAnsiText, markdownToPdfBytes } from '../../src/core/markdown-to-pdf';
+
+describe('sanitizeWinAnsiText and markdownToPdfBytes', () => {
+  it('sanitizes smart quotes, dashes, and unicode symbols to WinAnsi equivalents', () => {
+    const raw = '“Hello” — ‘World’ • Test… \u00A0 Trademark™ © ®';
+    const sanitized = sanitizeWinAnsiText(raw);
+    expect(sanitized).toBe('"Hello" - \'World\' - Test...   Trademark(TM) (C) (R)');
+  });
+
+  it('converts Markdown containing non-ASCII characters to PDF bytes without throwing', async () => {
+    const md =
+      '# Title with “Smart Quotes”\n\nSome paragraph with an em-dash — and bullet points • plus non-ASCII: € §.';
+    const bytes = await markdownToPdfBytes(md);
+    expect(bytes).toBeInstanceOf(Uint8Array);
+    expect(bytes.length).toBeGreaterThan(0);
+  });
+});

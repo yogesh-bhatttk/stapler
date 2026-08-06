@@ -194,6 +194,12 @@ export class GraphicsState {
   fontSize: number = 0;
   /** Text leading, set by the TL operator. Used by T* (= `0 –TL Td`). */
   textLeading: number = 0;
+  /**
+   * Saved graphics states from `q` operators. Carried across `/Contents` array
+   * chunk boundaries so a `q` in one chunk and its matching `Q` in the next
+   * properly restore the CTM instead of leaving it permanently transformed.
+   */
+  stateStack: GraphicsState[] = [];
 
   clone(): GraphicsState {
     const next = new GraphicsState();
@@ -202,6 +208,8 @@ export class GraphicsState {
     next.textLineMatrix = [...this.textLineMatrix] as Matrix;
     next.fontSize = this.fontSize;
     next.textLeading = this.textLeading;
+    // Deep-clone the stack so pushing/popping in the clone doesn't affect the original.
+    next.stateStack = this.stateStack.map(s => s.clone());
     return next;
   }
 }
@@ -265,19 +273,42 @@ export function intersects(r1: Rect, r2: Rect): boolean {
   );
 }
 
-export function filterContentStream(statements: Statement[], redactionBoxes: Rect[]): Statement[] {
+export interface FilterContentStreamResult {
+  filtered: Statement[];
+  /** Graphics state at the end of this stream, to carry into the next chunk of a `/Contents` array. */
+  finalState: GraphicsState;
+  /**
+   * Names of XObjects (from the `Do` operand) whose `Do` call was removed because
+   * they overlapped a redaction region. The caller must delete these from the page's
+   * `/Resources/XObject` dictionary so the image bytes are not recoverable from the
+   * saved file even though the painting operator is gone.
+   */
+  strippedXObjectNames: string[];
+}
+
+export function filterContentStream(
+  statements: Statement[],
+  redactionBoxes: Rect[],
+  initialState?: GraphicsState
+): FilterContentStreamResult {
   const filtered: Statement[] = [];
-  const stateStack: GraphicsState[] = [];
-  let state = new GraphicsState();
+  const strippedXObjectNames: string[] = [];
+  const state = initialState ? initialState.clone() : new GraphicsState();
 
   for (const stmt of statements) {
     const op = String.fromCharCode(...stmt.operator.bytes);
 
     if (op === 'q') {
-      stateStack.push(state.clone());
+      state.stateStack.push(state.clone());
     } else if (op === 'Q') {
-      if (stateStack.length > 0) {
-        state = stateStack.pop()!;
+      if (state.stateStack.length > 0) {
+        const popped = state.stateStack.pop()!;
+        state.ctm = popped.ctm;
+        state.textMatrix = popped.textMatrix;
+        state.textLineMatrix = popped.textLineMatrix;
+        state.fontSize = popped.fontSize;
+        state.textLeading = popped.textLeading;
+        // Note: we intentionally keep state.stateStack as-is (already mutated by pop())
       }
     } else if (op === 'cm') {
       if (stmt.operands.length === 6) {
@@ -300,17 +331,16 @@ export function filterContentStream(statements: Statement[], redactionBoxes: Rec
       if (stmt.operands.length === 2) {
         const tx = parseFloat(String.fromCharCode(...stmt.operands[0].bytes));
         const ty = parseFloat(String.fromCharCode(...stmt.operands[1].bytes));
+        if (op === 'TD') state.textLeading = -ty;
         const m: Matrix = [1, 0, 0, 1, tx, ty];
         state.textLineMatrix = multiplyMatrix(m, state.textLineMatrix);
         state.textMatrix = [...state.textLineMatrix];
       }
     } else if (op === 'TL') {
-      // Set text leading. Stored so T* can apply it.
       if (stmt.operands.length === 1) {
         state.textLeading = parseFloat(String.fromCharCode(...stmt.operands[0].bytes));
       }
     } else if (op === 'T*') {
-      // PDF spec: T* is equivalent to `0 –TL Td`.
       const m: Matrix = [1, 0, 0, 1, 0, -state.textLeading];
       state.textLineMatrix = multiplyMatrix(m, state.textLineMatrix);
       state.textMatrix = [...state.textLineMatrix];
@@ -319,20 +349,18 @@ export function filterContentStream(statements: Statement[], redactionBoxes: Rec
         state.fontSize = parseFloat(String.fromCharCode(...stmt.operands[1].bytes));
       }
     } else if (op === 'Tj' || op === 'TJ' || op === "'" || op === '"') {
-      // Calculate approximate bounding box
+      if (op === "'" || op === '"') {
+        const lm: Matrix = [1, 0, 0, 1, 0, -state.textLeading];
+        state.textLineMatrix = multiplyMatrix(lm, state.textLineMatrix);
+        state.textMatrix = [...state.textLineMatrix];
+      }
+
       let textStr = '';
       if (op === 'Tj' || op === "'" || op === '"') {
-        // Last operand is the string ("'" and '"' prepend a line move, but the
-        // last operand is always the text to draw).
         if (stmt.operands.length > 0) {
           textStr = String.fromCharCode(...stmt.operands[stmt.operands.length - 1].bytes);
         }
       } else if (op === 'TJ') {
-        // TJ takes an array: [ (str1) kern (str2) kern … ]
-        // Walk every token in the operand list and concatenate the string elements.
-        // Number tokens are kerning adjustments and do not contribute to the visible
-        // text width (they shift position, which the string-length estimate already
-        // ignores), so they are skipped.
         for (const token of stmt.operands) {
           if (token.type === 'string' || token.type === 'hexstring') {
             textStr += String.fromCharCode(...token.bytes);
@@ -340,17 +368,11 @@ export function filterContentStream(statements: Statement[], redactionBoxes: Rec
         }
       }
 
-      // We approximate the width.
-      // This is a gross overestimate to ensure we catch anything near the redaction region.
-      // Average char width ~ 0.6 * fontSize.
-      const estimatedWidth = Math.max(1, textStr.length) * state.fontSize;
+      const estimatedWidth = Math.max(1, textStr.length) * state.fontSize * 0.6;
 
-      const p1 = transformPoint(state.ctm, state.textMatrix[4], state.textMatrix[5]);
-      const p2 = transformPoint(
-        state.ctm,
-        state.textMatrix[4] + estimatedWidth,
-        state.textMatrix[5] + state.fontSize
-      );
+      const trm = multiplyMatrix(state.textMatrix, state.ctm);
+      const p1 = transformPoint(trm, 0, 0);
+      const p2 = transformPoint(trm, estimatedWidth, state.fontSize);
 
       const box: Rect = {
         x: Math.min(p1.x, p2.x),
@@ -358,6 +380,9 @@ export function filterContentStream(statements: Statement[], redactionBoxes: Rec
         width: Math.abs(p2.x - p1.x),
         height: Math.abs(p2.y - p1.y)
       };
+
+      const advance: Matrix = [1, 0, 0, 1, estimatedWidth, 0];
+      state.textMatrix = multiplyMatrix(advance, state.textMatrix);
 
       let overlaps = false;
       for (const r of redactionBoxes) {
@@ -368,12 +393,9 @@ export function filterContentStream(statements: Statement[], redactionBoxes: Rec
       }
 
       if (overlaps) {
-        // Strip it!
         continue;
       }
     } else if (op === 'Do') {
-      // XObject (Image or Form)
-      // We assume it's drawn at (0,0) to (1,1) in its local space.
       const p1 = transformPoint(state.ctm, 0, 0);
       const p2 = transformPoint(state.ctm, 1, 1);
 
@@ -384,16 +406,30 @@ export function filterContentStream(statements: Statement[], redactionBoxes: Rec
         height: Math.abs(p2.y - p1.y)
       };
 
-      let overlaps = false;
+      let xObjectName = '';
+      if (stmt.operands.length > 0 && stmt.operands[stmt.operands.length - 1].type === 'name') {
+        xObjectName = String.fromCharCode(...stmt.operands[stmt.operands.length - 1].bytes).slice(
+          1
+        );
+      }
+
+      let shouldStrip = false;
       for (const r of redactionBoxes) {
         if (intersects(box, r)) {
-          overlaps = true;
-          break;
+          const fullyContained =
+            box.x >= r.x &&
+            box.y >= r.y &&
+            box.x + box.width <= r.x + r.width &&
+            box.y + box.height <= r.y + r.height;
+          if (fullyContained) {
+            shouldStrip = true;
+            break;
+          }
         }
       }
 
-      if (overlaps) {
-        // Strip the image!
+      if (shouldStrip) {
+        if (xObjectName) strippedXObjectNames.push(xObjectName);
         continue;
       }
     }
@@ -401,7 +437,7 @@ export function filterContentStream(statements: Statement[], redactionBoxes: Rec
     filtered.push(stmt);
   }
 
-  return filtered;
+  return { filtered, finalState: state, strippedXObjectNames };
 }
 
 /**

@@ -147,6 +147,7 @@ export function createWorkerClient<T>(
     pin() {
       const inst = acquire();
       inst.leases += 1;
+      let released = false;
       return {
         async lease(fn) {
           inst.leases += 1;
@@ -158,6 +159,13 @@ export function createWorkerClient<T>(
           }
         },
         release() {
+          // Guard against callers invoking release() more than once (e.g. in a
+          // finally block that also catches an earlier error path that already
+          // called release). A second call would decrement leases below zero,
+          // making scheduleIdle() think the instance is idle and terminate it
+          // while another lease is still active.
+          if (released) return;
+          released = true;
           inst.leases -= 1;
           scheduleIdle(inst);
         }

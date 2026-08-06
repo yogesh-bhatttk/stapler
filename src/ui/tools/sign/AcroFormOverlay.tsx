@@ -1,22 +1,22 @@
 import { formFields, formValues } from './state';
-import type { PageRef } from '../../../core/store';
+
 import styles from './AcroFormOverlay.module.css';
 import { useTranslation } from '../../../core/i18n';
 
 export interface AcroFormOverlayProps {
-  page: PageRef;
+  pageIndex: number;
   width: number;
   height: number;
 }
 
-export function AcroFormOverlay({ page, width, height }: AcroFormOverlayProps) {
+export function AcroFormOverlay({ pageIndex, width, height }: AcroFormOverlayProps) {
   const t = useTranslation();
   const data = formFields.value;
   if (!data || data.isXfa || data.fields.length === 0) return null;
 
   // Find fields that have a rect on this page
   const visibleFields = data.fields.flatMap(field => {
-    return field.rects.filter(r => r.pageIndex === page.sourceIndex).map(rect => ({ field, rect }));
+    return field.rects.filter(r => r.pageIndex === pageIndex).map(rect => ({ field, rect }));
   });
 
   if (visibleFields.length === 0) return null;

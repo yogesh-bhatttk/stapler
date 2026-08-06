@@ -32,6 +32,27 @@ function wordWrap(text: string, font: PDFFont, size: number, maxWidth: number): 
   return lines;
 }
 
+export function sanitizeWinAnsiText(text: string): string {
+  if (!text) return '';
+  const mapped = text
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u2013\u2014]/g, '-')
+    .replace(/\u2022/g, '-')
+    .replace(/\u2026/g, '...')
+    .replace(/\u00A0/g, ' ')
+    .replace(/\u2122/g, '(TM)')
+    .replace(/\u00A9/g, '(C)')
+    .replace(/\u00AE/g, '(R)');
+
+  let out = '';
+  for (let i = 0; i < mapped.length; i++) {
+    const code = mapped.charCodeAt(i);
+    out += code > 255 ? '?' : mapped[i];
+  }
+  return out;
+}
+
 export async function markdownToPdfBytes(markdown: string): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
   const fontNormal = await doc.embedFont(StandardFonts.Helvetica);
@@ -56,8 +77,8 @@ export async function markdownToPdfBytes(markdown: string): Promise<Uint8Array> 
   };
 
   const drawTextWrapped = (text: string, font: PDFFont, size: number, indent = 0) => {
-    // Strip carriage returns and handle basic text
-    const clean = text.replace(/\r/g, '').replace(/\n/g, ' ');
+    // Strip carriage returns, normalize Unicode, and handle basic text
+    const clean = sanitizeWinAnsiText(text.replace(/\r/g, '').replace(/\n/g, ' '));
     const lines = wordWrap(clean, font, size, PAGE_WIDTH - MARGIN * 2 - indent);
     for (const line of lines) {
       advanceY(size * 1.5);
@@ -82,7 +103,7 @@ export async function markdownToPdfBytes(markdown: string): Promise<Uint8Array> 
       const isOrdered = token.ordered;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       token.items.forEach((item: any, index: number) => {
-        const bullet = isOrdered ? `${index + 1}. ` : '• ';
+        const bullet = isOrdered ? `${index + 1}. ` : '- ';
         drawTextWrapped(bullet + item.text, state.fontNormal, 12, 15);
       });
       advanceY(8);
@@ -103,7 +124,7 @@ export async function markdownToPdfBytes(markdown: string): Promise<Uint8Array> 
         advanceY(16);
         const font = isHeader ? state.fontBold : state.fontNormal;
         row.forEach((cell, i) => {
-          const text = cell.text || '';
+          const text = sanitizeWinAnsiText(cell.text || '');
           page.drawText(text.substring(0, 30), {
             x: state.x + i * colWidth,
             y: state.y,

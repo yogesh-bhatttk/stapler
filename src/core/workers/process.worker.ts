@@ -88,7 +88,7 @@ import {
   serializeStatements,
   decodeStream
 } from '../pdf/interpreter';
-import type { Rect } from '../pdf/interpreter';
+import type { Rect, GraphicsState } from '../pdf/interpreter';
 import { hasXfaMarker, XFA_MESSAGE } from '../pdf/xfa';
 
 /** A page in the output, pointing back at the bytes it came from. */
@@ -552,7 +552,11 @@ async function drawStamps(
       continue;
     }
 
-    const { text } = toWinAnsi(raw);
+    // Use the strict encoder: if the stamp text contains glyphs outside WinAnsi
+    // (e.g. Arabic or CJK characters from a localised date format), throw rather
+    // than silently drawing '???' on the page. The caller's per-file try/catch in
+    // compose() will surface this as a job error the user can action.
+    const text = toWinAnsiOrThrow(raw, 'stamp');
     const font = await stampFont(outDoc, fontCache);
     const size = Math.max(4, h * 0.7);
 
@@ -1061,7 +1065,7 @@ async function drawAnnotations(
       });
     } else if (ann.type === 'text' && ann.text && ann.rect) {
       if (!fontCache.font) {
-        fontCache.font = await outDoc.embedStandardFont(StandardFonts.Helvetica);
+        fontCache.font = await outDoc.embedFont(StandardFonts.Helvetica);
       }
       page.drawText(ann.text, {
         x: ann.rect.x * width,
@@ -1120,7 +1124,9 @@ async function composePages(
   nup: import('../../ui/tools/nup/state').NUpSettings | undefined | null,
   annotations: AnnotationSource[] | undefined,
   job: JobHandle | undefined,
-  label: string
+  label: string,
+  pageOffset: number = 0,
+  globalTotal: number = pages.length
 ): Promise<PDFDocument> {
   const outDoc = await PDFDocument.create();
   const getSource = sourceCache(sources);
@@ -1188,6 +1194,18 @@ async function composePages(
 
     if (normalize) {
       const { width, height } = copied.getSize();
+
+      // /Rotate is a display-only transform — content stays in the page's raw
+      // (unrotated) MediaBox. A 595x842 page with /Rotate 90 displays as
+      // landscape even though width < height in raw content space; the
+      // portrait/landscape decision (and the target box we ultimately write)
+      // must go by what's actually displayed, or a rotated page normalizes to
+      // the wrong orientation.
+      const rotation = normalizeRotation(copied.getRotation().angle);
+      const swapped = rotation === 90 || rotation === 270;
+      const displayedWidth = swapped ? height : width;
+      const displayedHeight = swapped ? width : height;
+
       let targetW = 595.28; // A4 default
       let targetH = 841.89;
       if (normalize.targetSize === 'Letter') {
@@ -1198,16 +1216,16 @@ async function composePages(
         targetH = 1008;
       }
 
-      // If page is landscape, target should be landscape
-      if (width > height) {
+      // If the displayed page is landscape, the displayed target should be too.
+      if (displayedWidth > displayedHeight) {
         const temp = targetW;
         targetW = targetH;
         targetH = temp;
       }
 
       let factor = 1;
-      const scaleX = targetW / width;
-      const scaleY = targetH / height;
+      const scaleX = targetW / displayedWidth;
+      const scaleY = targetH / displayedHeight;
 
       if (normalize.scaleMode === 'fit') {
         factor = Math.min(scaleX, scaleY);
@@ -1222,17 +1240,22 @@ async function composePages(
       const scaledW = width * factor;
       const scaledH = height * factor;
 
+      // The target box, mapped back from displayed orientation to the raw
+      // (unrotated) content space that setSize/translateContent operate in.
+      const rawTargetW = swapped ? targetH : targetW;
+      const rawTargetH = swapped ? targetW : targetH;
+
       // translateContent shifts the origin so the content is centered
-      const dx = (targetW - scaledW) / 2;
-      const dy = (targetH - scaledH) / 2;
+      const dx = (rawTargetW - scaledW) / 2;
+      const dy = (rawTargetH - scaledH) / 2;
 
       if (dx !== 0 || dy !== 0) {
         copied.translateContent(dx, dy);
       }
 
       // Override the boxes to match the target size exactly
-      copied.setSize(targetW, targetH);
-      copied.setCropBox(0, 0, targetW, targetH);
+      copied.setSize(rawTargetW, rawTargetH);
+      copied.setCropBox(0, 0, rawTargetW, rawTargetH);
     }
 
     outDoc.addPage(copied);
@@ -1282,8 +1305,8 @@ async function composePages(
         });
       } else if (watermarkFont && watermark.text) {
         const requestedText = watermark.text
-          .replace(/{n}/g, String(watermark.startAt + i))
-          .replace(/{total}/g, String(pages.length));
+          .replace(/{n}/g, String(watermark.startAt + pageOffset + i))
+          .replace(/{total}/g, String(globalTotal));
         const displayText = toWinAnsiOrThrow(requestedText, 'watermark');
 
         const textWidth = watermarkFont.widthOfTextAtSize(displayText, watermark.fontSize);
@@ -1320,7 +1343,7 @@ async function composePages(
       headerFooterFont &&
       (headerFooterPages === null || headerFooterPages.has(i))
     ) {
-      drawHeaderFooter(copied, headerFooterFont, headerFooter, i, pages.length);
+      drawHeaderFooter(copied, headerFooterFont, headerFooter, pageOffset + i, globalTotal);
     }
 
     await drawStamps(outDoc, copied, stampsByPage.get(ref.key) ?? [], fontCache, imageCache);
@@ -1681,7 +1704,9 @@ const api: ProcessJob = {
         nup,
         annotations,
         job,
-        'Composing page'
+        'Composing page',
+        0,
+        pages.length
       );
       return {
         bytes: transfer(await outDoc.save({ useObjectStreams: true })),
@@ -1692,6 +1717,7 @@ const api: ProcessJob = {
 
     const files: Record<string, Uint8Array> = {};
     const pad = Math.max(2, String(slices.length).length);
+    let currentOffset = 0;
     for (let i = 0; i < slices.length; i++) {
       await checkpoint(job, i / slices.length, `Writing file ${i + 1} of ${slices.length}`);
       const outDoc = await composePages(
@@ -1702,10 +1728,13 @@ const api: ProcessJob = {
         headerFooter,
         normalize,
         nup,
-        undefined, // annotations
+        annotations,
         job,
-        'Composing page'
+        'Composing page',
+        currentOffset,
+        pages.length
       );
+      currentOffset += slices[i].length;
       files[`${baseName}-${String(i + 1).padStart(pad, '0')}.pdf`] = await outDoc.save({
         useObjectStreams: true
       });
@@ -1842,6 +1871,7 @@ const api: ProcessJob = {
       }
     }
 
+    reattachAcroForm(out, [source]);
     await checkpoint(job, 0.95, 'Writing file');
     const rebuilt = await out.save({ useObjectStreams: true });
 
@@ -1868,7 +1898,13 @@ const api: ProcessJob = {
       let pageHeight = embedded.height;
       const margin = options?.margin ?? 0;
 
-      if (options?.pageSize === 'a4') {
+      if (options?.pageSize && typeof options.pageSize === 'object') {
+        const size = Array.isArray(options.pageSize) ? options.pageSize[i] : options.pageSize;
+        if (size) {
+          pageWidth = size.width;
+          pageHeight = size.height;
+        }
+      } else if (options?.pageSize === 'a4') {
         pageWidth = 595.28;
         pageHeight = 841.89;
       } else if (options?.pageSize === 'letter') {
@@ -1877,7 +1913,11 @@ const api: ProcessJob = {
       }
 
       const isLandscape = embedded.width > embedded.height;
-      if (options?.pageSize !== 'original') {
+      if (
+        options?.pageSize &&
+        typeof options.pageSize === 'string' &&
+        options.pageSize !== 'original'
+      ) {
         if (
           options?.orientation === 'landscape' ||
           (options?.orientation === 'auto' && isLandscape)
@@ -2056,6 +2096,7 @@ const api: ProcessJob = {
       }
     }
 
+    reattachAcroForm(out, [doc]);
     return transfer(await out.save({ useObjectStreams: true }));
   },
 
@@ -2085,29 +2126,61 @@ const api: ProcessJob = {
       const [copied] = await out.copyPages(source, [i]);
       out.addPage(copied);
 
+      const cropBox = copied.getCropBox();
+
+      // pdf.js applies /Rotate when building the viewport, so the normalized
+      // coordinates the UI produced are in the *rotated* frame. We must apply
+      // the inverse rotation to map them back to unrotated PDF content-space
+      // before passing them to filterContentStream or drawRectangle.
+      const rotateVal = copied.node.get(PDFName.of('Rotate'));
+      const rotateDeg =
+        rotateVal instanceof PDFNumber ? normalizeRotation(rotateVal.asNumber()) : 0;
+
+      function normalizedToContentSpace(r: RedactionRegion): Rect {
+        // Start in the rotated frame: (r.x, r.y) are top-left fractions.
+        // Convert to cropBox-relative unrotated coordinates.
+        let rx: number, ry: number, rw: number, rh: number;
+        if (rotateDeg === 0) {
+          rx = r.x;
+          ry = r.y;
+          rw = r.width;
+          rh = r.height;
+        } else if (rotateDeg === 90) {
+          // pdf.js rotates 90° CW: its x-axis = page y-axis, y-axis = inverted page x-axis
+          rx = r.y;
+          ry = 1 - r.x - r.width;
+          rw = r.height;
+          rh = r.width;
+        } else if (rotateDeg === 180) {
+          rx = 1 - r.x - r.width;
+          ry = 1 - r.y - r.height;
+          rw = r.width;
+          rh = r.height;
+        } else {
+          // 270
+          rx = 1 - r.y - r.height;
+          ry = r.x;
+          rw = r.height;
+          rh = r.width;
+        }
+        // Convert normalized fractions (top-left origin) to PDF user-space (bottom-left origin).
+        return {
+          x: cropBox.x + rx * cropBox.width,
+          y: cropBox.y + cropBox.height * (1 - ry - rh),
+          width: rw * cropBox.width,
+          height: rh * cropBox.height
+        };
+      }
+
       // 2. Perform operator-level content removal
       if (regionsByPage.has(i)) {
-        const regions = regionsByPage.get(i)!;
-        const { width, height } = copied.getSize();
+        const pageRegions = regionsByPage.get(i)!;
 
-        // Convert regions from normalized to PDF coordinates (bottom-left origin)
-        const rects: Rect[] = regions.map(r => ({
-          x: r.x * width,
-          y: height - r.y * height - r.height * height,
-          width: r.width * width,
-          height: r.height * height
-        }));
+        // Convert regions from normalized (fraction of the CropBox, y from top)
+        // to PDF content-space coordinates (bottom-left origin, offset by the
+        // CropBox's own origin within the page's default user space).
+        const rects: Rect[] = pageRegions.map(normalizedToContentSpace);
 
-        // /Contents may be a single stream reference or an array of streams
-        // (common in documents assembled by Adobe Acrobat or LibreOffice). The
-        // previous code only filtered get(0), silently leaving all other streams
-        // intact — a bypass. Collect every stream, filter each, then collapse
-        // them into one new FlateDecode stream so the output is always a scalar.
-        //
-        // The type tests here are `instanceof`, not `constructor.name`. A minified
-        // build renames the class, so a name comparison is false for every object
-        // it is meant to match: in a production bundle this loop skipped every
-        // content stream and redaction quietly filtered nothing.
         const rawContents = copied.node.Contents();
         const streamRefs: unknown[] = [];
         if (rawContents) {
@@ -2120,23 +2193,20 @@ const api: ProcessJob = {
           }
         }
 
+        // Collect all XObject names stripped across all content stream chunks so
+        // we can remove them from /Resources/XObject after processing.
+        const allStrippedXObjectNames: string[] = [];
+
         if (streamRefs.length > 0) {
           const filteredChunks: Uint8Array[] = [];
+          let carryState: GraphicsState | undefined;
 
           for (const ref of streamRefs) {
-            // `copyPages` registers a fresh object graph in `out.context`.
-            // Looking this ref up in `source.context` can resolve an unrelated
-            // object with the same number (or no stream at all), leaving the
-            // copied page's original content untouched.
             const stream = out.context.lookup(ref as never);
-            // PDFRawStream extends PDFStream, so one check covers both.
             if (!(stream instanceof PDFStream)) continue;
 
             let rawBytes: Uint8Array = stream.getContents();
 
-            // Decompress if needed. decodeStream tries both zlib-wrapped and
-            // raw-deflate and throws on anything else — we propagate the error
-            // rather than silently filtering compressed bytes (Bug 1).
             const filter = stream.dict.get(PDFName.of('Filter'));
             const isFlate =
               filter === PDFName.of('FlateDecode') ||
@@ -2147,13 +2217,17 @@ const api: ProcessJob = {
 
             const tokens = tokenizeContentStream(rawBytes);
             const statements = parseContentStream(tokens);
-            const filtered = filterContentStream(statements, rects);
+            const { filtered, finalState, strippedXObjectNames } = filterContentStream(
+              statements,
+              rects,
+              carryState
+            );
+            carryState = finalState;
+            allStrippedXObjectNames.push(...strippedXObjectNames);
             filteredChunks.push(serializeStatements(filtered));
           }
 
           if (filteredChunks.length > 0) {
-            // Merge all filtered chunks separated by a newline and write a
-            // single FlateDecode stream, which is always valid.
             let totalLen = 0;
             for (const c of filteredChunks) totalLen += c.length + 1;
             const merged = new Uint8Array(totalLen);
@@ -2167,23 +2241,175 @@ const api: ProcessJob = {
             copied.node.set(PDFName.of('Contents'), out.context.register(newStream));
           }
         }
+
+        // 2b. Strip image XObject streams from /Resources/XObject whose `Do`
+        // operators were removed. Two layers of removal are required:
+        //
+        //   1. Remove the name from the dict — this kills the named reference.
+        //   2. Delete the underlying indirect object from out.context — pdf-lib's
+        //      save() serialises every object in the context, regardless of whether
+        //      anything still points to it. Without this step the image bytes remain
+        //      recoverable via pdfimages/qpdf even though no live reference exists.
+        //
+        // Shared images (same PDFRef referenced from multiple pages' /Resources)
+        // must NOT be deleted from the context — only the per-page dict entry is
+        // removed; the remaining pages' references keep the stream alive correctly.
+        if (allStrippedXObjectNames.length > 0) {
+          const resources = copied.node.get(PDFName.of('Resources'));
+          const resourceDict =
+            resources instanceof PDFDict
+              ? resources
+              : resources instanceof PDFRef
+                ? (out.context.lookup(resources) as PDFDict | undefined)
+                : undefined;
+          if (resourceDict) {
+            const xObjectDict = resourceDict.get(PDFName.of('XObject'));
+            const xObjects =
+              xObjectDict instanceof PDFDict
+                ? xObjectDict
+                : xObjectDict instanceof PDFRef
+                  ? (out.context.lookup(xObjectDict) as PDFDict | undefined)
+                  : undefined;
+            if (xObjects) {
+              for (const name of allStrippedXObjectNames) {
+                const pdfName = PDFName.of(name);
+                // Capture the ref (if indirect) before deleting, so we can
+                // remove it from the context object table below.
+                const entry = xObjects.get(pdfName);
+                xObjects.delete(pdfName);
+
+                // Only purge the object from the context if it is an indirect
+                // ref (i.e. it has an object number we can look up) and it is
+                // not still referenced by any other page's XObject dictionary.
+                if (entry instanceof PDFRef) {
+                  let stillReferenced = false;
+                  for (const page of out.getPages()) {
+                    const pgResources = page.node.get(PDFName.of('Resources'));
+                    const pgResourceDict =
+                      pgResources instanceof PDFDict
+                        ? pgResources
+                        : pgResources instanceof PDFRef
+                          ? (out.context.lookup(pgResources) as PDFDict | undefined)
+                          : undefined;
+                    if (!pgResourceDict) continue;
+                    const pgXObjectRaw = pgResourceDict.get(PDFName.of('XObject'));
+                    const pgXObjects =
+                      pgXObjectRaw instanceof PDFDict
+                        ? pgXObjectRaw
+                        : pgXObjectRaw instanceof PDFRef
+                          ? (out.context.lookup(pgXObjectRaw) as PDFDict | undefined)
+                          : undefined;
+                    if (!pgXObjects) continue;
+                    for (let xi = 0; xi < pgXObjects.keys().length; xi++) {
+                      if (pgXObjects.get(pgXObjects.keys()[xi]) === entry) {
+                        stillReferenced = true;
+                        break;
+                      }
+                    }
+                    if (stillReferenced) break;
+                  }
+                  if (!stillReferenced) {
+                    // Remove the object from the context's indirect-object table
+                    // so pdf-lib's serialiser does not write orphaned image bytes.
+                    // `indirectObjects` is private on PDFContext, but the underlying
+                    // Map is the only way to surgically remove one object without
+                    // rebuilding the whole context. The cast is intentional.
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    (out.context as any).indirectObjects.delete(entry);
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // 2c. Strip PDF annotations that overlap a redacted region.
+        const annotsRaw = copied.node.get(PDFName.of('Annots'));
+        const annotsRef = annotsRaw instanceof PDFRef ? annotsRaw : null;
+        const annotsArray =
+          annotsRaw instanceof PDFArray
+            ? annotsRaw
+            : annotsRef
+              ? (out.context.lookup(annotsRef) as PDFArray | undefined)
+              : undefined;
+
+        if (annotsArray) {
+          const keptAnnotRefs: unknown[] = [];
+          for (let a = 0; a < annotsArray.size(); a++) {
+            const annotRef = annotsArray.get(a);
+            const annotDict =
+              annotRef instanceof PDFDict
+                ? annotRef
+                : annotRef instanceof PDFRef
+                  ? (out.context.lookup(annotRef) as PDFDict | undefined)
+                  : undefined;
+
+            if (!annotDict) {
+              keptAnnotRefs.push(annotRef);
+              continue;
+            }
+
+            const rectArr = annotDict.get(PDFName.of('Rect'));
+            if (!(rectArr instanceof PDFArray) || rectArr.size() < 4) {
+              keptAnnotRefs.push(annotRef);
+              continue;
+            }
+
+            const llx = (rectArr.get(0) as PDFNumber).asNumber();
+            const lly = (rectArr.get(1) as PDFNumber).asNumber();
+            const urx = (rectArr.get(2) as PDFNumber).asNumber();
+            const ury = (rectArr.get(3) as PDFNumber).asNumber();
+            const annotBox: Rect = {
+              x: Math.min(llx, urx),
+              y: Math.min(lly, ury),
+              width: Math.abs(urx - llx),
+              height: Math.abs(ury - lly)
+            };
+
+            let annotOverlaps = false;
+            for (const r of rects) {
+              if (!(
+                annotBox.x >= r.x + r.width ||
+                annotBox.x + annotBox.width <= r.x ||
+                annotBox.y >= r.y + r.height ||
+                annotBox.y + annotBox.height <= r.y
+              )) {
+                annotOverlaps = true;
+                break;
+              }
+            }
+
+            if (!annotOverlaps) {
+              keptAnnotRefs.push(annotRef);
+            }
+          }
+
+          // Rebuild the Annots array with only the surviving refs.
+          // Use a PDFArray directly rather than context.obj() to avoid the
+          // LiteralArray overload mismatch (keptAnnotRefs is unknown[]).
+          const newAnnots = PDFArray.withContext(out.context);
+          for (const ref of keptAnnotRefs) {
+            newAnnots.push(ref as PDFRef);
+          }
+          copied.node.set(PDFName.of('Annots'), newAnnots);
+        }
       }
 
-      // 3. Draw the opaque marks on top as well, so the redaction is unmistakable
-      // even if the raster were somehow produced without them.
+      // 3. Draw the opaque marks on top as well
       for (const region of regionsByPage.get(i) ?? []) {
-        const { width, height } = copied.getSize();
+        const cs = normalizedToContentSpace(region);
         copied.drawRectangle({
-          x: region.x * width,
-          y: height - region.y * height - region.height * height,
-          width: region.width * width,
-          height: region.height * height,
+          x: cs.x,
+          y: cs.y,
+          width: cs.width,
+          height: cs.height,
           color: DOC_REDACT,
           borderWidth: 0
         });
       }
     }
 
+    reattachAcroForm(out, [source]);
     await checkpoint(job, 0.95, 'Writing file');
     return transfer(await out.save({ useObjectStreams: true }));
   }

@@ -24,7 +24,7 @@ import { Button } from '../../components/Button';
 import { IconButton } from '../../components/IconButton';
 import { panelStyles } from '../../shell/OptionsPanel';
 import { SignatureModal } from './SignatureModal';
-import { activeStamp, signatureSuggestions, formFields, type StampType } from './state';
+import { activeStamp, signatureSuggestions, formFields, formValues, type StampType } from './state';
 import { useJob } from '../../useJob';
 import styles from './SignPanel.module.css';
 import { useTranslation } from '../../../core/i18n';
@@ -62,6 +62,10 @@ export function SignPanel() {
         });
     });
   }, [doc]);
+
+  useEffect(() => {
+    formValues.value = {};
+  }, [doc?.id]);
 
   const detect = () =>
     run({ label: 'Looking for signature lines', scope: 'sign.detect' }, async job => {
