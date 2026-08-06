@@ -747,3 +747,10 @@ export async function autoTrimDocument(
   commit();
   cropBoxes.value = { ...cropBoxes.value, ...updates };
 }
+
+export interface ImagesToPdfOptions {
+  pageSize: 'original' | 'a4' | 'letter';
+  orientation: 'auto' | 'portrait' | 'landscape';
+  margin: number;
+  quality: number;
+}

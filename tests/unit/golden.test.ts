@@ -121,6 +121,7 @@ async function composeCurrent(doc: StaplerDoc): Promise<Uint8Array> {
     undefined,
     null,
     null,
+    undefined,
     silentJob
   );
 }
@@ -249,6 +250,7 @@ describe('golden: OPS-03 split and extract', () => {
       null,
       null,
       'split',
+      undefined,
       silentJob
     );
 
@@ -288,6 +290,7 @@ describe('golden: OPS-03 split and extract', () => {
       undefined,
       null,
       null,
+      undefined,
       silentJob
     );
 
@@ -379,6 +382,7 @@ describe('golden: OPS-06 crop', () => {
       undefined,
       null,
       null,
+      undefined,
       silentJob
     );
 
@@ -412,6 +416,7 @@ describe('golden: OPS-09 normalize', () => {
       undefined,
       { targetSize: 'Letter' as const, scaleMode: 'fit' as const },
       null,
+      undefined,
       silentJob
     );
 

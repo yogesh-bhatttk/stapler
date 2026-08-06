@@ -12,6 +12,9 @@ import { importFiles } from '../../../core/import';
 import { appendPages, activeDoc, activeSources } from '../../../core/store';
 import { notify, notifyError } from '../../../core/notify';
 import { Button } from '../../components/Button';
+import { useImageImportOptions } from '../../useImageImportOptions';
+import { isPdfFile } from '../../../core/import';
+import { isSupportedImage } from '../../../core/image';
 import { panelStyles } from '../../shell/OptionsPanel';
 import { useJob } from '../../useJob';
 import { useTranslation } from '../../../core/i18n';
@@ -22,6 +25,7 @@ export function MergePanel() {
   const sourceList = activeSources.value;
   const { run } = useJob();
   const [busy, setBusy] = useState(false);
+  const { requestOptions, node } = useImageImportOptions();
 
   const addFiles = async () => {
     if (!doc) return;
@@ -30,9 +34,18 @@ export function MergePanel() {
       const opened = await platform.openFiles({ multiple: true, accept: PDF_AND_IMAGES });
       if (opened.length === 0) return;
       const files = await Promise.all(opened.map(handle => handle.getFile()));
+      let imageOptions = undefined;
+      if (files.some(f => !isPdfFile(f) && isSupportedImage(f))) {
+        const opts = await requestOptions(files);
+        if (!opts) {
+          setBusy(false);
+          return;
+        }
+        imageOptions = opts;
+      }
 
       await run({ label: 'Importing', scope: 'merge.add' }, async job => {
-        const outcome = await importFiles(files, job);
+        const outcome = await importFiles(files, job, imageOptions);
         for (const imported of outcome.imported) {
           appendPages(doc.id, imported.pages);
           for (const warning of imported.warnings) {
@@ -59,6 +72,7 @@ export function MergePanel() {
       <Button variant="secondary" icon={Plus} onClick={addFiles} disabled={busy || !doc}>
         {t('Add PDFs or images')}
       </Button>
+      {node}
 
       {sourceList.length > 0 && (
         <div className={panelStyles.section}>

@@ -162,7 +162,9 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
       const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
       const jpeg = new Uint8Array(await blob.arrayBuffer());
 
-      const bytes = await processWorker.lease(api => api.imagesToPdf([jpeg], createJobHandle(job)));
+      const bytes = await processWorker.lease(api =>
+        api.imagesToPdf([jpeg], undefined, createJobHandle(job))
+      );
       const info = await renderWorker.lease(api => api.loadDocument(bytes));
       const newSource = {
         id: crypto.randomUUID(),
@@ -234,7 +236,9 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
 
       if (jpegs.length === 0) return;
 
-      const bytes = await processWorker.lease(api => api.imagesToPdf(jpegs, createJobHandle(job)));
+      const bytes = await processWorker.lease(api =>
+        api.imagesToPdf(jpegs, undefined, createJobHandle(job))
+      );
       const info = await renderWorker.lease(api => api.loadDocument(bytes));
       const firstSource = sources.value[pages[0].sourceDocId];
 

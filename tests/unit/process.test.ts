@@ -189,6 +189,7 @@ describe('watermark composition', () => {
       undefined,
       null,
       null,
+      undefined,
       silentJob
     );
 
@@ -223,6 +224,7 @@ describe('watermark composition', () => {
         undefined,
         null,
         null,
+        undefined,
         silentJob
       )
     ).rejects.toMatchObject({ kind: 'UnsupportedFeature' });
@@ -282,6 +284,7 @@ describe('image watermark composition', () => {
       undefined,
       null,
       null,
+      undefined,
       silentJob
     );
 
@@ -329,6 +332,7 @@ describe('header and footer composition', () => {
       },
       null,
       null,
+      undefined,
       silentJob
     );
 
@@ -364,6 +368,7 @@ describe('header and footer composition', () => {
         },
         null,
         null,
+        undefined,
         silentJob
       )
     ).rejects.toMatchObject({ kind: 'UnsupportedFeature' });
@@ -392,6 +397,7 @@ describe('applyNUp layout', () => {
       undefined,
       null,
       { layout: '2-up', margin: 10, gutter: 10, drawBorders: true },
+      undefined,
       silentJob
     );
 
@@ -426,6 +432,7 @@ describe('applyNUp layout', () => {
       undefined,
       null,
       { layout: 'booklet', margin: 0, gutter: 0, drawBorders: false },
+      undefined,
       silentJob
     );
 
@@ -459,6 +466,7 @@ describe('applyNUp layout', () => {
       undefined,
       null,
       { layout: '2-up', margin: 0, gutter: 0, drawBorders: false },
+      undefined,
       silentJob
     );
 
@@ -528,6 +536,7 @@ describe('stamp placement on a rotated page (SGN-02)', () => {
       undefined,
       null,
       null,
+      undefined,
       silentJob
     );
 
@@ -595,6 +604,7 @@ describe('AcroForm fill survives compose (SGN-03)', () => {
       undefined,
       null,
       null,
+      undefined,
       silentJob
     );
   }
@@ -737,5 +747,81 @@ describe('XFA is detected and never partially processed (SGN-03)', () => {
     ).rejects.toThrow(/XFA form/);
     // The input buffer was not mutated in place either.
     expect(bytes).toEqual(before);
+  });
+});
+
+describe('CMP-03: resamples SMask when base image is downscaled', () => {
+  it('rebuildCompressed creates a new SMask of the requested dimensions', async () => {
+    const fs = await import('node:fs');
+    const { PDFDocument, PDFName, PDFDict, PDFStream } = await import('pdf-lib');
+    const bytes = fs.readFileSync('tests/fixtures/oversized-mask.pdf');
+
+    // Supply a mock downscaled base image and downscaled mask bytes.
+    const replacedImages = {
+      '0': {
+        ImStrip: {
+          jpeg: new Uint8Array(fs.readFileSync('tests/fixtures/tiny.jpg')),
+          width: 10,
+          height: 210,
+          maskBytes: new Uint8Array(10 * 210) // downscaled from 100 x 2100
+        }
+      }
+    };
+
+    const result = await processWorkerImpl.rebuildCompressed(bytes, [], replacedImages, silentJob);
+    expect(result.keptOriginal).toBe(false);
+
+    const doc = await PDFDocument.load(result.bytes);
+    const page = doc.getPage(0);
+    const xobjs = page.node.Resources()?.lookup(PDFName.of('XObject'), PDFDict);
+    expect(xobjs).toBeDefined();
+
+    const imStripRef = xobjs!.get(PDFName.of('ImStrip'));
+    const imgStream = doc.context.lookup(imStripRef, PDFStream);
+    const smaskRef = imgStream.dict.get(PDFName.of('SMask'));
+    const smaskStream = doc.context.lookup(smaskRef, PDFStream);
+
+    expect(smaskStream.dict.get(PDFName.of('Width'))?.toString()).toBe('10');
+    expect(smaskStream.dict.get(PDFName.of('Height'))?.toString()).toBe('210');
+  });
+});
+
+describe('imagesToPdf options (CNV-01)', () => {
+  it('respects a4 page size and margins', async () => {
+    const fs = await import('node:fs');
+    const { PDFDocument } = await import('pdf-lib');
+    const jpeg = new Uint8Array(fs.readFileSync('tests/fixtures/tiny.jpg')); // 10x210
+
+    const bytes = await processWorkerImpl.imagesToPdf([jpeg], {
+      pageSize: 'a4',
+      orientation: 'portrait',
+      margin: 20
+    });
+
+    const doc = await PDFDocument.load(bytes);
+    const page = doc.getPage(0);
+
+    // A4 Portrait
+    expect(page.getWidth()).toBeCloseTo(595.28, 1);
+    expect(page.getHeight()).toBeCloseTo(841.89, 1);
+  });
+
+  it('respects letter landscape orientation', async () => {
+    const fs = await import('node:fs');
+    const { PDFDocument } = await import('pdf-lib');
+    const jpeg = new Uint8Array(fs.readFileSync('tests/fixtures/tiny.jpg'));
+
+    const bytes = await processWorkerImpl.imagesToPdf([jpeg], {
+      pageSize: 'letter',
+      orientation: 'landscape',
+      margin: 0
+    });
+
+    const doc = await PDFDocument.load(bytes);
+    const page = doc.getPage(0);
+
+    // Letter Landscape
+    expect(page.getWidth()).toBe(792);
+    expect(page.getHeight()).toBe(612);
   });
 });

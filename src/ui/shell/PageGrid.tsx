@@ -206,7 +206,7 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
   return (
     <div className={styles.scroller} ref={scrollerRef} onScroll={onScroll}>
       <div className={styles.header}>
-        <h1 className={styles.title}>{doc.name}</h1>
+        <h2 className={styles.title}>{doc.name}</h2>
         <span className={styles.count}>
           {doc.pages.length} page{doc.pages.length === 1 ? '' : 's'}
           {selection.size > 0 && ` · ${selection.size} selected`}

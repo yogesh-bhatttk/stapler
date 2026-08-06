@@ -42,7 +42,7 @@ function looksLikePdf(bytes: Uint8Array): boolean {
   return false;
 }
 
-function isPdfFile(file: File): boolean {
+export function isPdfFile(file: File): boolean {
   return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
 }
 
@@ -107,19 +107,25 @@ async function importPdf(file: File, options: JobOptions): Promise<ImportedFile>
   }
 }
 
+import type { ImagesToPdfOptions } from './operations';
+
 /**
  * Imports a set of images as one document. Grouping them is deliberate: 20 phone
  * photos should become one 20-page PDF (CNV-01), not 20 tabs.
  */
-async function importImages(files: File[], options: JobOptions): Promise<ImportedFile> {
+async function importImages(
+  files: File[],
+  options: JobOptions,
+  imageOptions?: ImagesToPdfOptions
+): Promise<ImportedFile> {
   const job = createJobHandle(options);
   const jpegs: Uint8Array[] = [];
   for (let i = 0; i < files.length; i++) {
     options.onProgress?.(i / files.length, `Decoding image ${i + 1} of ${files.length}`);
-    jpegs.push(await imageFileToJpeg(files[i]));
+    jpegs.push(await imageFileToJpeg(files[i], imageOptions?.quality ?? 0.9));
   }
 
-  const bytes = await processWorker.lease(api => api.imagesToPdf(jpegs, job));
+  const bytes = await processWorker.lease(api => api.imagesToPdf(jpegs, imageOptions, job));
   const info = await renderWorker.lease(api => api.loadDocument(bytes));
   try {
     const id = crypto.randomUUID();
@@ -145,7 +151,11 @@ function replaceExtension(name: string): string {
  * Imports a mixed set of files. One bad file never aborts the rest — its reason is
  * returned alongside the successes so the UI can report per file.
  */
-export async function importFiles(files: File[], options: JobOptions = {}): Promise<ImportOutcome> {
+export async function importFiles(
+  files: File[],
+  options: JobOptions = {},
+  imageOptions?: ImagesToPdfOptions
+): Promise<ImportOutcome> {
   const pdfs = files.filter(isPdfFile);
   const images = files.filter(f => !isPdfFile(f) && isSupportedImage(f));
   const rejected = files.filter(f => !isPdfFile(f) && !isSupportedImage(f));
@@ -181,11 +191,15 @@ export async function importFiles(files: File[], options: JobOptions = {}): Prom
   if (images.length > 0 && !options.signal?.aborted) {
     try {
       imported.push(
-        await importImages(images, {
-          signal: options.signal,
-          onProgress: (fraction, label) =>
-            options.onProgress?.((done + (fraction ?? 0)) / total, label)
-        })
+        await importImages(
+          images,
+          {
+            signal: options.signal,
+            onProgress: (fraction, label) =>
+              options.onProgress?.((done + (fraction ?? 0)) / total, label)
+          },
+          imageOptions
+        )
       );
     } catch (err) {
       failures.push({ name: `${images.length} image(s)`, message: fromUnknown(err).message });

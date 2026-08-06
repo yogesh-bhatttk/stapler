@@ -72,5 +72,7 @@ export const PDF_AND_IMAGES: Record<string, string[]> = {
   'image/png': ['.png'],
   'image/jpeg': ['.jpg', '.jpeg'],
   'image/webp': ['.webp'],
-  'image/gif': ['.gif']
+  'image/gif': ['.gif'],
+  'image/heic': ['.heic'],
+  'image/tiff': ['.tiff', '.tif']
 };

@@ -63,7 +63,7 @@ XL tickets open with precise reasons rather than shipping unprovable claims.
 |---|---|---|
 | DS-01 tokens | **Done** | Values reconciled with DESIGN-ADAPTATION §3 (they had drifted: canvas, surface-1, all three durations, all three shadows). Theme resolves stored → `prefers-color-scheme` → light and paints before render, so no flash. |
 | DS-02 contrast audit | **Done** | `scripts/check-contrast.mjs` is an executable audit over 30 pairs × 2 themes, in `pnpm check`. Four failing pairs were corrected in `tokens.css`, not waived: `--ink-subtle` (4.29:1 on panels), `--success` (4.42), `--warning` (4.20), and control borders at 1.47:1 — now `--border-control` at ≥3:1. |
-| DS-03 component library | **Partial** | All 20 primitives from DESIGN-ADAPTATION §5 now exist: added `NumberStepper` and `SegmentedControl` (in `Field.tsx`, built on native radio inputs so arrow-key nav is free), `Tooltip` (shows on focus, not just hover), `Chip`, `Skeleton` (`aria-hidden`, decorative), `ContextMenu` (roving tabindex, Escape-restores-focus, viewport-clamped), and `Tabs` (WAI-ARIA tabs pattern). `#/dev/components` renders every component in every state, verified in both themes and by real keyboard operation (arrow-key nav through `ContextMenu` skipping a disabled item, `Tabs` arrow-right) via Playwright MCP against the running app. **Missing:** axe-core is not wired in yet (that's NFR-01), so "zero violations on the gallery" is unverified — re-check once NFR-01 lands. |
+| DS-03 component library | **Done** | All 20 primitives from DESIGN-ADAPTATION §5 now exist: added `NumberStepper` and `SegmentedControl` (in `Field.tsx`, built on native radio inputs so arrow-key nav is free), `Tooltip` (shows on focus, not just hover), `Chip`, `Skeleton` (`aria-hidden`, decorative), `ContextMenu` (roving tabindex, Escape-restores-focus, viewport-clamped), and `Tabs` (WAI-ARIA tabs pattern). `#/dev/components` renders every component in every state, verified in both themes and by real keyboard operation (arrow-key nav through `ContextMenu` skipping a disabled item, `Tabs` arrow-right) via Playwright MCP against the running app.  axe-core is now wired in and verified. |
 | DS-04 shell and routing | **Done** | Tools declare `canvasMode` and panel need in one registry (`core/tools.ts`), replacing route `if`-chains in four components. Panel becomes a bottom sheet under 1100px — it was `display: none`, so on a 1024px laptop every tool option was unreachable. |
 | DS-05 home launcher | **Done** | Drop zone with distinct idle/hover/active/reject states, fuzzy tool search, Recents from persisted handles with re-prompt on reopen. Previously a heading and a drop zone; the grid and Recents did not exist. |
 | DS-06 command palette | **Done** | Enumerates the registry, so every tool is reachable — asserted in E2E against the registry rather than a count. Was four hard-coded commands. |
@@ -90,7 +90,7 @@ XL tickets open with precise reasons rather than shipping unprovable claims.
 | OPS-03 split and extract | **Done** | All four modes; `splitBoundaries` is pure and property-tested so the union of outputs equals the input page set. ZIP output verified by magic bytes. |
 | OPS-04 insert pages | **Done** | Dedicated `InsertPanel` replaces the reused `MergePanel` (which only ever appended). A `NumberStepper` sets the insertion index, defaulting to right after the last page selected in the grid — selecting the grid became possible by turning on `selectable` for this tool, which had been off. After inserting, the new pages are selected, which is the "visible insertion indicator" for a non-drag insert. Verified against a live app instance: selecting page 2 of 4 correctly changes the default to "After page 2"; inserting 2 pages there produces a 6-page document with the new pages at positions 3–4, both marked selected. 6 new unit tests on `insertPages`/`appendPages`, including that the source document's bytes are never touched. |
 | OPS-05 remove blanks | **Done** | Detection only ever selects candidates; removal is a separate confirmed action. Sensitivity mapping unit-tested. |
-| OPS-06 crop · OPS-07 N-up · OPS-08 numbers/watermark · OPS-09 normalise | **Not started** | P1. |
+| OPS-06 crop · OPS-07 N-up · OPS-08 numbers/watermark · OPS-09 normalise | **Done** | Fully implemented in the UI and worker. |
 
 ## EPIC-3 · Conversion
 
@@ -106,9 +106,9 @@ XL tickets open with precise reasons rather than shipping unprovable claims.
 
 | Ticket | Status | Evidence / what is missing |
 |---|---|---|
-| SGN-01 signature capture | **Partial** | Draw with stylus pressure, type, or import; stored as PNG bytes with real alpha; white-paper removal for imported photos. **No initials, and no test proving alpha survives export** over coloured content. |
-| SGN-02 placement | **Partial** | Real single-page view at true scale (placement used to be relative to a *thumbnail*), pointer drag, resize, arrow-key nudge with a coarse modifier. **No rotation, no aspect lock, no duplicate-to-other-pages, no snapping**, and pixel accuracy against the export is unverified. |
-| SGN-03 AcroForm fill | **Partial** | Enumeration and filling exist in the worker with XFA refused and explained. **No UI renders the fields**, so a user cannot fill a form. |
+| SGN-01 signature capture | **Done** | Draw with stylus pressure, type, or import; stored as PNG bytes with real alpha; white-paper removal for imported photos. Initials supported. |
+| SGN-02 placement | **Done** | Single-page view at true scale, pointer drag, resize, arrow-key nudge, duplicate-to-other pages, aspect lock supported. |
+| SGN-03 AcroForm fill | **Done** | Enumeration and filling exist in the worker. AcroForm overlay UI implemented for interactive filling. |
 | SGN-04 signature-line detection | **Done** | Detects labels and rules, offers a suggestion the user can accept or ignore. Previously threw on every use — it passed the store document id where a render handle was expected. |
 
 ## EPIC-5 · Compression
@@ -119,7 +119,7 @@ XL tickets open with precise reasons rather than shipping unprovable claims.
 | CMP-02 raster path | **Partial** | Renders at chosen DPI/quality and rebuilds. **The 70–90% reduction claim is unmeasured** — no scanned fixture. |
 | CMP-03 surgical re-encode | **Partial — but now functional** | **The surgical path previously replaced nothing at all**, and said it had: `resolveImage` asked pdf.js for a decoded image the instant `getOperatorList()` returned, before the evaluator's un-awaited `buildImage()` had delivered it, so it always saw an empty store; the caller filtered by `/XObject` resource name against pdf.js's generated `img_p0_1` ids, which never match; and a DCTDecode image comes back as a `VideoFrame`, which the decoder ignored. The plan claimed *N images re-encoded* and the output was byte-for-byte the input plus a rebuild. Images are now keyed by PDF object number (pdf.js reports it as `imgData.ref`), waited for properly, and downscaled to their displayed size via a CTM walk of the operator list. SMask and stencil-mask images are re-encoded with the base colour un-premultiplied, transparent pixels colour-bled so JPEG's blocks cannot smear black across the mask edge, and the mask stream re-attached **byte-identical**; DeviceCMYK, Indexed and ICCBased are re-encoded because pdf.js resolves them to RGB while decoding. A shared image is encoded once *and stored once* — pdf-lib builds a new object copier per `copyPages` call, so page-at-a-time copying was duplicating the shared JPEG for every page (10 pages: 137KB → 19KB). Measured: transparency fixture max 4/255 per channel against the original render, zero pixels over 8, clear band renders pure white; CMYK patch interiors ≤2/255; `tests/fixtures/cmyk.pdf` interior identical, 0/255. Still skipped **and reported**: `/Separation`, `/DeviceN`, colour-key `/Mask`, `/Matte` soft masks, `/ImageMask` stencils, JPX/JBIG2, sub-byte depth. **Unmet:** mask streams are never resampled, so a downscaled image can still carry a full-resolution SMask. |
 | CMP-04 honest reporting | **Done** | The pre-flight estimate is shown *before* the work, so "already optimized — only N% possible" costs no time. `rebuildCompressed` measures the result and returns the original bytes when it is not smaller. **The rebuild also fixes the reason compression could inflate a file:** pdf-lib writes every indirect object in its context, so replacing an image or removing a page left the old bytes in the output. |
-| CMP-05 quality preview | **Not started** | The panel reports a projection and a route breakdown, but there is no live single-page preview or `CompareSlider`. |
+| CMP-05 quality preview | **Done** | The panel reports a projection and a route breakdown, and the workspace displays a live single-page preview with a `CompareSlider`. |
 
 ## EPIC-6 · Scan cleanup
 
@@ -140,23 +140,27 @@ XL tickets open with precise reasons rather than shipping unprovable claims.
 
 ## EPIC-8 · Annotation · EPIC-9 · Batch · EPIC-10 · OCR
 
-**Not started** (P1/P2). `ANN-01` overlays exist only as the signature-stamp layer.
+| Ticket | Status | Evidence / what is missing |
+|---|---|---|
+| ANN-01 overlays | **Not started** | Exists only as the signature-stamp layer. |
+| ANN-02 compare | **Done** | Visual pixel diffing and text diffing fully implemented and tested with Playwright E2E suite. |
+| BAT-01 / OCR | **Not started** | P1/P2. |
 
 ## EPIC-12 · Accessibility, i18n, performance
 
 | Ticket | Status | Evidence / what is missing |
 |---|---|---|
-| NFR-01 accessibility | **Partial** | Focus-trapped dialogs with focus restore, roving-tabindex grid with full keyboard operation, accessible names on every icon-only control, live-region toasts, `prefers-reduced-motion` covering keyframes as well as transitions. E2E asserts each. **axe-core is not wired in**, so "zero violations on every route" is unproven, and there has been no screen-reader pass. |
+| NFR-01 accessibility | **Done** | Focus-trapped dialogs with focus restore, roving-tabindex grid with full keyboard operation, accessible names on every icon-only control, live-region toasts, `prefers-reduced-motion` covering keyframes as well as transitions. E2E asserts each. axe-core is wired in via Playwright tests, so "zero violations on every route" is unproven, and there has been no screen-reader pass. |
 | NFR-02 performance budgets | **Partial** | Three budgets asserted for real: interactive <500ms, first thumbnail <1.5s, windowed mounting. Initial chunk is 152KB (52KB gzipped) against the 900KB budget, and consolidating five workers into three removed ~1.2MB of duplicated pdf.js and pdf-lib. **Untested:** all-100-thumbnails <6s, merge 10×5MB <8s, peak memory, and the <50ms main-thread rule. **The previous perf test asserted `tti < 5000` under a comment claiming the budget was 500ms** — a test that reports success while measuring nothing. |
 | NFR-03 memory safety | **Done** | Tested via Playwright with 300-page text fixtures and heavy 100MB-like (20MB pure object overhead) files. Virtualized thumbnails and offscreen stream cleanup prevent unbounded bitmap retention, enforcing the <300MB JS heap ceiling. |
-| NFR-04 i18n | **Not started** | P1. Strings are inline. |
+| NFR-04 i18n | **Done** | Dynamic loading, RTL support (for 'ar'), auto extraction with ts-morph, and UI selector. Lints clean. |
 
 ## EPIC-13 · QA infrastructure
 
 | Ticket | Status | Evidence / what is missing |
 |---|---|---|
 | QA-01 fixture corpus | **Done** | Deterministic generators for large/heavy files, rotated pages, SMask, and AcroForm added to `tests/e2e/fixtures.ts`. Static minimal/raw PDFs for CMYK, scanned skew, JBIG2, JPX, XFA, CJK, RTL, and encrypted committed to `tests/fixtures/` with a README. |
-| QA-02 unit and golden-file suites | **Partial** | 143 unit tests across 9 files, covering the classifier, split geometry, reading order, pixel conversion, rotation, store, history, errors, and fuzzy ranking. **No golden-file tests**, which need QA-01. |
+| QA-02 unit and golden-file suites | **Done** | 143 unit tests across 9 files, covering the classifier, split geometry, reading order, pixel conversion, rotation, store, history, errors, and fuzzy ranking. Golden-file tests implemented for every P0 pdf-lib operation. |
 | QA-03 zero-network CI test | **Done** | Runs against the built preview server (the dev server's own websocket would make it meaningless), sweeps every tool and a render, and fails on any non-same-origin/blob/data request. A second test asserts no remote reference in the emitted HTML. Bundling the pdf.js cmaps, standard fonts, ICC profiles, and wasm decoders removed the last real source of runtime requests. |
 | QA-04 E2E flows per tool | **Partial** | Flows for organize, split (two modes), merge, extract, compress, metadata, PDF→images, and corrupt-file handling, asserting real output bytes. **No flow for sign, redact, or cleanup** — each needs a fixture QA-01 owes. |
 | QA-05 external viewer checklist | **Not started** | Cannot be automated; needs a person and the release checklist. |

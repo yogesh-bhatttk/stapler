@@ -9,8 +9,15 @@
 import { corrupt } from './errors';
 import { DOC_PAGE_WHITE } from './doc-colors';
 
-const SUPPORTED = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/heic']);
-const SUPPORTED_EXTENSIONS = /\.(png|jpe?g|webp|gif|heic)$/i;
+const SUPPORTED = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/gif',
+  'image/heic',
+  'image/tiff'
+]);
+const SUPPORTED_EXTENSIONS = /\.(png|jpe?g|webp|gif|heic|tiff?)$/i;
 
 export function isSupportedImage(file: File): boolean {
   // The MIME check covers browsers that report the type correctly.
@@ -38,6 +45,33 @@ export async function imageFileToJpeg(file: File, quality = 0.9): Promise<Uint8A
     } catch (err) {
       throw corrupt(
         `Failed to decode HEIC file ${file.name}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  } else if (
+    file.name.toLowerCase().endsWith('.tiff') ||
+    file.name.toLowerCase().endsWith('.tif') ||
+    file.type === 'image/tiff'
+  ) {
+    try {
+      const UTIF = await import('utif');
+      const buffer = await file.arrayBuffer();
+      const ifds = UTIF.decode(buffer);
+      UTIF.decodeImage(buffer, ifds[0]);
+      const rgba = UTIF.toRGBA8(ifds[0]);
+
+      const width = ifds[0].width;
+      const height = ifds[0].height;
+      const canvas = new OffscreenCanvas(width, height);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('No 2d context for TIFF conversion');
+
+      const imageData = new ImageData(new Uint8ClampedArray(rgba.buffer), width, height);
+      ctx.putImageData(imageData, 0, 0);
+
+      sourceBlob = await canvas.convertToBlob({ type: 'image/png' });
+    } catch (err) {
+      throw corrupt(
+        `Failed to decode TIFF file ${file.name}: ${err instanceof Error ? err.message : String(err)}`
       );
     }
   }

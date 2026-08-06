@@ -361,7 +361,8 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     await save(doc, scrubbed, `${stem(doc.name)}-scrubbed.pdf`);
   },
   compare: async () => {},
-  batch: async () => {}
+  batch: async () => {},
+  'md-to-pdf': async () => {}
 };
 
 export async function commitTool(toolId: ToolId, job: JobOptions): Promise<void> {

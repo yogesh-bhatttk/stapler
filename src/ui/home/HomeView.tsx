@@ -22,12 +22,16 @@ import { ToolIcon } from '../components/ToolIcon';
 import { fuzzyRank } from '../../core/fuzzy';
 import styles from './HomeView.module.css';
 import { useTranslation } from '../../core/i18n';
+import { useImageImportOptions } from '../useImageImportOptions';
+import { isPdfFile } from '../../core/import';
+import { isSupportedImage } from '../../core/image';
 
 export function HomeView() {
   const t = useTranslation();
   const [, setLocation] = useLocation();
   const [query, setQuery] = useState('');
   const [recents, setRecents] = useState<RecentEntry[]>([]);
+  const { requestOptions, node } = useImageImportOptions();
 
   useEffect(() => {
     void platform.restoreHandles().then(setRecents);
@@ -50,7 +54,14 @@ export function HomeView() {
         });
         return;
       }
-      const outcome = await importFiles([await handle.getFile()]);
+      const files = [await handle.getFile()];
+      let imageOptions = undefined;
+      if (files.some(f => !isPdfFile(f) && isSupportedImage(f))) {
+        const opts = await requestOptions(files);
+        if (!opts) return;
+        imageOptions = opts;
+      }
+      const outcome = await importFiles(files, {}, imageOptions);
       for (const imported of outcome.imported) {
         addDocument({
           id: crypto.randomUUID(),
@@ -81,6 +92,7 @@ export function HomeView() {
         </div>
 
         <DropZone onImported={() => setLocation(toolRoute('organize'))} />
+        {node}
 
         <div className={styles.section}>
           <Field label={t('Search tools')}>

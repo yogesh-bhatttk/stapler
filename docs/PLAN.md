@@ -3,7 +3,7 @@
 > **Working name:** Stapler _(placeholder — trademark-check before store submission)_
 > **Store title (draft):** `Stapler — Offline PDF Tools: Merge, Split, Compress, Sign`
 > **Type:** Chrome Extension (Manifest V3) + identical static web app
-> **Status:** Planning. No code written yet.
+> **Status:** In development. Foundation, core features, i18n, and compare implemented.
 
 Companion documents:
 

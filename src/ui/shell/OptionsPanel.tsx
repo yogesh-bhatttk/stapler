@@ -27,6 +27,7 @@ import { NUpPanel } from '../tools/nup/NUpPanel';
 import { ComparePanel } from '../tools/compare/ComparePanel';
 import { AnnotatePanel } from '../tools/annotate/AnnotatePanel';
 import { BatchPanel } from '../tools/batch/BatchPanel';
+import { MarkdownToPdfPanel } from '../tools/convert/MarkdownToPdfPanel';
 import styles from './OptionsPanel.module.css';
 import { useTranslation } from '../../core/i18n';
 
@@ -49,7 +50,8 @@ const BODIES: Record<string, () => preact.JSX.Element | null> = {
   nup: NUpPanel,
   compare: ComparePanel,
   annotate: AnnotatePanel,
-  batch: BatchPanel
+  batch: BatchPanel,
+  'md-to-pdf': MarkdownToPdfPanel
 };
 
 export function OptionsPanel() {
@@ -63,7 +65,7 @@ export function OptionsPanel() {
   return (
     <aside className={styles.panel} aria-label={`${tool.title} options`}>
       <div className={styles.section}>
-        <h2 className={styles.title}>{tool.title}</h2>
+        <h1 className={styles.title}>{tool.title}</h1>
         <p className={styles.description}>{tool.summary}</p>
       </div>
       {hasDocument || tool.worksWithoutDocument ? (

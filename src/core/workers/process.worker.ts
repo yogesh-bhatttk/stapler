@@ -74,9 +74,12 @@ import {
 } from 'pdf-lib';
 import type { PDFField, PDFImage } from 'pdf-lib';
 import { zipSync } from 'fflate';
-import { checkpoint, type JobHandle } from './protocol';
+import type { JobHandle } from './protocol';
+import { checkpoint } from './protocol';
 import { corrupt, encrypted, internal, unsupported } from '../errors';
+import type { ImagesToPdfOptions } from '../operations';
 import { DOC_HAIRLINE_RGB, DOC_INK_RGB, DOC_REDACT_RGB } from '../doc-colors';
+import { markdownToPdfBytes } from '../markdown-to-pdf';
 import { normalizeRotation } from '../rotation';
 import {
   tokenizeContentStream,
@@ -289,7 +292,12 @@ export interface ProcessJob {
     >,
     job?: JobHandle
   ): Promise<{ bytes: Uint8Array; keptOriginal: boolean }>;
-  imagesToPdf(images: Uint8Array[], job?: JobHandle): Promise<Uint8Array>;
+  imagesToPdf(
+    images: Uint8Array[],
+    options?: ImagesToPdfOptions,
+    job?: JobHandle
+  ): Promise<Uint8Array>;
+  markdownToPdf(markdown: string): Promise<Uint8Array>;
   readMetadata(bytes: Uint8Array): Promise<MetadataFindings>;
   scrubMetadata(bytes: Uint8Array, settings?: ScrubSettings): Promise<Uint8Array>;
   /**
@@ -1845,14 +1853,53 @@ const api: ProcessJob = {
     return { bytes: transfer(rebuilt), keptOriginal: false };
   },
 
-  async imagesToPdf(images, job) {
+  async markdownToPdf(markdown: string): Promise<Uint8Array> {
+    return await markdownToPdfBytes(markdown);
+  },
+
+  async imagesToPdf(images, options, job) {
     const doc = await PDFDocument.create();
     for (let i = 0; i < images.length; i++) {
       await checkpoint(job, i / images.length, `Adding image ${i + 1} of ${images.length}`);
       // Images are normalised to JPEG before they reach the worker.
       const embedded = await doc.embedJpg(images[i]);
-      const page = doc.addPage([embedded.width, embedded.height]);
-      page.drawImage(embedded, { x: 0, y: 0, width: embedded.width, height: embedded.height });
+
+      let pageWidth = embedded.width;
+      let pageHeight = embedded.height;
+      const margin = options?.margin ?? 0;
+
+      if (options?.pageSize === 'a4') {
+        pageWidth = 595.28;
+        pageHeight = 841.89;
+      } else if (options?.pageSize === 'letter') {
+        pageWidth = 612;
+        pageHeight = 792;
+      }
+
+      const isLandscape = embedded.width > embedded.height;
+      if (options?.pageSize !== 'original') {
+        if (
+          options?.orientation === 'landscape' ||
+          (options?.orientation === 'auto' && isLandscape)
+        ) {
+          const temp = pageWidth;
+          pageWidth = pageHeight;
+          pageHeight = temp;
+        }
+      }
+
+      const page = doc.addPage([pageWidth, pageHeight]);
+      const availableWidth = pageWidth - margin * 2;
+      const availableHeight = pageHeight - margin * 2;
+
+      const scale = Math.min(1, availableWidth / embedded.width, availableHeight / embedded.height);
+
+      const drawWidth = embedded.width * scale;
+      const drawHeight = embedded.height * scale;
+      const x = margin + (availableWidth - drawWidth) / 2;
+      const y = margin + (availableHeight - drawHeight) / 2;
+
+      page.drawImage(embedded, { x, y, width: drawWidth, height: drawHeight });
     }
     return transfer(await doc.save({ useObjectStreams: true }));
   },

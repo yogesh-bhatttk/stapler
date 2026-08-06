@@ -129,9 +129,7 @@ export function SinglePageView({
           {t('Previous')}
         </Button>
         <span className={styles.pagerLabel}>
-          {t('Page')}
-          {pageIndex + 1} {t('of')}
-          {pages.length}
+          {t('Page')} {pageIndex + 1} {t('of')} {pages.length}
         </span>
         <Button
           variant="tertiary"

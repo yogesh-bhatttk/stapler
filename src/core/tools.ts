@@ -28,7 +28,8 @@ export type ToolId =
   | 'nup'
   | 'compare'
   | 'annotate'
-  | 'batch';
+  | 'batch'
+  | 'md-to-pdf';
 
 export type ToolGroup = 'Organize' | 'Convert' | 'Optimize' | 'Document' | 'Automation';
 
@@ -268,6 +269,18 @@ export const TOOLS: readonly ToolDefinition[] = [
     commitLabel: 'Run Batch',
     selectable: false,
     worksWithoutDocument: true
+  },
+  {
+    id: 'md-to-pdf',
+    group: 'Convert',
+    title: 'Markdown to PDF',
+    summary: 'Convert a Markdown file or text into a PDF.',
+    icon: 'FileText',
+    canvasMode: 'single',
+    needsOptionsPanel: true,
+    commitLabel: 'Export PDF',
+    worksWithoutDocument: true,
+    selectable: false
   }
 ];
 

@@ -15,6 +15,9 @@ import { importFiles } from '../../../core/import';
 import { activeDoc, insertPages, selectedPageKeys, setPageSelection } from '../../../core/store';
 import { notify, notifyError } from '../../../core/notify';
 import { Button } from '../../components/Button';
+import { useImageImportOptions } from '../../useImageImportOptions';
+import { isPdfFile } from '../../../core/import';
+import { isSupportedImage } from '../../../core/image';
 import { Field, NumberStepper } from '../../components/Field';
 import { panelStyles } from '../../shell/OptionsPanel';
 import { useJob } from '../../useJob';
@@ -34,6 +37,7 @@ export function InsertPanel() {
   const doc = activeDoc.value;
   const { run } = useJob();
   const [busy, setBusy] = useState(false);
+  const { requestOptions } = useImageImportOptions();
   // `null` follows the current grid selection; a number is an explicit override
   // once the user has touched the stepper. Cleared after each insert so the next
   // one goes back to following whatever is selected.
@@ -50,9 +54,18 @@ export function InsertPanel() {
       const opened = await platform.openFiles({ multiple: true, accept: PDF_AND_IMAGES });
       if (opened.length === 0) return;
       const files = await Promise.all(opened.map(handle => handle.getFile()));
+      let imageOptions = undefined;
+      if (files.some(f => !isPdfFile(f) && isSupportedImage(f))) {
+        const opts = await requestOptions(files);
+        if (!opts) {
+          setBusy(false);
+          return;
+        }
+        imageOptions = opts;
+      }
 
       await run({ label: 'Importing', scope: 'insert.add' }, async job => {
-        const outcome = await importFiles(files, job);
+        const outcome = await importFiles(files, job, imageOptions);
         let at = clampedIndex;
         const insertedKeys: string[] = [];
         for (const imported of outcome.imported) {

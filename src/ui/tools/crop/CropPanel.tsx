@@ -68,8 +68,7 @@ export function CropPanel() {
           {SCOPE_LABEL[settings.scope]}.
         </p>
         <Button variant="secondary" icon={RotateCcw} onClick={handleReset}>
-          {t('Reset crop on')}
-          {SCOPE_LABEL[settings.scope]}
+          {t('Reset crop on')} {SCOPE_LABEL[settings.scope]}
         </Button>
       </div>
 
@@ -81,8 +80,7 @@ export function CropPanel() {
           )}
         </p>
         <Button variant="secondary" icon={Scissors} onClick={handleAutoTrim}>
-          {t('Auto-trim')}
-          {SCOPE_LABEL[settings.scope]}
+          {t('Auto-trim')} {SCOPE_LABEL[settings.scope]}
         </Button>
       </div>
     </>
