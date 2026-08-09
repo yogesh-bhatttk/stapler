@@ -286,10 +286,28 @@ export interface FilterContentStreamResult {
   strippedXObjectNames: string[];
 }
 
+/**
+ * What's needed to compute a Form XObject's true device-space extent. Unlike an
+ * image (which always occupies the unit square in its own space), a Form's
+ * extent is its own `/BBox`, optionally transformed by its own `/Matrix`, before
+ * the page's CTM is applied. Treating every `Do` as a unit square — which this
+ * module used to do — silently gave every Form XObject invocation a bogus tiny
+ * box, so a Form's content could never be detected as overlapping a redaction
+ * region and was never stripped, however large it actually was on the page.
+ */
+export interface XObjectInfo {
+  subtype: 'Form' | 'Image' | 'Unknown';
+  /** Form space, as [llx, lly, urx, ury]. Unused for images. */
+  bbox?: [number, number, number, number];
+  /** Form's own transform, applied before the page CTM. Unused for images. */
+  matrix?: Matrix;
+}
+
 export function filterContentStream(
   statements: Statement[],
   redactionBoxes: Rect[],
-  initialState?: GraphicsState
+  initialState?: GraphicsState,
+  resolveXObject?: (name: string) => XObjectInfo | undefined
 ): FilterContentStreamResult {
   const filtered: Statement[] = [];
   const strippedXObjectNames: string[] = [];
@@ -396,16 +414,6 @@ export function filterContentStream(
         continue;
       }
     } else if (op === 'Do') {
-      const p1 = transformPoint(state.ctm, 0, 0);
-      const p2 = transformPoint(state.ctm, 1, 1);
-
-      const box: Rect = {
-        x: Math.min(p1.x, p2.x),
-        y: Math.min(p1.y, p2.y),
-        width: Math.abs(p2.x - p1.x),
-        height: Math.abs(p2.y - p1.y)
-      };
-
       let xObjectName = '';
       if (stmt.operands.length > 0 && stmt.operands[stmt.operands.length - 1].type === 'name') {
         xObjectName = String.fromCharCode(...stmt.operands[stmt.operands.length - 1].bytes).slice(
@@ -413,18 +421,47 @@ export function filterContentStream(
         );
       }
 
+      const info = xObjectName ? resolveXObject?.(xObjectName) : undefined;
+
+      let box: Rect;
+      if (info?.subtype === 'Form' && info.bbox) {
+        // The Form's own Matrix (if any) applies before the page's CTM.
+        const formCtm = info.matrix ? multiplyMatrix(info.matrix, state.ctm) : state.ctm;
+        const [llx, lly, urx, ury] = info.bbox;
+        const corners = [
+          transformPoint(formCtm, llx, lly),
+          transformPoint(formCtm, urx, lly),
+          transformPoint(formCtm, urx, ury),
+          transformPoint(formCtm, llx, ury)
+        ];
+        const xs = corners.map(c => c.x);
+        const ys = corners.map(c => c.y);
+        box = {
+          x: Math.min(...xs),
+          y: Math.min(...ys),
+          width: Math.max(...xs) - Math.min(...xs),
+          height: Math.max(...ys) - Math.min(...ys)
+        };
+      } else {
+        // Images occupy the unit square in their own space. A Form XObject
+        // whose /BBox we couldn't resolve falls back to this too — conservative
+        // in the sense that it may under-report the Form's true extent, but it
+        // is what every caller already relied on before Forms were handled at all.
+        const p1 = transformPoint(state.ctm, 0, 0);
+        const p2 = transformPoint(state.ctm, 1, 1);
+        box = {
+          x: Math.min(p1.x, p2.x),
+          y: Math.min(p1.y, p2.y),
+          width: Math.abs(p2.x - p1.x),
+          height: Math.abs(p2.y - p1.y)
+        };
+      }
+
       let shouldStrip = false;
       for (const r of redactionBoxes) {
         if (intersects(box, r)) {
-          const fullyContained =
-            box.x >= r.x &&
-            box.y >= r.y &&
-            box.x + box.width <= r.x + r.width &&
-            box.y + box.height <= r.y + r.height;
-          if (fullyContained) {
-            shouldStrip = true;
-            break;
-          }
+          shouldStrip = true;
+          break;
         }
       }
 

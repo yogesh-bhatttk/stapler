@@ -137,12 +137,22 @@ export async function reopenPersisted(id: string): Promise<OpenedFile | null> {
   // to re-prompt rather than failing silently.
   if (!(await ensureReadPermission(handle))) return null;
   session.set(id, handle);
+
+  let writable = false;
+  if (hasFileSystemAccess()) {
+    try {
+      writable = (await handle.queryPermission({ mode: 'readwrite' })) === 'granted';
+    } catch {
+      // Ignore if queryPermission fails
+    }
+  }
+
   return {
     id,
     name: handle.name,
     getFile: () => handle.getFile(),
     persistable: true,
-    writable: true
+    writable
   };
 }
 

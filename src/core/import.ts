@@ -19,6 +19,7 @@ import { hasXfaMarker, XFA_MESSAGE } from './pdf/xfa';
 export const LARGE_FILE_BYTES = 100 * 1024 * 1024;
 
 export interface ImportedFile {
+  originalFile: File;
   source: SourceDocument;
   pages: PageRef[];
   /** Non-fatal things the user should know: XFA, very large, mixed page sizes. */
@@ -104,7 +105,7 @@ async function importPdf(file: File, options: JobOptions): Promise<ImportedFile>
       registerSource(source);
       // `makePageRefs` takes the same id the source was registered under; that
       // coupling is the whole point of doing this in one function.
-      return { source, pages: makePageRefs(id, info.pageCount), warnings };
+      return { originalFile: file, source, pages: makePageRefs(id, info.pageCount), warnings };
     } finally {
       // Release the pdf.js parse; the workspace re-opens documents on demand through
       // the render cache, which knows how to evict them.
@@ -148,7 +149,12 @@ async function importImages(
         pageSizes: info.pageSizes
       };
       registerSource(source);
-      return { source, pages: makePageRefs(id, info.pageCount), warnings: [] };
+      return {
+        originalFile: files[0],
+        source,
+        pages: makePageRefs(id, info.pageCount),
+        warnings: []
+      };
     } finally {
       await client.lease(api => api.closeDocument(info.handle));
     }

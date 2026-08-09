@@ -92,6 +92,11 @@ export function MergePanel() {
               'Drag pages in the grid to reorder across files. Page sizes are preserved as they are.'
             )}
           </p>
+          <p className={panelStyles.description}>
+            {t(
+              'Bookmarks and outlines from the source files are not carried into the merged document.'
+            )}
+          </p>
         </div>
       )}
     </>

@@ -56,6 +56,11 @@ export function TrustModal({ onClose }: { onClose: () => void }) {
             {t('Read the source →')}
           </a>
         </p>
+        <p>
+          <a className={styles.link} href="privacy.html" target="_blank" rel="noopener noreferrer">
+            {t('Read the full privacy policy →')}
+          </a>
+        </p>
       </div>
     </Modal>
   );

@@ -1,4 +1,5 @@
 import {
+  PDFDict,
   PDFDocument,
   PDFName,
   PDFRef,
@@ -249,6 +250,44 @@ export async function sharedImagePdf(pageCount = 10): Promise<Uint8Array> {
   return doc.save();
 }
 
+/**
+ * The same image object drawn at a small size on page 1 and full-bleed on the
+ * last page — for the "shared image sized at its largest use, not whichever
+ * page is processed first" acceptance criterion.
+ */
+export async function sharedImageDifferentSizesPdf(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const image = await doc.embedPng(encodePng(photoPixels(1600, 1200), 1600, 1200, false));
+
+  const small = doc.addPage([595.28, 841.89]);
+  small.drawText('Small placement page', { x: 40, y: 790, size: 14, font });
+  for (let i = 0; i < 10; i++) {
+    small.drawText(`Body line ${i + 1}, enough text to keep the page surgical.`, {
+      x: 40,
+      y: 758 - i * 18,
+      size: 11,
+      font
+    });
+  }
+  // A tiny thumbnail — the "processed first, size everyone else inherited" case.
+  small.drawImage(image, { x: 40, y: 100, width: 60, height: 45 });
+
+  const large = doc.addPage([595.28, 841.89]);
+  large.drawText('Full-bleed placement page', { x: 40, y: 790, size: 14, font });
+  for (let i = 0; i < 10; i++) {
+    large.drawText(`Body line ${i + 1}, enough text to keep the page surgical.`, {
+      x: 40,
+      y: 758 - i * 18,
+      size: 11,
+      font
+    });
+  }
+  large.drawImage(image, { x: 0, y: 0, width: 595.28, height: 446 });
+
+  return doc.save();
+}
+
 /** Mixed page sizes, for the merge and normalise assertions. */
 export async function mixedSizePdf(): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
@@ -310,33 +349,58 @@ export async function corruptPdf(): Promise<Uint8Array> {
 }
 
 /**
- * A large file (~20MB) to test memory safety and chunked processing.
- * We generate this by creating many large unique objects.
+ * A large file (~5MB) to test memory safety, chunked processing, and the
+ * "10 × 5MB merge in <8s" performance budget.
+ *
+ * The previous version ran a "noise" buffer through PNG/DEFLATE before
+ * embedding it, on the assumption that pseudo-random bytes are incompressible
+ * — they are not, for a plain linear congruential generator: `deflateSync`
+ * collapses the intended 5.76MB buffer down to ~55KB (a ~104x ratio, far
+ * beyond what's possible for genuinely random data), so the "heavy" fixture
+ * was actually ~70KB on disk. Every test budgeted against "10 × 5MB" was
+ * really exercising 10 × ~7KB. Embedding the pixel data as a raw, unfiltered
+ * image XObject (no `/Filter` at all) sidesteps the question entirely: the
+ * output size is the pixel buffer's size, deterministically, regardless of
+ * how compressible its content turns out to be.
  */
 export async function heavyPdf(): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
 
-  // A 5MB PDF requires about 5MB of uncompressible data.
-  // Let's create a 1200x1200x4 (5.7MB) noise PNG.
-  const width = 1200;
-  const height = 1200;
-  const px = new Uint8Array(width * height * 4);
+  // 1350 x 1350 x 3 (RGB, no alpha) = ~5.47MB of raw pixel data, safely over
+  // the 5MB-per-file budget the merge test asserts against (with margin for
+  // the ~4KB of page/xref overhead added on top).
+  const width = 1350;
+  const height = 1350;
+  const px = new Uint8Array(width * height * 3);
   let seed = 12345;
   for (let i = 0; i < px.length; i++) {
     seed = (seed * 1103515245 + 12345) & 0x7fffffff;
     px[i] = (seed >> 16) & 0xff;
   }
 
-  // encodePng is defined earlier in this file.
-  const png = encodePng(px, width, height, true);
-  const image = await doc.embedPng(png);
+  const imageStream = doc.context.stream(px, {
+    Type: 'XObject',
+    Subtype: 'Image',
+    Width: width,
+    Height: height,
+    ColorSpace: 'DeviceRGB',
+    BitsPerComponent: 8
+  });
+  const imageRef = doc.context.register(imageStream);
 
-  // We'll create 10 pages and draw the same image.
-  // Wait, pdf-lib will deduplicate the image object.
-  // But the file itself will be > 5MB because of the 5.7MB PNG.
+  // Ten pages sharing one indirect object: the same dedup property the PNG
+  // version relied on, but now the shared object is genuinely ~5MB rather
+  // than however small DEFLATE happened to make it.
   for (let i = 0; i < 10; i++) {
     const page = doc.addPage([595.28, 841.89]);
-    page.drawImage(image, { x: 0, y: 0, width: 595.28, height: 841.89 });
+    (page.node.Resources() as PDFDict).set(
+      PDFName.of('XObject'),
+      doc.context.obj({ Im0: imageRef })
+    );
+    page.node.set(
+      PDFName.of('Contents'),
+      doc.context.register(doc.context.flateStream('q 595.28 0 0 841.89 0 0 cm /Im0 Do Q'))
+    );
   }
 
   return doc.save({ useObjectStreams: false });

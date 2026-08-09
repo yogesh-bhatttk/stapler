@@ -56,7 +56,13 @@ export function DropZone({ onImported }: DropZoneProps) {
       );
 
       for (const imported of outcome.imported) {
-        const handle = handles?.find(h => h.name === imported.source.name);
+        let handle: OpenedFile | undefined = undefined;
+        if (handles) {
+          const index = files.indexOf(imported.originalFile);
+          if (index !== -1) {
+            handle = handles[index];
+          }
+        }
         addDocument({
           id: crypto.randomUUID(),
           name: imported.source.name,

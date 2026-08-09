@@ -1,5 +1,5 @@
 import { Button } from '../../components/Button';
-import { Select } from '../../components/Field';
+import { Field, Select } from '../../components/Field';
 import { panelStyles } from '../../shell/OptionsPanel';
 import {
   inputDirHandle,
@@ -18,8 +18,12 @@ import type { NormalizeSettings } from '../normalize/state';
 import { runBatch } from './runner';
 import { useTranslation } from '../../../core/i18n';
 
+import { useRef } from 'preact/hooks';
+
 export function BatchPanel() {
   const t = useTranslation();
+  const abortControllerRef = useRef<AbortController | null>(null);
+
   const handleSelectInput = async () => {
     try {
       // @ts-expect-error TODO: fix type
@@ -46,7 +50,7 @@ export function BatchPanel() {
     const newRecipe: Recipe = {
       id: crypto.randomUUID(),
       name,
-      tools: [], // We could allow the user to select which tools to apply, or apply all active
+      tools: ['watermark', 'normalize', 'nup', 'compress'],
       settings: {
         compress: { ...compressSettings.value },
         watermark: { ...watermarkSettings.value },
@@ -59,8 +63,15 @@ export function BatchPanel() {
     activeRecipeId.value = newRecipe.id;
   };
 
-  const handleRun = () => {
-    runBatch();
+  const handleRun = async () => {
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    await runBatch(controller.signal);
+    abortControllerRef.current = null;
+  };
+
+  const handleCancel = () => {
+    abortControllerRef.current?.abort();
   };
 
   return (
@@ -75,16 +86,19 @@ export function BatchPanel() {
       </div>
 
       <div className={panelStyles.section}>
-        <label className={panelStyles.label}>{t('Recipe')}</label>
-        <Select
-          id="batch-recipe"
-          value={activeRecipeId.value || ''}
-          onChange={val => (activeRecipeId.value = val || null)}
-          options={[
-            { value: '', label: 'None (Use current settings)' },
-            ...savedRecipes.value.map(r => ({ value: r.id, label: r.name }))
-          ]}
-        />
+        <Field label={t('Recipe')}>
+          {id => (
+            <Select
+              id={id}
+              value={activeRecipeId.value || ''}
+              onChange={val => (activeRecipeId.value = val || null)}
+              options={[
+                { value: '', label: 'None (Use current settings)' },
+                ...savedRecipes.value.map(r => ({ value: r.id, label: r.name }))
+              ]}
+            />
+          )}
+        </Field>
         <Button onClick={handleSaveRecipe} variant="secondary">
           {t('Save current as recipe')}
         </Button>
@@ -114,6 +128,11 @@ export function BatchPanel() {
         >
           {t('Run Batch')}
         </Button>
+        {batchProgress.value.isProcessing && (
+          <Button onClick={handleCancel} variant="secondary">
+            {t('Cancel')}
+          </Button>
+        )}
       </div>
     </>
   );

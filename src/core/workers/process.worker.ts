@@ -67,12 +67,14 @@ import {
   PDFRef,
   PDFSignature,
   PDFStream,
+  PDFString,
+  PDFHexString,
   PDFTextField,
   degrees,
   StandardFonts,
   rgb
 } from 'pdf-lib';
-import type { PDFField, PDFImage } from 'pdf-lib';
+import type { PDFField, PDFImage, PDFContext } from 'pdf-lib';
 import { zipSync } from 'fflate';
 import type { JobHandle } from './protocol';
 import { checkpoint } from './protocol';
@@ -88,7 +90,7 @@ import {
   serializeStatements,
   decodeStream
 } from '../pdf/interpreter';
-import type { Rect, GraphicsState } from '../pdf/interpreter';
+import type { Rect, GraphicsState, Matrix } from '../pdf/interpreter';
 import { hasXfaMarker, XFA_MESSAGE } from '../pdf/xfa';
 
 /** A page in the output, pointing back at the bytes it came from. */
@@ -309,6 +311,14 @@ export interface ProcessJob {
     regions: RedactionRegion[],
     job?: JobHandle
   ): Promise<Uint8Array>;
+  /**
+   * RED-03's string-level check re-extracts pdf.js *page text* only, which never
+   * sees annotation `/Contents` (sticky notes, comments) or AcroForm field `/V`
+   * values — so a copy of a redacted string quoted in a comment on another page
+   * passed verification untouched. Returns every such string found anywhere in
+   * the document so the caller can fold them into the same whole-document check.
+   */
+  collectOffPageText(bytes: Uint8Array): Promise<string[]>;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1399,6 +1409,46 @@ function nameOf(value: unknown): string {
   return 'unknown';
 }
 
+/** `nameOf`, but resolving an indirect reference first — /Filter is legal as `N 0 R`. */
+function nameOfDeref(value: unknown, context: PDFContext): string {
+  return nameOf(value instanceof PDFRef ? context.lookup(value) : value);
+}
+
+/**
+ * `nameOf` alone misidentifies a colour space every time a producer encodes it
+ * the normal way rather than as a bare direct name: an indirect `/ColorSpace 7
+ * 0 R` resolves to neither `PDFName` nor `PDFArray` (it's a `PDFRef`) and falls
+ * through to `'unknown'`; a resource-scoped name like `/CS0` *is* a `PDFName`,
+ * so `nameOf` happily returns `'CS0'` — a string `UNSAFE_COLOR_SPACES` can never
+ * match, so a `/Separation` ink plate behind either encoding was silently
+ * flattened to RGB and destroyed. Both are pdf-lib's own defaults for anything
+ * beyond a plain device colour space (InDesign/Acrobat routinely emit both),
+ * so this was close to dead code for the exact spot colours it exists to catch.
+ */
+function colorSpaceNameOf(
+  value: unknown,
+  resources: PDFDict | undefined,
+  context: PDFContext
+): string {
+  let resolved: unknown = value;
+
+  if (resolved instanceof PDFName) {
+    const csDict = resources?.lookupMaybe(PDFName.of('ColorSpace'), PDFDict);
+    const named = csDict?.get(resolved);
+    if (named !== undefined) resolved = named;
+  }
+
+  if (resolved instanceof PDFRef) resolved = context.lookup(resolved);
+
+  if (resolved instanceof PDFName) return resolved.asString().replace(/^\//, '');
+  if (resolved instanceof PDFArray) {
+    let first: unknown = resolved.get(0);
+    if (first instanceof PDFRef) first = context.lookup(first);
+    return first instanceof PDFName ? first.asString().replace(/^\//, '') : 'array';
+  }
+  return 'unknown';
+}
+
 function numberOf(dict: PDFDict, key: string, fallback: number): number {
   const value = dict.lookup(PDFName.of(key));
   return value instanceof PDFNumber ? value.asNumber() : fallback;
@@ -1413,6 +1463,131 @@ function maskKindOf(smask: PDFStream | undefined, mask: unknown): ImageFacts['ma
   if (mask instanceof PDFStream) return 'soft';
   if (mask !== undefined) return 'colorKey';
   return 'none';
+}
+
+/**
+ * Finds the `/Resources/XObject` dict that actually contains `name` pointing at
+ * an Image — searching nested Form XObjects when it is not directly on
+ * `xobjects`, mirroring `collectImages`'s recursion. Without this, an image
+ * `imageInventory` found several Forms deep could be re-encoded but never
+ * written back: `rebuildCompressed` used to look the resource name up only in
+ * the page's own dict, find nothing, and silently leave the original in place.
+ */
+function findImageContainer(
+  xobjects: PDFDict,
+  name: string,
+  context: PDFContext,
+  visited: Set<number>,
+  depth = 0
+): PDFDict | undefined {
+  if (depth > 8) return undefined;
+  const targetKey = PDFName.of(name);
+
+  for (const [key, value] of xobjects.entries()) {
+    const ref = value instanceof PDFRef ? value : undefined;
+    const stream = xobjects.lookup(key);
+    if (!(stream instanceof PDFStream)) continue;
+    const subtype = nameOf(stream.dict.get(PDFName.of('Subtype')));
+
+    if (key === targetKey && subtype === 'Image') return xobjects;
+    if (subtype !== 'Form') continue;
+
+    if (ref) {
+      if (visited.has(ref.objectNumber)) continue;
+      visited.add(ref.objectNumber);
+    }
+    const formResourcesRaw = stream.dict.get(PDFName.of('Resources'));
+    const formResources =
+      formResourcesRaw instanceof PDFDict
+        ? formResourcesRaw
+        : formResourcesRaw instanceof PDFRef
+          ? context.lookupMaybe(formResourcesRaw, PDFDict)
+          : undefined;
+    const formXObjects = formResources?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+    if (formXObjects) {
+      const found = findImageContainer(formXObjects, name, context, visited, depth + 1);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Walks a `/Resources/XObject` dict, collecting `ImageFacts` for every Image it
+ * finds — recursing into Form XObjects along the way. A page whose only photo
+ * lives inside a Form (a common pattern for stamps, watermarks, and reusable
+ * letterhead art) used to be invisible to this scan entirely: only the page's
+ * own `/Resources/XObject` was read, so the image was never compressed, and the
+ * page was reported "already optimized" even though it carried an
+ * uncompressed photo one indirection down.
+ *
+ * `visited` guards against a Form that (directly or through a cycle) refers to
+ * itself, and against re-listing the same shared image twice if it is somehow
+ * reachable through two different paths on one page.
+ */
+function collectImages(
+  xobjects: PDFDict,
+  resources: PDFDict | undefined,
+  doc: PDFDocument,
+  images: ImageFacts[],
+  visited: Set<number>,
+  depth = 0
+): void {
+  if (depth > 8) return;
+
+  for (const [key, value] of xobjects.entries()) {
+    const ref = value instanceof PDFRef ? value : undefined;
+    if (ref) {
+      if (visited.has(ref.objectNumber)) continue;
+      visited.add(ref.objectNumber);
+    }
+
+    const stream = xobjects.lookup(key);
+    if (!(stream instanceof PDFStream)) continue;
+    const dict = stream.dict;
+    const subtype = nameOf(dict.get(PDFName.of('Subtype')));
+
+    if (subtype === 'Form') {
+      // A Form without its own /Resources inherits the resources of whatever
+      // invokes it — here, the scope we were called with.
+      const formResourcesRaw = dict.get(PDFName.of('Resources'));
+      const formResources =
+        formResourcesRaw instanceof PDFDict
+          ? formResourcesRaw
+          : formResourcesRaw instanceof PDFRef
+            ? doc.context.lookupMaybe(formResourcesRaw, PDFDict)
+            : resources;
+      const formXObjects = formResources?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+      if (formXObjects) {
+        collectImages(formXObjects, formResources, doc, images, visited, depth + 1);
+      }
+      continue;
+    }
+
+    if (subtype !== 'Image') continue;
+
+    const smask = dict.lookupMaybe(PDFName.of('SMask'), PDFStream);
+    const mask = dict.lookup(PDFName.of('Mask'));
+    const isImageMask = dict.lookup(PDFName.of('ImageMask')) === PDFBool.True;
+
+    images.push({
+      name: key.asString().replace(/^\//, ''),
+      objectNumber: ref?.objectNumber ?? -1,
+      width: numberOf(dict, 'Width', 0),
+      height: numberOf(dict, 'Height', 0),
+      // A stencil mask has no /BitsPerComponent of its own; it is 1 by
+      // definition, and defaulting it to 8 would let a stencil through the
+      // re-encode gate as if it were a photograph.
+      bitsPerComponent: numberOf(dict, 'BitsPerComponent', isImageMask ? 1 : 8),
+      colorSpace: colorSpaceNameOf(dict.get(PDFName.of('ColorSpace')), resources, doc.context),
+      filter: nameOfDeref(dict.get(PDFName.of('Filter')), doc.context),
+      hasSMask: dict.get(PDFName.of('SMask')) !== undefined,
+      hasMask: dict.get(PDFName.of('Mask')) !== undefined,
+      maskKind: maskKindOf(smask, mask),
+      isImageMask,
+      byteLength: stream instanceof PDFRawStream ? stream.contents.length : stream.sizeInBytes()
+    });
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -1478,39 +1653,7 @@ const api: ProcessJob = {
 
       const resources = page.node.Resources();
       const xobjects = resources?.lookupMaybe(PDFName.of('XObject'), PDFDict);
-
-      if (xobjects) {
-        for (const [key, value] of xobjects.entries()) {
-          const ref = value instanceof PDFRef ? value : undefined;
-          const stream = xobjects.lookup(key);
-          if (!(stream instanceof PDFStream)) continue;
-          const dict = stream.dict;
-          if (nameOf(dict.get(PDFName.of('Subtype'))) !== 'Image') continue;
-
-          const smask = dict.lookupMaybe(PDFName.of('SMask'), PDFStream);
-          const mask = dict.lookup(PDFName.of('Mask'));
-          const isImageMask = dict.lookup(PDFName.of('ImageMask')) === PDFBool.True;
-
-          images.push({
-            name: key.asString().replace(/^\//, ''),
-            objectNumber: ref?.objectNumber ?? -1,
-            width: numberOf(dict, 'Width', 0),
-            height: numberOf(dict, 'Height', 0),
-            // A stencil mask has no /BitsPerComponent of its own; it is 1 by
-            // definition, and defaulting it to 8 would let a stencil through the
-            // re-encode gate as if it were a photograph.
-            bitsPerComponent: numberOf(dict, 'BitsPerComponent', isImageMask ? 1 : 8),
-            colorSpace: nameOf(dict.get(PDFName.of('ColorSpace'))),
-            filter: nameOf(dict.get(PDFName.of('Filter'))),
-            hasSMask: dict.get(PDFName.of('SMask')) !== undefined,
-            hasMask: dict.get(PDFName.of('Mask')) !== undefined,
-            maskKind: maskKindOf(smask, mask),
-            isImageMask,
-            byteLength:
-              stream instanceof PDFRawStream ? stream.contents.length : stream.sizeInBytes()
-          });
-        }
-      }
+      if (xobjects) collectImages(xobjects, resources, doc, images, new Set());
 
       out.push({ pageIndex: i, images, width: size.width, height: size.height });
     }
@@ -1763,12 +1906,13 @@ const api: ProcessJob = {
       const pageIndex = Number(pageIndexKey);
       const page = pages[pageIndex];
       if (!page) continue;
-      const xobjects = page.node.Resources()?.lookupMaybe(PDFName.of('XObject'), PDFDict);
-      if (!xobjects) continue;
+      const pageXObjects = page.node.Resources()?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+      if (!pageXObjects) continue;
 
       for (const [name, encoded] of Object.entries(byName)) {
+        const xobjects = findImageContainer(pageXObjects, name, source.context, new Set());
+        if (!xobjects) continue;
         const key = PDFName.of(name);
-        if (!xobjects.has(key)) continue;
         const oldRef = xobjects.get(key);
         if (!(oldRef instanceof PDFRef)) continue;
 
@@ -1814,8 +1958,18 @@ const api: ProcessJob = {
           const originalHeight = originalSmask?.dict
             .lookupMaybe(PDFName.of('Height'), PDFNumber)
             ?.asNumber();
+          // Only *shrinking* the mask is worth the swap. `encodeMask` resamples
+          // to `encoded`'s target regardless of direction, so a mask smaller
+          // than the base image's new target — a disproportionately small mask
+          // behind a large image, the opposite of the case this exists for —
+          // would otherwise get inflated to match it: legal, but pure bloat on
+          // a path whose only job is making the file smaller. A one-directional
+          // check keeps the resample when it removes pixels and discards it
+          // when it would only add them (an SMask is stretched to the image's
+          // box at render time regardless of its own resolution, so keeping the
+          // original small mask costs nothing visually).
           const smaskOversized =
-            originalWidth !== encoded.width || originalHeight !== encoded.height;
+            (originalWidth ?? 0) > encoded.width || (originalHeight ?? 0) > encoded.height;
 
           if (smaskOversized) {
             const smaskStream = source.context.flateStream(encoded.maskBytes, {
@@ -1834,6 +1988,22 @@ const api: ProcessJob = {
         // mask keeps its own resolution, filter and bytes unless it needed resizing.
         if (finalSmaskRef) newStream.dict.set(PDFName.of('SMask'), finalSmaskRef);
         if (maskRef) newStream.dict.set(PDFName.of('Mask'), maskRef);
+
+        // `embedJpg` builds a bare Image XObject dict with only what pdf-lib
+        // itself needs — every other entry the original carried is dropped.
+        // `/OC` (optional content — a layer's visibility toggle) and
+        // `/StructParent` (this image's link back into the tagged-PDF structure
+        // tree) are exactly the kind of thing nothing re-derives afterwards:
+        // losing `/OC` makes a hideable layer permanently visible, and losing
+        // `/StructParent` breaks the structure tree's link to this image with
+        // no error, silently degrading accessibility for anyone using assistive
+        // tech on the "compressed" file.
+        const oc = oldStream.dict.get(PDFName.of('OC'));
+        if (oc !== undefined) newStream.dict.set(PDFName.of('OC'), oc);
+        const structParent = oldStream.dict.get(PDFName.of('StructParent'));
+        if (structParent !== undefined) {
+          newStream.dict.set(PDFName.of('StructParent'), structParent);
+        }
 
         embedded.set(oldRef.objectNumber, image.ref);
         xobjects.set(key, image.ref);
@@ -2197,6 +2367,67 @@ const api: ProcessJob = {
         // we can remove them from /Resources/XObject after processing.
         const allStrippedXObjectNames: string[] = [];
 
+        // A Form XObject's true extent is its own /BBox (through its own
+        // /Matrix) — nothing like an image's implicit unit square. Without this,
+        // every Form invocation was measured as a bogus tiny box and could never
+        // be detected as overlapping a redaction region, however large it
+        // actually painted on the page, leaving whatever text it drew untouched.
+        const pageResourcesRaw = copied.node.get(PDFName.of('Resources'));
+        const pageResourceDict =
+          pageResourcesRaw instanceof PDFDict
+            ? pageResourcesRaw
+            : pageResourcesRaw instanceof PDFRef
+              ? (out.context.lookup(pageResourcesRaw) as PDFDict | undefined)
+              : undefined;
+        const pageXObjectDictRaw = pageResourceDict?.get(PDFName.of('XObject'));
+        const pageXObjectDict =
+          pageXObjectDictRaw instanceof PDFDict
+            ? pageXObjectDictRaw
+            : pageXObjectDictRaw instanceof PDFRef
+              ? (out.context.lookup(pageXObjectDictRaw) as PDFDict | undefined)
+              : undefined;
+
+        const resolveXObject = (name: string) => {
+          const entry = pageXObjectDict?.get(PDFName.of(name));
+          const resolved = entry instanceof PDFRef ? out.context.lookup(entry) : entry;
+          const dict =
+            resolved instanceof PDFDict
+              ? resolved
+              : resolved instanceof PDFStream || resolved instanceof PDFRawStream
+                ? resolved.dict
+                : undefined;
+          if (!dict) return undefined;
+          const subtypeName = dict.get(PDFName.of('Subtype'));
+          const subtype =
+            subtypeName === PDFName.of('Form')
+              ? ('Form' as const)
+              : subtypeName === PDFName.of('Image')
+                ? ('Image' as const)
+                : ('Unknown' as const);
+          if (subtype !== 'Form') return { subtype };
+
+          const bboxArr = dict.get(PDFName.of('BBox'));
+          const bbox =
+            bboxArr instanceof PDFArray && bboxArr.size() === 4
+              ? ([
+                  (bboxArr.get(0) as PDFNumber).asNumber(),
+                  (bboxArr.get(1) as PDFNumber).asNumber(),
+                  (bboxArr.get(2) as PDFNumber).asNumber(),
+                  (bboxArr.get(3) as PDFNumber).asNumber()
+                ] as [number, number, number, number])
+              : undefined;
+
+          const matrixArr = dict.get(PDFName.of('Matrix'));
+          const matrix =
+            matrixArr instanceof PDFArray && matrixArr.size() === 6
+              ? (Array.from({ length: 6 }, (_, k) =>
+                  (matrixArr.get(k) as PDFNumber).asNumber()
+                ) as Matrix)
+              : undefined;
+
+          return { subtype, bbox, matrix };
+        };
+
         if (streamRefs.length > 0) {
           const filteredChunks: Uint8Array[] = [];
           let carryState: GraphicsState | undefined;
@@ -2220,7 +2451,8 @@ const api: ProcessJob = {
             const { filtered, finalState, strippedXObjectNames } = filterContentStream(
               statements,
               rects,
-              carryState
+              carryState,
+              resolveXObject
             );
             carryState = finalState;
             allStrippedXObjectNames.push(...strippedXObjectNames);
@@ -2412,6 +2644,56 @@ const api: ProcessJob = {
     reattachAcroForm(out, [source]);
     await checkpoint(job, 0.95, 'Writing file');
     return transfer(await out.save({ useObjectStreams: true }));
+  },
+
+  async collectOffPageText(bytes) {
+    const doc = await load(bytes);
+    const found: string[] = [];
+
+    const decode = (value: unknown): string | undefined => {
+      if (value instanceof PDFString || value instanceof PDFHexString) {
+        try {
+          return value.decodeText();
+        } catch {
+          return undefined;
+        }
+      }
+      return undefined;
+    };
+
+    for (const page of doc.getPages()) {
+      const annotsRaw = page.node.get(PDFName.of('Annots'));
+      const annots =
+        annotsRaw instanceof PDFArray
+          ? annotsRaw
+          : annotsRaw instanceof PDFRef
+            ? doc.context.lookupMaybe(annotsRaw, PDFArray)
+            : undefined;
+      if (!annots) continue;
+      for (let i = 0; i < annots.size(); i++) {
+        const ref = annots.get(i);
+        const dict = ref instanceof PDFDict ? ref : doc.context.lookupMaybe(ref, PDFDict);
+        if (!dict) continue;
+        const contents = decode(dict.get(PDFName.of('Contents')));
+        if (contents) found.push(contents);
+      }
+    }
+
+    try {
+      const form = doc.getForm();
+      for (const field of form.getFields()) {
+        if (field instanceof PDFTextField) {
+          const text = field.getText();
+          if (text) found.push(text);
+        } else if (field instanceof PDFDropdown || field instanceof PDFOptionList) {
+          found.push(...field.getSelected());
+        }
+      }
+    } catch {
+      // No AcroForm, or a malformed one — nothing to collect.
+    }
+
+    return found;
   }
 };
 

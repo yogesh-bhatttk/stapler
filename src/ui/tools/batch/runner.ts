@@ -13,7 +13,7 @@ import { compressDocument, planCompression } from '../../../core/operations';
 import type { WatermarkData } from '../../../core/workers/process.worker';
 import { notify } from '../../../core/notify';
 
-export async function runBatch() {
+export async function runBatch(signal?: AbortSignal) {
   const inDir = inputDirHandle.value;
   const outDir = outputDirHandle.value;
   if (!inDir || !outDir) return;
@@ -66,6 +66,10 @@ export async function runBatch() {
     batchProgress.value = { ...batchProgress.value, total: files.length };
 
     for (const fileHandle of files) {
+      if (signal?.aborted) {
+        notify('warning', 'Batch Cancelled', { detail: 'Processing was cancelled by the user.' });
+        break;
+      }
       batchProgress.value = { ...batchProgress.value, currentFile: fileHandle.name };
       try {
         const file = await fileHandle.getFile();
@@ -181,6 +185,9 @@ export async function runBatch() {
         };
       } catch (err) {
         console.error(`Failed to process ${fileHandle.name}`, err);
+        notify('danger', `Failed to process ${fileHandle.name}`, {
+          detail: err instanceof Error ? err.message : String(err)
+        });
         batchProgress.value = { ...batchProgress.value, failed: batchProgress.value.failed + 1 };
       }
     }

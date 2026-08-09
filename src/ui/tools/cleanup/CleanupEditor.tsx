@@ -49,6 +49,12 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
   const boxRef = useRef<HTMLDivElement>(null);
   const [split, setSplit] = useState(0.5);
   const [ready, setReady] = useState(false);
+  // Tracks whether afterRef.current reflects the *current* settings/quad rather
+  // than a stale or nonexistent preview — apply() must never ship what this page
+  // hasn't actually rendered yet (SCN-03 regression: Apply was gated on `ready`
+  // alone, so clicking right after a preset change, or before the first preview
+  // round trip lands, silently applied nothing).
+  const [previewReady, setPreviewReady] = useState(false);
   const { run } = useJob();
 
   const page = pages[pageIndex];
@@ -120,6 +126,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
   useEffect(() => {
     if (!ready || !beforeRef.current || !quad) return;
     let cancelled = false;
+    setPreviewReady(false);
 
     void (async () => {
       const processed = await cvWorker.lease(api =>
@@ -128,6 +135,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
       if (cancelled) return;
       afterRef.current = processed;
       paint();
+      setPreviewReady(true);
     })();
 
     return () => {
@@ -426,10 +434,15 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         >
           Next
         </Button>
-        <Button variant="primary" icon={Check} onClick={apply} disabled={!ready}>
+        <Button variant="primary" icon={Check} onClick={apply} disabled={!ready || !previewReady}>
           Apply to this page
         </Button>
-        <Button variant="primary" icon={Check} onClick={applyToAll} disabled={!ready}>
+        <Button
+          variant="primary"
+          icon={Check}
+          onClick={applyToAll}
+          disabled={!ready || !previewReady}
+        >
           Apply to all pages
         </Button>
       </div>

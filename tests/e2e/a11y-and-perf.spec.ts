@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import { ensureFixture, textPdf } from './fixtures';
 import { gotoTool, openApp } from './helpers';
 import AxeBuilder from '@axe-core/playwright';
+import { TOOLS as TOOL_REGISTRY } from '../../src/core/tools';
 
 /**
  * NFR-01 and NFR-02.
@@ -13,39 +14,16 @@ import AxeBuilder from '@axe-core/playwright';
  * never quietly widened.
  */
 
-const TOOLS = [
-  'merge',
-  'organize',
-  'split',
-  'nup',
-  'compress',
-  'crop',
-  'watermark',
-  'normalize',
-  'sign',
-  'redact',
-  'extract'
-];
-
-/** Kept in step with src/core/tools.ts by the palette assertion below. */
-const TOOL_TITLES = [
-  'Merge',
-  'Organize',
-  'Split & extract',
-  'Remove blanks',
-  'N-up & Booklet',
-  'Scan cleanup',
-  'Compress',
-  'Crop',
-  'Watermark',
-  'Normalize',
-  'PDF to images',
-  'Extract text',
-  'Sign & fill',
-  'Redact',
-  'Metadata',
-  'Insert pages'
-];
+// Derived from the registry, not hand-maintained: a hardcoded list of 11 tool
+// ids previously covered barely half the 20 registered tools (Remove blanks,
+// Scan cleanup, PDF to images, Metadata, and Insert pages were never
+// axe-scanned at all), and a *second*, separately hand-maintained list of
+// titles for the palette-reachability test below had drifted even further —
+// missing Compare, Annotate, Batch process, and Markdown to PDF entirely.
+// Both silently passed the moment the missing tools existed, because neither
+// list would ever tell you it forgot something.
+const TOOLS = TOOL_REGISTRY.map(t => t.id);
+const TOOL_TITLES = TOOL_REGISTRY.map(t => t.title);
 
 test.describe('first run', () => {
   test('the welcome screen appears once and never again', async ({ page }) => {
@@ -160,6 +138,21 @@ test.describe('accessibility', () => {
     await page.keyboard.press('Escape');
     await expect(dialog).not.toBeVisible();
   });
+
+  test('the trust panel links to a real, reachable privacy policy', async ({ page, request }) => {
+    // DIST-02: `public/privacy.html` existed and shipped into both build
+    // targets, but nothing in the app UI linked to it — a user reading the
+    // trust panel's claims had no way to reach the fuller policy page.
+    await openApp(page);
+    await page.getByRole('button', { name: /Offline, zero network/ }).click();
+    const dialog = page.getByRole('dialog', { name: /Zero network/ });
+    const link = dialog.getByRole('link', { name: /privacy policy/i });
+    await expect(link).toBeVisible();
+
+    const href = await link.getAttribute('href');
+    const response = await request.get(new URL(href!, page.url()).toString());
+    expect(response.ok()).toBe(true);
+  });
 });
 
 test.describe('performance budgets (PLAN §5.1)', () => {
@@ -189,6 +182,46 @@ test.describe('performance budgets (PLAN §5.1)', () => {
       { timeout: 20_000 }
     );
     expect(Date.now() - started).toBeLessThan(1500);
+  });
+
+  test('all 100 thumbnails of a 100-page PDF render within 6s of scrolling through', async ({
+    page
+  }) => {
+    // The other half of PLAN §5.1's thumbnail budget: not just the first
+    // paint, but scrolling the whole way through a 100-page document. Row
+    // virtualization (DOC-04) means only visible rows are ever mounted, so
+    // this scrolls in steps to actually pass every row through the viewport,
+    // then times how long the *last* page's thumbnail takes to paint —
+    // previously unasserted entirely.
+    const file = await ensureFixture('text-100.pdf', () => textPdf(100));
+    await openApp(page);
+    await page.locator('input[type="file"]').setInputFiles(file);
+    await gotoTool(page, 'organize');
+
+    const grid = page.getByRole('listbox', { name: /Pages of/ });
+    await expect(grid).toBeVisible({ timeout: 30_000 });
+    const scroller = page.locator('[data-testid="pagegrid-scroller"]');
+
+    const started = Date.now();
+    const steps = 10;
+    for (let i = 1; i <= steps; i++) {
+      await scroller.evaluate((el, fraction) => {
+        el.scrollTo(0, el.scrollHeight * fraction);
+      }, i / steps);
+      await page.waitForTimeout(50);
+    }
+
+    const lastPage = grid.getByRole('option', { name: 'Page 100 of 100' });
+    await expect(lastPage).toBeVisible({ timeout: 20_000 });
+    await page.waitForFunction(
+      option => {
+        const canvas = option?.querySelector('canvas');
+        return canvas instanceof HTMLCanvasElement && canvas.width > 1;
+      },
+      await lastPage.elementHandle(),
+      { timeout: 20_000 }
+    );
+    expect(Date.now() - started).toBeLessThan(6000);
   });
 
   test('a 100-page document mounts only the visible rows', async ({ page }) => {

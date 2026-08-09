@@ -213,7 +213,12 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
   }, [doc.pages.length, focusIndex]);
 
   return (
-    <div className={styles.scroller} ref={scrollerRef} onScroll={onScroll}>
+    <div
+      className={styles.scroller}
+      ref={scrollerRef}
+      onScroll={onScroll}
+      data-testid="pagegrid-scroller"
+    >
       <div className={styles.header}>
         <h2 className={styles.title}>{doc.name}</h2>
         <span className={styles.count}>

@@ -292,8 +292,19 @@ export async function compressDocument(
   const rasterPages: Record<number, Uint8Array> = {};
   type EncodedImage = { jpeg: Uint8Array; width: number; height: number; maskBytes?: Uint8Array };
   const replacedImages: Record<number, Record<string, EncodedImage>> = {};
-  const seenObjectNumbers = new Set<number>();
-  const sharedJpegs = new Map<number, EncodedImage>();
+
+  // A shared image (the same object referenced from several pages) is re-encoded
+  // once *per page that displays it*, not once total — the same object number
+  // can legitimately be drawn at very different sizes on different pages (a logo
+  // shown small on a cover and full-bleed five pages later), and keeping only
+  // whichever page happened to be processed first meant every other placement
+  // inherited that page's size, upscaling a tiny encode into a blurry full-page
+  // image. `bestByObjectNumber` keeps the largest (by pixel area) result seen
+  // across all of a shared image's pages; the per-page assignment pass below
+  // then points every page that wants it at that one winning encode, so a shared
+  // image still ends up embedded exactly once in the output.
+  const bestByObjectNumber = new Map<number, EncodedImage>();
+  const namesByPage: Record<number, { name: string; objectNumber: number }[]> = {};
 
   // One lease for every read, so every call reaches the instance that owns the
   // handle. See the note in `planCompression`.
@@ -317,53 +328,44 @@ export async function compressDocument(
           continue;
         }
 
-        const wanted: number[] = [];
-        const replacements: Record<string, EncodedImage> = {};
+        if (page.reencode.length === 0) continue;
+        namesByPage[page.pageIndex] = page.reencode;
 
-        for (const { name, objectNumber } of page.reencode) {
-          if (seenObjectNumbers.has(objectNumber)) {
-            // Encode once, reuse everywhere: the same image on ten pages is one
-            // JPEG, both in time spent and in bytes written.
-            const cached = sharedJpegs.get(objectNumber);
-            if (cached) replacements[name] = cached;
-          } else {
-            wanted.push(objectNumber);
+        const extracted = await api.extractPageImages(
+          handle,
+          page.pageIndex,
+          settings.quality,
+          settings.dpi,
+          page.reencode.map(e => e.objectNumber)
+        );
+
+        for (const image of extracted) {
+          const encoded = {
+            jpeg: image.jpeg,
+            width: image.width,
+            height: image.height,
+            maskBytes: image.maskBytes
+          };
+          const existing = bestByObjectNumber.get(image.objectNumber);
+          if (!existing || image.width * image.height > existing.width * existing.height) {
+            bestByObjectNumber.set(image.objectNumber, encoded);
           }
         }
-
-        if (wanted.length > 0) {
-          const extracted = await api.extractPageImages(
-            handle,
-            page.pageIndex,
-            settings.quality,
-            settings.dpi,
-            wanted
-          );
-
-          for (const image of extracted) {
-            // Images are addressed by object number; the resource name is
-            // per-page, and pdf.js does not know it at all.
-            const entry = page.reencode.find(e => e.objectNumber === image.objectNumber);
-            if (!entry) continue;
-
-            seenObjectNumbers.add(entry.objectNumber);
-            const encoded = {
-              jpeg: image.jpeg,
-              width: image.width,
-              height: image.height,
-              maskBytes: image.maskBytes
-            };
-            replacements[entry.name] = encoded;
-            sharedJpegs.set(entry.objectNumber, encoded);
-          }
-        }
-
-        if (Object.keys(replacements).length > 0) replacedImages[page.pageIndex] = replacements;
       }
     } finally {
       await api.closeDocument(handle);
     }
   });
+
+  for (const [pageIndexKey, entries] of Object.entries(namesByPage)) {
+    const pageIndex = Number(pageIndexKey);
+    const replacements: Record<string, EncodedImage> = {};
+    for (const { name, objectNumber } of entries) {
+      const best = bestByObjectNumber.get(objectNumber);
+      if (best) replacements[name] = best;
+    }
+    if (Object.keys(replacements).length > 0) replacedImages[pageIndex] = replacements;
+  }
 
   const result = await processWorker.lease(api =>
     api.rebuildCompressed(bytes, rasterPages, replacedImages, job)
@@ -473,11 +475,17 @@ async function verifyRedaction(
   output: Uint8Array,
   regions: RedactionRegion[]
 ): Promise<RegionVerdict[]> {
+  // Annotation `/Contents` (sticky notes, comments) and AcroForm field `/V`
+  // values never appear in pdf.js's page text, so a copy of the redacted
+  // string quoted in a comment elsewhere in the document would otherwise pass
+  // the whole-document check below untouched.
+  const offPageText = await processWorker.lease(api => api.collectOffPageText(output));
+
   return renderWorker.lease(async api => {
     const { handle } = await api.loadDocument(output);
     try {
       const pageText = await api.documentText(handle);
-      const wholeDocument = pageText.join('\n').toLowerCase();
+      const wholeDocument = [...pageText, ...offPageText].join('\n').toLowerCase();
 
       // RED-03: geometric verification — no text may remain inside any marked region.
       const regionChecks = await api.checkRegionText(handle, regions);

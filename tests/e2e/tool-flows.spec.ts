@@ -12,6 +12,7 @@ import {
   OVERSIZED_MASK_FIXTURE,
   oversizedMaskPdf,
   sharedImagePdf,
+  sharedImageDifferentSizesPdf,
   textPdf,
   transparentImagePdf
 } from './fixtures';
@@ -341,6 +342,18 @@ test.describe('tool flows', () => {
     expect(heights).toContain(1008);
   });
 
+  test('merge: discloses that bookmarks are not preserved', async ({ page }) => {
+    // OPS-01's real gap (bookmarks/outlines are dropped on merge) has no safe,
+    // well-tested fix available — pdf-lib has no outline API, and a hand-rolled
+    // outline-tree copier with cross-document destination remapping is a large
+    // enough feature to get subtly wrong. Disclosing the limitation honestly,
+    // rather than leaving it silent, is this pass's fix — this guards it stays said.
+    const file = await ensureFixture('mixed-sizes.pdf', mixedSizePdf);
+    await importFixture(page, file);
+    await gotoTool(page, 'merge');
+    await expect(page.getByText(/[Bb]ookmarks.*not carried/)).toBeVisible();
+  });
+
   test('extract: text comes out in reading order', async ({ page }) => {
     const file = await ensureFixture('text-6.pdf', () => textPdf(6));
     await importFixture(page, file);
@@ -357,6 +370,46 @@ test.describe('tool flows', () => {
     expect(text.indexOf('Stapler fixture page 1')).toBeLessThan(
       text.indexOf('Line 1 of body text on page 1.')
     );
+  });
+
+  /**
+   * CNV-04's golden-file gap: `tests/unit/golden.test.ts` explicitly excludes
+   * extraction because it needs a real browser's pdf.js/OffscreenCanvas, and
+   * nothing else exercised the CJK/RTL fixtures `QA-01` built specifically to
+   * validate CID-keyed text and bidi handling. `tests/fixtures/README.md`
+   * documents their expected content ("中文" via `UniJIS-UTF16-H`, "مر" via
+   * `Identity-H`) — this drives them through the real extract tool instead of
+   * only proving the fixtures parse.
+   */
+  test('extract: CJK text extracts correctly through a real CID lookup', async ({ page }) => {
+    await importFixture(page, 'tests/fixtures/cjk.pdf');
+    await gotoTool(page, 'extract');
+
+    await page.getByRole('button', { name: 'Extract text' }).click();
+    const output = page.getByRole('textbox', { name: 'Extracted text' });
+    await expect(output).toBeVisible({ timeout: 30_000 });
+    expect(await output.inputValue()).toContain('中文');
+  });
+
+  test('extract: RTL text decodes to real Arabic glyphs, not mojibake', async ({ page }) => {
+    // Not asserting a specific character order here: this fixture has no
+    // embedded font or /ToUnicode CMap, so the CID→Unicode mapping is
+    // underspecified, and pdf.js's own `getTextContent()` — called directly,
+    // with zero Stapler code involved — already returns these two letters in
+    // the opposite order from the content stream's CID sequence. Stapler's
+    // extraction has no RTL-specific logic of its own; it passes through
+    // whatever pdf.js decodes. What's worth guarding is that both real Arabic
+    // letters (U+0631 REH, U+0645 MEEM) come through decoded, rather than
+    // mojibake, a replacement character, or empty output.
+    await importFixture(page, 'tests/fixtures/rtl.pdf');
+    await gotoTool(page, 'extract');
+
+    await page.getByRole('button', { name: 'Extract text' }).click();
+    const output = page.getByRole('textbox', { name: 'Extracted text' });
+    await expect(output).toBeVisible({ timeout: 30_000 });
+    const text = await output.inputValue();
+    expect(text).toContain('ر');
+    expect(text).toContain('م');
   });
 
   test('compress: an already-optimized document is reported, not silently saved', async ({
@@ -660,6 +713,27 @@ test.describe('tool flows', () => {
     expect(output.length).toBeLessThan(entries[0].bytes * 3);
   });
 
+  test('compress: CMP-03 sizes a shared image at its largest use, not whichever page runs first', async ({
+    page
+  }) => {
+    test.setTimeout(60_000);
+    const file = await ensureFixture('shared-image-mixed-sizes.pdf', sharedImageDifferentSizesPdf);
+    await importFixture(page, file);
+    await gotoTool(page, 'compress');
+    await page.getByRole('button', { name: /Analyse without changing/ }).click();
+    await expect(page.getByText(/Images re-encoded, text kept/i)).toBeVisible({ timeout: 60_000 });
+
+    const output = await commitAndRead(page, 'Compress & export');
+    const entries = await imageEntries(output);
+    // One object, embedded once, shared by both pages.
+    expect(new Set(entries.map(e => e.ref)).size).toBe(1);
+    // Sized for the full-bleed page (roughly 595pt at 150dpi ≈ 1240px), not the
+    // ~60pt thumbnail (~125px) — the bug this guards against inherited whichever
+    // page the loop reached first, which for the small-then-large fixture used
+    // to mean every page kept the tiny thumbnail's resolution.
+    expect(entries[0].width).toBeGreaterThan(600);
+  });
+
   test('metadata: the inspector reports what the file carries', async ({ page }) => {
     const file = await ensureFixture('text-6.pdf', () => textPdf(6));
     await importFixture(page, file);
@@ -769,6 +843,33 @@ test.describe('tool flows', () => {
     expect(await drawnText(bytes)).not.toContain('Line 1 of body text on page 1.');
     expect(await drawnText(bytes)).toContain('Line 2 of body text on page 1.');
     expect(output.getPageCount()).toBe(6);
+  });
+
+  test('redact: a keyboard-only user can create, move, and delete a region', async ({ page }) => {
+    // Search-and-mark is already keyboard-accessible; drawing a hand-drawn region
+    // (for a photo or signature the text search cannot find) used to be
+    // pointer-only. This proves the keyboard equivalent — Enter to add a region
+    // at a default position, arrow keys to move it, Delete to remove it — works
+    // without a single pointer event.
+    const file = await ensureFixture('text-6.pdf', () => textPdf(6));
+    await importFixture(page, file);
+    await gotoTool(page, 'redact');
+
+    const drawingArea = page.getByRole('group', { name: /Redaction drawing area/ });
+    await drawingArea.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByText('Marks (1)')).toBeVisible();
+
+    const region = page.getByRole('group', { name: /Redaction region 1 on page 1/ });
+    await expect(region).toBeFocused();
+    const before = await region.boundingBox();
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('ArrowRight');
+    const after = await region.boundingBox();
+    expect(after!.x).toBeGreaterThan(before!.x);
+
+    await page.keyboard.press('Delete');
+    await expect(page.getByText('Marks (1)')).not.toBeVisible();
   });
 
   test('cleanup: applying b&w preset alters the page', async ({ page }) => {

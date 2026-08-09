@@ -129,6 +129,19 @@ interface DocEntry {
   task: pdfjsLib.PDFDocumentLoadingTask;
 }
 
+/**
+ * The subset of pdf.js's annotation shape this module reads. `getAnnotations()`
+ * returns a loosely-typed grab-bag whose exact fields vary by annotation type
+ * (`contents` for markup annotations, `fieldValue`/`buttonValue` for form
+ * widgets) — pdf.js does not export a discriminated union for it.
+ */
+interface PdfJsAnnotation {
+  contents?: string;
+  fieldValue?: string;
+  buttonValue?: string;
+  rect?: [number, number, number, number];
+}
+
 const docs = new Map<string, DocEntry>();
 
 function entry(handle: string): DocEntry {
@@ -316,7 +329,13 @@ const api: RenderJob = {
       await checkpoint(job, (i - 1) / doc.numPages, `Reading page ${i} of ${doc.numPages}`);
       const page = await doc.getPage(i);
       try {
-        pages.push((await textRuns(page)).map(run => run.str).join(''));
+        const textFromRuns = (await textRuns(page)).map(run => run.str).join('');
+        const annots = (await page.getAnnotations()) as PdfJsAnnotation[];
+        const textFromAnnots = annots
+          .flatMap(a => [a.contents, a.fieldValue, a.buttonValue])
+          .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+          .join('\n');
+        pages.push(textFromRuns + '\n' + textFromAnnots);
       } finally {
         page.cleanup();
       }
@@ -362,6 +381,40 @@ const api: RenderJob = {
               height: height / viewport.height,
               text: run.str.slice(at, at + needle.length)
             });
+          }
+        }
+
+        const annots = (await page.getAnnotations()) as PdfJsAnnotation[];
+        for (const annot of annots) {
+          const contents = [annot.contents, annot.fieldValue, annot.buttonValue]
+            .filter((s): s is string => typeof s === 'string')
+            .join(' ');
+          if (!contents.trim()) continue;
+
+          const haystack = matchCase ? contents : contents.toLowerCase();
+          let from = 0;
+          for (;;) {
+            const at = haystack.indexOf(needle, from);
+            if (at === -1) break;
+            from = at + needle.length;
+
+            if (annot.rect) {
+              const [llx, lly, urx, ury] = annot.rect;
+              const [x1, y1] = viewport.convertToViewportPoint(llx, lly);
+              const [x2, y2] = viewport.convertToViewportPoint(urx, ury);
+              const x = Math.min(x1, x2) / viewport.width;
+              const y = Math.min(y1, y2) / viewport.height;
+              const width = Math.abs(x2 - x1) / viewport.width;
+              const height = Math.abs(y2 - y1) / viewport.height;
+              regions.push({
+                pageIndex: i - 1,
+                x,
+                y,
+                width,
+                height,
+                text: contents.slice(at, at + needle.length)
+              });
+            }
           }
         }
       } finally {

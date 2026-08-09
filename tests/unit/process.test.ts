@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { PDFDocument, PDFArray, PDFName, PDFString, PDFDict, degrees } from 'pdf-lib';
+import { PDFDocument, PDFArray, PDFName, PDFString, PDFDict, PDFNumber, degrees } from 'pdf-lib';
 
 /**
  * Reads a PDF text object's value without going through pdf-lib's field
@@ -156,6 +156,219 @@ describe('applyRedactions', () => {
     // Just verify the bytes are different from the source bytes, showing it rebuilt.
     expect(redactedBytes).not.toEqual(bytes);
     expect(redactedBytes.length).toBeGreaterThan(0);
+  });
+});
+
+describe('collectOffPageText (RED-03 blind spot)', () => {
+  it('finds a redacted string quoted in a sticky-note annotation on another page', async () => {
+    const SECRET = 'SSN-123-45-6789';
+    const { StandardFonts } = await import('pdf-lib');
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const p1 = doc.addPage([600, 800]);
+    p1.drawText(SECRET, { x: 100, y: 750, size: 12, font });
+    const p2 = doc.addPage([600, 800]);
+    const annot = doc.context.obj({
+      Type: 'Annot',
+      Subtype: 'Text',
+      Rect: [50, 50, 250, 100],
+      Contents: PDFString.of(`Client ${SECRET} flagged`)
+    });
+    p2.node.set(PDFName.of('Annots'), doc.context.obj([doc.context.register(annot)]));
+    const bytes = await doc.save({ useObjectStreams: false });
+
+    // Redact only the occurrence on page 1 — the sticky note on page 2 is left
+    // structurally untouched, exactly as a real search-and-mark run would leave it.
+    const redacted = await processWorkerImpl.applyRedactions(bytes, [
+      { pageIndex: 0, x: 0.1, y: 0.03, width: 0.5, height: 0.08, text: SECRET }
+    ]);
+
+    const offPageText = await processWorkerImpl.collectOffPageText(redacted);
+    expect(offPageText.join(' ')).toContain(SECRET);
+  });
+
+  it('finds a filled AcroForm text field value', async () => {
+    const SECRET = 'Ada Lovelace';
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([600, 800]);
+    const form = doc.getForm();
+    const field = form.createTextField('name');
+    field.setText(SECRET);
+    field.addToPage(page, { x: 100, y: 700, width: 200, height: 40 });
+    const bytes = await doc.save({ useObjectStreams: false });
+
+    const offPageText = await processWorkerImpl.collectOffPageText(bytes);
+    expect(offPageText).toContain(SECRET);
+  });
+});
+
+describe('applyRedactions: Form XObject text (RED-02 gap)', () => {
+  it('strips text drawn inside a Form XObject that overlaps the region', async () => {
+    // A Form XObject invocation is not a unit square like an image — its extent
+    // is its own /BBox through its own /Matrix. Before this was handled, every
+    // Form Do call was measured with the image-style unit-square approximation,
+    // so it could never be detected as overlapping a redaction region and its
+    // content — including any text drawn inside it — was never touched.
+    const { StandardFonts } = await import('pdf-lib');
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const page = doc.addPage([600, 800]);
+
+    const formStream = doc.context.flateStream(
+      'BT /F1 24 Tf 1 0 0 1 50 760 Tm (FORM SECRET TEXT) Tj ET',
+      {
+        Type: 'XObject',
+        Subtype: 'Form',
+        BBox: [0, 400, 600, 800],
+        Resources: doc.context.obj({ Font: { F1: font.ref } })
+      }
+    );
+    const formRef = doc.context.register(formStream);
+    (page.node.Resources() as PDFDict).set(
+      PDFName.of('XObject'),
+      doc.context.obj({ Fm0: formRef })
+    );
+    page.node.set(
+      PDFName.of('Contents'),
+      doc.context.register(doc.context.flateStream('q /Fm0 Do Q'))
+    );
+    const bytes = await doc.save({ useObjectStreams: false });
+
+    // A small region inside the form's footprint (top band of the page).
+    const out = await processWorkerImpl.applyRedactions(bytes, [
+      { pageIndex: 0, x: 0.1, y: 0.1, width: 0.3, height: 0.1 }
+    ]);
+
+    const hasText = Buffer.from(out).toString('latin1').includes('FORM SECRET TEXT');
+    expect(hasText).toBe(false);
+  });
+});
+
+describe('imageInventory: colour-space detection through indirection (CMP-01 gap)', () => {
+  /** A 1x1 raw image stream carrying whatever /ColorSpace value the caller wants. */
+  function addImage(doc: PDFDocument, colorSpace: unknown) {
+    const page = doc.addPage([200, 200]);
+    const img = doc.context.stream(new Uint8Array([0xfa, 0xce, 0xfe]), {
+      Type: 'XObject',
+      Subtype: 'Image',
+      Width: 1,
+      Height: 1,
+      ColorSpace: colorSpace,
+      BitsPerComponent: 8
+    });
+    (page.node.Resources() as PDFDict).set(
+      PDFName.of('XObject'),
+      doc.context.obj({ Im0: doc.context.register(img) })
+    );
+    return page;
+  }
+
+  it('detects Separation given directly as an array', async () => {
+    const doc = await PDFDocument.create();
+    addImage(doc, doc.context.obj(['Separation', 'Black', 'DeviceGray']));
+    const bytes = await doc.save({ useObjectStreams: false });
+    const [inventory] = await processWorkerImpl.imageInventory(bytes);
+    expect(inventory.images[0].colorSpace).toBe('Separation');
+  });
+
+  it('detects Separation given as an indirect reference to the array', async () => {
+    const doc = await PDFDocument.create();
+    const csRef = doc.context.register(doc.context.obj(['Separation', 'Black', 'DeviceGray']));
+    addImage(doc, csRef);
+    const bytes = await doc.save({ useObjectStreams: false });
+    const [inventory] = await processWorkerImpl.imageInventory(bytes);
+    expect(inventory.images[0].colorSpace).toBe('Separation');
+  });
+
+  it('detects Separation given as a name resolved through /Resources/ColorSpace', async () => {
+    const doc = await PDFDocument.create();
+    const page = addImage(doc, PDFName.of('CS0'));
+    const csRef = doc.context.register(doc.context.obj(['Separation', 'Black', 'DeviceGray']));
+    (page.node.Resources() as PDFDict).set(
+      PDFName.of('ColorSpace'),
+      doc.context.obj({ CS0: csRef })
+    );
+    const bytes = await doc.save({ useObjectStreams: false });
+    const [inventory] = await processWorkerImpl.imageInventory(bytes);
+    expect(inventory.images[0].colorSpace).toBe('Separation');
+  });
+
+  it('still resolves an ordinary device colour space given by name', async () => {
+    const doc = await PDFDocument.create();
+    addImage(doc, PDFName.of('DeviceRGB'));
+    const bytes = await doc.save({ useObjectStreams: false });
+    const [inventory] = await processWorkerImpl.imageInventory(bytes);
+    expect(inventory.images[0].colorSpace).toBe('DeviceRGB');
+  });
+});
+
+describe('imageInventory: images nested inside a Form XObject (CMP-01 gap)', () => {
+  it('finds an image only reachable through a Form XObject, and rebuildCompressed can replace it', async () => {
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([200, 200]);
+
+    const img = doc.context.stream(new Uint8Array(300).fill(0x42), {
+      Type: 'XObject',
+      Subtype: 'Image',
+      Width: 10,
+      Height: 10,
+      ColorSpace: 'DeviceGray',
+      BitsPerComponent: 8
+    });
+    const imgRef = doc.context.register(img);
+
+    // The image lives only in the Form's own Resources, never on the page.
+    const formStream = doc.context.stream('q 200 0 0 200 0 0 cm /Im0 Do Q', {
+      Type: 'XObject',
+      Subtype: 'Form',
+      BBox: [0, 0, 200, 200],
+      Resources: doc.context.obj({ XObject: { Im0: imgRef } })
+    });
+    const formRef = doc.context.register(formStream);
+    (page.node.Resources() as PDFDict).set(
+      PDFName.of('XObject'),
+      doc.context.obj({ Fm0: formRef })
+    );
+    page.node.set(
+      PDFName.of('Contents'),
+      doc.context.register(doc.context.flateStream('q /Fm0 Do Q'))
+    );
+    const bytes = await doc.save({ useObjectStreams: false });
+
+    const [inventory] = await processWorkerImpl.imageInventory(bytes);
+    expect(inventory.images).toHaveLength(1);
+    expect(inventory.images[0].name).toBe('Im0');
+    expect(inventory.images[0].objectNumber).toBe(imgRef.objectNumber);
+
+    // A tiny hand-built JPEG (valid SOI/SOF0 header only, no real scan data) is
+    // enough here: rebuildCompressed only needs to embed it and find where to
+    // point the resource name, not decode it.
+    const tinyJpeg = new Uint8Array([
+      0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00,
+      0x01, 0x00, 0x01, 0x00, 0x00, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x02, 0x00, 0x02, 0x01,
+      0x01, 0x11, 0x00, 0xff, 0xd9
+    ]);
+    const { bytes: rebuilt } = await processWorkerImpl.rebuildCompressed(
+      bytes,
+      {},
+      { 0: { Im0: { jpeg: tinyJpeg, width: 2, height: 2 } } }
+    );
+
+    const rebuiltDoc = await PDFDocument.load(rebuilt);
+    const rebuiltForm = rebuiltDoc.context.lookup(
+      (rebuiltDoc.getPage(0).node.Resources() as PDFDict)
+        .lookupMaybe(PDFName.of('XObject'), PDFDict)
+        ?.get(PDFName.of('Fm0')) as never
+    );
+    const rebuiltFormDict =
+      rebuiltForm instanceof PDFDict ? rebuiltForm : (rebuiltForm as any).dict;
+    const rebuiltImgRef = (rebuiltFormDict.get(PDFName.of('Resources')) as PDFDict)
+      .lookupMaybe(PDFName.of('XObject'), PDFDict)
+      ?.get(PDFName.of('Im0'));
+    const rebuiltImg = rebuiltDoc.context.lookup(rebuiltImgRef as never);
+    const rebuiltImgDict = rebuiltImg instanceof PDFDict ? rebuiltImg : (rebuiltImg as any).dict;
+    expect(rebuiltImgDict.get(PDFName.of('Width'))?.toString()).toBe('2');
+    expect(rebuiltImgDict.get(PDFName.of('Filter'))?.toString()).toBe('/DCTDecode');
   });
 });
 
@@ -783,6 +996,120 @@ describe('CMP-03: resamples SMask when base image is downscaled', () => {
 
     expect(smaskStream.dict.get(PDFName.of('Width'))?.toString()).toBe('10');
     expect(smaskStream.dict.get(PDFName.of('Height'))?.toString()).toBe('210');
+  });
+
+  it('never inflates a mask smaller than the new target — that only grows the file', async () => {
+    const fs = await import('node:fs');
+    const { PDFDocument, PDFName, PDFDict, PDFStream, PDFRef } = await import('pdf-lib');
+
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([200, 200]);
+
+    // A 2x2 soft mask — much smaller than the base image's new (encoded) target
+    // of 10x210 below. Resampling this up would only add bytes for no visual
+    // gain, since a PDF viewer stretches an SMask to the base image's box at
+    // render time regardless of the mask's own resolution.
+    const smaskStream = doc.context.flateStream(new Uint8Array([255, 255, 255, 255]), {
+      Type: 'XObject',
+      Subtype: 'Image',
+      Width: 2,
+      Height: 2,
+      ColorSpace: 'DeviceGray',
+      BitsPerComponent: 8
+    });
+    const smaskRef = doc.context.register(smaskStream);
+
+    const baseStream = doc.context.stream(new Uint8Array([0, 0, 0]), {
+      Type: 'XObject',
+      Subtype: 'Image',
+      Width: 4,
+      Height: 4,
+      ColorSpace: 'DeviceRGB',
+      BitsPerComponent: 8,
+      SMask: smaskRef
+    });
+    const baseRef = doc.context.register(baseStream);
+    (page.node.Resources() as PDFDict).set(
+      PDFName.of('XObject'),
+      doc.context.obj({ Im0: baseRef })
+    );
+    page.node.set(
+      PDFName.of('Contents'),
+      doc.context.register(doc.context.flateStream('q 200 0 0 200 0 0 cm /Im0 Do Q'))
+    );
+    const bytes = await doc.save({ useObjectStreams: false });
+
+    const jpeg = new Uint8Array(fs.readFileSync('tests/fixtures/tiny.jpg')); // 10x210
+    const result = await processWorkerImpl.rebuildCompressed(
+      bytes,
+      [],
+      { 0: { Im0: { jpeg, width: 10, height: 210, maskBytes: new Uint8Array(10 * 210) } } },
+      silentJob
+    );
+
+    const outDoc = await PDFDocument.load(result.bytes);
+    const xobjs = outDoc.getPage(0).node.Resources()?.lookup(PDFName.of('XObject'), PDFDict);
+    const newBaseRef = xobjs!.get(PDFName.of('Im0'));
+    const newBase = outDoc.context.lookup(newBaseRef, PDFStream);
+    const newSmaskRef = newBase.dict.get(PDFName.of('SMask'));
+
+    expect(newSmaskRef).toBeInstanceOf(PDFRef);
+    const newSmask = outDoc.context.lookup(newSmaskRef as InstanceType<typeof PDFRef>, PDFStream);
+    // Still the original 2x2 mask, byte for byte — not resampled up to 10x210.
+    expect(newSmask.dict.get(PDFName.of('Width'))?.toString()).toBe('2');
+    expect(newSmask.dict.get(PDFName.of('Height'))?.toString()).toBe('2');
+  });
+
+  it('carries /OC and /StructParent over onto the re-encoded image', async () => {
+    const fs = await import('node:fs');
+    const { PDFDocument, PDFName, PDFDict, PDFStream } = await import('pdf-lib');
+
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([200, 200]);
+
+    // A minimal optional-content group — the image is on a hideable layer.
+    const ocg = doc.context.obj({ Type: 'OCG', Name: 'Watermark layer' });
+    const ocgRef = doc.context.register(ocg);
+    doc.catalog.set(
+      PDFName.of('OCProperties'),
+      doc.context.obj({ OCGs: [ocgRef], D: { ON: [ocgRef] } })
+    );
+
+    const baseStream = doc.context.stream(new Uint8Array([0, 0, 0]), {
+      Type: 'XObject',
+      Subtype: 'Image',
+      Width: 4,
+      Height: 4,
+      ColorSpace: 'DeviceRGB',
+      BitsPerComponent: 8,
+      OC: ocgRef,
+      StructParent: 7
+    });
+    const baseRef = doc.context.register(baseStream);
+    (page.node.Resources() as PDFDict).set(
+      PDFName.of('XObject'),
+      doc.context.obj({ Im0: baseRef })
+    );
+    page.node.set(
+      PDFName.of('Contents'),
+      doc.context.register(doc.context.flateStream('q 200 0 0 200 0 0 cm /Im0 Do Q'))
+    );
+    const bytes = await doc.save({ useObjectStreams: false });
+
+    const jpeg = new Uint8Array(fs.readFileSync('tests/fixtures/tiny.jpg'));
+    const result = await processWorkerImpl.rebuildCompressed(
+      bytes,
+      [],
+      { 0: { Im0: { jpeg, width: 10, height: 210 } } },
+      silentJob
+    );
+
+    const outDoc = await PDFDocument.load(result.bytes);
+    const xobjs = outDoc.getPage(0).node.Resources()?.lookup(PDFName.of('XObject'), PDFDict);
+    const newBase = outDoc.context.lookup(xobjs!.get(PDFName.of('Im0')), PDFStream);
+
+    expect(newBase.dict.get(PDFName.of('OC'))).toBeDefined();
+    expect((newBase.dict.get(PDFName.of('StructParent')) as PDFNumber).asNumber()).toBe(7);
   });
 });
 

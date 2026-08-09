@@ -255,7 +255,7 @@ drive the native file picker.
 
 ### OPS-01 · Merge — `S` `P0`
 
-**Status: Partial** — Mixed page sizes preserved, asserted on output. **Bookmarks neither preserved nor disclosed**; the 10×5MB budget is untested.
+**Status: Partial** — Mixed page sizes preserved, asserted on output. **Bookmarks are not preserved** — pdf-lib has no outline API, and a correct cross-document outline-tree copier (remapping nested destinations across copied pages) is large enough to get subtly wrong without a real bookmark fixture to test against; the limitation is now disclosed in the panel (`MergePanel.tsx`) rather than left silent. The 10×5MB budget is asserted in `tests/e2e/a11y-and-perf.spec.ts`, though against a fixture worth re-checking — see NFR-02.
 
 - **Requirements:** Combine N documents; drag to reorder at document _and_ page level;
   handle mixed page sizes (preserve by default, with an optional normalize toggle);
@@ -595,7 +595,7 @@ Implements PLAN §4.2 steps 2–3.
 
 ### ANN-01 · Highlight, freehand, shapes, text, sticky notes — `L` `P1`
 
-**Status: Done** — Fully implemented in the UI and worker. Overlays exist only as the signature-stamp layer.
+**Status: Done** — `src/ui/tools/annotate/` is a real annotation layer (highlight, freehand, shapes, sticky note, whiteout, colour/stroke picker), separate from the SGN-02 signature-stamp layer it used to share.
 
 - **Requirements:** Overlay layer per page; tools for highlight (multiply blend over text),
   freehand ink, arrow, rectangle, ellipse, text box, sticky note, and whiteout. Colour and
@@ -766,7 +766,7 @@ The test that protects the entire product claim.
 
 ### DIST-02 · Privacy policy and public repo — `S` `P0`
 
-**Status: Partial** — In-app trust panel and MIT licence. No hosted policy page, no README.
+**Status: Done** — In-app trust panel and MIT licence. `public/privacy.html` ships into both build targets and is now linked from the trust panel (previously unreachable from the app). `README.md` exists and documents `pnpm run verify`/the DevTools check for the zero-network claim.
 
 - **AC:** Privacy policy page states no data collection, hosted in-extension and on the
   website. Repo public under MIT with a README explaining how to verify the zero-network
