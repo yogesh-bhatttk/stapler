@@ -290,7 +290,7 @@ export interface ProcessJob {
     rasterPages: Record<number, Uint8Array>,
     replacedImages: Record<
       number,
-      Record<string, { jpeg: Uint8Array; width: number; height: number; maskBytes?: Uint8Array }>
+      Record<number, { jpeg: Uint8Array; width: number; height: number; maskBytes?: Uint8Array }>
     >,
     job?: JobHandle
   ): Promise<{ bytes: Uint8Array; keptOriginal: boolean }>;
@@ -1060,7 +1060,10 @@ async function drawAnnotations(
       }
       page.drawSvgPath(path, {
         borderColor: color,
-        borderWidth: ann.strokeWidth,
+        // `strokeWidth` is stored as a fraction of page width (matching x/y),
+        // so it reproduces the same relative thickness the user drew on
+        // screen regardless of which zoom level that was at.
+        borderWidth: ann.strokeWidth * width,
         opacity: ann.type === 'highlight' ? 0.5 : 1.0
       });
     } else if (ann.type === 'rectangle' && ann.rect) {
@@ -1070,7 +1073,10 @@ async function drawAnnotations(
         width: ann.rect.width * width,
         height: ann.rect.height * height,
         borderColor: color,
-        borderWidth: ann.strokeWidth,
+        // `strokeWidth` is stored as a fraction of page width (matching x/y),
+        // so it reproduces the same relative thickness the user drew on
+        // screen regardless of which zoom level that was at.
+        borderWidth: ann.strokeWidth * width,
         opacity: 1.0
       });
     } else if (ann.type === 'text' && ann.text && ann.rect) {
@@ -1466,22 +1472,29 @@ function maskKindOf(smask: PDFStream | undefined, mask: unknown): ImageFacts['ma
 }
 
 /**
- * Finds the `/Resources/XObject` dict that actually contains `name` pointing at
- * an Image — searching nested Form XObjects when it is not directly on
- * `xobjects`, mirroring `collectImages`'s recursion. Without this, an image
- * `imageInventory` found several Forms deep could be re-encoded but never
- * written back: `rebuildCompressed` used to look the resource name up only in
- * the page's own dict, find nothing, and silently leave the original in place.
+ * Walks a `/Resources/XObject` dict, recursing into nested Form XObjects
+ * exactly like `collectImages`, and returns every `{dict, key}` pair whose
+ * entry is an Image XObject — tagged with the object number it points at.
+ *
+ * This replaces an earlier version that matched by resource *name* alone
+ * (`findImageContainer`). Resource names are scoped per dictionary: a page's
+ * own `/Resources/XObject` and a nested Form's own `/Resources/XObject` can
+ * legally reuse the same local name (e.g. both call an image `/Im1`) — a
+ * letterhead Form and an unrelated photo on the same page is a realistic
+ * case. Matching by name alone could attach a re-encoded JPEG to the wrong
+ * container, silently swapping one image's content onto another's placement.
+ * Object numbers are unique across the document, so matching on those is
+ * collision-free; a page can also legitimately reference the same image
+ * object through more than one name/container, so every match is returned.
  */
-function findImageContainer(
+function collectImageRefs(
   xobjects: PDFDict,
-  name: string,
   context: PDFContext,
   visited: Set<number>,
   depth = 0
-): PDFDict | undefined {
-  if (depth > 8) return undefined;
-  const targetKey = PDFName.of(name);
+): { dict: PDFDict; key: PDFName; ref: PDFRef }[] {
+  if (depth > 8) return [];
+  const found: { dict: PDFDict; key: PDFName; ref: PDFRef }[] = [];
 
   for (const [key, value] of xobjects.entries()) {
     const ref = value instanceof PDFRef ? value : undefined;
@@ -1489,7 +1502,10 @@ function findImageContainer(
     if (!(stream instanceof PDFStream)) continue;
     const subtype = nameOf(stream.dict.get(PDFName.of('Subtype')));
 
-    if (key === targetKey && subtype === 'Image') return xobjects;
+    if (subtype === 'Image') {
+      if (ref) found.push({ dict: xobjects, key, ref });
+      continue;
+    }
     if (subtype !== 'Form') continue;
 
     if (ref) {
@@ -1505,11 +1521,10 @@ function findImageContainer(
           : undefined;
     const formXObjects = formResources?.lookupMaybe(PDFName.of('XObject'), PDFDict);
     if (formXObjects) {
-      const found = findImageContainer(formXObjects, name, context, visited, depth + 1);
-      if (found) return found;
+      found.push(...collectImageRefs(formXObjects, context, visited, depth + 1));
     }
   }
-  return undefined;
+  return found;
 }
 
 /**
@@ -1902,23 +1917,29 @@ const api: ProcessJob = {
     // page would write ten copies of the same JPEG — a shared image has to stay
     // shared or the "compressed" file grows a tenfold image table.
     const embedded = new Map<number, PDFRef>();
-    for (const [pageIndexKey, byName] of Object.entries(replacedImages)) {
+    for (const [pageIndexKey, byObjectNumber] of Object.entries(replacedImages)) {
       const pageIndex = Number(pageIndexKey);
       const page = pages[pageIndex];
       if (!page) continue;
       const pageXObjects = page.node.Resources()?.lookupMaybe(PDFName.of('XObject'), PDFDict);
       if (!pageXObjects) continue;
 
-      for (const [name, encoded] of Object.entries(byName)) {
-        const xobjects = findImageContainer(pageXObjects, name, source.context, new Set());
-        if (!xobjects) continue;
-        const key = PDFName.of(name);
-        const oldRef = xobjects.get(key);
-        if (!(oldRef instanceof PDFRef)) continue;
+      // Every Image entry reachable from this page, tagged with the object
+      // number it points at — resolved once per page, since a page can carry
+      // several images to replace and each needs the same full scan.
+      const refs = collectImageRefs(pageXObjects, source.context, new Set());
+
+      for (const [objectNumberKey, encoded] of Object.entries(byObjectNumber)) {
+        const objectNumber = Number(objectNumberKey);
+        // All entries pointing at this object number share the same underlying
+        // stream, so they are replaced together with one embedded JPEG.
+        const matches = refs.filter(r => r.ref.objectNumber === objectNumber);
+        if (matches.length === 0) continue;
+        const oldRef = matches[0].ref;
 
         const reused = embedded.get(oldRef.objectNumber);
         if (reused) {
-          xobjects.set(key, reused);
+          for (const { dict, key } of matches) dict.set(key, reused);
           continue;
         }
 
@@ -2006,7 +2027,7 @@ const api: ProcessJob = {
         }
 
         embedded.set(oldRef.objectNumber, image.ref);
-        xobjects.set(key, image.ref);
+        for (const { dict, key } of matches) dict.set(key, image.ref);
       }
     }
 

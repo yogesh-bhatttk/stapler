@@ -14,16 +14,21 @@ export function AcroFormOverlay({ pageIndex, width, height }: AcroFormOverlayPro
   const data = formFields.value;
   if (!data || data.isXfa || data.fields.length === 0) return null;
 
-  // Find fields that have a rect on this page
-  const visibleFields = data.fields.flatMap(field => {
-    return field.rects.filter(r => r.pageIndex === pageIndex).map(rect => ({ field, rect }));
-  });
+  // Find fields that have a rect on this page. `widgetIndex` is the widget's
+  // position within the *unfiltered* `field.rects` — the same order pdf-lib
+  // reports `field.getOptions()` in for a RadioGroup, so it is what pairs a
+  // given radio widget on the page with the export value it represents.
+  const visibleFields = data.fields.flatMap(field =>
+    field.rects
+      .map((rect, widgetIndex) => ({ field, rect, widgetIndex }))
+      .filter(({ rect: r }) => r.pageIndex === pageIndex)
+  );
 
   if (visibleFields.length === 0) return null;
 
   return (
     <div className={styles.layer} style={{ width: `${width}px`, height: `${height}px` }}>
-      {visibleFields.map(({ field, rect }, index) => {
+      {visibleFields.map(({ field, rect, widgetIndex }, index) => {
         const value = formValues.value[field.name] ?? field.value;
         const style = {
           left: `${rect.x * 100}%`,
@@ -57,22 +62,23 @@ export function AcroFormOverlay({ pageIndex, width, height }: AcroFormOverlayPro
             />
           );
         } else if (field.type === 'RadioGroup') {
+          // One widget rect = one physical radio button on the page. A `<select>`
+          // repeated at every widget's position offered the whole option list at
+          // each bullet — visually mismatched with the page artwork and unusable
+          // with more than one option. A native radio per widget, sharing the
+          // field's name, is both correct and free keyboard/arrow-key navigation.
+          const optionValue = field.options?.[widgetIndex] ?? '';
           input = (
-            <select
-              className={styles.select}
-              value={value as string}
+            <input
+              type="radio"
+              className={styles.checkbox}
+              name={field.name}
+              value={optionValue}
+              checked={value === optionValue}
               disabled={field.isReadOnly}
-              onChange={e => onChange((e.target as HTMLSelectElement).value)}
-            >
-              <option value="" disabled>
-                {t('Select an option')}
-              </option>
-              {field.options?.map(opt => (
-                <option key={opt} value={opt}>
-                  {opt}
-                </option>
-              ))}
-            </select>
+              onChange={() => onChange(optionValue)}
+              aria-label={optionValue || field.name}
+            />
           );
         } else if (field.type === 'Dropdown' || field.type === 'OptionList') {
           input = (

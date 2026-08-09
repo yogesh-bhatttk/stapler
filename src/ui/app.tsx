@@ -17,6 +17,7 @@ import { EmptyState } from './components/Feedback';
 import { Button } from './components/Button';
 import { notifyError } from '../core/notify';
 import { initTheme } from './theme';
+import { initLocale } from '../core/i18n';
 import './styles/tokens.css';
 
 function NotFound() {
@@ -65,5 +66,13 @@ const root = document.getElementById('app');
 if (!root) throw new Error('The #app mount point is missing from editor.html');
 
 initTheme();
+// `initLocale` was defined but never called — the dictionary for every
+// locale, including the 'en' default, never loaded on boot. Most `t()` calls
+// use the raw English string as their own key, so the "no dictionary loaded"
+// fallback (returning the key verbatim) happened to look correct by
+// coincidence; any call using a symbolic key (`t('header.title')` and every
+// key this audit added) rendered its literal dotted key instead of real text
+// until the user manually touched the language switcher once.
+void initLocale();
 installErrorHooks();
 render(<App />, root);

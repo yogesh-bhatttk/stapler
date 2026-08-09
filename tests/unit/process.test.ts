@@ -351,7 +351,7 @@ describe('imageInventory: images nested inside a Form XObject (CMP-01 gap)', () 
     const { bytes: rebuilt } = await processWorkerImpl.rebuildCompressed(
       bytes,
       {},
-      { 0: { Im0: { jpeg: tinyJpeg, width: 2, height: 2 } } }
+      { 0: { [imgRef.objectNumber]: { jpeg: tinyJpeg, width: 2, height: 2 } } }
     );
 
     const rebuiltDoc = await PDFDocument.load(rebuilt);
@@ -966,13 +966,23 @@ describe('XFA is detected and never partially processed (SGN-03)', () => {
 describe('CMP-03: resamples SMask when base image is downscaled', () => {
   it('rebuildCompressed creates a new SMask of the requested dimensions', async () => {
     const fs = await import('node:fs');
-    const { PDFDocument, PDFName, PDFDict, PDFStream } = await import('pdf-lib');
+    const { PDFDocument, PDFName, PDFDict, PDFStream, PDFRef } = await import('pdf-lib');
     const bytes = fs.readFileSync('tests/fixtures/oversized-mask.pdf');
+
+    // `replacedImages` is keyed by PDF object number, not resource name — look
+    // up the object number `/ImStrip` currently points at on page 0.
+    const sourceDoc = await PDFDocument.load(bytes);
+    const sourceXObjs = sourceDoc
+      .getPage(0)
+      .node.Resources()
+      ?.lookup(PDFName.of('XObject'), PDFDict);
+    const imStripSourceRef = sourceXObjs!.get(PDFName.of('ImStrip'));
+    if (!(imStripSourceRef instanceof PDFRef)) throw new Error('expected a PDFRef');
 
     // Supply a mock downscaled base image and downscaled mask bytes.
     const replacedImages = {
       '0': {
-        ImStrip: {
+        [imStripSourceRef.objectNumber]: {
           jpeg: new Uint8Array(fs.readFileSync('tests/fixtures/tiny.jpg')),
           width: 10,
           height: 210,
@@ -1043,7 +1053,16 @@ describe('CMP-03: resamples SMask when base image is downscaled', () => {
     const result = await processWorkerImpl.rebuildCompressed(
       bytes,
       [],
-      { 0: { Im0: { jpeg, width: 10, height: 210, maskBytes: new Uint8Array(10 * 210) } } },
+      {
+        0: {
+          [baseRef.objectNumber]: {
+            jpeg,
+            width: 10,
+            height: 210,
+            maskBytes: new Uint8Array(10 * 210)
+          }
+        }
+      },
       silentJob
     );
 

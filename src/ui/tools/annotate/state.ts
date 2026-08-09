@@ -1,4 +1,5 @@
 import { signal } from '@preact/signals';
+import { ANNOTATION_COLORS } from '../../../core/doc-colors';
 
 export type AnnotationType = 'freehand' | 'highlight' | 'rectangle' | 'text';
 
@@ -22,7 +23,7 @@ export interface Annotation {
 }
 
 export const activeAnnotationTool = signal<AnnotationType>('freehand');
-export const annotationColor = signal<string>('#' + 'FFEB3B'); // Default yellow for highlight
+export const annotationColor = signal<string>(ANNOTATION_COLORS[0]); // Default yellow for highlight
 export const annotationStrokeWidth = signal<number>(4);
 
 // Map of pageKey (e.g. "docId-pageIndex") to array of Annotations
@@ -40,4 +41,20 @@ export function clearAnnotations(pageKey: string) {
   const updated = { ...pageAnnotations.value };
   delete updated[pageKey];
   pageAnnotations.value = updated;
+}
+
+export function updateAnnotation(pageKey: string, id: string, patch: Partial<Annotation>) {
+  const current = pageAnnotations.value[pageKey] || [];
+  pageAnnotations.value = {
+    ...pageAnnotations.value,
+    [pageKey]: current.map(a => (a.id === id ? { ...a, ...patch } : a))
+  };
+}
+
+export function removeAnnotation(pageKey: string, id: string) {
+  const current = pageAnnotations.value[pageKey] || [];
+  pageAnnotations.value = {
+    ...pageAnnotations.value,
+    [pageKey]: current.filter(a => a.id !== id)
+  };
 }

@@ -291,7 +291,7 @@ export async function compressDocument(
 
   const rasterPages: Record<number, Uint8Array> = {};
   type EncodedImage = { jpeg: Uint8Array; width: number; height: number; maskBytes?: Uint8Array };
-  const replacedImages: Record<number, Record<string, EncodedImage>> = {};
+  const replacedImages: Record<number, Record<number, EncodedImage>> = {};
 
   // A shared image (the same object referenced from several pages) is re-encoded
   // once *per page that displays it*, not once total — the same object number
@@ -359,10 +359,14 @@ export async function compressDocument(
 
   for (const [pageIndexKey, entries] of Object.entries(namesByPage)) {
     const pageIndex = Number(pageIndexKey);
-    const replacements: Record<string, EncodedImage> = {};
-    for (const { name, objectNumber } of entries) {
+    // Keyed by PDF object number, not resource name — resource names are
+    // scoped per dictionary, so a page-level image and one nested inside a
+    // Form XObject can legally share a local name (e.g. both named `/Im1`).
+    // A name-keyed map would let one collide with and shadow the other.
+    const replacements: Record<number, EncodedImage> = {};
+    for (const { objectNumber } of entries) {
       const best = bestByObjectNumber.get(objectNumber);
-      if (best) replacements[name] = best;
+      if (best) replacements[objectNumber] = best;
     }
     if (Object.keys(replacements).length > 0) replacedImages[pageIndex] = replacements;
   }

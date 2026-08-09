@@ -133,6 +133,16 @@
   --doc-select: var(--primary);
   --doc-redact: #0a0a0b;
 
+  /* Annotation ink swatches (ANN-01). These are content colours a user paints
+     onto a page, not theme colours — a yellow highlighter must stay the same
+     yellow in dark mode, so they are not overridden below. */
+  --annotation-yellow: #ffeb3b;
+  --annotation-red: #f44336;
+  --annotation-green: #4caf50;
+  --annotation-blue: #2196f3;
+  --annotation-black: #000000;
+  --annotation-white: #ffffff;
+
   /* ---------- Elevation (§3.3) ---------- */
   --shadow-1: 0 1px 2px rgba(8, 9, 10, 0.06);
   --shadow-2: 0 4px 12px rgba(8, 9, 10, 0.08);

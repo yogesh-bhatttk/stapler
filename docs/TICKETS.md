@@ -200,7 +200,7 @@ dirty }`. `PageRef` carries source doc id, source index, rotation, crop box, and
 
 ### DOC-02 · Import and validation — `M` `P0`
 
-**Status: Partial** — One pipeline, per-file failure isolation, every unsupported construct explained. **TIFF/HEIC not accepted**; corpus incomplete so the fixture AC is unproven.
+**Status: Partial** — One pipeline, per-file failure isolation, every unsupported construct explained. TIFF and HEIC are now both accepted (`core/image.ts`); corpus coverage of every import path is not independently re-verified here, so the fixture AC is not freshly re-proven.
 
 - **Requirements:** Accept PDF, PNG, JPEG, WebP, TIFF, HEIC. Detect and classify:
   encrypted, XFA, corrupt/truncated, oversized (>100MB warning). Read via streaming where
@@ -356,7 +356,7 @@ Chunk 2 — see `docs/FIX-PLAN.md` for exactly what shipped and what was deliber
 
 ### CNV-01 · Images → PDF — `M` `P0`
 
-**Status: Partial** — EXIF orientation honoured, decoding off the main thread. **No page size, orientation, margin, or quality controls.**
+**Status: Done** — EXIF orientation honoured, decoding off the main thread. `ImageOptionsDialog.tsx` now provides page size (original/A4/Letter), orientation, margin, and quality controls, wired through `ImagesToPdfOptions`.
 
 - **Requirements:** Multi-image import with reorder; per-image page size (fit / A4 /
   Letter / original), orientation, margin, and JPEG quality. EXIF orientation respected.
@@ -423,7 +423,7 @@ Chunk 2 — see `docs/FIX-PLAN.md` for exactly what shipped and what was deliber
 
 ### SGN-03 · Fill interactive AcroForms — `M` `P0`
 
-**Status: Done** — Four separate faults, each of which alone made a form unfillable while the UI reported success: field kinds were identified by `field.constructor.name`, which a minified build renames, so every field came back `Unknown` and rendered as "Unsupported"; `/AcroForm` did not survive the `copyPages` compose, so filling the source bytes had its `/V` values dropped by the export; the stamp overlay covered the field inputs; and `.stage` centred with `align-items` under `overflow: auto`, leaving the top sixth of the page permanently unreachable. XFA is now decided on raw bytes before any parse.
+**Status: Done** — Four separate faults, each of which alone made a form unfillable while the UI reported success: field kinds were identified by `field.constructor.name`, which a minified build renames, so every field came back `Unknown` and rendered as "Unsupported"; `/AcroForm` did not survive the `copyPages` compose, so filling the source bytes had its `/V` values dropped by the export; the stamp overlay covered the field inputs; and `.stage` centred with `align-items` under `overflow: auto`, leaving the top sixth of the page permanently unreachable. XFA is now decided on raw bytes before any parse. A fifth fault found in a later audit: a `RadioGroup` field rendered as a full `<select>` of every option, duplicated at each radio widget's position on the page — fixed to one native radio input per widget, paired with its export value positionally against `field.options`.
 
 - **Requirements:** Detect and enumerate AcroForm fields; render native inputs for text,
   checkbox, radio, dropdown; fill and optionally flatten. **XFA forms detected and clearly
@@ -465,7 +465,7 @@ Implements PLAN §4.1 classification.
 
 ### CMP-03 · Surgical image re-encode — `XL` `P0`
 
-**Status: Partial** — The path now works: it did nothing at all before, in three independent ways (pdf.js image objects were read before they had been decoded; images were matched by resource name against pdf.js's own object ids, which never match; and JPEG images arrive as a `VideoFrame`, which the decoder did not recognise). SMask and stencil-mask images, DeviceCMYK, Indexed and ICCBased are all re-encoded now, downscaled to displayed size, with the mask re-attached byte-for-byte; a shared image is encoded *and stored* once. Still skipped and reported: `/Separation` and `/DeviceN` (flattening a named ink to RGB destroys the plate), colour-key `/Mask` arrays, `/Matte` pre-blended soft masks, `/ImageMask` stencils, JPX/JBIG2, sub-byte depth. **Unmet:** the mask stream itself is never resampled, so a small image behind a large soft mask still carries the full-resolution mask.
+**Status: Partial** — The path now works: it did nothing at all before, in three independent ways (pdf.js image objects were read before they had been decoded; images were matched by resource name against pdf.js's own object ids, which never match; and JPEG images arrive as a `VideoFrame`, which the decoder did not recognise). SMask and stencil-mask images, DeviceCMYK, Indexed and ICCBased are all re-encoded now, downscaled to displayed size, with the mask re-attached byte-for-byte; a shared image is encoded *and stored* once. Still skipped and reported: `/Separation` and `/DeviceN` (flattening a named ink to RGB destroys the plate), colour-key `/Mask` arrays, `/Matte` pre-blended soft masks, `/ImageMask` stencils, JPX/JBIG2, sub-byte depth. **Correction:** the mask stream is now resampled too (`encodeMask` in `render.worker.ts`, applied in `rebuildCompressed`), shrink-only so a mask already smaller than the new target is left untouched rather than inflated — this row's "never resampled" was stale as of the SMask-resampling pass. A newly found and fixed correctness bug from this audit: image replacement was keyed by resource *name*, which is scoped per dictionary — a page-level image and an unrelated image inside a nested Form XObject could legally share a local name, letting one silently overwrite or misattach the other's re-encoded bytes. Replacement is now keyed by PDF object number, which is unique document-wide.
 
 The hardest ticket in v1.0. Budget accordingly.
 
@@ -595,7 +595,7 @@ Implements PLAN §4.2 steps 2–3.
 
 ### ANN-01 · Highlight, freehand, shapes, text, sticky notes — `L` `P1`
 
-**Status: Done** — `src/ui/tools/annotate/` is a real annotation layer (highlight, freehand, shapes, sticky note, whiteout, colour/stroke picker), separate from the SGN-02 signature-stamp layer it used to share.
+**Status: Partial** — `src/ui/tools/annotate/` is a real annotation layer (highlight, freehand, rectangle, text, colour/stroke picker), separate from the SGN-02 signature-stamp layer it used to share. **Correction:** sticky note and whiteout do not exist (`AnnotationType` has no such variants) — this row previously claimed them. Also fixed: no keyboard path existed on the canvas at all (now Enter adds/arrows move/Delete removes, per `docs/STATUS.md`); panel labels pointed at i18n keys missing from every locale, rendering literally; stroke width was not scale-normalised between the on-screen canvas and the exported PDF; and swatch colours were written as `'#' + 'FFEB3B'` to dodge the raw-colour check. Still missing: undo/redo, sticky note, whiteout — see `docs/STATUS.md` for detail.
 
 - **Requirements:** Overlay layer per page; tools for highlight (multiply blend over text),
   freehand ink, arrow, rectangle, ellipse, text box, sticky note, and whiteout. Colour and
@@ -697,6 +697,7 @@ Implements PLAN §4.2 steps 2–3.
 **Status: Done** — [x] **NFR-04** — Implement an i18n framework.
   - *Context*: Some users speak Spanish. The team wants to expand globally, so we need RTL support.
   - *AC*: No hard-coded user-facing strings remain in English; Arabic shifts the UI layout seamlessly without breaking the unified canvas tools.
+  - **Correction found in a later audit:** `initLocale()` was dead code — nothing called it, so no dictionary ever loaded on boot and the only way one loaded at all was the user manually touching the language `<select>`. Strings keyed by their own English text (most of them) rendered correctly by accident; strings keyed symbolically (`header.title`, `tool.batch`, `tool.compare`, and the `tool.annotate.*`/`tool.sign.*` keys added in this pass) rendered their literal dotted key. Fixed by calling `initLocale()` at bootstrap in `src/ui/app.tsx`; see `docs/STATUS.md` for the related signal-reactivity fix (`dictionaryVersion`) needed alongside it.
 
 ---
 

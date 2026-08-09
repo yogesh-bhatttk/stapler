@@ -5,7 +5,9 @@ import {
   annotationColor,
   annotationStrokeWidth,
   pageAnnotations,
-  addAnnotation
+  addAnnotation,
+  updateAnnotation,
+  removeAnnotation
 } from './state';
 
 export interface AnnotateOverlayProps {
@@ -14,13 +16,28 @@ export interface AnnotateOverlayProps {
   height: number;
 }
 
+/** Default size for a shape created with the keyboard, centred on the page. */
+const DEFAULT_RECT = { width: 0.3, height: 0.08 };
+/** Default straight segment for freehand/highlight created with the keyboard. */
+const DEFAULT_LINE_LENGTH = 0.3;
+const NUDGE = 0.01;
+const NUDGE_COARSE = 0.05;
+const clamp = (min: number, max: number, value: number) => Math.max(min, Math.min(max, value));
+
 export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const [isDrawing, setIsDrawing] = useState(false);
   const [currentAnnotation, setCurrentAnnotation] = useState<Partial<Annotation> | null>(null);
+  // The annotation most recently created or touched by the keyboard path —
+  // arrow keys move it and Delete removes it, mirroring RedactOverlay's
+  // "Enter adds, arrows move, Delete removes" convention for the one thing a
+  // canvas-based tool cannot offer a pointer alternative for: keyboard-only
+  // creation and editing of a mark a mouse would otherwise drag.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const annotations = pageAnnotations.value[pageKey] || [];
+  const selected = annotations.find(a => a.id === selectedId) ?? null;
 
   const redraw = () => {
     const canvas = canvasRef.current;
@@ -38,7 +55,11 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
       ctx.beginPath();
       ctx.strokeStyle = ann.color;
       ctx.fillStyle = ann.color;
-      ctx.lineWidth = ann.strokeWidth;
+      // `strokeWidth` is stored as a fraction of page width (like x/y), not a
+      // pixel count, so a stroke drawn at one zoom level reproduces at the
+      // same *relative* thickness at any other — and matches the PDF export,
+      // which scales it by the real page width in `drawAnnotations`.
+      ctx.lineWidth = ann.strokeWidth * width;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
 
@@ -99,6 +120,10 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
 
     setIsDrawing(true);
     const type = activeAnnotationTool.value;
+    // Normalised to a fraction of page width, exactly like x/y above, so the
+    // stroke keeps the same relative thickness regardless of zoom and matches
+    // what `drawAnnotations` (process.worker.ts) draws into the exported PDF.
+    const strokeWidth = annotationStrokeWidth.value / width;
 
     if (type === 'text') {
       const text = window.prompt('Enter note text:');
@@ -107,7 +132,7 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
           id: crypto.randomUUID(),
           type: 'text',
           color: annotationColor.value,
-          strokeWidth: annotationStrokeWidth.value,
+          strokeWidth,
           rect: { x, y, width: 100, height: 20 },
           text,
           fontSize: 16
@@ -121,7 +146,7 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
       id: crypto.randomUUID(),
       type,
       color: annotationColor.value,
-      strokeWidth: annotationStrokeWidth.value,
+      strokeWidth,
       points: type === 'freehand' || type === 'highlight' ? [{ x, y }] : undefined,
       rect: type === 'rectangle' ? { x, y, width: 0, height: 0 } : undefined
     });
@@ -160,9 +185,127 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
   const handlePointerUp = () => {
     if (isDrawing && currentAnnotation) {
       addAnnotation(pageKey, currentAnnotation as Annotation);
+      setSelectedId(currentAnnotation.id ?? null);
     }
     setIsDrawing(false);
     setCurrentAnnotation(null);
+  };
+
+  /**
+   * Drawing by drag (freehand strokes especially) is inherently pointer-only.
+   * Enter/Space adds one annotation of the active tool at a default size and
+   * position instead, selected for the arrow-key/Delete handling below — the
+   * same "keyboard equivalent of a drag" convention RedactOverlay uses.
+   */
+  const addAnnotationViaKeyboard = () => {
+    const type = activeAnnotationTool.value;
+    const strokeWidth = annotationStrokeWidth.value / width;
+    const color = annotationColor.value;
+
+    if (type === 'text') {
+      const text = window.prompt('Enter note text:');
+      if (!text) return;
+      const ann: Annotation = {
+        id: crypto.randomUUID(),
+        type: 'text',
+        color,
+        strokeWidth,
+        rect: {
+          x: (1 - DEFAULT_RECT.width) / 2,
+          y: (1 - DEFAULT_RECT.height) / 2,
+          width: 100,
+          height: 20
+        },
+        text,
+        fontSize: 16
+      };
+      addAnnotation(pageKey, ann);
+      setSelectedId(ann.id);
+      return;
+    }
+
+    const cx = 0.5;
+    const cy = 0.5;
+    const ann: Annotation =
+      type === 'rectangle'
+        ? {
+            id: crypto.randomUUID(),
+            type,
+            color,
+            strokeWidth,
+            rect: {
+              x: (1 - DEFAULT_RECT.width) / 2,
+              y: (1 - DEFAULT_RECT.height) / 2,
+              width: DEFAULT_RECT.width,
+              height: DEFAULT_RECT.height
+            }
+          }
+        : {
+            id: crypto.randomUUID(),
+            type,
+            color,
+            strokeWidth,
+            points: [
+              { x: cx - DEFAULT_LINE_LENGTH / 2, y: cy },
+              { x: cx + DEFAULT_LINE_LENGTH / 2, y: cy }
+            ]
+          };
+    addAnnotation(pageKey, ann);
+    setSelectedId(ann.id);
+  };
+
+  const handleOverlayKeyDown = (event: KeyboardEvent) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      addAnnotationViaKeyboard();
+      return;
+    }
+    if (!selected) return;
+    if (event.key === 'Delete' || event.key === 'Backspace') {
+      event.preventDefault();
+      removeAnnotation(pageKey, selected.id);
+      setSelectedId(null);
+      return;
+    }
+    if (!/^Arrow/.test(event.key)) return;
+    event.preventDefault();
+    const step = event.shiftKey ? NUDGE_COARSE : NUDGE;
+    const deltas: Record<string, [number, number]> = {
+      ArrowLeft: [-step, 0],
+      ArrowRight: [step, 0],
+      ArrowUp: [0, -step],
+      ArrowDown: [0, step]
+    };
+    const [dx, dy] = deltas[event.key];
+
+    if ((event.ctrlKey || event.metaKey) && selected.type === 'rectangle' && selected.rect) {
+      updateAnnotation(pageKey, selected.id, {
+        rect: {
+          x: selected.rect.x,
+          y: selected.rect.y,
+          width: clamp(0.01, 1 - selected.rect.x, selected.rect.width + dx),
+          height: clamp(0.01, 1 - selected.rect.y, selected.rect.height + dy)
+        }
+      });
+      return;
+    }
+
+    if (selected.rect) {
+      updateAnnotation(pageKey, selected.id, {
+        rect: {
+          ...selected.rect,
+          x: clamp(0, 1 - selected.rect.width, selected.rect.x + dx),
+          y: clamp(0, 1 - selected.rect.height, selected.rect.y + dy)
+        }
+      });
+    } else if (selected.points) {
+      updateAnnotation(pageKey, selected.id, {
+        points: selected.points.map(p => ({
+          x: clamp(0, 1, p.x + dx),
+          y: clamp(0, 1, p.y + dy)
+        }))
+      });
+    }
   };
 
   return (
@@ -170,6 +313,9 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
       ref={canvasRef}
       width={width}
       height={height}
+      tabIndex={0}
+      role="group"
+      aria-label="Annotation drawing area. Draw with the pointer, or press Enter to add a shape at a default size and position, then use arrow keys to move it, Control plus arrows to resize a rectangle, and Delete to remove it."
       style={{
         position: 'absolute',
         top: 0,
@@ -184,6 +330,7 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
       onPointerLeave={handlePointerUp}
+      onKeyDown={handleOverlayKeyDown}
     />
   );
 }

@@ -35,3 +35,19 @@ export const DOC_HAIRLINE_RGB: readonly [number, number, number] = [
 
 /** Redaction fill. Matches `--doc-redact`; opaque and identical in both themes. */
 export const DOC_REDACT_RGB: readonly [number, number, number] = [10 / 255, 10 / 255, 11 / 255];
+
+/**
+ * Annotation ink swatches (ANN-01) — colours a user paints onto the page, not
+ * theme colours, so they stay fixed across light/dark. Matches the
+ * `--annotation-*` tokens in tokens.css by hand for the same reason as the
+ * rest of this module: canvas 2D and pdf-lib need real colour values, not
+ * CSS custom properties.
+ */
+export const ANNOTATION_COLORS: readonly string[] = [
+  '#ffeb3b', // --annotation-yellow
+  '#f44336', // --annotation-red
+  '#4caf50', // --annotation-green
+  '#2196f3', // --annotation-blue
+  '#000000', // --annotation-black
+  '#ffffff' // --annotation-white
+];

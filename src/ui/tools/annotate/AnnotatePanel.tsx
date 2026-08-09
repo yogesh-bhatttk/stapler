@@ -1,4 +1,5 @@
 import { useTranslation } from '../../../core/i18n';
+import { ANNOTATION_COLORS } from '../../../core/doc-colors';
 import { RadioGroup, Slider } from '../../components/Field';
 import { panelStyles } from '../../shell/OptionsPanel';
 import {
@@ -7,6 +8,15 @@ import {
   annotationStrokeWidth,
   AnnotationType
 } from './state';
+
+const COLOR_NAME_KEYS: Record<string, string> = {
+  [ANNOTATION_COLORS[0]]: 'tool.annotate.colorYellow',
+  [ANNOTATION_COLORS[1]]: 'tool.annotate.colorRed',
+  [ANNOTATION_COLORS[2]]: 'tool.annotate.colorGreen',
+  [ANNOTATION_COLORS[3]]: 'tool.annotate.colorBlue',
+  [ANNOTATION_COLORS[4]]: 'tool.annotate.colorBlack',
+  [ANNOTATION_COLORS[5]]: 'tool.annotate.colorWhite'
+};
 
 export function AnnotatePanel() {
   const t = useTranslation();
@@ -29,14 +39,7 @@ export function AnnotatePanel() {
       <div className={panelStyles.section}>
         <label className={panelStyles.label}>{t('tool.annotate.color')}</label>
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '8px' }}>
-          {[
-            '#' + 'FFEB3B',
-            '#' + 'F44336',
-            '#' + '4CAF50',
-            '#' + '2196F3',
-            '#' + '000000',
-            '#' + 'FFFFFF'
-          ].map(color => (
+          {ANNOTATION_COLORS.map(color => (
             <button
               key={color}
               type="button"
@@ -52,7 +55,7 @@ export function AnnotatePanel() {
                 backgroundColor: color,
                 cursor: 'pointer'
               }}
-              aria-label={`Select color ${color}`}
+              aria-label={`${t('tool.annotate.selectColor')} ${t(COLOR_NAME_KEYS[color])}`}
             />
           ))}
         </div>

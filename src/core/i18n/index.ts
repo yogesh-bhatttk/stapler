@@ -18,6 +18,18 @@ export type Locale = (typeof locales)[number];
 const dictionaries: Record<string, Record<string, string>> = {};
 
 export const currentLocale = signal<Locale>('en');
+/**
+ * Bumped every time a dictionary import resolves, independent of whether
+ * `currentLocale.value` actually changed. `initLocale`'s default target is
+ * 'en' — the same value `currentLocale` is already initialised to — so
+ * `currentLocale.value = 'en'` is a no-op assignment that never notifies
+ * subscribers. Any component that called `useTranslation()` and rendered
+ * before the dictionary's dynamic import resolved would render with an empty
+ * dictionary (falling back to the raw key) and then never re-render, since
+ * nothing it read had "changed". `useTranslation` also subscribes to this
+ * counter so a dictionary becoming available always triggers a re-render.
+ */
+export const dictionaryVersion = signal(0);
 
 export async function setLocale(locale: Locale) {
   if (!dictionaries[locale]) {
@@ -30,6 +42,7 @@ export async function setLocale(locale: Locale) {
   }
 
   currentLocale.value = locale;
+  dictionaryVersion.value++;
 
   if (locale === 'ar') {
     document.documentElement.dir = 'rtl';
@@ -54,6 +67,10 @@ export function initLocale(savedLocale?: string) {
 
 export function useTranslation() {
   const locale = currentLocale.value;
+  // Read (not just referenced) so a dictionary finishing its async load always
+  // schedules a re-render, even on the 'en' default where `currentLocale`
+  // itself never changes value — see the comment on `dictionaryVersion`.
+  void dictionaryVersion.value;
 
   return function t(key: string): string {
     const dict = dictionaries[locale];

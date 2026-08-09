@@ -29,10 +29,10 @@ import { useJob } from '../../useJob';
 import styles from './SignPanel.module.css';
 import { useTranslation } from '../../../core/i18n';
 
-const STAMPS: { type: StampType; label: string; icon: typeof Type }[] = [
-  { type: 'text', label: 'Text', icon: Type },
-  { type: 'date', label: 'Date', icon: Calendar },
-  { type: 'check', label: 'Check', icon: Check }
+const STAMPS: { type: StampType; labelKey: string; icon: typeof Type }[] = [
+  { type: 'text', labelKey: 'tool.sign.stampText', icon: Type },
+  { type: 'date', labelKey: 'tool.sign.stampDate', icon: Calendar },
+  { type: 'check', labelKey: 'tool.sign.stampCheck', icon: Check }
 ];
 
 export function SignPanel() {
@@ -117,7 +117,7 @@ export function SignPanel() {
                   role="button"
                   tabIndex={0}
                   aria-pressed={active}
-                  aria-label={`Use this ${signature.kind} signature`}
+                  aria-label={`${t('tool.sign.useThisPrefix')} ${signature.kind} ${t('tool.sign.signatureSuffix')}`}
                   onClick={() =>
                     (activeStamp.value = active
                       ? null
@@ -136,7 +136,7 @@ export function SignPanel() {
                     <IconButton
                       icon={Trash2}
                       size="compact"
-                      aria-label="Delete this signature"
+                      aria-label={t('tool.sign.deleteSignature')}
                       onClick={event => {
                         event.stopPropagation();
                         void deleteSignature(signature.id);
@@ -166,7 +166,7 @@ export function SignPanel() {
                   role="button"
                   tabIndex={0}
                   aria-pressed={active}
-                  aria-label={`Use this ${signature.kind} initial`}
+                  aria-label={`${t('tool.sign.useThisPrefix')} ${signature.kind} ${t('tool.sign.initialSuffix')}`}
                   onClick={() =>
                     (activeStamp.value = active
                       ? null
@@ -185,7 +185,7 @@ export function SignPanel() {
                     <IconButton
                       icon={Trash2}
                       size="compact"
-                      aria-label="Delete these initials"
+                      aria-label={t('tool.sign.deleteInitials')}
                       onClick={event => {
                         event.stopPropagation();
                         void deleteSignature(signature.id);
@@ -215,7 +215,7 @@ export function SignPanel() {
                 onClick={() => (activeStamp.value = active ? null : { type: stamp.type })}
               >
                 <stamp.icon size={18} aria-hidden="true" />
-                {stamp.label}
+                {t(stamp.labelKey)}
               </button>
             );
           })}
@@ -223,9 +223,7 @@ export function SignPanel() {
       </div>
 
       <p className={panelStyles.description}>
-        {armed
-          ? 'Click the page to place it. Arrow keys nudge; hold Shift for larger steps.'
-          : 'Pick a signature or stamp, then click the page.'}
+        {armed ? t('tool.sign.placementHintActive') : t('tool.sign.placementHintIdle')}
       </p>
 
       <Button variant="tertiary" icon={ScanSearch} onClick={detect} disabled={!doc}>
