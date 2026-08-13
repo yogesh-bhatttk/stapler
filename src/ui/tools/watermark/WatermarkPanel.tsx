@@ -78,9 +78,7 @@ export function WatermarkPanel() {
                 className={styles.input}
               />
               <div className={styles.hint}>
-                {t('Use')}
-                {'{n}'} {t('for page number,')}
-                {'{total}'} {t('for total pages.')}
+                {t('Use')} {'{n}'} {t('for page number,')} {'{total}'} {t('for total pages.')}
               </div>
             </>
           )}
@@ -241,7 +239,7 @@ export function WatermarkPanel() {
       )}
 
       <div className={styles.sectionDivider} />
-      <h3 className={styles.sectionHeading}>{t('Header &amp; footer')}</h3>
+      <h3 className={styles.sectionHeading}>{t('Header & footer')}</h3>
       <p className={styles.hint}>
         {t(
           'A fixed, unrotated line printed in the page margin — distinct from the watermark stamp above. Use'

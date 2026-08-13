@@ -64,7 +64,7 @@ export function CropPanel() {
         <p className={panelStyles.description}>
           {t(
             'Drag on the page to draw a crop box, drag its handles to resize, or drag inside it to move it. The box applies to'
-          )}
+          )}{' '}
           {SCOPE_LABEL[settings.scope]}.
         </p>
         <Button variant="secondary" icon={RotateCcw} onClick={handleReset}>

@@ -30,8 +30,7 @@ export function OrganizePanel() {
   return (
     <>
       <p className={panelStyles.description}>
-        {t('Acting on')}
-        {scope} {t('page(s).')}
+        {t('Acting on')} {scope} {t('page(s).')}
       </p>
 
       <div className={panelStyles.section}>

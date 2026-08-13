@@ -82,7 +82,7 @@ export function RedactPanel() {
             {regions.map((region, index) => (
               <li className={panelStyles.listRow} key={`${region.pageIndex}-${index}`}>
                 <span className={panelStyles.listRowText}>
-                  {region.text ? `"${region.text}"` : 'Drawn region'} {t('· page')}
+                  {region.text ? `"${region.text}"` : 'Drawn region'} {t('· page')}{' '}
                   {region.pageIndex + 1}
                 </span>
                 <IconButton

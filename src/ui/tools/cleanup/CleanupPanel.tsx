@@ -76,7 +76,7 @@ export function CleanupPanel() {
       {!manual && (
         <p className={`${panelStyles.note} ${panelStyles.noteInfo}`}>
           {t(
-            'The Auto and B&amp;W presets set contrast per pixel, so the sliders do not apply. Switch to Photo or Manual to use them.'
+            'The Auto and B&W presets set contrast per pixel, so the sliders do not apply. Switch to Photo or Manual to use them.'
           )}
         </p>
       )}

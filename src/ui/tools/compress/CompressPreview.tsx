@@ -231,8 +231,7 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
 
       <div className={styles.bottomBar}>
         <span className={styles.pageLabel}>
-          {t('Preview: Page')}
-          {page.sourceIndex + 1}
+          {t('Preview: Page')} {page.sourceIndex + 1}
         </span>
         <div className={styles.toolbar}>
           <IconButton

@@ -134,8 +134,7 @@ export function CompressPanel() {
 
           {report.plan.skipped.length > 0 && (
             <p className={panelStyles.note}>
-              {t('Not re-encoded, to avoid damaging them:')}
-              {report.plan.skipped.join('; ')}.
+              {t('Not re-encoded, to avoid damaging them:')} {report.plan.skipped.join('; ')}.
             </p>
           )}
 
@@ -143,8 +142,7 @@ export function CompressPanel() {
             <p className={panelStyles.note}>
               {t('This document is already optimized — about')}{' '}
               {Math.max(0, Math.round(report.estimatedFraction * 100))}
-              {t('% is all that is available from')}
-              {formatBytes(report.originalBytes)}
+              {t('% is all that is available from')} {formatBytes(report.originalBytes)}
               {t('. Compressing it is not worth the time.')}
             </p>
           )}

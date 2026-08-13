@@ -107,8 +107,7 @@ export function BatchPanel() {
       {batchProgress.value.isProcessing && (
         <div className={panelStyles.section}>
           <p>
-            {t('Processing:')}
-            {batchProgress.value.currentFile}
+            {t('Processing:')} {batchProgress.value.currentFile}
           </p>
           <p>
             {batchProgress.value.completed} / {batchProgress.value.total} {t('completed')}

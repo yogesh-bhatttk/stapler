@@ -43,8 +43,7 @@ export function BatchView() {
         <div className={panelStyles.section}>
           <h3>{t('Processing')}</h3>
           <p>
-            {t('File:')}
-            {batchProgress.value.currentFile}
+            {t('File:')} {batchProgress.value.currentFile}
           </p>
           <div
             style={{
