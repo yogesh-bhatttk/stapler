@@ -38,9 +38,20 @@ test.describe('manifest', () => {
     expect(csp).not.toContain("'unsafe-inline'");
   });
 
-  test('ships every icon size the store requires', () => {
+  test('ships every icon size the store requires, at real dimensions', () => {
+    // DIST-01: these were 1×1 placeholder pixels for a while — this only ever
+    // asserted the manifest *declared* a path, never that the file behind it
+    // was a real icon, so the toolbar button and the store listing were both
+    // blank the entire time. A PNG's width/height live at fixed offsets in
+    // its IHDR chunk (bytes 16–23), no image library needed to check them.
     for (const size of ['16', '32', '48', '128']) {
-      expect(manifest.icons[size]).toBeTruthy();
+      const declaredPath: string = manifest.icons[size];
+      expect(declaredPath).toBeTruthy();
+      const bytes = readFileSync(path.resolve(process.cwd(), 'public', declaredPath));
+      const width = bytes.readUInt32BE(16);
+      const height = bytes.readUInt32BE(20);
+      expect(width).toBe(Number(size));
+      expect(height).toBe(Number(size));
     }
   });
 });
