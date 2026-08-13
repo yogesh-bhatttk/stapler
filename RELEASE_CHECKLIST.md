@@ -1,29 +1,51 @@
 # Release Checklist
 
-Follow these steps when preparing a new release for Stapler.
+Follow these steps when preparing a new release for Stapler. Per `docs/TICKETS.md`
+(DIST-05): **no release ships without a green zero-network test.** That test — not
+this checklist — is the thing that actually protects the product's central claim,
+so it gets its own explicit step below rather than being buried inside "run verify."
 
 ## 1. Pre-Release Verification
-- [ ] **Tests Pass:** Run `npm run verify` to ensure all checks (typecheck, linting, formatting, bundle size) and tests (Vitest and Playwright e2e) pass.
-- [ ] **Feature Complete:** All features for this release have been implemented and manually tested in the browser.
 - [ ] **Version Bump:** Update the version number in `package.json` according to semantic versioning.
 - [ ] **Manifest Update:** Ensure the `version` field in `public/manifest.json` matches the new version.
-- [ ] **Changelog:** Update `CHANGELOG.md` with the new version and detail the changes (features, bug fixes, etc.).
+- [ ] **Changelog:** Move the `[Unreleased]` entries in `CHANGELOG.md` under a new
+      `[x.y.z] — YYYY-MM-DD` heading.
+- [ ] **`pnpm check` (or `npm run check`):** typecheck, lint, format, design-token
+      audit, contrast audit. Must be clean on the tree you intend to release.
+- [ ] **`pnpm test` (or `npm test`):** the full Vitest unit suite.
+- [ ] **`pnpm test:e2e` (or `npm run test:e2e`):** the full Playwright suite —
+      includes every P0 tool flow, accessibility, and performance budgets.
+- [ ] **Zero-network test is green:** confirm `tests/e2e/zero-network.spec.ts`
+      passed in the run above (it is part of `test:e2e`, but check it by name —
+      a broader suite passing does not tell you *this specific* test ran and
+      passed). This is the test that would catch an accidentally-added CDN
+      import, Google Fonts link, or analytics snippet before it ships.
+- [ ] **QA-05 — external viewer compatibility (manual, cannot be automated):**
+      open a representative output from each P0 tool in Chrome's own PDF viewer,
+      Adobe Acrobat Reader, macOS Preview, and Firefox's pdf.js. Confirm no
+      warnings on open and that the content matches what Stapler showed.
+      Record the result (pass/fail per viewer, per tool) in this file's git
+      history or an issue — "it should work" is not a passing criterion.
+- [ ] **Feature Complete:** All features for this release are implemented; any
+      known limitation is disclosed in the relevant panel, not silent.
 
 ## 2. Build the Extension
-- [ ] **Clean Build:** Remove any old `dist/` folders.
-- [ ] **Build:** Run `npm run build:ext` to build the extension package.
-- [ ] **Review Artifacts:** Check the `dist/` directory to ensure `manifest.json`, `background.js`, `index.html`, and required assets are present and correctly minified.
+- [ ] **Clean Build:** Remove any old `dist/ext` folder.
+- [ ] **Build:** Run `npm run build:ext` — emits the unpacked extension to `dist/ext`.
+- [ ] **Review Artifacts:** Check `dist/ext` for `manifest.json`, `background.js`,
+      `editor.html`, and every icon size, correctly minified.
 
 ## 3. Local Testing of the Build
-- [ ] **Load Unpacked:** Open Chrome, go to `chrome://extensions`, enable "Developer mode", and click "Load unpacked". Select the `dist/` folder.
-- [ ] **Functionality Check:** 
-  - Open the extension and test the primary workflows (Merge, Split, Compress).
-  - Verify that offline functionality works (turn off Wi-Fi and attempt to process a PDF).
-- [ ] **No Console Errors:** Open DevTools for the extension popup/page and ensure there are no errors in the console.
+- [ ] **Load Unpacked:** Open Chrome, go to `chrome://extensions`, enable "Developer mode", and click "Load unpacked". Select the `dist/ext` folder.
+- [ ] **No install warning:** confirm Chrome's install dialog shows no permission
+      warnings at all (F-02's whole point) — a regression here is a release blocker.
+- [ ] **Functionality Check:**
+  - Open the extension and test the primary workflows (Merge, Split, Compress, Sign, Redact).
+  - Verify offline functionality: disable networking entirely and confirm every tool still works.
+- [ ] **No Console Errors:** Open DevTools for the extension's editor tab and ensure there are no errors in the console.
 
 ## 4. Packaging
-- [ ] **Zip the Extension:** Compress the contents of the `dist/` folder into a `.zip` file (e.g., `stapler-v1.0.0.zip`).
-- *(Note: Ensure you are zipping the contents inside `dist/`, not the `dist` folder itself).*
+- [ ] **Zip the Extension:** Compress the *contents* of `dist/ext` into a `.zip` file (e.g., `stapler-v1.0.0.zip`) — zip the files inside `dist/ext`, not the `dist/ext` folder itself.
 
 ## 5. Chrome Web Store Publishing
 - [ ] **Upload Package:** Go to the [Chrome Developer Dashboard](https://chrome.google.com/webstore/devconsole).

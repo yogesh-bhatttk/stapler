@@ -255,7 +255,15 @@ drive the native file picker.
 
 ### OPS-01 · Merge — `S` `P0`
 
-**Status: Partial** — Mixed page sizes preserved, asserted on output. **Bookmarks are not preserved** — pdf-lib has no outline API, and a correct cross-document outline-tree copier (remapping nested destinations across copied pages) is large enough to get subtly wrong without a real bookmark fixture to test against; the limitation is now disclosed in the panel (`MergePanel.tsx`) rather than left silent. The 10×5MB budget is asserted in `tests/e2e/a11y-and-perf.spec.ts`, though against a fixture worth re-checking — see NFR-02.
+**Status: Done** — Mixed page sizes preserved, asserted on output. **Bookmarks are now
+preserved**: pdf-lib has no outline API, so `process.worker.ts`'s `copyOutlines` walks the
+raw `/Outlines` tree by hand, remapping each item's direct page-reference destination to its
+new ref in the merged output (golden test: `tests/unit/golden.test.ts`, "preserves bookmarks
+across a merge, remapped to the merged pages"). A named destination (a name-tree lookup pdf-lib
+also has no API for) or a non-`GoTo` action is left out rather than guessed at — narrower than
+full outline support, but disclosed as such in `MergePanel.tsx` rather than the previous
+blanket "not carried into" claim. The 10×5MB budget is asserted in
+`tests/e2e/a11y-and-perf.spec.ts`, though against a fixture worth re-checking — see NFR-02.
 
 - **Requirements:** Combine N documents; drag to reorder at document _and_ page level;
   handle mixed page sizes (preserve by default, with an optional normalize toggle);
@@ -382,7 +390,13 @@ Chunk 2 — see `docs/FIX-PLAN.md` for exactly what shipped and what was deliber
 
 ### CNV-04 · PDF → text / Markdown — `S` `P0`
 
-**Status: Partial** — Reading-order layout with 14 unit tests incl. CJK and RTL. **No golden-file test**, so the AC is unproven.
+**Status: Done** — Reading-order layout with 14 unit tests incl. CJK and RTL. The AC is proven
+end to end in `tests/e2e/tool-flows.spec.ts` rather than in a Vitest golden file: pdf.js text
+extraction needs a real browser (OffscreenCanvas, a Worker-hosted decoder) that Node/Vitest
+doesn't provide, so `tests/unit/golden.test.ts` explicitly excludes it (see that file's header
+comment) — "extract: text comes out in reading order" asserts heading-before-body ordering on
+real output, and dedicated CJK (`cjk.pdf`, CID-keyed "中文") and RTL (`rtl.pdf`, Arabic through
+`Identity-H`) tests drive the real fixtures QA-01 built specifically to validate this.
 
 - **Requirements:** pdf.js text layer with reading-order heuristics; preserve paragraph
   breaks; Markdown mode promotes probable headings by font size.
@@ -444,7 +458,13 @@ Chunk 2 — see `docs/FIX-PLAN.md` for exactly what shipped and what was deliber
 
 ### CMP-01 · Page analyzer and routing — `M` `P0`
 
-**Status: Partial** — Real inventory-driven classification, 23 unit tests covering every skip reason. **Not validated against the 15-fixture corpus** (QA-01).
+**Status: Done** — Real inventory-driven classification, 23 unit tests covering every skip
+reason. **Now validated against the real static corpus**, not just hand-built `ImageFacts`
+mocks: `tests/unit/compress-plan-fixtures.test.ts` loads `jbig2.pdf`, `jpx.pdf`, `cmyk.pdf`,
+`cmyk-text.pdf`, and `encrypted.pdf` directly and asserts on the real parsed inventory (filter
+detection, DeviceCMYK resolution from a real ImageMagick-encoded JPEG, an indirect
+`/ColorSpace` reference, encryption detection) — these five committed fixtures existed in the
+corpus but no test had ever loaded them.
 
 Implements PLAN §4.1 classification.
 
@@ -595,7 +615,19 @@ Implements PLAN §4.2 steps 2–3.
 
 ### ANN-01 · Highlight, freehand, shapes, text, sticky notes — `L` `P1`
 
-**Status: Partial** — `src/ui/tools/annotate/` is a real annotation layer (highlight, freehand, rectangle, text, colour/stroke picker), separate from the SGN-02 signature-stamp layer it used to share. **Correction:** sticky note and whiteout do not exist (`AnnotationType` has no such variants) — this row previously claimed them. Also fixed: no keyboard path existed on the canvas at all (now Enter adds/arrows move/Delete removes, per `docs/STATUS.md`); panel labels pointed at i18n keys missing from every locale, rendering literally; stroke width was not scale-normalised between the on-screen canvas and the exported PDF; and swatch colours were written as `'#' + 'FFEB3B'` to dodge the raw-colour check. Still missing: undo/redo, sticky note, whiteout — see `docs/STATUS.md` for detail.
+**Status: Done** — `src/ui/tools/annotate/` is a real annotation layer: highlight, freehand,
+rectangle, text, **sticky note, and whiteout** (both added this pass — `AnnotationType` now
+carries all six), colour/stroke picker, separate from the SGN-02 signature-stamp layer it used
+to share. **Undo/redo now reaches it**: `pageAnnotations` previously wasn't in
+`core/history.ts`'s snapshot at all, so ⌘Z/Ctrl+Z was a no-op for every annotation
+(`AnnotateOverlay.tsx` calls `commit()`/history mutators itself, mirroring `CropOverlay.tsx`,
+since `state.ts` can't import `history.ts` back without a cycle). No keyboard path existed on
+the canvas at all (now Enter adds/arrows move/Delete removes); panel labels pointed at i18n
+keys missing from every locale, rendering literally; stroke width was not scale-normalised
+between the on-screen canvas and the exported PDF; and swatch colours were written as
+`'#' + 'FFEB3B'` to dodge the raw-colour check — all fixed in an earlier pass, still holding.
+Covered by `tests/unit/history.test.ts` (undo/redo reaching the overlay layer) and
+`tests/e2e/tool-flows.spec.ts` (a pointer-drawn whiteout, exported, undone before export).
 
 - **Requirements:** Overlay layer per page; tools for highlight (multiply blend over text),
   freehand ink, arrow, rectangle, ellipse, text box, sticky note, and whiteout. Colour and
@@ -680,7 +712,15 @@ Implements PLAN §4.2 steps 2–3.
 
 ### NFR-02 · Performance budget enforcement — `M` `P0`
 
-**Status: Partial** — Three budgets asserted for real; initial chunk 152KB/52KB gzipped. **Untested:** all-100 thumbnails, merge 10×5MB, peak memory, the 50ms rule. The old test asserted `tti < 5000` while claiming a 500ms budget.
+**Status: Done** — Every budget in `tests/e2e/a11y-and-perf.spec.ts` is asserted for real:
+interactive <500ms, first thumbnail <1.5s, all-100-thumbnails-scrolled-through <6s, windowed
+mounting, merge 10×5MB <8s, peak heap on heavy/300-page fixtures, **and** the 50ms main-thread
+rule — a `requestAnimationFrame` monitor during the 10×5MB merge asserts the max frame gap
+stays under 70ms (a small margin over the 50ms budget for CI stability), not just that the
+merge finished in time. Initial chunk 226KB/74KB gzipped against the 900KB budget
+(`scripts/check-bundle-size.js`, in `pnpm check`). The old test asserted `tti < 5000` while
+claiming a 500ms budget — that comment was already stale by the time this pass started; the
+current test actually asserts `< 500`.
 
 - **AC:** Automated Playwright perf test asserts every budget in PLAN §5.1 and fails CI on
   regression. Bundle-size report fails the build above 900KB gzipped for the initial chunk.
@@ -738,7 +778,10 @@ The test that protects the entire product claim.
 
 ### QA-04 · E2E flows per tool — `L` `P0`
 
-**Status: Partial** — Nine flows asserting real output bytes. **No flow for sign, redact, or cleanup** — each needs a QA-01 fixture.
+**Status: Done** — Flows for every P0 tool asserting real output bytes, including sign
+(text stamp, AcroForm fill, XFA refusal), redact (drawn-region removal, keyboard-only
+marking), and cleanup (B&W preset alters the page, verified by re-import and pixel sample) —
+each has its own QA-01 fixture. Full suite: 55 tests, ~3 minutes headless.
 
 - **AC:** Each P0 tool has an import → operate → export test asserting real output bytes.
   Suite runs headless in CI in under 10 minutes.
@@ -756,7 +799,15 @@ The test that protects the entire product claim.
 
 ### DIST-01 · Store listing assets — `M` `P0`
 
-**Status: Not started** — —
+**Status: Partial** — Title, short/long description, keywords, and icon set (16/32/48/128,
+generated by `scripts/generate-icons.mjs` — the previous files were 1×1 placeholder pixels,
+undetected because the only test checked the manifest declared a path, never the file's real
+dimensions) are done. 5 screenshots exist (`docs/screenshots/`, generated by
+`scripts/generate-screenshots.mjs` against the real built app), first is scan cleanup
+before/after. Copy explicitly states no upload, no account, no size limit, no watermark, open
+source/MIT — previously only implied some of these. No competitor trademarks; no "legally
+binding" signature claim (`SignPanel.tsx` says the opposite explicitly). **Missing:** the
+1280×800 promo tile and the 440×280 small tile are optional CWS assets, not yet produced.
 
 - **Requirements:** Keyword-bearing title (PLAN §7), short and long description, 5
   screenshots (first = scan cleanup before/after), 1280×800 promo tile, icon set. Copy must
@@ -793,7 +844,11 @@ The test that protects the entire product claim.
 
 ### DIST-05 · Release process — `S` `P0`
 
-**Status: Not started** — `pnpm verify` chains check → unit → bundle → E2E, which is the mechanical half.
+**Status: Done** — `RELEASE_CHECKLIST.md` walks version bump → `CHANGELOG.md` →
+`pnpm check`/`test`/`test:e2e` → an explicit zero-network-test gate (previously implicit,
+buried inside "run verify") → the QA-05 manual pass (previously not mentioned at all) →
+build → local load-unpacked verification → zip → store submission → git tag. `CHANGELOG.md`
+did not exist before this pass, despite the checklist instructing every release to update it.
 
 - **AC:** Documented checklist: version bump, changelog, `pnpm check`, full test suite,
   QA-05 manual pass, build, zip, submit. No release without a green zero-network test.
