@@ -54,4 +54,12 @@ test.describe('manifest', () => {
       expect(height).toBe(Number(size));
     }
   });
+
+  test('version matches package.json', () => {
+    // Found out of sync (manifest said 1.0.0, package.json said 0.1.0) with
+    // nothing catching it — RELEASE_CHECKLIST.md's "keep these in step" step
+    // is manual and easy to skip under release pressure.
+    const pkg = JSON.parse(readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8'));
+    expect(manifest.version).toBe(pkg.version);
+  });
 });
