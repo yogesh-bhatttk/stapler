@@ -913,6 +913,152 @@ function mergeTerminalWidgets(doc: PDFDocument, keepRef: PDFRef, dupRef: PDFRef)
  * front and refuse (see `core/pdf/xfa.ts`), so reaching here with one is already
  * a refusal path.
  */
+/**
+ * OPS-01 — bookmark (outline) preservation.
+ *
+ * pdf-lib has no outline API at all, so this walks the raw `/Outlines` tree by
+ * hand. Deliberately narrow: only a direct page-reference destination (the
+ * common case pdf-lib itself and most authoring tools produce) is followed —
+ * a named destination (resolved through `/Root/Names/Dests`, a name tree) or
+ * any action other than a plain `/GoTo` is left out rather than guessed at. A
+ * bookmark whose page was not copied into this output (extracted away, or a
+ * source that contributed no pages) is dropped, not guessed at either. An
+ * item with no resolvable destination but retained children is kept as a
+ * bare heading, since dropping it would silently flatten the outline's
+ * grouping structure.
+ */
+interface RetainedOutlineItem {
+  title: string;
+  destPageRef?: PDFRef;
+  children: RetainedOutlineItem[];
+}
+
+/** Every page's object number to its index within `doc`, for /Dest resolution. */
+function pageRefIndex(doc: PDFDocument): Map<number, number> {
+  const map = new Map<number, number>();
+  doc.getPages().forEach((page, i) => map.set(page.ref.objectNumber, i));
+  return map;
+}
+
+/** Resolves an outline item's destination to a source page index, if it can. */
+function resolveDestPageIndex(item: PDFDict, refIndex: Map<number, number>): number | undefined {
+  let dest = item.lookup(PDFName.of('Dest'));
+  if (dest === undefined) {
+    const action = item.lookupMaybe(PDFName.of('A'), PDFDict);
+    if (action && nameOf(action.get(PDFName.of('S'))) === 'GoTo') {
+      dest = action.lookup(PDFName.of('D'));
+    }
+  }
+  if (!(dest instanceof PDFArray) || dest.size() === 0) return undefined;
+  const target = dest.get(0);
+  if (!(target instanceof PDFRef)) return undefined; // named destination — not resolved here
+  return refIndex.get(target.objectNumber);
+}
+
+/** Walks one level of `/First`→`/Next` siblings under `parent`, recursing into each's own children. */
+function walkSourceOutline(
+  parent: PDFDict,
+  refIndex: Map<number, number>,
+  pageRefMap: Map<string, PDFRef>,
+  sourceDocId: string,
+  visited: Set<PDFDict>
+): RetainedOutlineItem[] {
+  const result: RetainedOutlineItem[] = [];
+  let cur = parent.lookupMaybe(PDFName.of('First'), PDFDict);
+  while (cur && !visited.has(cur)) {
+    visited.add(cur);
+    const titleValue = cur.lookup(PDFName.of('Title'));
+    const title =
+      titleValue instanceof PDFString || titleValue instanceof PDFHexString
+        ? titleValue.decodeText()
+        : 'Untitled';
+    const sourceIndex = resolveDestPageIndex(cur, refIndex);
+    const destPageRef =
+      sourceIndex !== undefined ? pageRefMap.get(`${sourceDocId}:${sourceIndex}`) : undefined;
+    const children = walkSourceOutline(cur, refIndex, pageRefMap, sourceDocId, visited);
+    if (destPageRef || children.length > 0) {
+      result.push({ title, destPageRef, children });
+    }
+    cur = cur.lookupMaybe(PDFName.of('Next'), PDFDict);
+  }
+  return result;
+}
+
+/** Registers `items` as a `/First`↔`/Next`↔`/Last` sibling chain under `parentRef`. Returns the total item count for `/Count`. */
+function registerOutlineSiblings(
+  ctx: PDFContext,
+  items: RetainedOutlineItem[],
+  parentRef: PDFRef
+): { firstRef?: PDFRef; lastRef?: PDFRef; count: number } {
+  let firstRef: PDFRef | undefined;
+  let lastRef: PDFRef | undefined;
+  let prevRef: PDFRef | undefined;
+  let count = 0;
+
+  for (const item of items) {
+    const dict = ctx.obj({ Title: PDFString.of(item.title), Parent: parentRef }) as PDFDict;
+    if (item.destPageRef) {
+      dict.set(PDFName.of('Dest'), ctx.obj([item.destPageRef, PDFName.of('Fit')]));
+    }
+    const ref = ctx.register(dict);
+    if (!firstRef) firstRef = ref;
+    if (prevRef) {
+      ctx.lookup(prevRef, PDFDict).set(PDFName.of('Next'), ref);
+      dict.set(PDFName.of('Prev'), prevRef);
+    }
+    lastRef = ref;
+    prevRef = ref;
+    count += 1;
+
+    const kids = registerOutlineSiblings(ctx, item.children, ref);
+    if (kids.firstRef) {
+      dict.set(PDFName.of('First'), kids.firstRef);
+      dict.set(PDFName.of('Last'), kids.lastRef!);
+      dict.set(PDFName.of('Count'), PDFNumber.of(kids.count));
+      count += kids.count;
+    }
+  }
+  return { firstRef, lastRef, count };
+}
+
+/**
+ * Copies bookmarks whose destination page survived into `outDoc`. Each
+ * contributing source document's own top-level outline items become
+ * top-level siblings in document order; a source with no `/Outlines`, or none
+ * of whose bookmarks resolved, contributes nothing (never an empty heading).
+ */
+function copyOutlines(
+  outDoc: PDFDocument,
+  contributorDocIds: Map<PDFDocument, string>,
+  pageRefMap: Map<string, PDFRef>
+): void {
+  const allRetained: RetainedOutlineItem[] = [];
+  for (const [srcDoc, docId] of contributorDocIds) {
+    const srcOutlines = srcDoc.catalog.lookupMaybe(PDFName.of('Outlines'), PDFDict);
+    if (!srcOutlines) continue;
+    const refIndex = pageRefIndex(srcDoc);
+    const retained = walkSourceOutline(
+      srcOutlines,
+      refIndex,
+      pageRefMap,
+      docId,
+      new Set<PDFDict>()
+    );
+    allRetained.push(...retained);
+  }
+  if (allRetained.length === 0) return;
+
+  const ctx = outDoc.context;
+  const outlinesDict = ctx.obj({ Type: 'Outlines' }) as PDFDict;
+  const outlinesRef = ctx.register(outlinesDict);
+  const { firstRef, lastRef, count } = registerOutlineSiblings(ctx, allRetained, outlinesRef);
+  if (!firstRef) return;
+  outlinesDict.set(PDFName.of('First'), firstRef);
+  outlinesDict.set(PDFName.of('Last'), lastRef!);
+  outlinesDict.set(PDFName.of('Count'), PDFNumber.of(count));
+  outDoc.catalog.set(PDFName.of('Outlines'), outlinesRef);
+}
+
 function reattachAcroForm(outDoc: PDFDocument, contributors: PDFDocument[]): void {
   const fields: PDFRef[] = [];
   const seenRoots = new Set<string>();
@@ -1257,13 +1403,20 @@ async function composePages(
 
   /** Every source document that contributed a page, for the /AcroForm rebuild. */
   const contributors: PDFDocument[] = [];
+  /** Same, keyed by the doc id the /Outlines copy needs to look up pages by. */
+  const contributorDocIds = new Map<PDFDocument, string>();
+  /** `${sourceDocId}:${sourceIndex}` → the copied page's ref in `outDoc`, for OPS-01. */
+  const pageRefMap = new Map<string, PDFRef>();
 
   for (let i = 0; i < pages.length; i++) {
     const ref = pages[i];
     await checkpoint(job, i / pages.length, `${label} ${i + 1} of ${pages.length}`);
 
     const srcDoc = await getSource(ref.sourceDocId);
-    if (!contributors.includes(srcDoc)) contributors.push(srcDoc);
+    if (!contributors.includes(srcDoc)) {
+      contributors.push(srcDoc);
+      contributorDocIds.set(srcDoc, ref.sourceDocId);
+    }
     if (ref.sourceIndex < 0 || ref.sourceIndex >= srcDoc.getPageCount()) {
       throw internal('A page refers to an index outside its source document', {
         sourceIndex: ref.sourceIndex,
@@ -1345,6 +1498,7 @@ async function composePages(
     }
 
     outDoc.addPage(copied);
+    pageRefMap.set(`${ref.sourceDocId}:${ref.sourceIndex}`, copied.ref);
 
     if (ref.cropBox) {
       // PDF-lib coordinates are bottom-left. The incoming cropBox is top-left normalized [0,1].
@@ -1444,6 +1598,7 @@ async function composePages(
   }
 
   reattachAcroForm(outDoc, contributors);
+  copyOutlines(outDoc, contributorDocIds, pageRefMap);
   return outDoc;
 }
 

@@ -94,7 +94,7 @@ export function MergePanel() {
           </p>
           <p className={panelStyles.description}>
             {t(
-              'Bookmarks and outlines from the source files are not carried into the merged document.'
+              'Bookmarks that point directly at a page carry over into the merged document. Bookmarks using a named destination or a non-standard action are left out.'
             )}
           </p>
         </div>

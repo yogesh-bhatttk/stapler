@@ -342,16 +342,16 @@ test.describe('tool flows', () => {
     expect(heights).toContain(1008);
   });
 
-  test('merge: discloses that bookmarks are not preserved', async ({ page }) => {
-    // OPS-01's real gap (bookmarks/outlines are dropped on merge) has no safe,
-    // well-tested fix available — pdf-lib has no outline API, and a hand-rolled
-    // outline-tree copier with cross-document destination remapping is a large
-    // enough feature to get subtly wrong. Disclosing the limitation honestly,
-    // rather than leaving it silent, is this pass's fix — this guards it stays said.
+  test('merge: discloses the narrower bookmark limitation that remains', async ({ page }) => {
+    // OPS-01: page-destination bookmarks now survive a merge (see the golden
+    // test in golden.test.ts for the byte-level proof); named destinations and
+    // non-GoTo actions still do not, since pdf-lib has no name-tree API and
+    // resolving one by hand is out of scope here. This guards the panel keeps
+    // saying so, rather than reverting to silence or overclaiming full support.
     const file = await ensureFixture('mixed-sizes.pdf', mixedSizePdf);
     await importFixture(page, file);
     await gotoTool(page, 'merge');
-    await expect(page.getByText(/[Bb]ookmarks.*not carried/)).toBeVisible();
+    await expect(page.getByText(/named destination/i)).toBeVisible();
   });
 
   test('extract: text comes out in reading order', async ({ page }) => {

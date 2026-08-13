@@ -163,6 +163,81 @@ describe('golden: OPS-01 merge', () => {
     expect(texts[3]).toContain('fixture page 2');
     expect(texts[4]).toContain('fixture page 3');
   });
+
+  /**
+   * OPS-01's disclosed limitation — pdf-lib has no outline API, so bookmarks
+   * were dropped entirely. This builds a real `/Outlines` tree by hand (the
+   * same raw dict shape any authoring tool produces) and proves the merged
+   * output's bookmarks resolve to the *new*, merged page objects, not the
+   * source documents' — which is exactly the part that is easy to get wrong.
+   */
+  it('preserves bookmarks across a merge, remapped to the merged pages', async () => {
+    const { PDFName, PDFString, PDFDict, PDFNumber } = await import('pdf-lib');
+    const src = await PDFDocument.create();
+    const p1 = src.addPage([595.28, 841.89]);
+    const p2 = src.addPage([595.28, 841.89]);
+    const ctx = src.context;
+
+    const outlinesDict = ctx.obj({ Type: 'Outlines' });
+    const outlinesRef = ctx.register(outlinesDict);
+
+    const chapter1 = ctx.obj({
+      Title: PDFString.of('Chapter 1'),
+      Parent: outlinesRef,
+      Dest: [p1.ref, PDFName.of('Fit')]
+    });
+    const chapter1Ref = ctx.register(chapter1);
+
+    const chapter2 = ctx.obj({
+      Title: PDFString.of('Chapter 2'),
+      Parent: outlinesRef,
+      Dest: [p2.ref, PDFName.of('Fit')]
+    });
+    const chapter2Ref = ctx.register(chapter2);
+
+    chapter1.set(PDFName.of('Next'), chapter2Ref);
+    chapter2.set(PDFName.of('Prev'), chapter1Ref);
+    outlinesDict.set(PDFName.of('First'), chapter1Ref);
+    outlinesDict.set(PDFName.of('Last'), chapter2Ref);
+    outlinesDict.set(PDFName.of('Count'), PDFNumber.of(2));
+    src.catalog.set(PDFName.of('Outlines'), outlinesRef);
+
+    const srcBytes = await src.save();
+
+    const { textPdf } = await import('../e2e/fixtures');
+    const a = seedDoc('bookmarked', 2, srcBytes);
+    appendPages(a.id, makePageRefs('plain', 1));
+    registerSource({
+      id: 'plain',
+      name: 'plain.pdf',
+      bytes: await textPdf(1),
+      pageCount: 1,
+      pageSizes: [{ width: 595.28, height: 841.89 }]
+    });
+
+    const doc = currentDoc(a.id);
+    const output = await composeCurrent(doc);
+    const out = await PDFDocument.load(output);
+    expect(out.getPageCount()).toBe(3);
+
+    const outOutlines = out.catalog.lookupMaybe(PDFName.of('Outlines'), PDFDict);
+    expect(outOutlines).toBeDefined();
+    const first = outOutlines!.lookupMaybe(PDFName.of('First'), PDFDict)!;
+    const second = first.lookupMaybe(PDFName.of('Next'), PDFDict)!;
+    expect(first.lookup(PDFName.of('Title')).decodeText()).toBe('Chapter 1');
+    expect(second.lookup(PDFName.of('Title')).decodeText()).toBe('Chapter 2');
+
+    // The real assertion: each bookmark's /Dest must point at the *merged*
+    // output's page objects, in their new positions — not the source pages,
+    // which are no longer part of this document's page tree at all.
+    const dest1 = first.lookup(PDFName.of('Dest'));
+    const dest2 = second.lookup(PDFName.of('Dest'));
+    expect(dest1.get(0)).toEqual(out.getPage(0).ref);
+    expect(dest2.get(0)).toEqual(out.getPage(1).ref);
+
+    // The plain (bookmark-less) third source contributes no outline entries.
+    expect(second.lookupMaybe(PDFName.of('Next'), PDFDict)).toBeUndefined();
+  });
 });
 
 describe('golden: OPS-02 organize (rotate, delete, duplicate, reorder)', () => {
