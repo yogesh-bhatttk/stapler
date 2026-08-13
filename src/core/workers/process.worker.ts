@@ -120,7 +120,7 @@ export interface StampSource {
 
 export interface AnnotationSource {
   pageKey: string;
-  type: 'freehand' | 'highlight' | 'rectangle' | 'text';
+  type: 'freehand' | 'highlight' | 'rectangle' | 'text' | 'sticky' | 'whiteout';
   color: string;
   strokeWidth: number;
   points?: { x: number; y: number }[];
@@ -1090,8 +1090,78 @@ async function drawAnnotations(
         color: color,
         font: fontCache.font
       });
+    } else if (ann.type === 'whiteout' && ann.rect) {
+      // A solid cover, not a redaction: this hides content visually in the
+      // output without touching the underlying content stream. RED-02 is the
+      // tool for actual content removal.
+      page.drawRectangle({
+        x: ann.rect.x * width,
+        y: height - ann.rect.y * height - ann.rect.height * height,
+        width: ann.rect.width * width,
+        height: ann.rect.height * height,
+        color,
+        opacity: 1.0
+      });
+    } else if (ann.type === 'sticky' && ann.rect) {
+      if (!fontCache.font) {
+        fontCache.font = await outDoc.embedFont(StandardFonts.Helvetica);
+      }
+      const rectX = ann.rect.x * width;
+      const rectY = height - ann.rect.y * height - ann.rect.height * height;
+      const rectW = ann.rect.width * width;
+      const rectH = ann.rect.height * height;
+      page.drawRectangle({
+        x: rectX,
+        y: rectY,
+        width: rectW,
+        height: rectH,
+        color,
+        borderColor: DOC_INK,
+        borderWidth: 1,
+        opacity: 1.0,
+        borderOpacity: 0.3
+      });
+      if (ann.text) {
+        const size = ann.fontSize || 12;
+        const lines = wrapTextForPdf(ann.text, fontCache.font, size, rectW - 12);
+        let cursorY = rectY + rectH - size - 4;
+        for (const line of lines) {
+          if (cursorY < rectY) break;
+          page.drawText(line, {
+            x: rectX + 6,
+            y: cursorY,
+            size,
+            color: DOC_INK,
+            font: fontCache.font
+          });
+          cursorY -= size * 1.2;
+        }
+      }
     }
   }
+}
+
+/** Word-wraps `text` to fit within `maxWidth` using `font`'s real metrics. */
+function wrapTextForPdf(
+  text: string,
+  font: import('pdf-lib').PDFFont,
+  size: number,
+  maxWidth: number
+): string[] {
+  const words = text.split(/\s+/);
+  const lines: string[] = [];
+  let line = '';
+  for (const word of words) {
+    const test = line ? `${line} ${word}` : word;
+    if (font.widthOfTextAtSize(test, size) > maxWidth && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = test;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
 }
 
 /**

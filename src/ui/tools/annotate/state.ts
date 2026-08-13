@@ -1,7 +1,8 @@
 import { signal } from '@preact/signals';
 import { ANNOTATION_COLORS } from '../../../core/doc-colors';
 
-export type AnnotationType = 'freehand' | 'highlight' | 'rectangle' | 'text';
+export type AnnotationType =
+  'freehand' | 'highlight' | 'rectangle' | 'text' | 'sticky' | 'whiteout';
 
 export interface Point {
   x: number;
@@ -15,9 +16,9 @@ export interface Annotation {
   strokeWidth: number;
   // For freehand & highlight:
   points?: Point[];
-  // For rectangle & text:
+  // For rectangle, text, sticky & whiteout:
   rect?: { x: number; y: number; width: number; height: number };
-  // For text:
+  // For text & sticky:
   text?: string;
   fontSize?: number;
 }
@@ -26,7 +27,12 @@ export const activeAnnotationTool = signal<AnnotationType>('freehand');
 export const annotationColor = signal<string>(ANNOTATION_COLORS[0]); // Default yellow for highlight
 export const annotationStrokeWidth = signal<number>(4);
 
-// Map of pageKey (e.g. "docId-pageIndex") to array of Annotations
+// Map of pageKey (e.g. "docId-pageIndex") to array of Annotations. Included in
+// `core/history.ts`'s undo snapshot, exactly like `cropBoxes`. `core/history.ts`
+// imports this module for that snapshot, so these mutators cannot import
+// `commit` back from there without a cycle — callers (`AnnotateOverlay.tsx`)
+// call `commit()`/`beginTransaction()` themselves, exactly as `CropOverlay.tsx`
+// does around `cropBoxes` mutations.
 export const pageAnnotations = signal<Record<string, Annotation[]>>({});
 
 export function addAnnotation(pageKey: string, annotation: Annotation) {

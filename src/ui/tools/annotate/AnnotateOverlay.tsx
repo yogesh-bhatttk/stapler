@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
+import { commit } from '../../../core/history';
+import { ANNOTATION_COLORS, DOC_SIGNATURE_STROKE } from '../../../core/doc-colors';
 import {
   Annotation,
   activeAnnotationTool,
@@ -9,6 +11,10 @@ import {
   updateAnnotation,
   removeAnnotation
 } from './state';
+
+// A whiteout always covers with white — that is what the tool name promises —
+// regardless of whatever ink colour is currently selected for the drawing tools.
+const WHITEOUT_COLOR = ANNOTATION_COLORS[5];
 
 export interface AnnotateOverlayProps {
   pageKey: string;
@@ -23,6 +29,33 @@ const DEFAULT_LINE_LENGTH = 0.3;
 const NUDGE = 0.01;
 const NUDGE_COARSE = 0.05;
 const clamp = (min: number, max: number, value: number) => Math.max(min, Math.min(max, value));
+/** Default size for a sticky note created with pointer or keyboard. */
+const DEFAULT_STICKY = { width: 0.16, height: 0.12 };
+
+/** Wraps `text` at `maxWidth`, drawing each line `lineHeight` apart. */
+function wrapText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth: number,
+  lineHeight: number
+) {
+  const words = text.split(/\s+/);
+  let line = '';
+  let cursorY = y;
+  for (const word of words) {
+    const test = line ? `${line} ${word}` : word;
+    if (ctx.measureText(test).width > maxWidth && line) {
+      ctx.fillText(line, x, cursorY);
+      line = word;
+      cursorY += lineHeight;
+    } else {
+      line = test;
+    }
+  }
+  if (line) ctx.fillText(line, x, cursorY);
+}
 
 export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -91,6 +124,47 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
       } else if (ann.type === 'text' && ann.text && ann.rect) {
         ctx.font = `${ann.fontSize || 16}px sans-serif`;
         ctx.fillText(ann.text, ann.rect.x * width, ann.rect.y * height + (ann.fontSize || 16));
+      } else if (ann.type === 'whiteout' && ann.rect) {
+        // A solid cover, not a redaction: this hides content visually on the
+        // page without touching the underlying document structure. RED-02 is
+        // the tool for actual content removal.
+        ctx.globalAlpha = 1.0;
+        ctx.fillRect(
+          ann.rect.x * width,
+          ann.rect.y * height,
+          ann.rect.width * width,
+          ann.rect.height * height
+        );
+      } else if (ann.type === 'sticky' && ann.rect) {
+        ctx.globalAlpha = 1.0;
+        ctx.fillRect(
+          ann.rect.x * width,
+          ann.rect.y * height,
+          ann.rect.width * width,
+          ann.rect.height * height
+        );
+        ctx.globalAlpha = 0.3;
+        ctx.strokeStyle = DOC_SIGNATURE_STROKE;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(
+          ann.rect.x * width,
+          ann.rect.y * height,
+          ann.rect.width * width,
+          ann.rect.height * height
+        );
+        ctx.globalAlpha = 1.0;
+        if (ann.text) {
+          ctx.fillStyle = DOC_SIGNATURE_STROKE;
+          ctx.font = `${ann.fontSize || 12}px sans-serif`;
+          wrapText(
+            ctx,
+            ann.text,
+            ann.rect.x * width + 6,
+            ann.rect.y * height + (ann.fontSize || 12) + 4,
+            ann.rect.width * width - 12,
+            (ann.fontSize || 12) * 1.2
+          );
+        }
       }
     });
   };
@@ -128,6 +202,7 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
     if (type === 'text') {
       const text = window.prompt('Enter note text:');
       if (text) {
+        commit();
         addAnnotation(pageKey, {
           id: crypto.randomUUID(),
           type: 'text',
@@ -142,13 +217,31 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
       return;
     }
 
+    if (type === 'sticky') {
+      const text = window.prompt('Enter note text:');
+      if (text) {
+        commit();
+        addAnnotation(pageKey, {
+          id: crypto.randomUUID(),
+          type: 'sticky',
+          color: annotationColor.value,
+          strokeWidth,
+          rect: { x, y, width: DEFAULT_STICKY.width, height: DEFAULT_STICKY.height },
+          text,
+          fontSize: 12
+        });
+      }
+      setIsDrawing(false);
+      return;
+    }
+
     setCurrentAnnotation({
       id: crypto.randomUUID(),
       type,
-      color: annotationColor.value,
+      color: type === 'whiteout' ? WHITEOUT_COLOR : annotationColor.value,
       strokeWidth,
       points: type === 'freehand' || type === 'highlight' ? [{ x, y }] : undefined,
-      rect: type === 'rectangle' ? { x, y, width: 0, height: 0 } : undefined
+      rect: type === 'rectangle' || type === 'whiteout' ? { x, y, width: 0, height: 0 } : undefined
     });
 
     // e.currentTarget.setPointerCapture(e.pointerId);
@@ -167,7 +260,7 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
       if (!prev) return prev;
       if ((prev.type === 'freehand' || prev.type === 'highlight') && prev.points) {
         return { ...prev, points: [...prev.points, { x, y }] };
-      } else if (prev.type === 'rectangle' && prev.rect) {
+      } else if ((prev.type === 'rectangle' || prev.type === 'whiteout') && prev.rect) {
         return {
           ...prev,
           rect: {
@@ -184,6 +277,7 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
 
   const handlePointerUp = () => {
     if (isDrawing && currentAnnotation) {
+      commit();
       addAnnotation(pageKey, currentAnnotation as Annotation);
       setSelectedId(currentAnnotation.id ?? null);
     }
@@ -219,6 +313,30 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
         text,
         fontSize: 16
       };
+      commit();
+      addAnnotation(pageKey, ann);
+      setSelectedId(ann.id);
+      return;
+    }
+
+    if (type === 'sticky') {
+      const text = window.prompt('Enter note text:');
+      if (!text) return;
+      const ann: Annotation = {
+        id: crypto.randomUUID(),
+        type: 'sticky',
+        color,
+        strokeWidth,
+        rect: {
+          x: (1 - DEFAULT_STICKY.width) / 2,
+          y: (1 - DEFAULT_STICKY.height) / 2,
+          width: DEFAULT_STICKY.width,
+          height: DEFAULT_STICKY.height
+        },
+        text,
+        fontSize: 12
+      };
+      commit();
       addAnnotation(pageKey, ann);
       setSelectedId(ann.id);
       return;
@@ -227,11 +345,11 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
     const cx = 0.5;
     const cy = 0.5;
     const ann: Annotation =
-      type === 'rectangle'
+      type === 'rectangle' || type === 'whiteout'
         ? {
             id: crypto.randomUUID(),
             type,
-            color,
+            color: type === 'whiteout' ? WHITEOUT_COLOR : color,
             strokeWidth,
             rect: {
               x: (1 - DEFAULT_RECT.width) / 2,
@@ -250,6 +368,7 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
               { x: cx + DEFAULT_LINE_LENGTH / 2, y: cy }
             ]
           };
+    commit();
     addAnnotation(pageKey, ann);
     setSelectedId(ann.id);
   };
@@ -263,6 +382,7 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
     if (!selected) return;
     if (event.key === 'Delete' || event.key === 'Backspace') {
       event.preventDefault();
+      commit();
       removeAnnotation(pageKey, selected.id);
       setSelectedId(null);
       return;
@@ -277,8 +397,10 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
       ArrowDown: [0, step]
     };
     const [dx, dy] = deltas[event.key];
+    const resizable = selected.type === 'rectangle' || selected.type === 'whiteout';
 
-    if ((event.ctrlKey || event.metaKey) && selected.type === 'rectangle' && selected.rect) {
+    if ((event.ctrlKey || event.metaKey) && resizable && selected.rect) {
+      commit();
       updateAnnotation(pageKey, selected.id, {
         rect: {
           x: selected.rect.x,
@@ -291,6 +413,7 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
     }
 
     if (selected.rect) {
+      commit();
       updateAnnotation(pageKey, selected.id, {
         rect: {
           ...selected.rect,
@@ -299,6 +422,7 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
         }
       });
     } else if (selected.points) {
+      commit();
       updateAnnotation(pageKey, selected.id, {
         points: selected.points.map(p => ({
           x: clamp(0, 1, p.x + dx),

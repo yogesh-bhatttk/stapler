@@ -18,10 +18,17 @@ import {
   beginTransaction,
   canRedo,
   canUndo,
+  commit,
   redo,
   resetHistory,
   undo
 } from '../../src/core/history';
+import {
+  pageAnnotations,
+  addAnnotation as addOverlayAnnotation,
+  removeAnnotation as removeOverlayAnnotation,
+  type Annotation as OverlayAnnotation
+} from '../../src/ui/tools/annotate/state';
 
 function seed(pageCount = 5): StaplerDoc {
   registerSource({
@@ -47,6 +54,7 @@ beforeEach(() => {
   sources.value = {};
   activeDocId.value = null;
   selectedPageKeys.value = new Set();
+  pageAnnotations.value = {};
   resetHistory();
 });
 
@@ -178,4 +186,42 @@ describe('transactions', () => {
     undo();
     expect(documents.value[0].pages[0].rotation).toBe(0);
   });
+
+  /**
+   * ANN-01 — `pageAnnotations` (the freehand/highlight/rectangle/text/sticky/
+   * whiteout overlay layer, distinct from the SGN-02 stamp `Annotation` type
+   * above) previously wasn't in the undo snapshot at all: drawing a shape and
+   * pressing ⌘Z did nothing. It now rides the same snapshot as `cropBoxes`.
+   */
+  it('reaches the ANN-01 overlay layer, not just SGN-02 stamps', () => {
+    const ann: OverlayAnnotation = {
+      id: 'a1',
+      type: 'rectangle',
+      color: '#ff0000',
+      strokeWidth: 0.01,
+      rect: { x: 0.1, y: 0.1, width: 0.2, height: 0.2 }
+    };
+    commitLikeOverlay(() => addOverlayAnnotation('doc-1-0', ann));
+    expect(pageAnnotations.value['doc-1-0']).toHaveLength(1);
+
+    undo();
+    expect(pageAnnotations.value['doc-1-0'] ?? []).toHaveLength(0);
+    redo();
+    expect(pageAnnotations.value['doc-1-0']).toHaveLength(1);
+
+    commitLikeOverlay(() => removeOverlayAnnotation('doc-1-0', 'a1'));
+    expect(pageAnnotations.value['doc-1-0']).toHaveLength(0);
+    undo();
+    expect(pageAnnotations.value['doc-1-0']).toHaveLength(1);
+  });
 });
+
+/**
+ * `AnnotateOverlay.tsx` calls `commit()` itself before each mutation (the
+ * mutators in `ui/tools/annotate/state.ts` cannot import it back without a
+ * cycle with `history.ts`). Mirrors that call order here.
+ */
+function commitLikeOverlay(mutate: () => void) {
+  commit();
+  mutate();
+}

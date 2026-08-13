@@ -19,6 +19,7 @@
  */
 import { activeDocId, documents, selectedPageKeys, type StaplerDoc } from './store';
 import { cropBoxes, type CropBox } from '../ui/tools/crop/state';
+import { pageAnnotations, type Annotation } from '../ui/tools/annotate/state';
 
 const MAX_DEPTH = 50;
 
@@ -27,6 +28,7 @@ interface Snapshot {
   activeId: string | null;
   selection: Set<string>;
   cropBoxes: Record<string, CropBox>;
+  pageAnnotations: Record<string, Annotation[]>;
 }
 
 let undoStack: Snapshot[] = [];
@@ -40,7 +42,8 @@ function snapshot(): Snapshot {
     docs: documents.value,
     activeId: activeDocId.value,
     selection: new Set(selectedPageKeys.value),
-    cropBoxes: cropBoxes.value
+    cropBoxes: cropBoxes.value,
+    pageAnnotations: pageAnnotations.value
   };
 }
 
@@ -55,6 +58,7 @@ function restore(state: Snapshot) {
   activeDocId.value = state.activeId;
   selectedPageKeys.value = new Set(state.selection);
   cropBoxes.value = state.cropBoxes;
+  pageAnnotations.value = state.pageAnnotations;
 }
 
 /**

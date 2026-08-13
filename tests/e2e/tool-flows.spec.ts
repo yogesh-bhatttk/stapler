@@ -898,6 +898,78 @@ test.describe('tool flows', () => {
     expect(Math.max(...pixel.slice(0, 3)) - Math.min(...pixel.slice(0, 3))).toBeLessThanOrEqual(2);
   });
 
+  /**
+   * ANN-01 — the overlay's canvas draws are never checked against real output
+   * bytes anywhere else. This drives a whiteout drawn by pointer drag directly
+   * over a known line of body text, and proves the annotation layer now rides
+   * the app's undo stack, which it did not before this pass (ArrowKey/Enter
+   * keyboard creation is covered separately by the redact/crop overlays'
+   * equivalent tests — this one exercises the pointer path and undo together).
+   */
+  test('annotate: a pointer-drawn whiteout exports, and undo removes it before export', async ({
+    page
+  }) => {
+    const file = await ensureFixture('text-6.pdf', () => textPdf(6));
+    await importFixture(page, file);
+    await gotoTool(page, 'annotate');
+    await page.getByRole('radio', { name: 'Whiteout' }).check();
+
+    const drawingArea = page.getByRole('group', { name: /Annotation drawing area/ });
+    const box = await drawingArea.boundingBox();
+    if (!box) throw new Error('missing drawing area geometry');
+    // text-6.pdf's body lines run from x≈0.09 to x≈0.35 of the page; this
+    // rectangle covers several of them vertically too.
+    const from = { x: box.x + box.width * 0.08, y: box.y + box.height * 0.38 };
+    const to = { x: box.x + box.width * 0.36, y: box.y + box.height * 0.6 };
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    await page.mouse.move(to.x, to.y);
+    await page.mouse.up();
+
+    // Undo must reach the overlay layer — previously nothing in history.ts's
+    // snapshot even referenced it, so ⌘Z/Ctrl+Z was a no-op for annotations.
+    await page.keyboard.press('Control+z');
+    const bytesNoWhiteout = await commitAndRead(page, 'Export annotated PDF');
+    await openApp(page);
+    await page.locator('input[type="file"]').setInputFiles({
+      name: 'no-whiteout.pdf',
+      mimeType: 'application/pdf',
+      buffer: Buffer.from(bytesNoWhiteout)
+    });
+    await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
+    const grid: [number, number][] = [
+      [0.18, 0.4],
+      [0.26, 0.4],
+      [0.18, 0.48],
+      [0.26, 0.48],
+      [0.18, 0.56]
+    ];
+    const clearPixels = await samplePage(page, grid);
+    const clearHasInk = clearPixels.some(p => p.some(c => c < 200));
+
+    // Redo the same document and drawing from scratch, keep the whiteout this time.
+    await importFixture(page, file);
+    await gotoTool(page, 'annotate');
+    await page.getByRole('radio', { name: 'Whiteout' }).check();
+    const box2 = await drawingArea.boundingBox();
+    if (!box2) throw new Error('missing drawing area geometry');
+    await page.mouse.move(box2.x + box2.width * 0.08, box2.y + box2.height * 0.38);
+    await page.mouse.down();
+    await page.mouse.move(box2.x + box2.width * 0.36, box2.y + box2.height * 0.6);
+    await page.mouse.up();
+    const bytesWithWhiteout = await commitAndRead(page, 'Export annotated PDF');
+    await openApp(page);
+    await page.locator('input[type="file"]').setInputFiles({
+      name: 'with-whiteout.pdf',
+      mimeType: 'application/pdf',
+      buffer: Buffer.from(bytesWithWhiteout)
+    });
+    await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
+    const whitePixels = await samplePage(page, grid);
+    expect(whitePixels.every(p => p.every(c => c > 250))).toBe(true);
+    expect(clearHasInk).toBe(true);
+  });
+
   test('a corrupt file is refused with a reason and does not break the tab', async ({ page }) => {
     const file = await ensureFixture('not-a-pdf.pdf', async () =>
       new TextEncoder().encode('This is definitely not a PDF.')

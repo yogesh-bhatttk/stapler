@@ -32,7 +32,9 @@ export function AnnotatePanel() {
           { value: 'freehand', label: t('tool.annotate.freehand') },
           { value: 'highlight', label: t('tool.annotate.highlight') },
           { value: 'rectangle', label: t('tool.annotate.rectangle') },
-          { value: 'text', label: t('tool.annotate.text') }
+          { value: 'text', label: t('tool.annotate.text') },
+          { value: 'sticky', label: t('tool.annotate.sticky') },
+          { value: 'whiteout', label: t('tool.annotate.whiteout') }
         ]}
       />
 
