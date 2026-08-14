@@ -1,8 +1,17 @@
 import { expect, test } from '@playwright/test';
-import { PDFArray, PDFDict, PDFDocument, PDFName, PDFRawStream, PDFRef, PDFStream } from 'pdf-lib';
+import {
+  decodePDFRawStream,
+  PDFArray,
+  PDFDict,
+  PDFDocument,
+  PDFName,
+  PDFRawStream,
+  PDFRef,
+  PDFStream
+} from 'pdf-lib';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { unzipSync } from 'fflate';
+import { unzipSync, unzlibSync } from 'fflate';
 import {
   acroformPdf,
   ANNOTATION_TEXT,
@@ -857,6 +866,79 @@ test.describe('tool flows', () => {
     await page.getByRole('radio', { name: 'PNG' }).check();
     const bytes = await commitAndRead(page, 'Export images');
     expect(Array.from(bytes.slice(0, 4))).toEqual([0x50, 0x4b, 0x03, 0x04]);
+  });
+
+  /**
+   * CNV-06. The opposite of the test above: nothing is rendered, so the file in
+   * the ZIP has to carry the *source image object's* own samples. Asserted by
+   * inflating the PNG the app produced and comparing it to the image stream
+   * inside the PDF that went in.
+   */
+  test('extract images: the extracted file holds the source image samples exactly', async ({
+    page
+  }) => {
+    // The Flate-raster variant, under its own fixture name: the JPEG variant of
+    // `mixed-text-image.pdf` is what CMP-03's reduction band is measured against,
+    // and `ensureFixture` caches by filename, so sharing the name would silently
+    // hand that test a different document.
+    const file = await ensureFixture('mixed-text-image-flate.pdf', () => mixedTextImagePdf());
+    await importFixture(page, file);
+    await gotoTool(page, 'extract-img');
+
+    const bytes = await commitAndRead(page, 'Extract images');
+    const files = unzipSync(bytes);
+    expect(Object.keys(files)).toEqual(['page-001-image-01.png']);
+
+    // What the document actually carries.
+    const source = await PDFDocument.load(new Uint8Array(readFileSync(file)));
+    const xobjects = source
+      .getPage(0)
+      .node.Resources()
+      ?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+    const streams = [...(xobjects?.entries() ?? [])]
+      .map(([key]) => xobjects?.lookup(key))
+      .filter((entry): entry is PDFRawStream => entry instanceof PDFRawStream);
+    expect(streams).toHaveLength(1);
+    const expected = decodePDFRawStream(streams[0]).decode();
+
+    // What the app wrote: IDAT, inflated, with each scanline's filter byte removed.
+    const png = files['page-001-image-01.png'];
+    const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
+    let at = 8;
+    let width = 0;
+    let height = 0;
+    const idat: Uint8Array[] = [];
+    while (at < png.length) {
+      const length = view.getUint32(at);
+      const type = String.fromCharCode(...png.subarray(at + 4, at + 8));
+      const data = png.subarray(at + 8, at + 8 + length);
+      if (type === 'IHDR') {
+        const head = new DataView(data.buffer, data.byteOffset, data.byteLength);
+        width = head.getUint32(0);
+        height = head.getUint32(4);
+        expect(data[8]).toBe(8); // bit depth
+        expect(data[9]).toBe(2); // truecolour, as the source DeviceRGB raster is
+      }
+      if (type === 'IDAT') idat.push(new Uint8Array(data));
+      at += 12 + length;
+    }
+    expect(width).toBe(1600);
+    expect(height).toBe(1200);
+
+    const joined = new Uint8Array(idat.reduce((n, part) => n + part.length, 0));
+    let offset = 0;
+    for (const part of idat) {
+      joined.set(part, offset);
+      offset += part.length;
+    }
+    const raw = unzlibSync(joined);
+    const rowBytes = width * 3;
+    const samples = new Uint8Array(rowBytes * height);
+    for (let y = 0; y < height; y++) {
+      expect(raw[y * (rowBytes + 1)]).toBe(0);
+      samples.set(raw.subarray(y * (rowBytes + 1) + 1, (y + 1) * (rowBytes + 1)), y * rowBytes);
+    }
+    expect(Buffer.from(samples).equals(Buffer.from(expected))).toBe(true);
   });
 
   test('sign: adding a text annotation and exporting embeds the text', async ({ page }) => {

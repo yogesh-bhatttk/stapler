@@ -74,6 +74,11 @@ git-ignored — deterministic, so re-running tests reproduces them identically:
   over-sampled for the 150 DPI default (`transparentImagePdf`). **Must not regress:** after
   `CMP-03` compression the `/SMask` stream is still referenced and byte-identical, the clear
   band renders as the white page rather than black, and no band shifts by more than 12/255.
+- `mixed-text-image-flate.pdf` — the same builder with **no** JPEG argument, so the photo is
+  stored as a Flate RGB raster. Its own filename on purpose: `ensureFixture` caches by name,
+  and sharing `mixed-text-image.pdf` handed CMP-03's reduction-band test a different
+  document. Used by CMP-05's projection test and by CNV-06's extraction test, which compares
+  the extracted PNG's samples against this file's image stream.
 - `mixed-text-image.pdf` — a page of text plus an already-JPEG photo (`mixedTextImagePdf`;
   the JPEG is encoded by the browser inside the test, since Node here has no encoder).
   **Must not regress:** compression reduces it by 30–70%, the content stream is byte-identical,

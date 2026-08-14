@@ -17,6 +17,7 @@ export type ToolId =
   | 'remove-blanks'
   | 'cleanup'
   | 'pdf-to-img'
+  | 'extract-img'
   | 'extract'
   | 'compress'
   | 'crop'
@@ -189,6 +190,17 @@ export const TOOLS: readonly ToolDefinition[] = [
     canvasMode: 'grid',
     needsOptionsPanel: true,
     commitLabel: 'Export images',
+    selectable: true
+  },
+  {
+    id: 'extract-img',
+    title: 'Extract images',
+    group: 'Convert',
+    summary: 'Pull embedded photos and artwork out at their original quality.',
+    icon: 'ImageDown',
+    canvasMode: 'grid',
+    needsOptionsPanel: true,
+    commitLabel: 'Extract images',
     selectable: true
   },
   {
