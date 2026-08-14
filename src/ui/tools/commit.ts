@@ -43,12 +43,7 @@ import {
   compressTargetOutcome,
   targetSizeBytes
 } from './compress/state';
-import {
-  flattenOnExport,
-  pdfToImageSettings,
-  removeBlanksThreshold,
-  splitSettings
-} from './state';
+import { flattenOnExport, pdfToImageSettings, removeBlanksThreshold, splitSettings } from './state';
 import { extractSettings } from './extract/state';
 import { formFields, formValues } from './sign/state';
 import { XFA_MESSAGE } from '../../core/pdf/xfa';
