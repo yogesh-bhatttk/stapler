@@ -458,8 +458,12 @@ test.describe('tool flows', () => {
     await gotoTool(page, 'compress');
 
     await page.getByRole('button', { name: /Analyse without changing/ }).click();
-    await expect(page.getByText(/already optimized/i)).toBeVisible({ timeout: 60_000 });
-    await expect(page.getByText('no reduction')).toBeVisible();
+    // Scoped to the options panel: CMP-05's preview also reports a size delta for
+    // the previewed page, so an unscoped "no reduction" now matches three nodes
+    // and this assertion silently stopped saying which one it meant.
+    const panel = page.getByLabel('Compress options');
+    await expect(panel.getByText(/already optimized/i)).toBeVisible({ timeout: 60_000 });
+    await expect(panel.getByText('no reduction')).toBeVisible();
   });
 
   test('compress: CMP-02 raster path reduces scanned fixture by 70-90%', async ({ page }) => {

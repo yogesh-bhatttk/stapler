@@ -3,7 +3,9 @@ import {
   MEANINGFUL_SAVING,
   classifyPages,
   effectiveDpi,
-  estimateSavings
+  estimateSavings,
+  refineEstimate,
+  representativePageIndex
 } from '../../src/core/compress-plan';
 import type { ImageFacts, PageImageInventory } from '../../src/core/workers/process.worker';
 import type { PageTextPresence } from '../../src/core/workers/render.worker';
@@ -257,5 +259,159 @@ describe('estimateSavings', () => {
     const low = estimateSavings(plan, 1_000_000, 0.3);
     const high = estimateSavings(plan, 1_000_000, 0.95);
     expect(low.estimatedBytes).toBeLessThan(high.estimatedBytes);
+  });
+});
+
+/**
+ * CMP-05 — which page the quality preview shows. The preview re-encodes this
+ * page for real on every slider tick, so picking the wrong one both wastes the
+ * work and shows the user a page that cannot demonstrate the quality change.
+ */
+describe('representativePageIndex', () => {
+  it('picks the page with the most image area, not the first or the heaviest', () => {
+    const plan = classifyPages(
+      [
+        // Page 0 has the heaviest *bytes* but a small image; page 2 has the most
+        // image area. Area wins, because that is what quality is judged on.
+        page([image({ width: 400, height: 400, byteLength: 5_000_000 })], 0),
+        page([], 1),
+        page([image({ width: 2480, height: 3508, byteLength: 400_000 })], 2)
+      ],
+      [text(0, 0), text(3000, 1), text(0, 2)],
+      OPTIONS
+    );
+    expect(representativePageIndex(plan)).toBe(2);
+  });
+
+  it('counts every image on a page, not just the first', () => {
+    const plan = classifyPages(
+      [
+        // 810,000 pixels in one image, against 980,000 spread over two.
+        page([image({ width: 900, height: 900 })], 0),
+        page(
+          [
+            image({ width: 700, height: 700, objectNumber: 11 }),
+            image({ width: 700, height: 700, objectNumber: 12 })
+          ],
+          1
+        )
+      ],
+      [text(0, 0), text(0, 1)],
+      OPTIONS
+    );
+    expect(plan.pages[1].imagePixels).toBe(980_000);
+    expect(representativePageIndex(plan)).toBe(1);
+  });
+
+  it('falls back to a real page for a document with no images at all', () => {
+    const plan = classifyPages([page([], 0), page([], 1)], [text(3000, 0), text(3000, 1)], OPTIONS);
+    expect(representativePageIndex(plan)).toBe(0);
+    expect(representativePageIndex(null)).toBe(0);
+  });
+});
+
+/**
+ * CMP-05 — the projection re-anchored on a page the preview really re-encoded.
+ * The numbers below are the shapes measured against real exports in
+ * `tests/e2e/compress-preview.spec.ts`; these tests pin the arithmetic that made
+ * those two exports land within 0.2%.
+ */
+describe('refineEstimate', () => {
+  const surgicalPlan = () =>
+    classifyPages([page([image({ byteLength: 900_000 })])], [text(3000)], OPTIONS);
+  const rasterPlan = () =>
+    classifyPages([page([image({ byteLength: 900_000 })])], [text(0)], OPTIONS);
+
+  it('beats the pre-flight model when the content compresses better than the model assumes', () => {
+    const plan = surgicalPlan();
+    const measurement = {
+      pageIndex: 0,
+      // A composed one-page PDF: 900KB of image plus 20KB of text and structure.
+      beforeBytes: 920_000,
+      // What the real encoder returned: 30KB, i.e. 10KB of image plus the same
+      // 20KB of surviving text.
+      afterBytes: 30_000,
+      pageActionableBytes: 900_000,
+      pageTargetPixels: plan.pages[0].targetPixels
+    };
+    const refined = refineEstimate(plan, 1_000_000, 0.75, measurement);
+    expect(refined).not.toBeNull();
+    // 100KB untouched + the 10KB of measured image bytes.
+    expect(refined!.estimatedBytes).toBe(110_000);
+    // And it is a long way below what the un-measured model projects.
+    expect(refined!.estimatedBytes).toBeLessThan(
+      estimateSavings(plan, 1_000_000, 0.75).estimatedBytes
+    );
+  });
+
+  it('drops the non-actionable bytes a rasterised page throws away', () => {
+    const plan = rasterPlan();
+    const measurement = {
+      pageIndex: 0,
+      beforeBytes: 920_000,
+      // The whole page became one 200KB JPEG — its old text and structure are gone.
+      afterBytes: 200_000,
+      pageActionableBytes: 900_000,
+      pageTargetPixels: plan.pages[0].targetPixels
+    };
+    const refined = refineEstimate(plan, 1_000_000, 0.75, measurement);
+    expect(refined).not.toBeNull();
+    // 100KB untouched, minus the 20KB of page overhead that does not survive.
+    expect(refined!.estimatedBytes).toBe(280_000);
+  });
+
+  it('scales a multi-page scan from the one page that was measured', () => {
+    const plan = classifyPages(
+      // Distinct object numbers: two scans, not one image drawn twice, so both
+      // pages' bytes count towards the document's actionable total.
+      [
+        page([image({ byteLength: 900_000, objectNumber: 10 })], 0),
+        page([image({ byteLength: 900_000, objectNumber: 11 })], 1)
+      ],
+      [text(0, 0), text(0, 1)],
+      OPTIONS
+    );
+    const measurement = {
+      pageIndex: 0,
+      beforeBytes: 920_000,
+      afterBytes: 200_000,
+      pageActionableBytes: 900_000,
+      pageTargetPixels: plan.pages[0].targetPixels
+    };
+    const refined = refineEstimate(plan, 2_000_000, 0.75, measurement);
+    // Both pages are the same size and route, so both project at 200KB.
+    expect(refined!.estimatedBytes).toBe(560_000);
+  });
+
+  it('never projects more than the file already weighs', () => {
+    const plan = rasterPlan();
+    const refined = refineEstimate(plan, 1_000_000, 0.75, {
+      pageIndex: 0,
+      beforeBytes: 920_000,
+      afterBytes: 5_000_000,
+      pageActionableBytes: 900_000,
+      pageTargetPixels: plan.pages[0].targetPixels
+    });
+    expect(refined!.estimatedBytes).toBeLessThanOrEqual(1_000_000);
+  });
+
+  it('declines rather than guessing when the measurement cannot support a ratio', () => {
+    const plan = surgicalPlan();
+    const base = {
+      pageIndex: 0,
+      beforeBytes: 920_000,
+      afterBytes: 30_000,
+      pageActionableBytes: 900_000,
+      pageTargetPixels: plan.pages[0].targetPixels
+    };
+    // A page the preview never re-encoded.
+    expect(refineEstimate(plan, 1_000_000, 0.75, { ...base, pageIndex: 7 })).toBeNull();
+    // No re-encode target to divide by.
+    expect(refineEstimate(plan, 1_000_000, 0.75, { ...base, pageTargetPixels: 0 })).toBeNull();
+    // Surviving text alone already accounts for the whole measured output.
+    expect(refineEstimate(plan, 1_000_000, 0.75, { ...base, afterBytes: 15_000 })).toBeNull();
+    // Nothing actionable at all: a text-only document keeps its pre-flight answer.
+    const textOnly = classifyPages([page([])], [text(3000)], OPTIONS);
+    expect(refineEstimate(textOnly, 1_000_000, 0.75, base)).toBeNull();
   });
 });

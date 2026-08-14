@@ -501,7 +501,7 @@ Implements PLAN §4.1 classification.
 3. **`rebuildCompressed`'s "second lock" did not actually hold.** It tested `/Mask` unresolved, so the ordinary indirect form (`/Mask 12 0 R` pointing at a colour-key array) read as a plain `PDFRef` and was copied verbatim onto a downscaled JPEG whose samples can no longer fall in those ranges; `/Matte` and `/ImageMask true` were not checked at all. All three are now re-checked against the resolved objects, so the guard no longer depends on the classifier having reached the same conclusion.
 4. **A shared image was sized from whichever pages happened to over-sample it.** The displayed size is only measured on pages listing the image in `reencode`, so an image over-sampled on a small page and correctly sized on a larger one was replaced at the small page's size and the larger placement silently inherited the downscale. Candidacy is now document-wide, so "largest use wins" sees every use. The same pass stopped a shared image's bytes being counted once per page in `actionableBytes`, which had inflated CMP-04's pre-flight estimate.
 
-Still `Partial` only in the sense of its deliberate bounds: the six unsupported constructs are detected before any mutation, left byte-identical, and named in the report (`CompressPanel`, and the commit summary). CMP-05's live preview is the ticket's remaining unbuilt half and is tracked there.
+Still `Partial` only in the sense of its deliberate bounds: the six unsupported constructs are detected before any mutation, left byte-identical, and named in the report (`CompressPanel`, and the commit summary). CMP-05's live preview, once the ticket's remaining unbuilt half, is now built and Done.
 
 The hardest ticket in v1.0. Budget accordingly.
 
@@ -526,7 +526,54 @@ The hardest ticket in v1.0. Budget accordingly.
 
 ### CMP-05 · Quality preview UI — `M` `P0`
 
-**Status: Not started** — Projection and route breakdown only; no live preview or `CompareSlider`.
+**Status: Done** — A live before/after preview wired to the real pipeline, and a projection
+that is measured rather than modelled. Evidence below is from
+`tests/e2e/compress-preview.spec.ts`, which asserts on produced bytes and painted pixels.
+
+**What the preview does.** The representative page is composed into a one-page PDF
+(`composeDocument`), classified by the real planner (`planCompression`) and re-encoded by the
+real `compressDocument` at the current DPI/quality; the returned bytes are loaded into pdf.js
+and rendered into the "after" half of `CompareSlider`. It is the export's own encoder output,
+not a canvas-quality simulation — the test proves it by asserting the two canvases differ
+pixel-wise and that dropping quality from 70% to 30% produces fewer bytes from the encoder.
+All work is in the render/process workers, each stage takes an `AbortSignal`, and an
+abandoned slider tick aborts rather than finishing unwatched.
+
+**Representative page.** `PagePlan` gained `imagePixels`, and `representativePageIndex`
+(pure, unit-tested) picks the most image area, falling back to actionable bytes then page 1.
+Asserted on a purpose-built three-page fixture whose largest image is on page 3
+(`imageOnLastPagePdf`): the preview reports `data-preview-page=3`, so "most image area" is
+distinguishable from "the first page".
+
+**AC 1 — slider changes reflect within 400ms: met.** Measured end to end from the keypress
+to the new bitmap being on screen at the new quality: **192ms** on an idle machine (337ms
+with another test suite running alongside), and under 400ms again when stepping back to a
+cached setting. Composed bytes, the plan (keyed by DPI only, since quality never changes
+routing) and the encoded output are cached, so a quality tick re-runs only the encode and
+the render, and a zoom change re-runs neither. The number is wall-clock and load-sensitive:
+on a machine at load average 30 the same assertion measured 6.6s, so treat a failure here as
+a machine-contention signal before a regression.
+
+**AC 2 — projected size within 15% of actual: met, by replacing the model with a
+measurement.** The pre-flight estimator was measured at **296% over** on the mixed fixture
+and **108% over** on the scanned one, so `refineEstimate` now re-anchors the displayed
+projection on the page the preview actually re-encoded. Two corrections carry it: a surgical
+page's non-image bytes survive into the output and must come out of the ratio, and a raster
+page's do *not* survive and must come out of the "untouched" total (that one assumption was
+the entire 108%). Against real exported bytes: **surgical 11,524 projected vs 11,524 actual
+(0.0%)**, **raster 424,405 vs 423,699 (0.2%)**. The e2e also asserts the number shown is the
+measured one, so a lucky fallback cannot pass.
+
+**Deliberately unchanged:** `commit.ts`'s CMP-04 export gate still runs its own pre-flight
+`planCompression` and decides on that. Only the *displayed* projection is refined, and it is
+labelled "Projected output (measured)" when it is. A measurement is discarded when the
+settings or the page change, so a stale ratio is never applied.
+
+**One existing test was re-scoped, not weakened.** CMP-04's "already optimized" e2e asserted
+an unscoped `getByText('no reduction')`; the preview now reports a size delta of its own, so
+that locator matched three nodes and failed strict mode. It is now scoped to the Compress
+options panel, which is the surface that assertion was always about. Full compress e2e after
+the change: 13/13 (5 CMP-05, 8 CMP-02/03/04). `pnpm check` clean, `pnpm test` 275/275.
 
 - **Requirements:** Quality slider with live re-render of one representative page (the one
   with the most image area), `CompareSlider` before/after, zoom to 400%, and a live

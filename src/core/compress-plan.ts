@@ -32,6 +32,17 @@ export interface PagePlan {
    * output resolution, not by how the input happened to be compressed.
    */
   targetPixels: number;
+  /**
+   * Stored pixels of every image drawn on this page, counted per page rather
+   * than per document (a shared image counts on each page that shows it).
+   *
+   * This is only used to pick CMP-05's representative page — "the one with the
+   * most image area" — so it deliberately measures what is *on the page*, not
+   * what is unique in the file. Stored pixels stand in for displayed area for
+   * the same reason `effectiveDpi` uses the full-page-span assumption: the
+   * placement CTM is not available at this stage.
+   */
+  imagePixels: number;
 }
 
 export interface CompressionPlan {
@@ -247,6 +258,7 @@ export function classifyPages(
   for (const page of inventory) {
     const census = textByPage.get(page.pageIndex);
     const hasText = hasTextOn(page.pageIndex);
+    const imagePixels = page.images.reduce((n, image) => n + image.width * image.height, 0);
     const safety = page.images.map(image => ({ image, ...safetyOf(image) }));
     for (const entry of safety) {
       if (!entry.safe && entry.reason) skipped.add(entry.reason);
@@ -262,7 +274,8 @@ export function classifyPages(
           reason: 'Page has neither text nor images',
           reencode: [],
           actionableBytes: 0,
-          targetPixels: 0
+          targetPixels: 0,
+          imagePixels
         });
         continue;
       }
@@ -274,7 +287,8 @@ export function classifyPages(
         reason: 'Scanned page — no extractable text, so the page is re-rendered as one image',
         reencode: [],
         actionableBytes: bytes,
-        targetPixels: pagePixelCount(page.width, page.height, options.rasterDpi)
+        targetPixels: pagePixelCount(page.width, page.height, options.rasterDpi),
+        imagePixels
       });
       continue;
     }
@@ -300,7 +314,8 @@ export function classifyPages(
             : 'Text and vectors only, or images already at the target resolution',
         reencode: [],
         actionableBytes: 0,
-        targetPixels: 0
+        targetPixels: 0,
+        imagePixels
       });
       continue;
     }
@@ -324,7 +339,8 @@ export function classifyPages(
         objectNumber: entry.image.objectNumber
       })),
       actionableBytes: bytes,
-      targetPixels
+      targetPixels,
+      imagePixels
     });
   }
 
@@ -413,3 +429,128 @@ export function estimateSavings(
 
 /** Below this, telling the truth beats saving a pointless file (CMP-04). */
 export const MEANINGFUL_SAVING = 0.05;
+
+/**
+ * One page of this document, put through the real re-encoder by CMP-05's
+ * preview: the composed one-page PDF's size, and the size the pipeline actually
+ * returned for it at the settings being previewed.
+ */
+export interface PreviewMeasurement {
+  pageIndex: number;
+  /** Size of the composed one-page PDF the measurement was taken from. */
+  beforeBytes: number;
+  /** Size the real pipeline returned for it. */
+  afterBytes: number;
+  /**
+   * `actionableBytes` and `targetPixels` of that *composed* page's own plan.
+   *
+   * Not the document plan's figures for the same page: composing a page
+   * re-embeds its streams, so the one-page PDF is not a byte-for-byte slice of
+   * the original file (on the scanned fixture it is roughly twice the size).
+   * Subtracting the original file's actionable bytes from the composed page's
+   * total therefore produced a nonsense "overhead" larger than the whole
+   * measured output, and the refinement silently declined every time.
+   */
+  pageActionableBytes: number;
+  pageTargetPixels: number;
+}
+
+/**
+ * CMP-05 — the projection, re-anchored on a page that was actually re-encoded.
+ *
+ * `estimateSavings` has to guess how well content it has never encoded will
+ * compress, and `projectedReencodeBytes`'s coefficients are fitted to
+ * photographic content; on smooth or flat artwork it overshoots by multiples —
+ * measured at 296% over on the mixed fixture — which is exactly the gap CMP-05's
+ * "within 15% of actual" criterion is about. Once the preview has run one page
+ * through the real encoder there is nothing left to guess about how *this*
+ * document's content compresses: that page gives a measured bytes-per-target-
+ * pixel, and the rest of the plan is scaled by it.
+ *
+ * Two corrections make that scaling hold, and both were found by measuring
+ * against real exports rather than reasoning about them:
+ *
+ * 1. **The measured page's own non-image bytes.** On a `surgical` page the text,
+ *    fonts and structure survive into the output, so they must come out of the
+ *    measured bytes before a per-pixel image cost can be taken — otherwise every
+ *    other page inherits this page's text as if it were image data. On a
+ *    `raster` page they do *not* survive: the page becomes one JPEG, so the
+ *    measured output essentially is the image.
+ * 2. **Non-actionable bytes that disappear.** `estimateSavings` assumes every
+ *    byte outside `actionableBytes` survives, which is right for the surgical
+ *    route and wrong for the raster one — a rasterised page throws its old
+ *    content away. On the scanned fixture that single assumption was the whole
+ *    108% overshoot. The measured page tells us what a raster page's
+ *    non-actionable bytes weigh, and every raster page is scaled by area from it.
+ *
+ * Pages on the *other* actionable route from the one measured keep the
+ * pre-flight model, since nothing was measured for them.
+ *
+ * Returns `null` — "keep the pre-flight estimate" — whenever the measurement
+ * cannot support a ratio: a page with no re-encode target, or a measured output
+ * whose surviving overhead already accounts for all of it.
+ */
+export function refineEstimate(
+  plan: CompressionPlan,
+  totalBytes: number,
+  quality: number,
+  measurement: PreviewMeasurement
+): { estimatedBytes: number; estimatedFraction: number } | null {
+  const measuredPage = plan.pages.find(p => p.pageIndex === measurement.pageIndex);
+  if (!measuredPage || measurement.pageTargetPixels <= 0) return null;
+  const route = measuredPage.route;
+  if (route !== 'raster' && route !== 'surgical') return null;
+
+  const pageOverhead = Math.max(0, measurement.beforeBytes - measurement.pageActionableBytes);
+  const survivingOverhead = route === 'surgical' ? pageOverhead : 0;
+  const imageBytesAfter = measurement.afterBytes - survivingOverhead;
+  if (imageBytesAfter <= 0) return null;
+
+  const perPixel = imageBytesAfter / measurement.pageTargetPixels;
+
+  let projectedImages = 0;
+  let vanishing = 0;
+  for (const page of plan.pages) {
+    if (page.targetPixels <= 0) continue;
+    if (page.route === route) {
+      projectedImages += perPixel * page.targetPixels;
+      // A rasterised page's old content is replaced wholesale, so its share of
+      // the "untouched" bytes is not untouched at all.
+      if (route === 'raster') {
+        vanishing += pageOverhead * (page.targetPixels / measurement.pageTargetPixels);
+      }
+    } else {
+      projectedImages += projectedReencodeBytes(page.targetPixels, quality);
+    }
+  }
+  if (projectedImages <= 0) return null;
+
+  const untouched = Math.max(0, totalBytes - plan.actionableBytes - vanishing);
+  const estimated = Math.min(totalBytes, Math.max(1, untouched + projectedImages));
+  return {
+    estimatedBytes: Math.round(estimated),
+    estimatedFraction: totalBytes > 0 ? 1 - estimated / totalBytes : 0
+  };
+}
+
+/**
+ * CMP-05 — the page a quality preview should show: the one with the most image
+ * area, since that is where a quality judgement can actually be made.
+ *
+ * Ties (a text-only document, where every page has no image at all) fall back to
+ * the page with the most actionable bytes, and then to the first page, so the
+ * preview always has something to render rather than nothing.
+ */
+export function representativePageIndex(plan: CompressionPlan | null | undefined): number {
+  if (!plan || plan.pages.length === 0) return 0;
+  let best = plan.pages[0];
+  for (const page of plan.pages) {
+    if (
+      page.imagePixels > best.imagePixels ||
+      (page.imagePixels === best.imagePixels && page.actionableBytes > best.actionableBytes)
+    ) {
+      best = page;
+    }
+  }
+  return best.pageIndex;
+}

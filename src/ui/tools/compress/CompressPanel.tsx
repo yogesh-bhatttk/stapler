@@ -11,7 +11,7 @@ import { Button } from '../../components/Button';
 import { Field, Select, Slider } from '../../components/Field';
 import { SizeDelta, formatBytes } from '../../components/Feedback';
 import { panelStyles } from '../../shell/OptionsPanel';
-import { compressReport, compressSettings } from './state';
+import { compressMeasurement, compressReport, compressSettings, projectedOutput } from './state';
 import { useEffect } from 'preact/hooks';
 import { useJob } from '../../useJob';
 import { useTranslation } from '../../../core/i18n';
@@ -48,6 +48,11 @@ export function CompressPanel() {
     }, 300);
     return () => clearTimeout(timer);
   }, [settings.dpi, settings.quality]);
+
+  // CMP-05: once the preview has re-encoded the representative page for real,
+  // the projection is re-anchored on those measured bytes instead of the
+  // pre-flight model. The export path keeps its own pre-flight check.
+  const projection = projectedOutput(report, compressMeasurement.value, settings);
 
   const routeCounts = report
     ? report.plan.pages.reduce<Record<string, number>>((counts, page) => {
@@ -90,11 +95,18 @@ export function CompressPanel() {
       {report && (
         <div className={panelStyles.section}>
           <h3 className={panelStyles.title}>{t('Projection')}</h3>
-          <SizeDelta before={report.originalBytes} after={report.estimatedBytes} />
+          <SizeDelta
+            before={report.originalBytes}
+            after={projection ? projection.bytes : report.estimatedBytes}
+          />
           <p className={panelStyles.description}>
-            {t(
-              'Estimated, deliberately cautious. Actual output is measured before saving, and if it is not smaller the original is kept.'
-            )}
+            {projection?.measured
+              ? t(
+                  'Measured from one page re-encoded at these settings in the preview. Actual output is measured before saving, and if it is not smaller the original is kept.'
+                )
+              : t(
+                  'Estimated, deliberately cautious. Actual output is measured before saving, and if it is not smaller the original is kept.'
+                )}
           </p>
 
           {routeCounts && (

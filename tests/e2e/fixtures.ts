@@ -289,6 +289,38 @@ export async function sharedImageDifferentSizesPdf(): Promise<Uint8Array> {
   return doc.save();
 }
 
+/**
+ * Three pages whose image area deliberately climbs: text only, a small image,
+ * then a large one.
+ *
+ * CMP-05's preview claims to show "the page with the most image area", and a
+ * one-page fixture cannot tell that apart from "the first page". Every page
+ * carries a real text layer so the whole document stays on the surgical route
+ * and the preview is judging image quality rather than a rasterised page.
+ */
+export async function imageOnLastPagePdf(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const small = await doc.embedPng(encodePng(photoPixels(400, 300), 400, 300, false));
+  const large = await doc.embedPng(encodePng(photoPixels(1600, 1200), 1600, 1200, false));
+
+  for (let p = 0; p < 3; p++) {
+    const page = doc.addPage([595.28, 841.89]);
+    page.drawText(`Page ${p + 1} of 3`, { x: 40, y: 790, size: 14, font });
+    for (let i = 0; i < 12; i++) {
+      page.drawText(`Body line ${i + 1}: the quick brown fox jumps over the lazy dog.`, {
+        x: 40,
+        y: 758 - i * 18,
+        size: 11,
+        font
+      });
+    }
+    if (p === 1) page.drawImage(small, { x: 40, y: 300, width: 200, height: 150 });
+    if (p === 2) page.drawImage(large, { x: 40, y: 120, width: 450, height: 338 });
+  }
+  return doc.save();
+}
+
 /** Mixed page sizes, for the merge and normalise assertions. */
 export async function mixedSizePdf(): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
