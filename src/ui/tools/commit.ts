@@ -15,6 +15,7 @@ import {
   composeDocument,
   currentDocumentBytes,
   extractDocumentText,
+  extractEmbeddedImages,
   fillFormFields,
   pagesToImageArchive,
   planCompression,
@@ -37,6 +38,7 @@ import type { ToolId } from '../../core/tools';
 import { compressSettings } from './compress/state';
 import { pdfToImageSettings, removeBlanksThreshold, splitSettings } from './state';
 import { extractSettings } from './extract/state';
+import { extractImagesReport, summarize } from './extract-images/state';
 import { formFields, formValues } from './sign/state';
 import { XFA_MESSAGE } from '../../core/pdf/xfa';
 import { pendingRedactions, redactionReport } from './redact/state';
@@ -288,6 +290,43 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
 
     const archive = await pagesToImageArchive(bytes, indices, settings.format, settings.dpi, job);
     await save(doc, archive, `${stem(doc.name)}-${settings.dpi}dpi.zip`);
+  },
+
+  /**
+   * CNV-06. Deliberately extracts from the *source* bytes rather than
+   * `currentDocumentBytes`: composing re-embeds every image through pdf-lib, and
+   * an extraction that promises the document's own bytes must not first put them
+   * through a rebuild. Page indices are the source pages the workspace shows.
+   */
+  'extract-img': async ({ doc, job }) => {
+    const bytes = await currentDocumentBytes(job);
+    const selected = selectedPageKeys.value;
+    const indices = doc.pages
+      .map((page, index) => ({ page, index }))
+      .filter(({ page }) => selected.size === 0 || selected.has(page.key))
+      .map(({ index }) => index);
+
+    const result = await extractEmbeddedImages(bytes, indices, job);
+    extractImagesReport.value = { docId: doc.id, entries: result.entries };
+    const summary = summarize(result.entries);
+
+    if (summary.fileCount === 0) {
+      // Saving an empty ZIP would look like a successful export of nothing.
+      notify('warning', 'No images could be extracted.', {
+        detail:
+          result.entries.length === 0
+            ? 'These pages carry no embedded image XObjects — any pictures you can see are drawn as vectors or text.'
+            : summary.reasons.join(' ')
+      });
+      return;
+    }
+
+    const saved = await save(doc, result.bytes, `${stem(doc.name)}-images.zip`);
+    if (saved && summary.skippedCount > 0) {
+      notify('warning', `${summary.skippedCount} image(s) were left in the document.`, {
+        detail: summary.reasons.join(' ')
+      });
+    }
   },
 
   compress: async ({ doc, job }) => {

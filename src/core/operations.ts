@@ -9,7 +9,7 @@ import { commit } from './history';
  */
 import { processWorker, renderWorker, cvWorker } from './workers';
 import { createJobHandle, type JobOptions } from './workers/protocol';
-import type { RedactionRegion, StampSource } from './workers/process.worker';
+import type { ExtractedImages, RedactionRegion, StampSource } from './workers/process.worker';
 import type { TextRegion } from './workers/render.worker';
 import {
   MEANINGFUL_SAVING,
@@ -678,6 +678,23 @@ export async function pagesToImageArchive(
   // Store, not deflate: PNG and JPEG are already compressed, so deflating them
   // costs seconds and saves nothing.
   return zipSync(files, { level: 0 });
+}
+
+/**
+ * CNV-06 — the embedded image XObjects themselves, as a ZIP.
+ *
+ * Distinct from `pagesToImageArchive` above, which *rasterises pages* through
+ * pdf.js: nothing here is rendered, decoded, or re-encoded where the source is
+ * already a file format, so the extracted JPEG is the same bytes the document
+ * carries. The report says, per image, what happened to it.
+ */
+export async function extractEmbeddedImages(
+  bytes: Uint8Array,
+  pageIndices: number[],
+  options: JobOptions = {}
+): Promise<ExtractedImages> {
+  const job = createJobHandle(options);
+  return processWorker.lease(api => api.extractImages(bytes, pageIndices, job));
 }
 
 import { normalizeSettings } from '../ui/tools/normalize/state';

@@ -70,6 +70,7 @@ test.describe('zero network', () => {
         'remove-blanks',
         'cleanup',
         'pdf-to-img',
+        'extract-img',
         'extract',
         'compress',
         'crop',

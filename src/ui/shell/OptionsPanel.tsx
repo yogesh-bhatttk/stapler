@@ -15,6 +15,7 @@ import { SplitPanel } from '../tools/split/SplitPanel';
 import { BlanksPanel } from '../tools/blanks/BlanksPanel';
 import { PdfToImagePanel } from '../tools/convert/PdfToImagePanel';
 import { ExtractPanel } from '../tools/extract/ExtractPanel';
+import { ExtractImagesPanel } from '../tools/extract-images/ExtractImagesPanel';
 import { CompressPanel } from '../tools/compress/CompressPanel';
 import { CropPanel } from '../tools/crop/CropPanel';
 import { WatermarkPanel } from '../tools/watermark/WatermarkPanel';
@@ -40,6 +41,7 @@ const BODIES: Record<string, () => preact.JSX.Element | null> = {
   'remove-blanks': BlanksPanel,
   'pdf-to-img': PdfToImagePanel,
   extract: ExtractPanel,
+  'extract-img': ExtractImagesPanel,
   compress: CompressPanel,
   crop: CropPanel,
   watermark: WatermarkPanel,

@@ -72,6 +72,7 @@ import {
   PDFHexString,
   PDFTextField,
   degrees,
+  decodePDFRawStream,
   StandardFonts,
   rgb
 } from 'pdf-lib';
@@ -84,6 +85,7 @@ import type { ImagesToPdfOptions } from '../operations';
 import { DOC_HAIRLINE_RGB, DOC_INK_RGB, DOC_REDACT_RGB } from '../doc-colors';
 import { markdownToPdfBytes } from '../markdown-to-pdf';
 import { batesLabel } from '../bates';
+import { encodePng } from '../png';
 import { normalizeRotation } from '../rotation';
 import {
   tokenizeContentStream,
@@ -387,6 +389,16 @@ export interface ProcessJob {
     options?: ImagesToPdfOptions,
     job?: JobHandle
   ): Promise<Uint8Array>;
+  /**
+   * CNV-06 — every embedded image XObject as its own file, in a ZIP. Never
+   * re-renders and never re-encodes; an image it cannot hand over natively is
+   * reported in `entries` rather than written out approximately.
+   */
+  extractImages(
+    bytes: Uint8Array,
+    pageIndices?: number[],
+    job?: JobHandle
+  ): Promise<ExtractedImages>;
   markdownToPdf(markdown: string): Promise<Uint8Array>;
   readMetadata(bytes: Uint8Array): Promise<MetadataFindings>;
   scrubMetadata(bytes: Uint8Array, settings?: ScrubSettings): Promise<Uint8Array>;
@@ -1926,14 +1938,27 @@ function maskKindOf(smask: PDFStream | undefined, mask: unknown): ImageFacts['ma
  * collision-free; a page can also legitimately reference the same image
  * object through more than one name/container, so every match is returned.
  */
+interface ImageRef {
+  dict: PDFDict;
+  key: PDFName;
+  ref: PDFRef;
+  /**
+   * The resource dictionary this image was reached through, needed to resolve a
+   * resource-scoped `/ColorSpace` name (`/CS0`) — see `colorSpaceNameOf`. Only
+   * CNV-06's extractor reads it; CMP-03 matches purely on object number.
+   */
+  resources: PDFDict | undefined;
+}
+
 function collectImageRefs(
   xobjects: PDFDict,
   context: PDFContext,
   visited: Set<number>,
+  resources?: PDFDict,
   depth = 0
-): { dict: PDFDict; key: PDFName; ref: PDFRef }[] {
+): ImageRef[] {
   if (depth > 8) return [];
-  const found: { dict: PDFDict; key: PDFName; ref: PDFRef }[] = [];
+  const found: ImageRef[] = [];
 
   for (const [key, value] of xobjects.entries()) {
     const ref = value instanceof PDFRef ? value : undefined;
@@ -1942,7 +1967,7 @@ function collectImageRefs(
     const subtype = nameOf(stream.dict.get(PDFName.of('Subtype')));
 
     if (subtype === 'Image') {
-      if (ref) found.push({ dict: xobjects, key, ref });
+      if (ref) found.push({ dict: xobjects, key, ref, resources });
       continue;
     }
     if (subtype !== 'Form') continue;
@@ -1957,10 +1982,12 @@ function collectImageRefs(
         ? formResourcesRaw
         : formResourcesRaw instanceof PDFRef
           ? context.lookupMaybe(formResourcesRaw, PDFDict)
-          : undefined;
+          : // A Form with no /Resources of its own inherits the invoking scope,
+            // exactly as `collectImages` already assumes.
+            resources;
     const formXObjects = formResources?.lookupMaybe(PDFName.of('XObject'), PDFDict);
     if (formXObjects) {
-      found.push(...collectImageRefs(formXObjects, context, visited, depth + 1));
+      found.push(...collectImageRefs(formXObjects, context, visited, formResources, depth + 1));
     }
   }
   return found;
@@ -2043,6 +2070,399 @@ function collectImages(
       isImageMask,
       byteLength: stream instanceof PDFRawStream ? stream.contents.length : stream.sizeInBytes()
     });
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Embedded image extraction (CNV-06)
+ * ------------------------------------------------------------------ */
+
+/**
+ * How an image's samples are modelled once its colour space is resolved.
+ *
+ * `unsupported` is a first-class outcome, not an error: CNV-06 extracts *native*
+ * data, and a DeviceCMYK or /Separation raster has no lossless single-file
+ * raster format to land in (PNG cannot carry either). Converting it to RGB would
+ * be a re-encode of exactly the kind this ticket exists to avoid — and, for a
+ * named ink plate, the same destruction `compress-plan.ts` refuses — so the
+ * image is reported and left in the document instead.
+ */
+type ImageColorModel =
+  | { kind: 'gray' }
+  | { kind: 'rgb' }
+  | { kind: 'indexed'; palette: Uint8Array }
+  | { kind: 'unsupported'; reason: string };
+
+/** Bytes behind a `/Indexed` lookup, which is legally a string or a stream. */
+function lookupTableBytes(value: unknown, context: PDFContext): Uint8Array | undefined {
+  let resolved: unknown = value;
+  if (resolved instanceof PDFRef) resolved = context.lookup(resolved);
+  if (resolved instanceof PDFRawStream) {
+    try {
+      return decodePDFRawStream(resolved).decode();
+    } catch {
+      return undefined;
+    }
+  }
+  if (resolved instanceof PDFHexString || resolved instanceof PDFString) {
+    return resolved.asBytes();
+  }
+  return undefined;
+}
+
+/** Component count declared by an `/ICCBased` stream's `/N`. */
+function iccComponents(value: unknown, context: PDFContext): number {
+  let resolved: unknown = value;
+  if (resolved instanceof PDFRef) resolved = context.lookup(resolved);
+  if (resolved instanceof PDFStream) {
+    const n = resolved.dict.get(PDFName.of('N'));
+    if (n instanceof PDFNumber) return n.asNumber();
+  }
+  return 0;
+}
+
+/**
+ * Resolves an image's `/ColorSpace` into the sample model PNG needs.
+ *
+ * Goes further than `colorSpaceNameOf` (which only needs a name for the
+ * compression skip lists) because extraction has to know the component count and,
+ * for `/Indexed`, the actual palette bytes. The same two encodings that function
+ * documents — an indirect reference, and a resource-scoped name — are handled
+ * here for the same reason.
+ */
+function resolveColorModel(
+  value: unknown,
+  resources: PDFDict | undefined,
+  context: PDFContext,
+  depth = 0
+): ImageColorModel {
+  if (depth > 4) return { kind: 'unsupported', reason: 'colour space nested too deeply' };
+  let resolved: unknown = value;
+
+  if (resolved instanceof PDFName) {
+    const csDict = resources?.lookupMaybe(PDFName.of('ColorSpace'), PDFDict);
+    const named = csDict?.get(resolved);
+    if (named !== undefined) resolved = named;
+  }
+  if (resolved instanceof PDFRef) resolved = context.lookup(resolved);
+
+  if (resolved instanceof PDFName) {
+    const name = resolved.asString().replace(/^\//, '');
+    if (name === 'DeviceGray' || name === 'CalGray' || name === 'G') return { kind: 'gray' };
+    if (name === 'DeviceRGB' || name === 'CalRGB' || name === 'RGB') return { kind: 'rgb' };
+    if (name === 'DeviceCMYK' || name === 'CMYK') {
+      return { kind: 'unsupported', reason: 'DeviceCMYK raster (no lossless CMYK raster format)' };
+    }
+    return { kind: 'unsupported', reason: `${name} colour space` };
+  }
+
+  if (!(resolved instanceof PDFArray)) {
+    return { kind: 'unsupported', reason: 'unreadable colour space' };
+  }
+
+  let head: unknown = resolved.get(0);
+  if (head instanceof PDFRef) head = context.lookup(head);
+  const family = head instanceof PDFName ? head.asString().replace(/^\//, '') : 'unknown';
+
+  if (family === 'ICCBased') {
+    const n = iccComponents(resolved.get(1), context);
+    if (n === 1) return { kind: 'gray' };
+    if (n === 3) return { kind: 'rgb' };
+    if (n === 4) {
+      return { kind: 'unsupported', reason: 'ICCBased CMYK raster (4 components)' };
+    }
+    return {
+      kind: 'unsupported',
+      reason: `ICCBased colour space with ${n || 'unknown'} components`
+    };
+  }
+
+  if (family === 'CalGray') return { kind: 'gray' };
+  if (family === 'CalRGB') return { kind: 'rgb' };
+  if (family === 'DeviceGray') return { kind: 'gray' };
+  if (family === 'DeviceRGB') return { kind: 'rgb' };
+
+  if (family === 'Indexed' || family === 'I') {
+    const base = resolveColorModel(resolved.get(1), resources, context, depth + 1);
+    if (base.kind === 'unsupported') {
+      return {
+        kind: 'unsupported',
+        reason: `Indexed image over an unsupported base (${base.reason})`
+      };
+    }
+    if (base.kind === 'indexed') {
+      return { kind: 'unsupported', reason: 'Indexed image over an Indexed base' };
+    }
+    let hival: unknown = resolved.get(2);
+    if (hival instanceof PDFRef) hival = context.lookup(hival);
+    const entries = hival instanceof PDFNumber ? Math.round(hival.asNumber()) + 1 : 0;
+    const table = lookupTableBytes(resolved.get(3), context);
+    if (entries <= 0 || !table) {
+      return { kind: 'unsupported', reason: 'Indexed image with an unreadable palette' };
+    }
+    const components = base.kind === 'rgb' ? 3 : 1;
+    if (table.length < entries * components) {
+      return { kind: 'unsupported', reason: 'Indexed image with a truncated palette' };
+    }
+    // PNG's PLTE is always RGB triples, so a greyscale base is widened by
+    // repeating each value — the same colour, not a converted one.
+    const palette = new Uint8Array(entries * 3);
+    for (let i = 0; i < entries; i++) {
+      if (components === 3) {
+        palette.set(table.subarray(i * 3, i * 3 + 3), i * 3);
+      } else {
+        palette.fill(table[i], i * 3, i * 3 + 3);
+      }
+    }
+    return { kind: 'indexed', palette };
+  }
+
+  return { kind: 'unsupported', reason: `${family} colour space` };
+}
+
+/** `/Decode` as plain numbers, or undefined when the key is absent. */
+function decodeArrayOf(dict: PDFDict, context: PDFContext): number[] | undefined {
+  let value: unknown = dict.get(PDFName.of('Decode'));
+  if (value instanceof PDFRef) value = context.lookup(value);
+  if (!(value instanceof PDFArray)) return undefined;
+  const out: number[] = [];
+  for (let i = 0; i < value.size(); i++) {
+    let entry: unknown = value.get(i);
+    if (entry instanceof PDFRef) entry = context.lookup(entry);
+    out.push(entry instanceof PDFNumber ? entry.asNumber() : Number.NaN);
+  }
+  return out;
+}
+
+/** True when `decode` is the identity mapping for `components` components. */
+function isDefaultDecode(decode: number[] | undefined, components: number): boolean {
+  if (!decode) return true;
+  if (decode.length !== components * 2) return false;
+  for (let i = 0; i < components; i++) {
+    if (decode[i * 2] !== 0 || decode[i * 2 + 1] !== 1) return false;
+  }
+  return true;
+}
+
+/** Filters that are pure byte transforms, i.e. not an image codec. */
+const TRANSPORT_FILTERS = new Set([
+  'FlateDecode',
+  'Fl',
+  'LZWDecode',
+  'LZW',
+  'ASCII85Decode',
+  'A85',
+  'ASCIIHexDecode',
+  'AHx',
+  'RunLengthDecode',
+  'RL'
+]);
+
+/**
+ * Strips the transport filters wrapping a codec payload (`[/ASCII85Decode
+ * /DCTDecode]` is a JPEG inside ASCII85), leaving the codec's own bytes.
+ *
+ * Done by handing pdf-lib a synthetic stream carrying only the wrapper filters,
+ * rather than reimplementing ASCII85/LZW/Flate — the decoders are already there
+ * and already exercised; `decodePDFRawStream` simply refuses to run a chain that
+ * ends in an image codec.
+ */
+function stripTransportFilters(
+  contents: Uint8Array,
+  wrappers: string[],
+  context: PDFContext
+): Uint8Array {
+  if (wrappers.length === 0) return contents;
+  const filters = PDFArray.withContext(context);
+  for (const name of wrappers) filters.push(PDFName.of(name));
+  const dict = PDFDict.withContext(context);
+  dict.set(PDFName.of('Filter'), filters);
+  return decodePDFRawStream(PDFRawStream.of(dict, contents)).decode();
+}
+
+export interface ExtractedImageEntry {
+  pageIndex: number;
+  /** 1-based position of the image in the page's resources, in resource order. */
+  position: number;
+  /** Resource name (`Im1`), for matching the file back to the document. */
+  name: string;
+  objectNumber: number;
+  width: number;
+  height: number;
+  /** ZIP entry name; absent when nothing was written. */
+  fileName?: string;
+  /** Sibling file carrying the image's `/SMask` or stencil `/Mask`, if any. */
+  maskFileName?: string;
+  /** Bytes written for this image (excluding any mask sibling). */
+  byteLength: number;
+  status: 'extracted' | 'duplicate' | 'skipped';
+  /** Why it was skipped, or which file a duplicate points at. Always human-readable. */
+  note?: string;
+}
+
+export interface ExtractedImages {
+  /** A ZIP of every extracted file. Empty ZIP when nothing could be extracted. */
+  bytes: Uint8Array;
+  entries: ExtractedImageEntry[];
+}
+
+interface ExtractedFile {
+  bytes: Uint8Array;
+  /** File extension, without the dot. */
+  ext: string;
+}
+
+type ExtractOutcome = { ok: true; file: ExtractedFile } | { ok: false; reason: string };
+
+/**
+ * The heart of CNV-06: the image object's *own* encoded bytes, wherever the
+ * source format is already a file format, and an exact PNG re-frame where it is
+ * a raw raster.
+ *
+ * Three outcomes, and nothing in between:
+ *
+ *  • `/DCTDecode` → the stream is a complete JFIF/Adobe JPEG. Written out
+ *    byte-for-byte, including a CMYK JPEG's Adobe APP14 marker: no decode
+ *    happens, so nothing can be lost.
+ *  • `/JPXDecode` → likewise a complete JPEG 2000 codestream, written as `.jp2`.
+ *    CMP-03 refuses these because pdf.js cannot re-encode them; extraction can
+ *    hand them over untouched precisely *because* it never decodes them.
+ *  • Transport filters only (Flate/LZW/ASCII85/ASCIIHex/RunLength, or none) →
+ *    the decoded samples are the raw raster, re-framed into PNG at the same bit
+ *    depth, sample order and palette (`core/png.ts`).
+ *
+ * Everything else — JBIG2 (whose stream is an embedded segment sequence with its
+ * globals in a separate object, not a standalone file), CCITT (a fax codestream
+ * with no container), CMYK and /Separation rasters, a non-identity `/Decode` — is
+ * refused with a reason. Following CMP-03's precedent: skip cleanly and report,
+ * never write a file that claims to be the image and is not.
+ */
+function extractImageFile(
+  stream: PDFStream,
+  resources: PDFDict | undefined,
+  context: PDFContext
+): ExtractOutcome {
+  if (!(stream instanceof PDFRawStream)) {
+    return { ok: false, reason: 'the image stream could not be read as raw bytes' };
+  }
+  const dict = stream.dict;
+  const width = numberOf(dict, 'Width', 0);
+  const height = numberOf(dict, 'Height', 0);
+  if (width <= 0 || height <= 0) return { ok: false, reason: 'the image declares no pixels' };
+
+  const filters = filterNamesOf(dict.get(PDFName.of('Filter')), context);
+  const codec = filters.length > 0 ? filters[filters.length - 1] : '';
+  const wrappers = filters.slice(0, -1);
+  const wrappersAreTransport = wrappers.every(name => TRANSPORT_FILTERS.has(name));
+
+  if (codec === 'DCTDecode' || codec === 'DCT' || codec === 'JPXDecode') {
+    if (!wrappersAreTransport) {
+      return { ok: false, reason: `an unsupported filter chain (${filters.join(' → ')})` };
+    }
+    try {
+      const payload = stripTransportFilters(stream.contents, wrappers, context);
+      return {
+        ok: true,
+        file: {
+          // A copy, not a view into the parsed file's buffer: these bytes outlive
+          // the document and are transferred to the main thread.
+          bytes: new Uint8Array(payload),
+          ext: codec === 'JPXDecode' ? 'jp2' : 'jpg'
+        }
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ok: false, reason: `its wrapper filters could not be decoded (${message})` };
+    }
+  }
+
+  if (codec === 'JBIG2Decode') {
+    return {
+      ok: false,
+      reason:
+        'JBIG2 data is an embedded segment sequence whose symbol dictionary lives in a separate /JBIG2Globals object, so it is not a standalone image file'
+    };
+  }
+  if (codec === 'CCITTFaxDecode' || codec === 'CCF') {
+    return {
+      ok: false,
+      reason: 'CCITT fax data is a bare codestream with no image-file container in the PDF'
+    };
+  }
+  if (codec !== '' && !TRANSPORT_FILTERS.has(codec)) {
+    return { ok: false, reason: `an unsupported filter (${codec})` };
+  }
+
+  let samples: Uint8Array;
+  try {
+    samples = decodePDFRawStream(stream).decode();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, reason: `its stream could not be decoded (${message})` };
+  }
+
+  const isImageMask = dict.lookup(PDFName.of('ImageMask')) === PDFBool.True;
+  const decode = decodeArrayOf(dict, context);
+
+  if (isImageMask) {
+    if (decode && !isDefaultDecode(decode, 1) && !(decode.length === 2 && decode[0] === 1)) {
+      return { ok: false, reason: 'a stencil mask with a /Decode array we do not model' };
+    }
+    const inverted = decode?.[0] === 1;
+    // A stencil's 1-bit samples map straight onto a 1-bit greyscale PNG: sample 0
+    // paints (black here), sample 1 leaves the page (white). /Decode [1 0] swaps
+    // that meaning, so the bits are flipped rather than the file being mislabelled.
+    const bits = inverted ? samples.map(byte => byte ^ 0xff) : samples;
+    try {
+      return {
+        ok: true,
+        file: {
+          bytes: encodePng({ width, height, bitDepth: 1, colorType: 0, samples: bits }),
+          ext: 'png'
+        }
+      };
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  const model = resolveColorModel(dict.get(PDFName.of('ColorSpace')), resources, context);
+  if (model.kind === 'unsupported') {
+    return { ok: false, reason: model.reason };
+  }
+
+  const bpc = numberOf(dict, 'BitsPerComponent', 8);
+  if (bpc !== 1 && bpc !== 2 && bpc !== 4 && bpc !== 8 && bpc !== 16) {
+    return { ok: false, reason: `an unsupported bit depth (${bpc})` };
+  }
+  const components = model.kind === 'rgb' ? 3 : 1;
+  if (!isDefaultDecode(decode, components)) {
+    return {
+      ok: false,
+      reason: 'a non-default /Decode array, which remaps sample values on display'
+    };
+  }
+  if (model.kind === 'indexed' && bpc === 16) {
+    return { ok: false, reason: 'a 16-bit indexed image, which PNG cannot express' };
+  }
+
+  try {
+    return {
+      ok: true,
+      file: {
+        bytes: encodePng({
+          width,
+          height,
+          bitDepth: bpc,
+          colorType: model.kind === 'rgb' ? 2 : model.kind === 'indexed' ? 3 : 0,
+          samples,
+          palette: model.kind === 'indexed' ? model.palette : undefined
+        }),
+        ext: 'png'
+      }
+    };
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -2701,6 +3121,154 @@ const api: ProcessJob = {
       page.drawImage(embedded, { x, y, width: drawWidth, height: drawHeight });
     }
     return transfer(await doc.save({ useObjectStreams: true }));
+  },
+
+  /**
+   * CNV-06 — pull every embedded image out as its own file.
+   *
+   * Enumeration is CMP-03's `collectImageRefs` walker, unchanged: page
+   * resources plus nested Form XObjects, matched by object number. What differs
+   * is the destination — `extractImageFile` hands over the image object's own
+   * encoded bytes instead of re-encoding them.
+   *
+   * One file per distinct image *object*, named for the page and position it
+   * first appears at. A logo drawn on 300 pages is one stream in the file and
+   * one file here (the later pages report it as a `duplicate` pointing at that
+   * name), which is both the "encode once, not once per page" rule and the only
+   * sane output for a document that reuses artwork.
+   */
+  async extractImages(bytes, pageIndices, job) {
+    // Not `allowEncrypted`: an encrypted document's streams are ciphertext, so
+    // "extracting" them would write files full of noise. `load` refuses with the
+    // explanation instead.
+    const doc = await load(bytes);
+    const pages = doc.getPages();
+    const wanted =
+      pageIndices && pageIndices.length > 0
+        ? pageIndices.filter(i => i >= 0 && i < pages.length)
+        : pages.map((_, i) => i);
+
+    const files: Record<string, Uint8Array> = {};
+    const entries: ExtractedImageEntry[] = [];
+    /** Object number → what happened the first time this image object was seen. */
+    const done = new Map<
+      number,
+      { fileName: string; byteLength: number } | { refusedBecause: string }
+    >();
+    const pad = Math.max(3, String(pages.length).length);
+
+    for (let i = 0; i < wanted.length; i++) {
+      const pageIndex = wanted[i];
+      await checkpoint(
+        job,
+        i / wanted.length,
+        `Extracting images from page ${pageIndex + 1} of ${pages.length}`
+      );
+
+      const resources = pages[pageIndex].node.Resources();
+      const xobjects = resources?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+      if (!xobjects) continue;
+      const refs = collectImageRefs(xobjects, doc.context, new Set(), resources);
+
+      let position = 0;
+      const seenOnPage = new Set<number>();
+      for (const found of refs) {
+        // The same object reachable twice on one page (two resource names for one
+        // image) is one image on the page, not two.
+        if (seenOnPage.has(found.ref.objectNumber)) continue;
+        seenOnPage.add(found.ref.objectNumber);
+        position += 1;
+
+        const stream = doc.context.lookup(found.ref);
+        if (!(stream instanceof PDFStream)) continue;
+        const name = found.key.asString().replace(/^\//, '');
+        const width = numberOf(stream.dict, 'Width', 0);
+        const height = numberOf(stream.dict, 'Height', 0);
+        const base = {
+          pageIndex,
+          position,
+          name,
+          objectNumber: found.ref.objectNumber,
+          width,
+          height
+        };
+
+        const already = done.get(found.ref.objectNumber);
+        if (already) {
+          entries.push(
+            'fileName' in already
+              ? {
+                  ...base,
+                  fileName: already.fileName,
+                  byteLength: already.byteLength,
+                  status: 'duplicate',
+                  note: `Same image object as ${already.fileName}, already extracted.`
+                }
+              : {
+                  ...base,
+                  byteLength: 0,
+                  status: 'skipped',
+                  note: `Left in the document: it has ${already.refusedBecause}.`
+                }
+          );
+          continue;
+        }
+
+        const outcome = extractImageFile(stream, found.resources, doc.context);
+        if (!outcome.ok) {
+          done.set(found.ref.objectNumber, { refusedBecause: outcome.reason });
+          entries.push({
+            ...base,
+            byteLength: 0,
+            status: 'skipped',
+            note: `Left in the document: it has ${outcome.reason}.`
+          });
+          continue;
+        }
+
+        const stem = `page-${String(pageIndex + 1).padStart(pad, '0')}-image-${String(position).padStart(2, '0')}`;
+        const fileName = `${stem}.${outcome.file.ext}`;
+        files[fileName] = outcome.file.bytes;
+        done.set(found.ref.objectNumber, { fileName, byteLength: outcome.file.bytes.length });
+
+        // Transparency is a separate object in PDF, and the base image's native
+        // bytes cannot carry it (a JPEG has no alpha channel at all). Rather than
+        // re-encode the pair into something that can — which would be exactly the
+        // generational loss this ticket forbids — the mask is written beside it.
+        let maskFileName: string | undefined;
+        let maskNote: string | undefined;
+        const smask = stream.dict.lookupMaybe(PDFName.of('SMask'), PDFStream);
+        const hardMask = stream.dict.lookup(PDFName.of('Mask'));
+        const maskStream = smask ?? (hardMask instanceof PDFStream ? hardMask : undefined);
+        if (maskStream) {
+          const maskOutcome = extractImageFile(maskStream, found.resources, doc.context);
+          if (maskOutcome.ok) {
+            maskFileName = `${stem}-mask.${maskOutcome.file.ext}`;
+            files[maskFileName] = maskOutcome.file.bytes;
+            maskNote = `Transparency is a separate PDF object; it is beside this file as ${maskFileName}.`;
+          } else {
+            maskNote = `This image has transparency that could not be extracted: it has ${maskOutcome.reason}.`;
+          }
+        } else if (hardMask !== undefined) {
+          maskNote =
+            'This image has colour-key transparency, which is defined by sample values rather than by a mask image.';
+        }
+
+        entries.push({
+          ...base,
+          fileName,
+          maskFileName,
+          byteLength: outcome.file.bytes.length,
+          status: 'extracted',
+          note: maskNote
+        });
+      }
+    }
+
+    await checkpoint(job, 0.95, 'Building the archive');
+    // Store, not deflate: JPEG, JPEG 2000, and PNG are already compressed, so
+    // deflating them again costs seconds and saves nothing (CNV-02 does the same).
+    return { bytes: transfer(zipSync(files, { level: 0 })), entries };
   },
 
   async readMetadata(bytes) {

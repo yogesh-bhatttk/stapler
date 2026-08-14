@@ -1110,7 +1110,51 @@ bookmark (OPS-12)".
 
 ### CNV-06 · Extract embedded images — `M` `P1`
 
-**Status: Not started**
+**Status: Done** — An `Extract images` tool (`src/ui/tools/extract-images/`) whose worker
+method `extractImages` reuses CMP-03's own enumeration (`collectImageRefs`, extended to
+carry the resource scope an image's `/ColorSpace` name resolves against) and then does the
+opposite of CMP-03: it hands over the image object's *own* encoded bytes.
+
+- `/DCTDecode` → written as `.jpg` **byte-for-byte** — the stream is already a complete
+  JFIF/Adobe JPEG, so nothing is decoded and no generational loss is possible. Asserted by
+  equality with the source file on disk, not by a similarity threshold.
+- `/JPXDecode` → `.jp2`, likewise untouched. CMP-03 refuses JPX because pdf.js cannot
+  re-encode it; extraction can hand it over precisely *because* it never decodes it.
+- Transport filters only (Flate/LZW/ASCII85/ASCIIHex/RunLength, or none) → an exact PNG
+  re-frame via `src/core/png.ts`: same bit depth (1/2/4/8/16), same sample order, same
+  palette for `/Indexed`, filter byte 0 per scanline so the IDAT payload *is* the PDF's
+  decoded samples. A canvas round trip was rejected for this path — it would promote
+  everything to 8-bit RGBA and cannot express a palette or a 1-bit stencil at all.
+  A wrapper around a codec (`[/ASCIIHexDecode /DCTDecode]`) is unwrapped with pdf-lib's own
+  decoders; the codec payload still is never decoded.
+- Skipped and reported, following CMP-03's precedent rather than converting: JBIG2 (an
+  embedded segment sequence whose globals live in another object — not a standalone file),
+  CCITT (a bare codestream), CMYK and `/Separation` rasters (no lossless single-file raster
+  format; converting to RGB would be the re-encode this ticket exists to avoid), a
+  non-identity `/Decode`, and any stream whose data is shorter than its declared raster.
+- Transparency is written *beside* the image (`page-001-image-01-mask.png`), because a JPEG
+  cannot carry an alpha channel and merging the pair would mean re-encoding both.
+- One file per distinct image *object*, named `page-NNN-image-NN.ext` for the page and
+  position it first appears at; later pages report the reuse. So a logo on 300 pages is
+  decoded once and written once.
+- Encrypted input is refused with the standard message — its streams are ciphertext, so
+  "extracting" them would write files full of noise. Nothing is written when nothing could
+  be extracted: an empty ZIP would read as a successful export of nothing.
+
+Evidence: `tests/unit/extract-images.test.ts` (16 tests) — the AC's two halves are
+"writes a DCTDecode image out byte-for-byte, with no decode step at all",
+"re-frames a Flate raster into PNG with the samples unchanged" (IDAT inflated and compared
+to `decodePDFRawStream(...).decode()`), and "yields one file per image on a page with N
+images" — plus the Indexed palette, SMask sibling, truncated-raster refusal, reuse,
+CMYK/JBIG2/JPX routing, encryption, and progress/cancellation cases. E2E:
+`tests/e2e/tool-flows.spec.ts` → "extract images: the extracted file holds the source image
+samples exactly", which drives the real UI and compares the ZIP's PNG against the image
+stream inside the imported PDF.
+
+**Known limit:** a CMYK or `/Separation` *raster* (as opposed to a CMYK JPEG, which is
+handed over untouched) is reported, never converted — so `cmyk.pdf` extracts nothing and
+says why. That is the deliberate reading of "no re-encode"; a user who wants those pixels
+converted is asking for CNV-02.
 
 - **Requirements:** Pull the original image XObjects out of a PDF byte-for-byte — no
   re-render, no re-encode — distinct from CNV-02 (which rasterizes whole pages). Output
