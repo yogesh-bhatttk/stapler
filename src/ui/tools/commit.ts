@@ -12,6 +12,7 @@ import { internal } from '../../core/errors';
 import {
   applyRedactions,
   compressDocument,
+  compressToTargetSize,
   composeDocument,
   currentDocumentBytes,
   extractDocumentText,
@@ -34,7 +35,13 @@ import {
 import { formatBytes } from '../components/Feedback';
 import type { JobOptions } from '../../core/workers/protocol';
 import type { ToolId } from '../../core/tools';
-import { compressSettings } from './compress/state';
+import {
+  compressMode,
+  compressSettings,
+  compressTarget,
+  compressTargetOutcome,
+  targetSizeBytes
+} from './compress/state';
 import { pdfToImageSettings, removeBlanksThreshold, splitSettings } from './state';
 import { extractSettings } from './extract/state';
 import { formFields, formValues } from './sign/state';
@@ -352,6 +359,68 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   compress: async ({ doc, job }) => {
     const settings = compressSettings.value;
     const original = await currentDocumentBytes(job);
+
+    // DOC-07 — "aim for a size" replaces the manual DPI/quality pair with a
+    // measured search. Everything it reports is the byte length of the file it
+    // is about to write; when the floor cannot reach the target it says so and
+    // asks, rather than saving a file that quietly misses what was asked for.
+    if (compressMode.value === 'target') {
+      const targetBytes = targetSizeBytes(compressTarget.value);
+      if (original.byteLength <= targetBytes) {
+        notify('info', 'Already under the target.', {
+          detail: `${doc.name} is ${formatBytes(original.byteLength)}, which is already at or under ${formatBytes(targetBytes)}. Nothing was changed.`
+        });
+        return;
+      }
+
+      const outcome = await compressToTargetSize(original, targetBytes, job);
+      compressTargetOutcome.value = {
+        targetBytes,
+        achievedBytes: outcome.achievedBytes,
+        originalBytes: outcome.originalBytes,
+        reached: outcome.reachedTarget,
+        settings: outcome.settings,
+        attempts: outcome.trials.length,
+        skipped: outcome.plan?.skipped ?? []
+      };
+      // Show the preview at the settings the search actually landed on.
+      if (outcome.settings) compressSettings.value = { ...outcome.settings };
+
+      if (outcome.keptOriginal) {
+        notify('warning', 'Kept the original file.', {
+          detail:
+            `Every setting Stapler tried produced a larger file than ${formatBytes(outcome.originalBytes)}, ` +
+            'so all of them were discarded and nothing was written. This document is already as small as it usefully gets.',
+          timeout: 0
+        });
+        return;
+      }
+
+      if (!outcome.reachedTarget) {
+        const skipped =
+          outcome.plan && outcome.plan.skipped.length > 0
+            ? ` Some content cannot be re-encoded safely and stays at full size: ${outcome.plan.skipped.join('; ')}.`
+            : '';
+        const proceed = await confirmAction({
+          title: `Could not reach ${formatBytes(targetBytes)}`,
+          body:
+            `The smallest Stapler can produce without destroying this document is ${formatBytes(outcome.achievedBytes)}, ` +
+            `at ${outcome.settings?.dpi} DPI and ${Math.round((outcome.settings?.quality ?? 0) * 100)}% quality — ` +
+            `measured, after ${outcome.trials.length} attempt(s).${skipped} Save that file instead, or keep the original?`,
+          confirmLabel: `Save at ${formatBytes(outcome.achievedBytes)}`,
+          cancelLabel: 'Keep the original'
+        });
+        if (!proceed) return;
+      }
+
+      const savedTarget = await save(doc, outcome.bytes, `${stem(doc.name)}-compressed.pdf`);
+      if (savedTarget && outcome.reachedTarget) {
+        notify('success', `Reached ${formatBytes(outcome.achievedBytes)}`, {
+          detail: `Target was ${formatBytes(targetBytes)}. ${formatBytes(outcome.originalBytes)} → ${formatBytes(outcome.achievedBytes)} at ${outcome.settings?.dpi} DPI, ${Math.round((outcome.settings?.quality ?? 0) * 100)}% quality.`
+        });
+      }
+      return;
+    }
 
     // CMP-04: tell the truth *before* spending the user's time, not after.
     const report = await planCompression(original, settings, job);

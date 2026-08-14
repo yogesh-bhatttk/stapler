@@ -8,10 +8,22 @@ import { Gauge } from 'lucide-preact';
 import { activeDoc } from '../../../core/store';
 import { currentDocumentBytes, planCompression } from '../../../core/operations';
 import { Button } from '../../components/Button';
-import { Field, Select, Slider } from '../../components/Field';
+import { Field, NumberInput, RadioGroup, Select, Slider } from '../../components/Field';
 import { SizeDelta, formatBytes } from '../../components/Feedback';
 import { panelStyles } from '../../shell/OptionsPanel';
-import { compressMeasurement, compressReport, compressSettings, projectedOutput } from './state';
+import {
+  compressMeasurement,
+  compressMode,
+  compressReport,
+  compressSettings,
+  compressTarget,
+  compressTargetOutcome,
+  projectedOutput,
+  targetSizeBytes,
+  type CompressMode,
+  type TargetUnit
+} from './state';
+import { MAX_TARGET_TRIALS } from '../../../core/compress-target';
 import { useEffect } from 'preact/hooks';
 import { useJob } from '../../useJob';
 import { useTranslation } from '../../../core/i18n';
@@ -20,6 +32,24 @@ const DPI_OPTIONS = [
   { value: 72, label: '72 DPI — smallest' },
   { value: 150, label: '150 DPI — recommended' },
   { value: 300, label: '300 DPI — print' }
+] as const;
+
+const MODE_OPTIONS = [
+  {
+    value: 'quality' as CompressMode,
+    label: 'Choose quality',
+    hint: 'You pick the resolution and quality; the preview shows the result.'
+  },
+  {
+    value: 'target' as CompressMode,
+    label: 'Aim for a size',
+    hint: `Stapler tries up to ${MAX_TARGET_TRIALS} real settings and reports the size it actually reached.`
+  }
+] as const;
+
+const UNIT_OPTIONS = [
+  { value: 'MB' as TargetUnit, label: 'MB' },
+  { value: 'KB' as TargetUnit, label: 'KB' }
 ] as const;
 
 export function CompressPanel() {
@@ -61,32 +91,130 @@ export function CompressPanel() {
       }, {})
     : null;
 
+  const mode = compressMode.value;
+  const target = compressTarget.value;
+  const outcome = compressTargetOutcome.value;
+  const targetBytes = targetSizeBytes(target);
+
   return (
     <>
-      <Field label={t('Scanned-page resolution')}>
-        {id => (
-          <Select
-            id={id}
-            value={settings.dpi}
-            options={DPI_OPTIONS}
-            onChange={dpi => (compressSettings.value = { ...settings, dpi })}
-          />
-        )}
-      </Field>
+      <RadioGroup
+        legend={t('How should Stapler compress?')}
+        name="compress-mode"
+        value={mode}
+        options={MODE_OPTIONS.map(option => ({
+          value: option.value,
+          label: t(option.label),
+          hint: t(option.hint)
+        }))}
+        onChange={next => (compressMode.value = next)}
+      />
 
-      <Field label={t('Image quality')} value={`${Math.round(settings.quality * 100)}%`}>
-        {id => (
-          <Slider
-            id={id}
-            min={30}
-            max={95}
-            step={5}
-            value={Math.round(settings.quality * 100)}
-            scale={['Smaller file', 'Better quality']}
-            onChange={value => (compressSettings.value = { ...settings, quality: value / 100 })}
-          />
-        )}
-      </Field>
+      {mode === 'target' && (
+        <>
+          <Field
+            label={t('Target size')}
+            hint={t(
+              'Each attempt is a real re-encode, measured on the bytes it produced. If the lowest setting still misses your target, Stapler says so instead of degrading further.'
+            )}
+          >
+            {id => (
+              <div className={panelStyles.actions}>
+                <NumberInput
+                  id={id}
+                  min={0.05}
+                  step={target.unit === 'MB' ? 0.5 : 50}
+                  value={target.amount}
+                  data-target-amount={target.amount}
+                  onInput={event => {
+                    const amount = Number((event.target as HTMLInputElement).value);
+                    if (Number.isFinite(amount) && amount > 0) {
+                      compressTarget.value = { ...target, amount };
+                    }
+                  }}
+                />
+                <Select
+                  value={target.unit}
+                  options={UNIT_OPTIONS}
+                  ariaLabel={t('Target size unit')}
+                  onChange={unit => (compressTarget.value = { ...target, unit })}
+                />
+              </div>
+            )}
+          </Field>
+          {report && targetBytes >= report.originalBytes && (
+            <p className={panelStyles.note}>
+              {t('This document is already')} {formatBytes(report.originalBytes)} —{' '}
+              {t('smaller than the target, so there is nothing to do.')}
+            </p>
+          )}
+        </>
+      )}
+
+      {outcome && (
+        <div
+          className={panelStyles.section}
+          data-target-outcome={outcome.reached ? 'reached' : 'missed'}
+          data-target-bytes={outcome.targetBytes}
+          data-target-achieved={outcome.achievedBytes}
+          data-target-attempts={outcome.attempts}
+        >
+          <h3 className={panelStyles.title}>{t('Target result')}</h3>
+          <SizeDelta before={outcome.originalBytes} after={outcome.achievedBytes} />
+          <p className={panelStyles.description}>
+            {outcome.reached
+              ? `${t('Reached')} ${formatBytes(outcome.achievedBytes)} — ${t('at or under your target of')} ${formatBytes(outcome.targetBytes)}.`
+              : `${t('Could not reach')} ${formatBytes(outcome.targetBytes)}. ${t('The smallest Stapler can produce without destroying this document is')} ${formatBytes(outcome.achievedBytes)}.`}
+            {outcome.settings
+              ? ` ${t('Settings used:')} ${outcome.settings.dpi} DPI, ${Math.round(outcome.settings.quality * 100)}%. `
+              : ' '}
+            {t('Attempts:')} {outcome.attempts}.
+          </p>
+          {!outcome.reached && outcome.skipped.length > 0 && (
+            <p className={panelStyles.note}>
+              {t('Some content cannot be re-encoded safely, so it stays at full size:')}{' '}
+              {outcome.skipped.join('; ')}.
+            </p>
+          )}
+        </div>
+      )}
+
+      {mode === 'quality' ? (
+        <>
+          <Field label={t('Scanned-page resolution')}>
+            {id => (
+              <Select
+                id={id}
+                value={settings.dpi}
+                options={DPI_OPTIONS}
+                onChange={dpi => (compressSettings.value = { ...settings, dpi })}
+              />
+            )}
+          </Field>
+
+          <Field label={t('Image quality')} value={`${Math.round(settings.quality * 100)}%`}>
+            {id => (
+              <Slider
+                id={id}
+                min={30}
+                max={95}
+                step={5}
+                value={Math.round(settings.quality * 100)}
+                scale={['Smaller file', 'Better quality']}
+                onChange={value => (compressSettings.value = { ...settings, quality: value / 100 })}
+              />
+            )}
+          </Field>
+        </>
+      ) : (
+        // In target mode these two are chosen by the search, not by the user, so
+        // showing them as editable controls would misrepresent what the export
+        // will do. The preview keeps rendering at whatever the search last used.
+        <p className={panelStyles.note}>
+          {t('Resolution and quality are chosen by the search. The preview shows')} {settings.dpi}{' '}
+          DPI, {Math.round(settings.quality * 100)}%.
+        </p>
+      )}
 
       <Button variant="secondary" icon={Gauge} onClick={analyse}>
         {t('Analyse without changing anything')}

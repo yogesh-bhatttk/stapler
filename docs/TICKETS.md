@@ -1193,7 +1193,59 @@ bookmark (OPS-12)".
 
 ### DOC-07 · Compress to a target size — `M` `P1`
 
-**Status: Not started**
+**Status: Done** — An "Aim for a size" preset on the compress tool
+(`compressMode`/`compressTarget` in `src/ui/tools/compress/state.ts`) hands DPI and
+quality to a measured search (`src/core/compress-target.ts`,
+`operations.compressToTargetSize`) instead of to the user. The search bisects a
+nine-rung (DPI, quality) ladder — 300/90% down to a 72 DPI / 30% floor — for the
+*highest-quality* rung whose real output lands at or under the target, capped at
+`MAX_TARGET_TRIALS` (5) full render+encode passes. Every rung it reports on is a
+complete `planCompression` + `compressDocument` run, so each trial independently
+keeps CMP-04's safety net (an output that is not smaller is discarded and the
+original returned) and CMP-01's skip rules; nothing here is derived from
+`estimateSavings`' static model, deliberately — CMP-05 had to re-anchor that model
+on a real re-encode precisely because it is wrong by multiples on content it was
+not fitted to, and a target-size feature built on it would *assert* a size it had
+never produced. The floor rung is probed **first**: it is the one run that can
+settle "impossible" outright, so the honest answer costs one pass rather than
+four. That case is not exotic — CMP-03 still skips six image categories, so on a
+document dominated by JPX/JBIG2/Separation/stencil/colour-key/pre-blended images
+"cannot reach the target" is the ordinary outcome, and the dialog names the
+skipped constructs when it says so. Progress spans the whole search
+("*300 DPI at 75% — Processing page 2*") and the abort signal is checked between
+trials as well as inside them.
+
+Evidence, all against real output byte counts:
+
+- `tests/e2e/compress-preview.spec.ts` → "DOC-07 compress to a target size":
+  - *reaches it*: `scanned_skewed.pdf` (3,224,311 B) with a 300 KB target →
+    `DOC-07 reachable: target 300000 B, achieved 290117 B, file on disk 290117 B,
+    4 attempt(s)`. The number the panel reports is asserted equal to the byte
+    length of the file the export actually wrote, and ≤ the target.
+  - *cannot reach it, honestly*: same fixture with a 5 KB target →
+    `DOC-07 unreachable: target 5000 B, smallest achievable 22567 B after 1
+    attempt(s)`. A "Could not reach 5 KB" dialog states the smallest achievable
+    size; declining it writes **nothing** (asserted: no `download` event), and the
+    panel reports `data-target-outcome="missed"`. The floor answers it in one
+    pass — degrading further is never on offer.
+  - Mode is switched from the keyboard (focus the first radio, `ArrowDown`), and
+    both new controls are a native `<input type=number>` and `<select>` with
+    accessible names, so the registry-driven axe sweep in `a11y-and-perf.spec.ts`
+    covers them (15 passed).
+- `tests/unit/compress-target.test.ts` (7 tests) covers the search order itself:
+  floor-first (one run when impossible), highest-quality rung at or under the
+  target, ≤ 5 trials for *every* target across the ladder, cancellation mid-search
+  (`UserCancelled` after 2 runs, remaining trials never started), and — against a
+  deliberately non-monotone encoder — that success is only ever claimed from a
+  measurement, never inferred from ladder order.
+- `pnpm check` clean, `pnpm test` 302 passed, `pnpm test:e2e compress-preview`
+  7 passed, `tool-flows` 37 passed, `a11y-and-perf` 15 passed.
+
+Known limits, stated rather than papered over: the ladder is fixed, so the best
+achievable size is quantised to its nine rungs (a target between two rungs lands
+on the lower one, not on an interpolated setting); and the search's notion of
+"smallest possible" is the floor rung, not a proof that no encoder could do
+better.
 
 - **Requirements:** A compression preset that takes a target size (e.g. "under 10MB")
   and iterates DPI/quality within CMP-02/CMP-03's existing pipeline to land at or under
