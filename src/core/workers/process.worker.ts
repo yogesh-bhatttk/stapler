@@ -94,6 +94,7 @@ import {
 } from '../pdf/interpreter';
 import type { Rect, GraphicsState, Matrix } from '../pdf/interpreter';
 import { hasXfaMarker, XFA_MESSAGE } from '../pdf/xfa';
+import { encryptPdf, type ProtectionSettings } from '../pdf/encrypt';
 
 /** A page in the output, pointing back at the bytes it came from. */
 export interface PageSource {
@@ -390,6 +391,11 @@ export interface ProcessJob {
   markdownToPdf(markdown: string): Promise<Uint8Array>;
   readMetadata(bytes: Uint8Array): Promise<MetadataFindings>;
   scrubMetadata(bytes: Uint8Array, settings?: ScrubSettings): Promise<Uint8Array>;
+  /**
+   * RED-06 — encrypts the *exported* bytes. The document in the workspace is
+   * never touched; this runs on the copy that is about to be written to disk.
+   */
+  protectDocument(bytes: Uint8Array, settings: ProtectionSettings): Promise<Uint8Array>;
   /**
    * Applies redactions through operator-level content removal, removing intersecting text
    * and image objects from the content stream while keeping the rest of the page selectable.
@@ -2767,6 +2773,10 @@ const api: ProcessJob = {
       customInfo,
       filesystemPaths
     };
+  },
+
+  async protectDocument(bytes, settings) {
+    return encryptPdf(bytes, settings);
   },
 
   async scrubMetadata(bytes, settings) {

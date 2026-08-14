@@ -997,7 +997,31 @@ password-*removal* non-goal.
 
 ### RED-05 · Pattern-based auto-redaction — `M` `P1`
 
-**Status: Not started**
+**Status: Done** — Matching lives in `src/core/patterns.ts` as pure string work (`detectPatterns`
+finds the hits, `locatePatterns` maps them back onto pdf.js text runs), so every false-positive
+question is testable without a PDF. The render worker's new `findPatterns` calls it per page and
+returns `PatternSuggestion`s built from the same `TextRegion` shape `findText` already produces;
+accepting one pushes its regions into the existing `pendingRedactions` array, so the RED-02 commit
+path and the RED-03 verifier cannot tell a suggested mark from a drawn one. Runs are concatenated
+per page (newline at `hasEOL`) before matching, so a value the typesetter split across two runs is
+still found, and one suggestion can carry a rectangle per run.
+
+Category precedence resolves overlaps — an SSN is reported as an SSN, never as a phone number —
+and card numbers must pass Luhn, not just look like a digit run. The phone matcher requires a
+separator between every group, which is what stops the digits inside a card number being
+re-reported.
+
+Verified against a generated fixture whose lines pdf.js actually extracts
+(`tests/unit/redact-patterns.test.ts`): the six planted values surface in document order with the
+right categories and in-page rectangles, the four prose lines around them (`3.14.15`, `12:00:00`,
+`000-00-0000`, `4111-1111-1111-1112`, a 20-digit serial) produce nothing, and accepting only the
+SSN then running `applyRedactions` leaves the export with the SSN gone and the five declined
+values still extractable. `tests/unit/patterns.test.ts` covers the matcher itself (7 cases).
+
+**Known limitation, tested rather than implied:** RED-02 removes the whole text-showing operator a
+mark intersects, so declining a value typeset in the *same* run as an accepted one loses it too.
+The last test in `redact-patterns.test.ts` pins that behaviour down. Values on separate lines are
+unaffected. Narrowing it is RED-02's granularity, not this ticket's.
 
 - **Requirements:** Scan extracted page text for emails, phone numbers, US SSNs, credit
   card numbers (Luhn-validated), and IPv4/IPv6 addresses. Surface each match as a
@@ -1010,7 +1034,46 @@ password-*removal* non-goal.
 
 ### RED-06 · Add password protection on export — `M` `P1`
 
-**Status: Not started**
+**Status: Done** — pdf-lib cannot write encrypted documents and no dependency in `package.json`
+could, so the standard security handler is implemented in `src/core/pdf/encrypt.ts` against
+pdf-lib's low-level object model: load the finished bytes, walk every indirect object, replace each
+string (as a hex string, so ciphertext survives serialisation) and each raw stream with its
+ciphertext, register the `/Encrypt` dictionary *last* so the walk never encrypts it, set a trailer
+`/ID`, and save with `useObjectStreams: false` so there is no xref stream to leave in the clear. No
+new dependency was added — nothing to audit for network calls.
+
+Revision 6 / AES-256 is the algorithm because it needs only primitives WebCrypto offers (SHA-2 and
+AES-CBC) where RC4 revisions need MD5 and RC4 hand-rolled, and because it uses one file key for
+every object rather than a per-object derivation. Two WebCrypto gaps are worked around and
+commented at their call sites: AES-CBC always pads, so the no-padding form drops the trailing
+block; and there is no ECB, so algorithm 10's single-block ECB is done as CBC with a zero IV.
+
+Applied in `applyProtection` inside `save()` in `src/ui/tools/commit.ts`, so every tool's export
+goes through the one rule rather than a forked save path. An encryption failure returns `null` and
+blocks the save outright — writing the plaintext instead would hand back a file the user believes
+is protected. A ZIP export says plainly that no password was applied. The password is typed twice
+and the setting resets when the active document changes, because encrypting a document the user
+did not mean to encrypt is not recoverable.
+
+**How the password requirement was proved** (`tests/unit/encrypt.test.ts`, 8 passing): pdf.js —
+which, unlike pdf-lib, actually implements the security handler and accepts a password — is handed
+the exported bytes. With no password and with a wrong password it rejects with `PasswordException`;
+with the user password and again with the owner password it opens, reports 2 pages, and
+`getTextContent` returns both pages' text verbatim, so the streams genuinely decrypt. The
+document title round-trips through `getMetadata` while the literal string `Board pack` is absent
+from the raw bytes, proving strings are encrypted too. `getPermissions()` reports PRINT present and
+COPY / MODIFY_CONTENTS absent for a print-only export. The plaintext input array is byte-identical
+after the call and still opens with no password. Re-encrypting an encrypted file is refused.
+Independently confirmed outside the JS ecosystem with poppler: `pdfinfo` on the exported file exits
+1 with `Incorrect password`, and `pdfinfo -upw <password>` reports
+`Encrypted: yes (print:yes copy:no change:no addNotes:no algorithm:AES-256)`, with `pdftotext -opw`
+recovering the page text.
+
+**One caveat, stated rather than glossed:** the AC names Chrome's own viewer, and PDFium was not
+exercised directly — headless Chromium does not run the PDF plugin, so the check would have been
+theatre. Two independent implementations of the handler (pdf.js and poppler) were used instead,
+both of which refuse the file without the password and decrypt it with one. PDFium documents
+support for V5/R6 AES-256, so this is expected to hold, but it is inference, not a measurement.
 
 - **Requirements:** Optional owner/user password and a permission set (print, copy,
   modify) applied to the exported PDF only, entirely client-side. Clearly label this as

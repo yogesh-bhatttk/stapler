@@ -40,12 +40,65 @@ import { extractSettings } from './extract/state';
 import { formFields, formValues } from './sign/state';
 import { XFA_MESSAGE } from '../../core/pdf/xfa';
 import { pendingRedactions, redactionReport } from './redact/state';
+import { protection, protectionActive, protectionIssue } from './protect/state';
+import type { ProtectionSettings } from '../../core/pdf/encrypt';
 import { scrubSettings } from './metadata/state';
 import { renderWorker } from '../../core/workers';
 
 /** Strips the extension so suffixes can be appended without doubling `.pdf`. */
 function stem(name: string): string {
   return name.replace(/\.[^.]+$/, '') || 'document';
+}
+
+/**
+ * RED-06 — encrypts what is about to be written, if the user asked for it.
+ *
+ * Returns the bytes to write, or `null` when the export must not happen: an
+ * encryption failure has to stop the save outright, because writing the
+ * unencrypted bytes instead would hand the user a file they believe is protected.
+ * Applied here rather than in each handler so every tool's export is covered by
+ * one rule, and so nothing forks a second save path.
+ */
+async function applyProtection(bytes: Uint8Array, name: string): Promise<Uint8Array | null> {
+  const issue = protectionIssue();
+  if (issue) {
+    notify('danger', 'Nothing was saved.', {
+      detail: `${issue} Fix it in the Metadata & privacy panel, or turn password protection off.`,
+      timeout: 0
+    });
+    return null;
+  }
+  if (!protectionActive()) return bytes;
+
+  if (!name.toLowerCase().endsWith('.pdf')) {
+    // A ZIP has no PDF security handler to carry the password, and encrypting the
+    // members individually is a different feature than the one that was asked for.
+    notify('warning', 'This export is a ZIP, so no password was applied.', {
+      detail: 'Export a single PDF to password-protect it.',
+      timeout: 0
+    });
+    return bytes;
+  }
+
+  const state = protection.value;
+  // The confirmation field and the on/off flag are UI state; only the handler's
+  // own settings cross into the worker.
+  const settings: ProtectionSettings = {
+    userPassword: state.userPassword,
+    ownerPassword: state.ownerPassword,
+    allowPrinting: state.allowPrinting,
+    allowCopying: state.allowCopying,
+    allowModifying: state.allowModifying
+  };
+  try {
+    return await processWorker.lease(api => api.protectDocument(bytes, settings));
+  } catch (err) {
+    notify('danger', 'Could not password-protect the file — nothing was saved.', {
+      detail: `${err instanceof Error ? err.message : String(err)} Your document is unchanged.`,
+      timeout: 0
+    });
+    return null;
+  }
 }
 
 /**
@@ -59,6 +112,12 @@ function stem(name: string): string {
  * surprise this product's error-handling philosophy exists to avoid.
  */
 async function save(doc: StaplerDoc, bytes: Uint8Array, name: string): Promise<boolean> {
+  const protectedBytes = await applyProtection(bytes, name);
+  if (!protectedBytes) return false;
+  const wasProtected = protectedBytes !== bytes;
+  bytes = protectedBytes;
+  const note = (size: string) => (wasProtected ? `${size} · password required to open` : size);
+
   if (doc.sourceHandle?.writable) {
     const overwrite = await confirmAction({
       title: `Save changes to ${doc.name}?`,
@@ -69,7 +128,7 @@ async function save(doc: StaplerDoc, bytes: Uint8Array, name: string): Promise<b
     if (overwrite) {
       const saved = await platform.saveOver(doc.sourceHandle.fileId, bytes);
       if (saved) {
-        notify('success', `Saved ${doc.name}`, { detail: formatBytes(bytes.byteLength) });
+        notify('success', `Saved ${doc.name}`, { detail: note(formatBytes(bytes.byteLength)) });
       } else {
         notify('warning', 'Could not save over the original file.', {
           detail: 'Nothing was overwritten. Try again to save a new file instead.'
@@ -80,7 +139,7 @@ async function save(doc: StaplerDoc, bytes: Uint8Array, name: string): Promise<b
   }
 
   const saved = await platform.saveFileAs(bytes, name);
-  if (saved) notify('success', `Saved ${name}`, { detail: formatBytes(bytes.byteLength) });
+  if (saved) notify('success', `Saved ${name}`, { detail: note(formatBytes(bytes.byteLength)) });
   return saved;
 }
 

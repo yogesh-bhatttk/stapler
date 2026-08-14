@@ -10,7 +10,7 @@ import { commit } from './history';
 import { processWorker, renderWorker, cvWorker } from './workers';
 import { createJobHandle, type JobOptions } from './workers/protocol';
 import type { RedactionRegion, StampSource } from './workers/process.worker';
-import type { TextRegion } from './workers/render.worker';
+import type { PatternSuggestion, TextRegion } from './workers/render.worker';
 import {
   MEANINGFUL_SAVING,
   classifyPages,
@@ -464,6 +464,28 @@ export async function searchForRedaction(
     const { handle } = await api.loadDocument(bytes);
     try {
       return await api.findText(handle, query, matchCase, job);
+    } finally {
+      await api.closeDocument(handle);
+    }
+  });
+}
+
+/**
+ * RED-05 — proposes redaction marks from patterns in the page text.
+ *
+ * Returns suggestions only. Nothing is marked, and nothing is removed, until the
+ * user accepts one in the panel; from that point it is an ordinary mark on the
+ * RED-02 path.
+ */
+export async function scanForPatterns(
+  bytes: Uint8Array,
+  options: JobOptions = {}
+): Promise<PatternSuggestion[]> {
+  const job = createJobHandle(options);
+  return renderWorker.lease(async api => {
+    const { handle } = await api.loadDocument(bytes);
+    try {
+      return await api.findPatterns(handle, job);
     } finally {
       await api.closeDocument(handle);
     }
