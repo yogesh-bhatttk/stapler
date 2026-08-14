@@ -57,6 +57,9 @@ export interface PlatformAdapter {
   /** Re-opens a persisted handle, re-prompting for permission if needed. */
   reopenHandle(id: string): Promise<OpenedFile | null>;
   revokeHandle(id: string): Promise<void>;
+
+  /** Reads an image from the OS clipboard, or null if empty/refused. */
+  readClipboardImage(): Promise<File | null>;
 }
 
 /** `accept` map → the `accept` attribute of an `<input type=file>`. */

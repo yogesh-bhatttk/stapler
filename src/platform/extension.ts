@@ -15,7 +15,8 @@ import {
   revokePersisted,
   saveOverHandle,
   saveViaDownload,
-  saveViaPicker
+  saveViaPicker,
+  readClipboardImage
 } from './file-system';
 
 export const extensionPlatform: PlatformAdapter = {
@@ -31,5 +32,6 @@ export const extensionPlatform: PlatformAdapter = {
   persistHandle: persistFileHandle,
   restoreHandles: listRecent,
   reopenHandle: reopenPersisted,
-  revokeHandle: revokePersisted
+  revokeHandle: revokePersisted,
+  readClipboardImage
 };

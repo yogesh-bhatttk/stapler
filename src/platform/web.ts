@@ -17,7 +17,8 @@ import {
   revokePersisted,
   saveOverHandle,
   saveViaDownload,
-  saveViaPicker
+  saveViaPicker,
+  readClipboardImage
 } from './file-system';
 
 export const webPlatform: PlatformAdapter = {
@@ -38,5 +39,6 @@ export const webPlatform: PlatformAdapter = {
   },
   restoreHandles: async () => (hasFileSystemAccess() ? listRecent() : []),
   reopenHandle: async id => (hasFileSystemAccess() ? reopenPersisted(id) : null),
-  revokeHandle: revokePersisted
+  revokeHandle: revokePersisted,
+  readClipboardImage
 };

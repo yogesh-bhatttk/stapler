@@ -19,7 +19,10 @@ import { ShortcutModal } from '../components/ShortcutModal';
 import { WelcomeModal } from '../components/WelcomeModal';
 import { isCommandPaletteOpen, isShortcutSheetOpen } from '../../core/ui';
 import { canRedo, canUndo, redo, undo } from '../../core/history';
-import { activeDoc, selectAllPages } from '../../core/store';
+import { activeDoc, selectAllPages, insertPages, selectedPageKeys } from '../../core/store';
+import { importFiles } from '../../core/import';
+import { platform } from '../../platform/current';
+import { notify } from '../../core/notify';
 import { readSetting, writeSetting } from '../../core/db';
 import { useUnsavedGuard } from '../useUnsavedGuard';
 import styles from './AppShell.module.css';
@@ -90,6 +93,43 @@ export function AppShell({ children }: { children: ComponentChildren }) {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  useEffect(() => {
+    const onPaste = async (event: ClipboardEvent) => {
+      if (isTypingTarget(event.target)) return;
+
+      const doc = activeDoc.value;
+      if (!doc) return;
+
+      const file = await platform.readClipboardImage();
+      if (!file) {
+        notify('warning', 'No image found on the clipboard.');
+        return;
+      }
+
+      const { imported, failures } = await importFiles([file], undefined, undefined);
+      if (failures.length > 0) {
+        notify('danger', failures[0].message);
+        return;
+      }
+
+      if (imported.length > 0) {
+        let at = doc.pages.length;
+        if (selectedPageKeys.value.size > 0) {
+          const indices = Array.from(selectedPageKeys.value)
+            .map(k => doc.pages.findIndex(p => p.key === k))
+            .filter(i => i >= 0);
+          if (indices.length > 0) {
+            at = Math.max(...indices) + 1;
+          }
+        }
+        insertPages(doc.id, imported[0].pages, at);
+      }
+    };
+
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
   }, []);
 
   return (

@@ -22,6 +22,24 @@ import {
 import type { OpenOptions, OpenedFile, OutputDirectory, RecentEntry } from './index';
 import { deleteHandle, listHandles, readHandle, writeHandle } from '../core/db';
 
+export async function readClipboardImage(): Promise<File | null> {
+  try {
+    const items = await navigator.clipboard.read();
+    for (const item of items) {
+      for (const type of item.types) {
+        if (type.startsWith('image/')) {
+          const blob = await item.getType(type);
+          const extension = type.split('/')[1] || 'png';
+          return new File([blob], `Pasted Image.${extension}`, { type });
+        }
+      }
+    }
+  } catch {
+    // Permission denied or clipboard empty
+  }
+  return null;
+}
+
 /** Handles from this session, so `saveOver` can find the one a file came from. */
 const session = new Map<string, FsaFileHandle>();
 

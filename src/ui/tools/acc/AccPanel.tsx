@@ -58,7 +58,7 @@ export function AccPanel() {
                   <div
                     style={{ display: 'flex', flexDirection: 'column', flex: 1, gap: '0.25rem' }}
                   >
-                    <label style={{ fontSize: '11px', color: '#666' }}>
+                    <label style={{ fontSize: '11px', color: 'var(--ink-subtle)' }}>
                       Page {img.pageIndex + 1} - {img.name}
                     </label>
                     <input
