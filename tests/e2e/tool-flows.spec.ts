@@ -2,9 +2,12 @@ import { expect, test } from '@playwright/test';
 import { PDFArray, PDFDict, PDFDocument, PDFName, PDFRawStream, PDFRef, PDFStream } from 'pdf-lib';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { unzipSync } from 'fflate';
 import {
   acroformPdf,
   BAND_SAMPLE_POINTS,
+  BOOKMARK_CHAPTERS,
+  bookmarkedPdf,
   cmykImagePdf,
   ensureFixture,
   mixedSizePdf,
@@ -308,6 +311,25 @@ async function makePhotoJpeg(
     { width, height, quality }
   );
   return new Uint8Array(Buffer.from(base64, 'base64'));
+}
+
+/** Top-level bookmark titles of a produced file, in `/First`→`/Next` order. */
+async function outlineTitles(bytes: Uint8Array): Promise<string[]> {
+  const doc = await PDFDocument.load(bytes);
+  const outlines = doc.catalog.lookupMaybe(PDFName.of('Outlines'), PDFDict);
+  if (!outlines) return [];
+  const titles: string[] = [];
+  let item = outlines.lookupMaybe(PDFName.of('First'), PDFDict);
+  while (item) {
+    const title = item.lookup(PDFName.of('Title'));
+    titles.push(
+      typeof (title as { decodeText?: () => string }).decodeText === 'function'
+        ? (title as { decodeText: () => string }).decodeText()
+        : String(title)
+    );
+    item = item.lookupMaybe(PDFName.of('Next'), PDFDict);
+  }
+  return titles;
 }
 
 test.describe('tool flows', () => {
@@ -1188,6 +1210,74 @@ test.describe('tool flows', () => {
     expect(await drawnText(bytes)).toContain('ACME Corp');
     expect(await drawnText(bytes)).toContain('Page 1 of 6');
     expect(output.getPageCount()).toBe(6);
+  });
+
+  test('bookmarks: renaming, reordering, and adding survives export (OPS-10)', async ({ page }) => {
+    const file = await ensureFixture('bookmarked-9.pdf', bookmarkedPdf);
+    await importFixture(page, file);
+    await gotoTool(page, 'outline');
+
+    const titles = page.getByRole('textbox', { name: /^Bookmark title/ });
+    await expect(titles).toHaveCount(BOOKMARK_CHAPTERS.length);
+    await expect(titles.nth(1)).toHaveValue('Chapter 2: Costs');
+
+    // Rename the first entry, then reorder the last two from the keyboard alone.
+    await titles.first().fill('Front matter');
+    await page.getByRole('button', { name: 'Move down: Chapter 2: Costs' }).press('Enter');
+
+    // Add one pointing at the page the viewer is on (page 1 by default).
+    await page.getByRole('button', { name: /Add bookmark for page 1/ }).click();
+    await expect(titles).toHaveCount(BOOKMARK_CHAPTERS.length + 1);
+
+    const bytes = await commitAndRead(page, /Export PDF/i);
+    expect(await outlineTitles(bytes)).toEqual([
+      'Front matter',
+      'Appendix',
+      'Chapter 2: Costs',
+      'Page 1'
+    ]);
+    expect((await PDFDocument.load(bytes)).getPageCount()).toBe(9);
+  });
+
+  test('bates: a stamped run is sequential and zero-padded (OPS-11)', async ({ page }) => {
+    const file = await ensureFixture('text-6.pdf', () => textPdf(6));
+    await importFixture(page, file);
+    await gotoTool(page, 'watermark');
+
+    await page.getByRole('checkbox', { name: 'Stamp a Bates number' }).check();
+    await page.getByLabel('Prefix').fill('ACME-');
+    await page.getByLabel('Digits').fill('6');
+    await page.getByLabel('Start at').fill('1');
+
+    const bytes = await commitAndRead(page, /Export PDF/i);
+    // `drawnText` reads page 1; the whole-document sequence is asserted on output
+    // bytes in tests/unit/outline.test.ts.
+    expect(await drawnText(bytes)).toContain('ACME-000001');
+    expect((await PDFDocument.load(bytes)).getPageCount()).toBe(6);
+  });
+
+  test('split: bookmark mode writes one file per top-level bookmark (OPS-12)', async ({ page }) => {
+    const file = await ensureFixture('bookmarked-9.pdf', bookmarkedPdf);
+    await importFixture(page, file);
+    await gotoTool(page, 'split');
+
+    await page.getByRole('radio', { name: 'Split at bookmarks' }).check();
+    await expect(page.getByText(/3 top-level bookmark/)).toBeVisible();
+
+    const bytes = await commitAndRead(page, 'Split / extract');
+    const files = unzipSync(bytes);
+    expect(Object.keys(files).sort()).toEqual([
+      'Appendix.pdf',
+      'Chapter 2- Costs.pdf',
+      'Cover.pdf'
+    ]);
+
+    // The three files' pages union to the nine that went in, with no overlap.
+    let total = 0;
+    for (const entry of Object.values(files)) {
+      total += (await PDFDocument.load(entry)).getPageCount();
+    }
+    expect(total).toBe(9);
   });
 
   test('nup: generates a 2-up layout', async ({ page }) => {

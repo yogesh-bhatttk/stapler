@@ -83,6 +83,7 @@ import { corrupt, encrypted, internal, unsupported } from '../errors';
 import type { ImagesToPdfOptions } from '../operations';
 import { DOC_HAIRLINE_RGB, DOC_INK_RGB, DOC_REDACT_RGB } from '../doc-colors';
 import { markdownToPdfBytes } from '../markdown-to-pdf';
+import { batesLabel } from '../bates';
 import { normalizeRotation } from '../rotation';
 import {
   tokenizeContentStream,
@@ -282,6 +283,54 @@ export interface SplitResult {
   fileCount: number;
 }
 
+/**
+ * OPS-10 — one `/Outlines` entry, flattened to what this codebase can round-trip.
+ *
+ * `pageIndex` is an index into the document's page list, or `-1` when the entry has
+ * no destination this code resolves. That is the same narrow reading OPS-01's
+ * `copyOutlines` documents: a named destination (a name-tree lookup pdf-lib has no
+ * API for) or a non-`GoTo` action is *reported* as unresolved rather than guessed
+ * at, so the editor can say so instead of silently repointing it at page 1.
+ */
+export interface OutlineNode {
+  title: string;
+  pageIndex: number;
+  children: OutlineNode[];
+}
+
+/** OPS-11 — a Bates stamp, resolved to what the drawing code needs. */
+export interface BatesData {
+  prefix: string;
+  digits: number;
+  start: number;
+  /** One of the nine `positionOrigin` grid points, e.g. `bottom-right`. */
+  position: string;
+  fontSize: number;
+}
+
+/**
+ * Late-added, optional composition inputs.
+ *
+ * A bag rather than four more positional parameters: `compose` already takes nine,
+ * and appending to that list means every existing call site (and every test) has to
+ * be re-counted to keep `job` in the right slot. Structured-clones fine over Comlink.
+ */
+export interface ComposeExtras {
+  /**
+   * OPS-10. `undefined` keeps OPS-01's behaviour of carrying the source documents'
+   * outlines through; an array (including an empty one) *replaces* them with exactly
+   * this tree, whose `pageIndex` values index the composed output's pages.
+   */
+  outline?: OutlineNode[];
+  /** OPS-11. Stamped on every page, numbered from `start` in output page order. */
+  bates?: BatesData;
+  /**
+   * OPS-12. One filename per output slice, used instead of `${baseName}-NN.pdf`.
+   * Split only; ignored by `compose`.
+   */
+  fileNames?: string[];
+}
+
 export interface ProcessJob {
   inspect(bytes: Uint8Array): Promise<DocumentFacts>;
   imageInventory(bytes: Uint8Array, job?: JobHandle): Promise<PageImageInventory[]>;
@@ -300,8 +349,11 @@ export interface ProcessJob {
     normalize?: import('../../ui/tools/normalize/state').NormalizeSettings | null,
     nup?: import('../../ui/tools/nup/state').NUpSettings | null,
     annotations?: AnnotationSource[],
-    job?: JobHandle
+    job?: JobHandle,
+    extras?: ComposeExtras
   ): Promise<Uint8Array>;
+  /** OPS-10 — the document's existing outline, as an editable tree. */
+  readOutline(bytes: Uint8Array): Promise<OutlineNode[]>;
   composeSplit(
     pages: PageSource[],
     sources: Record<string, Uint8Array>,
@@ -313,7 +365,8 @@ export interface ProcessJob {
     nup?: import('../../ui/tools/nup/state').NUpSettings | null,
     baseName?: string,
     annotations?: AnnotationSource[],
-    job?: JobHandle
+    job?: JobHandle,
+    extras?: ComposeExtras
   ): Promise<{ isZip: boolean; bytes: Uint8Array }>;
   /**
    * Rebuilds `bytes` with the given pages replaced by rasters and the given image
@@ -622,6 +675,26 @@ async function drawStamps(
 }
 
 /** Cheap content hash, enough to dedupe identical embedded images. */
+/**
+ * A ZIP entry name that has not been used yet.
+ *
+ * OPS-12 names files after bookmark titles, and two chapters legitimately share a
+ * title ("Appendix" twice) — a `Record` keyed by name would silently keep only the
+ * last of them, i.e. lose a slice of the user's document. Collisions get a numeric
+ * suffix instead.
+ */
+function uniqueName(used: Set<string>, preferred: string | undefined, fallback: string): string {
+  const stem = (preferred ?? '').trim() || fallback;
+  let candidate = `${stem}.pdf`;
+  let counter = 2;
+  while (used.has(candidate)) {
+    candidate = `${stem}-${counter}.pdf`;
+    counter += 1;
+  }
+  used.add(candidate);
+  return candidate;
+}
+
 function fingerprintBytes(bytes: Uint8Array): string {
   let h1 = 0x811c9dc5;
   for (let i = 0; i < bytes.length; i++) {
@@ -1019,6 +1092,49 @@ function walkSourceOutline(
   return result;
 }
 
+/**
+ * Reads one level of `/First`→`/Next` siblings as editable `OutlineNode`s (OPS-10).
+ *
+ * Unlike `walkSourceOutline`, nothing is dropped: an entry whose destination this
+ * code cannot resolve comes back with `pageIndex: -1` so the editor can show it and
+ * say what is wrong with it, rather than the entry vanishing from the user's tree.
+ */
+function readOutlineNodes(
+  parent: PDFDict,
+  refIndex: Map<number, number>,
+  visited: Set<PDFDict>
+): OutlineNode[] {
+  const result: OutlineNode[] = [];
+  let cur = parent.lookupMaybe(PDFName.of('First'), PDFDict);
+  while (cur && !visited.has(cur)) {
+    visited.add(cur);
+    const titleValue = cur.lookup(PDFName.of('Title'));
+    const title =
+      titleValue instanceof PDFString || titleValue instanceof PDFHexString
+        ? titleValue.decodeText()
+        : 'Untitled';
+    result.push({
+      title,
+      pageIndex: resolveDestPageIndex(cur, refIndex) ?? -1,
+      children: readOutlineNodes(cur, refIndex, visited)
+    });
+    cur = cur.lookupMaybe(PDFName.of('Next'), PDFDict);
+  }
+  return result;
+}
+
+/**
+ * A title string safe to write back.
+ *
+ * Always hex/UTF-16BE: `PDFString.of` writes its argument between parentheses
+ * without escaping, so a user-typed title containing `)` or `\` would produce a
+ * syntactically broken outline dictionary, and any non-Latin-1 character would be
+ * mangled on the way out.
+ */
+function outlineTitle(text: string): PDFHexString {
+  return PDFHexString.fromText(text);
+}
+
 /** Registers `items` as a `/First`↔`/Next`↔`/Last` sibling chain under `parentRef`. Returns the total item count for `/Count`. */
 function registerOutlineSiblings(
   ctx: PDFContext,
@@ -1031,7 +1147,7 @@ function registerOutlineSiblings(
   let count = 0;
 
   for (const item of items) {
-    const dict = ctx.obj({ Title: PDFString.of(item.title), Parent: parentRef }) as PDFDict;
+    const dict = ctx.obj({ Title: outlineTitle(item.title), Parent: parentRef }) as PDFDict;
     if (item.destPageRef) {
       dict.set(PDFName.of('Dest'), ctx.obj([item.destPageRef, PDFName.of('Fit')]));
     }
@@ -1081,17 +1197,38 @@ function copyOutlines(
     );
     allRetained.push(...retained);
   }
-  if (allRetained.length === 0) return;
+  attachOutline(outDoc, allRetained);
+}
 
+/** Writes `items` as `outDoc`'s `/Outlines`, or leaves the catalog alone if empty. */
+function attachOutline(outDoc: PDFDocument, items: RetainedOutlineItem[]): void {
+  if (items.length === 0) return;
   const ctx = outDoc.context;
   const outlinesDict = ctx.obj({ Type: 'Outlines' }) as PDFDict;
   const outlinesRef = ctx.register(outlinesDict);
-  const { firstRef, lastRef, count } = registerOutlineSiblings(ctx, allRetained, outlinesRef);
+  const { firstRef, lastRef, count } = registerOutlineSiblings(ctx, items, outlinesRef);
   if (!firstRef) return;
   outlinesDict.set(PDFName.of('First'), firstRef);
   outlinesDict.set(PDFName.of('Last'), lastRef!);
   outlinesDict.set(PDFName.of('Count'), PDFNumber.of(count));
   outDoc.catalog.set(PDFName.of('Outlines'), outlinesRef);
+}
+
+/**
+ * OPS-10 — writes a user-authored outline over the composed document.
+ *
+ * `pageIndex` addresses the *output* pages, so an entry whose page was deleted or
+ * whose index is out of range becomes a bare heading rather than a dangling
+ * destination; an entry the editor never resolved (`-1`) stays a heading too.
+ */
+function writeOutline(outDoc: PDFDocument, nodes: OutlineNode[]): void {
+  const pages = outDoc.getPages();
+  const convert = (node: OutlineNode): RetainedOutlineItem => ({
+    title: node.title,
+    destPageRef: pages[node.pageIndex]?.ref,
+    children: node.children.map(convert)
+  });
+  attachOutline(outDoc, nodes.map(convert));
 }
 
 function reattachAcroForm(outDoc: PDFDocument, contributors: PDFDocument[]): void {
@@ -1393,7 +1530,8 @@ async function composePages(
   job: JobHandle | undefined,
   label: string,
   pageOffset: number = 0,
-  globalTotal: number = pages.length
+  globalTotal: number = pages.length,
+  extras: ComposeExtras = {}
 ): Promise<PDFDocument> {
   const outDoc = await PDFDocument.create();
   const getSource = sourceCache(sources);
@@ -1414,6 +1552,12 @@ async function composePages(
   if (headerFooterActive) {
     headerFooterFont = await outDoc.embedStandardFont(StandardFonts.Helvetica);
   }
+
+  // OPS-11. Bold, because a Bates number is an identifier that has to stay legible
+  // on a photocopy — and its own font object, so it is unaffected by whether a
+  // header/footer or watermark happens to be configured too.
+  const bates = extras.bates;
+  const batesFont = bates ? await outDoc.embedStandardFont(StandardFonts.HelveticaBold) : undefined;
 
   const watermarkPages =
     watermarkActive && watermark ? parsePageRange(watermark.pageRange, pages.length) : null;
@@ -1621,6 +1765,17 @@ async function composePages(
       drawHeaderFooter(copied, headerFooterFont, headerFooter, pageOffset + i, globalTotal);
     }
 
+    if (bates && batesFont) {
+      // `pageOffset` is what keeps a split run sequential across its output files:
+      // the numbering follows the whole production set, not each file's own pages.
+      const label = toWinAnsiOrThrow(batesLabel(bates, pageOffset + i), 'Bates number');
+      const { width, height } = copied.getSize();
+      const textWidth = batesFont.widthOfTextAtSize(label, bates.fontSize);
+      const textHeight = batesFont.heightAtSize(bates.fontSize);
+      const { x, y } = positionOrigin(bates.position, width, height, textWidth, textHeight, 24);
+      copied.drawText(label, { x, y, size: bates.fontSize, font: batesFont, color: DOC_INK });
+    }
+
     await drawStamps(outDoc, copied, stampsByPage.get(ref.key) ?? [], fontCache, imageCache);
     await drawAnnotations(outDoc, copied, annotationsByPage.get(ref.key) ?? [], fontCache);
   }
@@ -1633,7 +1788,10 @@ async function composePages(
   }
 
   reattachAcroForm(outDoc, contributors);
-  copyOutlines(outDoc, contributorDocIds, pageRefMap);
+  // An explicit outline (even an empty one, meaning "the user deleted them all")
+  // replaces the carried-through source outlines rather than adding to them.
+  if (extras.outline) writeOutline(outDoc, extras.outline);
+  else copyOutlines(outDoc, contributorDocIds, pageRefMap);
   return outDoc;
 }
 
@@ -2154,7 +2312,18 @@ const api: ProcessJob = {
     return transfer(await doc.save({ useObjectStreams: true }));
   },
 
-  async compose(pages, sources, stamps, watermark, headerFooter, normalize, nup, annotations, job) {
+  async compose(
+    pages,
+    sources,
+    stamps,
+    watermark,
+    headerFooter,
+    normalize,
+    nup,
+    annotations,
+    job,
+    extras
+  ) {
     if (pages.length === 0) throw internal('Nothing to export: the page list is empty');
     const outDoc = await composePages(
       pages,
@@ -2166,10 +2335,20 @@ const api: ProcessJob = {
       nup,
       annotations,
       job,
-      'Composing page'
+      'Composing page',
+      0,
+      pages.length,
+      extras
     );
     await checkpoint(job, 0.95, 'Writing file');
     return transfer(await outDoc.save({ useObjectStreams: true }));
+  },
+
+  async readOutline(bytes) {
+    const doc = await load(bytes);
+    const outlines = doc.catalog.lookupMaybe(PDFName.of('Outlines'), PDFDict);
+    if (!outlines) return [];
+    return readOutlineNodes(outlines, pageRefIndex(doc), new Set<PDFDict>());
   },
 
   async composeSplit(
@@ -2183,9 +2362,16 @@ const api: ProcessJob = {
     nup,
     baseName,
     annotations,
-    job
+    job,
+    extras
   ) {
     if (pages.length === 0) throw internal('Nothing to export: the page list is empty');
+
+    // A whole-document outline cannot be written into a slice — its page indexes
+    // address the input, not this file's pages — so only the Bates stamp (which is
+    // deliberately continuous across the set) crosses into each slice. Source
+    // outlines still carry through per slice via `copyOutlines`, unchanged.
+    const sliceExtras: ComposeExtras = { bates: extras?.bates };
 
     const cuts = [...new Set(boundaries)]
       .filter(b => Number.isInteger(b) && b > 0 && b < pages.length)
@@ -2212,7 +2398,8 @@ const api: ProcessJob = {
         job,
         'Composing page',
         0,
-        pages.length
+        pages.length,
+        sliceExtras
       );
       return {
         bytes: transfer(await outDoc.save({ useObjectStreams: true })),
@@ -2223,6 +2410,7 @@ const api: ProcessJob = {
 
     const files: Record<string, Uint8Array> = {};
     const pad = Math.max(2, String(slices.length).length);
+    const usedNames = new Set<string>();
     let currentOffset = 0;
     for (let i = 0; i < slices.length; i++) {
       await checkpoint(job, i / slices.length, `Writing file ${i + 1} of ${slices.length}`);
@@ -2238,12 +2426,17 @@ const api: ProcessJob = {
         job,
         'Composing page',
         currentOffset,
-        pages.length
+        pages.length,
+        sliceExtras
       );
       currentOffset += slices[i].length;
-      files[`${baseName}-${String(i + 1).padStart(pad, '0')}.pdf`] = await outDoc.save({
-        useObjectStreams: true
-      });
+      files[
+        uniqueName(
+          usedNames,
+          extras?.fileNames?.[i],
+          `${baseName}-${String(i + 1).padStart(pad, '0')}`
+        )
+      ] = await outDoc.save({ useObjectStreams: true });
     }
 
     await checkpoint(job, 0.95, 'Compressing archive');

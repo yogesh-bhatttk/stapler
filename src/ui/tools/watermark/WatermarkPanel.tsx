@@ -1,10 +1,13 @@
 import {
+  batesSettings,
   watermarkSettings,
   headerFooterSettings,
   readWatermarkImage,
   type WatermarkPosition,
   type HeaderFooterAlign
 } from './state';
+import { batesLabel, MAX_BATES_DIGITS } from '../../../core/bates';
+import { Checkbox } from '../../components/Field';
 import { Field, SegmentedControl } from '../../components/Field';
 import { Button } from '../../components/Button';
 import { notifyError } from '../../../core/notify';
@@ -33,6 +36,11 @@ export function WatermarkPanel() {
   const t = useTranslation();
   const settings = watermarkSettings.value;
   const headerFooter = headerFooterSettings.value;
+  const bates = batesSettings.value;
+
+  const updateBates = (updates: Partial<typeof bates>) => {
+    batesSettings.value = { ...bates, ...updates };
+  };
 
   const update = (updates: Partial<typeof settings>) => {
     watermarkSettings.value = { ...settings, ...updates };
@@ -235,6 +243,98 @@ export function WatermarkPanel() {
               />
             )}
           </Field>
+        </>
+      )}
+
+      <div className={styles.sectionDivider} />
+      <h3 className={styles.sectionHeading}>{t('Bates numbering')}</h3>
+      <p className={styles.hint}>
+        {t(
+          'Sequential legal numbering, stamped on every exported page and continuous across a split. Independent of the page numbers above.'
+        )}
+      </p>
+
+      <Checkbox
+        label={t('Stamp a Bates number')}
+        checked={bates.enabled}
+        onChange={enabled => updateBates({ enabled })}
+      />
+
+      {bates.enabled && (
+        <>
+          <Field label={t('Prefix')}>
+            {id => (
+              <input
+                id={id}
+                type="text"
+                value={bates.prefix}
+                onInput={e => updateBates({ prefix: e.currentTarget.value })}
+                placeholder={t('ACME-')}
+                className={styles.input}
+              />
+            )}
+          </Field>
+
+          <Field label={t('Digits')}>
+            {id => (
+              <input
+                id={id}
+                type="number"
+                min="1"
+                max={MAX_BATES_DIGITS}
+                step="1"
+                value={bates.digits}
+                onInput={e =>
+                  updateBates({
+                    digits: Math.min(
+                      MAX_BATES_DIGITS,
+                      Math.max(1, Number(e.currentTarget.value) || 1)
+                    )
+                  })
+                }
+                className={styles.input}
+              />
+            )}
+          </Field>
+
+          <Field label={t('Start at')}>
+            {id => (
+              <input
+                id={id}
+                type="number"
+                min="0"
+                step="1"
+                value={bates.start}
+                onInput={e =>
+                  updateBates({ start: Math.max(0, Number(e.currentTarget.value) || 0) })
+                }
+                className={styles.input}
+              />
+            )}
+          </Field>
+
+          <Field label={t('Bates position')}>
+            {id => (
+              <select
+                id={id}
+                value={bates.position}
+                onChange={e =>
+                  updateBates({ position: e.currentTarget.value as WatermarkPosition })
+                }
+                className={styles.select}
+              >
+                {POSITIONS.map(p => (
+                  <option key={p.value} value={p.value}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            )}
+          </Field>
+
+          <p className={styles.hint}>
+            {t('First page')}: {batesLabel(bates, 0)}
+          </p>
         </>
       )}
 

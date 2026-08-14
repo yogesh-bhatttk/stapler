@@ -104,6 +104,10 @@ export interface ComposeRequest {
   headerFooter?: import('../ui/tools/watermark/state').HeaderFooterSettings;
   normalize?: import('../ui/tools/normalize/state').NormalizeSettings | null;
   nup?: import('../ui/tools/nup/state').NUpSettings | null;
+  /** OPS-10 — replaces the document's outline with this tree, indexed on `pages`. */
+  outline?: import('./workers/process.worker').OutlineNode[];
+  /** OPS-11 — a Bates stamp for every exported page. */
+  bates?: import('./workers/process.worker').BatesData;
 }
 
 /** DOC-05 — compose the current model into output bytes. */
@@ -132,7 +136,8 @@ export async function composeDocument(
       request.normalize,
       request.nup,
       request.layerAnnotations,
-      job
+      job,
+      { outline: request.outline, bates: request.bates }
     )
   );
 }
@@ -140,6 +145,8 @@ export async function composeDocument(
 export interface SplitRequest extends ComposeRequest {
   boundaries: number[];
   baseName: string;
+  /** OPS-12 — one filename stem per output slice, in slice order. */
+  fileNames?: string[];
 }
 
 export async function splitDocument(request: SplitRequest, options: JobOptions = {}) {
@@ -165,9 +172,37 @@ export async function splitDocument(request: SplitRequest, options: JobOptions =
       request.nup,
       request.baseName,
       request.layerAnnotations,
-      job
+      job,
+      { bates: request.bates, fileNames: request.fileNames }
     )
   );
+}
+
+/** OPS-10 — reads a document's existing `/Outlines` tree. */
+export async function readDocumentOutline(bytes: Uint8Array) {
+  return processWorker.lease(api => api.readOutline(bytes));
+}
+
+/**
+ * A filesystem-safe stem for a file named after a bookmark title (OPS-12).
+ *
+ * Path separators, the Windows-reserved `<>:"|?*`, and control characters are
+ * replaced rather than stripped, so two distinct titles stay distinct; a title that
+ * sanitizes to nothing falls back to the caller's default. Length is capped well
+ * under the 255-byte limit every filesystem in play imposes.
+ */
+export function sanitizeFileStem(title: string, fallback: string): string {
+  const cleaned = title
+    // eslint-disable-next-line no-control-regex -- control characters are exactly what must go
+    .replace(/[\x00-\x1f\x7f]/g, ' ')
+    .replace(/[/\\<>:"|?*]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^\.+/, '')
+    .replace(/\.+$/, '')
+    .slice(0, 80)
+    .trim();
+  return cleaned || fallback;
 }
 
 /**
@@ -178,11 +213,26 @@ export async function splitDocument(request: SplitRequest, options: JobOptions =
  * equals the input page set.
  */
 export function splitBoundaries(
-  mode: 'individual' | 'every_n' | 'custom',
+  mode: 'individual' | 'every_n' | 'custom' | 'bookmarks',
   pageCount: number,
-  options: { every?: number; custom?: string } = {}
+  options: { every?: number; custom?: string; bookmarkStarts?: number[] } = {}
 ): number[] {
   if (pageCount <= 1) return [];
+
+  if (mode === 'bookmarks') {
+    // OPS-12: one file per top-level bookmark, so the cuts are the bookmarks' start
+    // pages — minus the first. Anything before the first bookmark (a cover, a table
+    // of contents) belongs to that first file rather than to a nameless extra one,
+    // which is also what makes the output count exactly N for N bookmarks.
+    const starts = [
+      ...new Set(
+        (options.bookmarkStarts ?? []).filter(
+          index => Number.isInteger(index) && index >= 0 && index < pageCount
+        )
+      )
+    ].sort((a, b) => a - b);
+    return starts.slice(1);
+  }
 
   if (mode === 'individual') {
     return Array.from({ length: pageCount - 1 }, (_, i) => i + 1);

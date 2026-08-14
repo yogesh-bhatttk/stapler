@@ -8,7 +8,7 @@
  */
 import { signal } from '@preact/signals';
 
-export type SplitMode = 'extract' | 'individual' | 'every_n' | 'custom';
+export type SplitMode = 'extract' | 'individual' | 'every_n' | 'custom' | 'bookmarks';
 
 export interface SplitSettings {
   mode: SplitMode;
