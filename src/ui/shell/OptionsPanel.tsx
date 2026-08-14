@@ -24,6 +24,7 @@ import { CleanupPanel } from '../tools/cleanup/CleanupPanel';
 import { SignPanel } from '../tools/sign/SignPanel';
 import { RedactPanel } from '../tools/redact/RedactPanel';
 import { MetadataPanel } from '../tools/metadata/MetadataPanel';
+import { OcrPanel } from '../tools/ocr/OcrPanel';
 import { NormalizePanel } from '../tools/normalize/NormalizePanel';
 import { NUpPanel } from '../tools/nup/NUpPanel';
 import { ComparePanel } from '../tools/compare/ComparePanel';
@@ -50,6 +51,7 @@ const BODIES: Record<string, () => preact.JSX.Element | null> = {
   sign: SignPanel,
   redact: RedactPanel,
   metadata: MetadataPanel,
+  ocr: OcrPanel,
   normalize: NormalizePanel,
   nup: NUpPanel,
   compare: ComparePanel,
