@@ -62,6 +62,7 @@ import {
   PDFNumber,
   PDFObjectCopier,
   PDFOptionList,
+  PDFPage,
   PDFRadioGroup,
   PDFRawStream,
   PDFRef,
@@ -146,8 +147,23 @@ export interface ImageFacts {
   bitsPerComponent: number;
   /** `DeviceRGB`, `DeviceCMYK`, `Indexed`, … or `unknown`. */
   colorSpace: string;
-  /** Outermost stream filter, e.g. `DCTDecode`, `JPXDecode`, `JBIG2Decode`. */
+  /**
+   * The *image-defining* filter, e.g. `DCTDecode`, `JPXDecode`, `JBIG2Decode` —
+   * the last entry of a `/Filter` chain, since filters apply in order and it is
+   * the final one that produces the image samples.
+   */
   filter: string;
+  /**
+   * Every filter in the chain, in application order. `/Filter` is legally an
+   * array (`[/ASCII85Decode /JPXDecode]` is what several producers emit), and
+   * reading only its head reported such an image as `ASCII85Decode` — a name no
+   * skip list matches, so a JPX image behind an ASCII85 wrapper was classified
+   * as an ordinary re-encode candidate. Safety checks test the whole chain.
+   *
+   * Optional only so a hand-built `ImageFacts` still type-checks; the inventory
+   * always fills it in.
+   */
+  filters?: string[];
   hasSMask: boolean;
   hasMask: boolean;
   /**
@@ -188,6 +204,21 @@ export interface FormFieldData {
   rects: { pageIndex: number; x: number; y: number; width: number; height: number }[];
 }
 
+/**
+ * A filesystem path found in the document, with the scrub category that removes it.
+ * A Windows user path (`C:\Users\…`) is the single most common accidental disclosure
+ * in a PDF and it hides in several places at once — the Producer string, a custom
+ * Info key a Word plugin wrote, and the XMP packet — so the inspector has to name
+ * *where* it found each one, otherwise the user cannot tell which toggle clears it.
+ */
+export interface MetadataPathFinding {
+  /** Human-readable source, e.g. `Producer` or `SourceFile (custom property)`. */
+  source: string;
+  value: string;
+  /** The `ScrubSettings` key whose removal takes this path with it. */
+  settingKey: keyof ScrubSettings;
+}
+
 export interface MetadataFindings {
   title?: string;
   author?: string;
@@ -205,6 +236,10 @@ export interface MetadataFindings {
   hasPageThumbnails: boolean;
   hasOptionalContent: boolean;
   hasCustomInfo: boolean;
+  /** Every non-standard Info dictionary entry, with its value, so it can be shown. */
+  customInfo: { key: string; value: string }[];
+  /** Filesystem paths found anywhere in the metadata (Info values and the XMP packet). */
+  filesystemPaths: MetadataPathFinding[];
 }
 
 export interface ScrubSettings {
@@ -1640,9 +1675,30 @@ function nameOf(value: unknown): string {
   return 'unknown';
 }
 
-/** `nameOf`, but resolving an indirect reference first — /Filter is legal as `N 0 R`. */
-function nameOfDeref(value: unknown, context: PDFContext): string {
-  return nameOf(value instanceof PDFRef ? context.lookup(value) : value);
+/**
+ * Every filter name in a `/Filter` chain, in application order.
+ *
+ * Replaces a `nameOf`-based reading that collapsed an array to its *first*
+ * entry — the wrong end. A chain applies left to right, so
+ * `[/ASCII85Decode /JPXDecode]` is a JPEG2000 image wrapped in ASCII85, and
+ * reading its head reported `ASCII85Decode`: a name `UNDECODABLE_FILTERS`
+ * cannot match, which routed the image into the surgical re-encode the JPX skip
+ * exists to keep it out of. Each entry is dereferenced individually, since an
+ * array of indirect names is legal too, as is `/Filter 7 0 R` for the array.
+ */
+function filterNamesOf(value: unknown, context: PDFContext): string[] {
+  const resolved: unknown = value instanceof PDFRef ? context.lookup(value) : value;
+  if (resolved === undefined || resolved === null) return [];
+  if (resolved instanceof PDFArray) {
+    const names: string[] = [];
+    for (let i = 0; i < resolved.size(); i++) {
+      let entry: unknown = resolved.get(i);
+      if (entry instanceof PDFRef) entry = context.lookup(entry);
+      names.push(entry instanceof PDFName ? entry.asString().replace(/^\//, '') : 'unknown');
+    }
+    return names;
+  }
+  return [resolved instanceof PDFName ? resolved.asString().replace(/^\//, '') : 'unknown'];
 }
 
 /**
@@ -1809,6 +1865,7 @@ function collectImages(
     const smask = dict.lookupMaybe(PDFName.of('SMask'), PDFStream);
     const mask = dict.lookup(PDFName.of('Mask'));
     const isImageMask = dict.lookup(PDFName.of('ImageMask')) === PDFBool.True;
+    const filters = filterNamesOf(dict.get(PDFName.of('Filter')), doc.context);
 
     images.push({
       name: key.asString().replace(/^\//, ''),
@@ -1820,7 +1877,8 @@ function collectImages(
       // re-encode gate as if it were a photograph.
       bitsPerComponent: numberOf(dict, 'BitsPerComponent', isImageMask ? 1 : 8),
       colorSpace: colorSpaceNameOf(dict.get(PDFName.of('ColorSpace')), resources, doc.context),
-      filter: nameOfDeref(dict.get(PDFName.of('Filter')), doc.context),
+      filter: filters[filters.length - 1] ?? 'unknown',
+      filters,
       hasSMask: dict.get(PDFName.of('SMask')) !== undefined,
       hasMask: dict.get(PDFName.of('Mask')) !== undefined,
       maskKind: maskKindOf(smask, mask),
@@ -1856,6 +1914,71 @@ const JS_KEYS = ['JavaScript', 'JS'] as const;
 
 function catalogHas(doc: PDFDocument, key: string): boolean {
   return doc.catalog.get(PDFName.of(key)) !== undefined;
+}
+
+const STANDARD_INFO_KEYS = [
+  'Title',
+  'Author',
+  'Subject',
+  'Creator',
+  'Producer',
+  'Keywords',
+  'CreationDate',
+  'ModDate'
+] as const;
+
+/** Info key -> the `ScrubSettings` field that removes it. */
+const INFO_KEY_SETTING: Record<string, keyof ScrubSettings> = {
+  Title: 'title',
+  Author: 'author',
+  Subject: 'subject',
+  Creator: 'creator',
+  Producer: 'producer',
+  Keywords: 'keywords',
+  CreationDate: 'creationDate',
+  ModDate: 'modificationDate'
+};
+
+/**
+ * Windows drive paths, UNC shares, and POSIX home paths. Deliberately conservative:
+ * a false positive here is a scary-looking row in the inspector for a string that is
+ * not a path, so the pattern requires a real path separator and at least one segment.
+ *
+ * The drive-letter branch is guarded by a lookbehind because a URL scheme ends the same
+ * way: `https://github.com/…` contains `s://`, and without the guard pdf-lib's own
+ * Producer string was reported as a filesystem path on every document it had ever
+ * written.
+ */
+const PATH_PATTERN =
+  /(?:(?<![A-Za-z])[A-Za-z]:[\\/][^\s"'<>)]{1,200}|\\\\[A-Za-z0-9._-]+\\[^\s"'<>)]{1,200}|\/(?:Users|home)\/[^\s"'<>)]{1,200})/g;
+
+function findPaths(text: string): string[] {
+  if (!text) return [];
+  const out: string[] = [];
+  for (const match of text.matchAll(PATH_PATTERN)) {
+    const value = match[0].replace(/[.,;]+$/, '');
+    if (!out.includes(value)) out.push(value);
+  }
+  return out;
+}
+
+/**
+ * The XMP packet as text, or `''`. The packet is conventionally stored unfiltered, so
+ * the raw contents are read directly and only decoded when a `/Filter` says to; if it
+ * cannot be decoded, presence is still reported by `hasXmp` and only the path scan
+ * loses resolution — never a throw that would break the whole inspection.
+ */
+async function readXmpText(doc: PDFDocument): Promise<string> {
+  const stream = doc.catalog.lookup(PDFName.of('Metadata'));
+  if (!(stream instanceof PDFRawStream)) return '';
+  const raw = stream.getContents();
+  const filter = stream.dict.get(PDFName.of('Filter'));
+  try {
+    const bytes = filter === undefined ? raw : await decodeStream(raw);
+    return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  } catch {
+    return '';
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -2178,8 +2301,35 @@ const api: ProcessJob = {
         // carried across means the image would render opaque — the black box
         // this whole path exists to avoid. The classifier already refuses these,
         // and this is the second lock on the same door: leave the original.
-        const carriable = (value: unknown) => value === undefined || value instanceof PDFRef;
+        //
+        // The value is *resolved* before it is judged. `/Mask` as an array of
+        // colour ranges is a colour-key mask, whose transparency is defined by
+        // exact sample values that a lossy re-encode destroys; written the
+        // ordinary way (`/Mask 12 0 R`, pointing at an array) it is a `PDFRef`,
+        // so an unresolved check called it carriable and copied it verbatim onto
+        // a downscaled JPEG whose samples no longer match any of those ranges.
+        const carriable = (value: unknown) => {
+          if (value === undefined) return true;
+          if (!(value instanceof PDFRef)) return false;
+          return !(source.context.lookup(value) instanceof PDFArray);
+        };
         if (!carriable(smaskRef) || !carriable(maskRef)) continue;
+
+        // A `/Matte` soft mask is pre-blended against a matte colour, and pdf.js
+        // un-blends it while decoding: re-attaching the original mask would tell
+        // a viewer to un-blend data that no longer is. A stencil (`/ImageMask
+        // true`) paints the fill colour through a 1-bit shape and is not a
+        // picture JPEG can carry at all. Both are on the classifier's refuse
+        // list; both are re-checked here so the lock does not depend on the
+        // classifier having reached the same conclusion.
+        const smaskStreamNow =
+          smaskRef instanceof PDFRef
+            ? source.context.lookupMaybe(smaskRef, PDFStream)
+            : smaskRef instanceof PDFStream
+              ? smaskRef
+              : undefined;
+        if (smaskStreamNow?.dict.get(PDFName.of('Matte')) !== undefined) continue;
+        if (oldStream.dict.lookup(PDFName.of('ImageMask')) === PDFBool.True) continue;
 
         const image = await source.embedJpg(encoded.jpeg);
         // `embedJpg` only reserves a reference; the stream itself is written on
@@ -2373,28 +2523,32 @@ const api: ProcessJob = {
       if (page.node.get(PDFName.of('Thumb')) !== undefined) hasPageThumbnails = true;
     }
 
-    let hasCustomInfo = false;
+    const customInfo: { key: string; value: string }[] = [];
+    const filesystemPaths: MetadataPathFinding[] = [];
     const info = doc.context.lookupMaybe(doc.context.trailerInfo.Info, PDFDict);
     if (info) {
-      for (const [key] of info.entries()) {
+      for (const [key, rawValue] of info.entries()) {
         const name = key.asString().replace(/^\//, '');
-        if (
-          ![
-            'Title',
-            'Author',
-            'Subject',
-            'Creator',
-            'Producer',
-            'CreationDate',
-            'ModDate',
-            'Keywords'
-          ].includes(name)
-        ) {
-          hasCustomInfo = true;
-          break;
+        const value = doc.context.lookup(rawValue);
+        // PDFString and PDFHexString share no exported base class, so the readable
+        // form is reached through the two concrete types, as elsewhere in this file.
+        const text =
+          value instanceof PDFString || value instanceof PDFHexString ? value.decodeText() : '';
+        const isStandard = (STANDARD_INFO_KEYS as readonly string[]).includes(name);
+        if (!isStandard) customInfo.push({ key: name, value: text });
+        for (const path of findPaths(text)) {
+          filesystemPaths.push({
+            source: isStandard ? name : `${name} (custom property)`,
+            value: path,
+            settingKey: isStandard ? INFO_KEY_SETTING[name] : 'customInfo'
+          });
         }
       }
     }
+    for (const path of findPaths(await readXmpText(doc))) {
+      filesystemPaths.push({ source: 'XMP packet', value: path, settingKey: 'hasXmp' });
+    }
+    const hasCustomInfo = customInfo.length > 0;
 
     return {
       title: asString(doc.getTitle()),
@@ -2416,7 +2570,9 @@ const api: ProcessJob = {
       hasEmbeddedFiles: names?.get(PDFName.of('EmbeddedFiles')) !== undefined,
       hasPageThumbnails,
       hasOptionalContent: catalogHas(doc, 'OCProperties'),
-      hasCustomInfo
+      hasCustomInfo,
+      customInfo,
+      filesystemPaths
     };
   },
 
@@ -2446,16 +2602,7 @@ const api: ProcessJob = {
     if (info) {
       for (const [key] of info.entries()) {
         const name = key.asString().replace(/^\//, '');
-        const isStandard = [
-          'Title',
-          'Author',
-          'Subject',
-          'Creator',
-          'Producer',
-          'Keywords',
-          'CreationDate',
-          'ModDate'
-        ].includes(name);
+        const isStandard = (STANDARD_INFO_KEYS as readonly string[]).includes(name);
 
         if (name === 'Title' && s.title) info.delete(key);
         else if (name === 'Author' && s.author) info.delete(key);
@@ -2496,14 +2643,53 @@ const api: ProcessJob = {
       }
     }
 
+    await doc.flush();
     const out = await PDFDocument.create();
-    const copied = await out.copyPages(doc, doc.getPageIndices());
-    for (const page of copied) out.addPage(page);
+    /*
+     * One copier for the whole rebuild rather than pdf-lib's per-`copyPages` instance.
+     * Kept catalog entries — an /OCProperties tree, an embedded-file name tree — point
+     * at the same objects the pages point at, and a second copier would clone those
+     * into separate output objects: layer dictionaries that no longer match the /OC
+     * marks left in the page content.
+     */
+    const copier = PDFObjectCopier.for(doc.context, out.context);
+    for (const page of doc.getPages()) {
+      const leaf = copier.copy(page.node);
+      const ref = out.context.register(leaf);
+      out.addPage(PDFPage.of(leaf, ref, out));
+    }
+
+    /*
+     * Carry across the catalog entries the user chose to keep. The rebuild starts from
+     * an empty catalog, so before this every catalog-level toggle was strip-only: an
+     * embedded file, a hidden layer, an open action or the XMP packet was removed
+     * whether or not its checkbox was ticked. Per-item control has to mean both
+     * directions or it is not control.
+     */
+    const carry = (key: string, stripped: boolean | undefined) => {
+      if (stripped) return;
+      const value = doc.catalog.get(PDFName.of(key));
+      if (value !== undefined) out.catalog.set(PDFName.of(key), copier.copy(value));
+    };
+    carry('Metadata', s.hasXmp);
+    carry('OpenAction', s.hasOpenAction);
+    carry('AA', s.hasAdditionalActions);
+    carry('OCProperties', s.hasOptionalContent);
+    // The stripped subtrees were deleted from /Names above, so whatever is left — kept
+    // JavaScript, kept embedded files, and unrelated entries such as /Dests — carries.
+    if (names && names.entries().length > 0) carry('Names', false);
 
     const outInfo =
       out.context.lookup(out.context.trailerInfo.Info, PDFDict) || out.context.obj({});
     if (!out.context.lookupMaybe(out.context.trailerInfo.Info, PDFDict)) {
       out.context.trailerInfo.Info = out.context.register(outInfo);
+    }
+
+    // `PDFDocument.create()` stamps its own Producer/Creator/CreationDate/ModDate, so a
+    // document whose Producer was just stripped came back carrying pdf-lib's instead —
+    // the stripped category was populated again in the output the user inspects.
+    for (const name of STANDARD_INFO_KEYS) {
+      if (s[INFO_KEY_SETTING[name]]) outInfo.delete(PDFName.of(name));
     }
 
     if (info) {

@@ -37,6 +37,21 @@ the application. `.gitignore` allow-lists exactly these files inside `tests/fixt
 - `rtl.pdf` — a minimal hand-built PDF using `Identity-H` to show Arabic text ("مر") whose
   logical and visual byte order differ. Validates bidi handling in text extraction
   (`CNV-04`).
+- `cmyk-text.pdf` — a CMYK image whose `/ColorSpace` is an **indirect** reference
+  (`/ColorSpace 10 0 R`), the case that used to resolve to `unknown` and be re-encoded to
+  RGB anyway (`CMP-03`). Built with ImageMagick.
+- `tiny.jpg` — a 10×210 grayscale JPEG. The extreme aspect ratio is the point: it is what
+  the images-to-PDF orientation and page-fit assertions measure against (`CNV-01`). Node
+  has no JPEG encoder, so unlike the PNG fixtures it cannot be built inside a test.
+- `sample.png` / `sample.webp` / `sample.tiff` — one 240×160 gradient in three encodings,
+  so `DOC-02`'s "accept PNG, JPEG, WebP, TIFF, HEIC" is exercised through the real import
+  pipeline (`tests/e2e/import.spec.ts`) rather than asserted. Built with ImageMagick.
+
+  **HEIC has no fixture.** ImageMagick in this toolchain reads HEIC but cannot write it
+  (`HEIC  r--`), and no other offline encoder here produces one, so the HEIC branch of
+  `core/image.ts` is covered only up to its routing and its failure message — see the
+  honest note on `DOC-02` in `docs/TICKETS.md`. Dropping a real `.heic` file in by hand is
+  the only way to close that gap.
 
 Regenerate any of these (after deleting the file) with `npm run fixtures:static`. The raw
 hand-built ones (`jbig2`, `jpx`, `xfa`, `cjk`, `rtl`) always regenerate offline; the other
@@ -71,6 +86,15 @@ git-ignored — deterministic, so re-running tests reproduces them identically:
   to name a field, so a two-level name is what catches a `/AcroForm` rebuild that dedupes
   only at the tree root. **Must not regress:** after an export the field is still enumerable
   and its typed value is drawn into the page, on every page it appears on (`SGN-03`).
+
+- `metadata-windows-path.pdf` — an author name (`Grace Hopper`) and a Windows user path in
+  the three places a path actually hides: a custom `/SourceFile` Info key, inside the
+  `/Producer` string, and inside the XMP packet — plus a document-level JavaScript action
+  (`metadataLeakPdf`, strings exported as `METADATA_LEAK`). The Info strings are written as
+  hex, not literals, because pdf-lib writes a literal string unescaped and its own parser
+  then reads `C:\Users\…` back as `C:Users…`. **Must not regress (`RED-04`):** the inspector
+  displays the author and every copy of the path before, and after a strip none of them
+  survive anywhere in the decompressed output bytes.
 
 `tests/e2e/fixtures.ts` also exports `largePdf` (300 pages), `rotatedPdf` (90/180/270°
 pages), `acroformPdf` (fillable text field + checkbox), and `corruptPdf` (truncated PDF) —

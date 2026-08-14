@@ -24,7 +24,8 @@ export default defineConfig({
   webServer: {
     // Preview the *built* site, not the dev server: the dev server injects its own
     // websocket client, so a zero-network assertion against it would be meaningless.
-    command: 'npm run build:web && npx vite preview --port 4173 --strictPort',
+    command:
+      'BUILD_TARGET=web pnpm exec vite build && pnpm exec vite preview --port 4173 --strictPort',
     port: 4173,
     reuseExistingServer: false,
     timeout: 180_000

@@ -8,6 +8,8 @@ import {
   cmykImagePdf,
   ensureFixture,
   mixedSizePdf,
+  METADATA_LEAK,
+  metadataLeakPdf,
   mixedTextImagePdf,
   OVERSIZED_MASK_FIXTURE,
   oversizedMaskPdf,
@@ -182,6 +184,41 @@ async function drawnText(bytes: Uint8Array): Promise<string> {
   const xobjects = page.node.Resources()?.lookupMaybe(PDFName.of('XObject'), PDFDict);
   for (const [, ref] of xobjects?.entries() ?? []) all += decode(doc.context.lookup(ref));
   return all;
+}
+
+/**
+ * Every string anywhere in a produced file: the raw bytes, every stream decompressed
+ * (object streams included, which is where the Info dictionary ends up), and the
+ * readable form of every hex literal. RED-04 asks for absence from the *bytes*, and a
+ * value that merely stopped being referenced is still a disclosure.
+ */
+async function allStrings(bytes: Uint8Array): Promise<string> {
+  const { inflateSync } = await import('node:zlib');
+  let text = Buffer.from(bytes).toString('latin1');
+  const doc = await PDFDocument.load(bytes, { updateMetadata: false });
+  for (const [, obj] of doc.context.enumerateIndirectObjects()) {
+    if (!(obj instanceof PDFStream)) continue;
+    const raw = Buffer.from((obj as PDFRawStream).contents ?? []);
+    const isFlate = String(obj.dict.get(PDFName.of('Filter'))) === '/FlateDecode';
+    try {
+      text += (isFlate ? inflateSync(raw) : raw).toString('latin1');
+    } catch {
+      // Undecodable stream: its raw bytes are already in `text` from the file scan.
+    }
+  }
+  let decoded = text;
+  for (const match of text.matchAll(/<([0-9A-Fa-f\s]+)>/g)) {
+    const hex = match[1].replace(/\s+/g, '');
+    for (const width of [2, 4]) {
+      if (hex.length % width !== 0) continue;
+      let out = '';
+      for (let i = 0; i < hex.length; i += width) {
+        out += String.fromCharCode(parseInt(hex.slice(i, i + width), 16));
+      }
+      decoded += `\n${out}`;
+    }
+  }
+  return decoded;
 }
 
 /**
@@ -742,6 +779,46 @@ test.describe('tool flows', () => {
     await page.getByRole('button', { name: /Inspect this document/ }).click();
     // pdf-lib stamps a Producer, so there is always at least one finding to show.
     await expect(page.getByText(/Producer|Nothing identifying/)).toBeVisible({ timeout: 30_000 });
+  });
+
+  /**
+   * RED-04's acceptance criteria, end to end: the author name and the Windows user
+   * path are on screen before, and gone from the exported bytes after.
+   */
+  test('metadata: an author and a Windows path are shown, then stripped from the bytes', async ({
+    page
+  }) => {
+    const file = await ensureFixture('metadata-windows-path.pdf', metadataLeakPdf);
+    await importFixture(page, file);
+    await gotoTool(page, 'metadata');
+
+    await page.getByRole('button', { name: /Inspect this document/ }).click();
+
+    // Displayed before: the author, both copies of the path, and the JavaScript.
+    await expect(page.getByText(METADATA_LEAK.author).first()).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText(METADATA_LEAK.sourcePath).first()).toBeVisible();
+    await expect(page.getByText(METADATA_LEAK.producerPath).first()).toBeVisible();
+    await expect(page.getByRole('checkbox', { name: 'Embedded JavaScript' })).toBeChecked();
+
+    // Per-item control: unticking an item and re-ticking it via "Select all" both work
+    // through the keyboard alone.
+    const authorBox = page.getByRole('checkbox', { name: 'Author' });
+    await authorBox.focus();
+    await page.keyboard.press('Space');
+    await expect(authorBox).not.toBeChecked();
+    await page.getByRole('button', { name: 'Select all' }).click();
+    await expect(authorBox).toBeChecked();
+
+    const output = await commitAndRead(page, 'Strip & export');
+
+    // Absent after, in the produced bytes — the whole file, decompressed.
+    const text = await allStrings(output);
+    expect(text).not.toContain(METADATA_LEAK.author);
+    expect(text).not.toContain('ghopper');
+    expect(text).not.toContain('board-pack.docx');
+    const scrubbed = await PDFDocument.load(output);
+    expect(scrubbed.getPageCount()).toBe(1);
+    expect(scrubbed.getAuthor()).toBeUndefined();
   });
 
   test('pdf to images: exports a ZIP at the chosen resolution', async ({ page }) => {

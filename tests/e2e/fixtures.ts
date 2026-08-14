@@ -2,6 +2,7 @@ import {
   PDFDict,
   PDFDocument,
   PDFName,
+  PDFHexString,
   PDFRef,
   StandardFonts,
   concatTransformationMatrix,
@@ -633,5 +634,90 @@ export async function oversizedMaskPdf(): Promise<Uint8Array> {
     }
   );
   drawRawImage(page, colourRef, 'ImStrip', box);
+  return doc.save();
+}
+
+/* ------------------------------------------------------------------ *
+ * RED-04 — metadata disclosure fixture
+ * ------------------------------------------------------------------ */
+
+/**
+ * The exact strings the metadata tests assert on, exported so the unit test, the
+ * e2e test, and the generator cannot drift apart.
+ */
+export const METADATA_LEAK = {
+  author: 'Grace Hopper',
+  /** Lives in a custom Info key, the way a Word/Acrobat plugin writes it. */
+  sourcePath: 'C:\\Users\\ghopper\\Documents\\Q3\\board-pack.docx',
+  /** A second copy inside the Producer string — the one users never expect. */
+  producerPath: 'C:\\Users\\ghopper\\AppData\\Local\\Acme\\engine.dll',
+  /** A third copy inside the XMP packet, which survives an Info-only scrub. */
+  xmpPath: 'C:\\Users\\ghopper\\Desktop\\drafts',
+  javascript: 'app.alert("stapler fixture");'
+} as const;
+
+/**
+ * A document whose metadata carries an author name and a Windows user path in the
+ * three places a path actually hides — a custom Info key, the Producer string, and
+ * the XMP packet — plus a document-level JavaScript action. RED-04's acceptance
+ * criteria are asserted against this file.
+ */
+export async function metadataLeakPdf(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage([595.28, 841.89]);
+  page.drawText('Quarterly board pack', { x: 56, y: 780, size: 18, font });
+  page.drawText('The body text is unrelated to the metadata under test.', {
+    x: 56,
+    y: 740,
+    size: 11,
+    font
+  });
+
+  doc.setTitle('Q3 board pack');
+  doc.setAuthor(METADATA_LEAK.author);
+  doc.setCreator('Acme Report Writer 4.2');
+  doc.setProducer(`Acme PDF Engine (${METADATA_LEAK.producerPath})`);
+
+  const info = doc.context.lookup(doc.context.trailerInfo.Info, PDFDict);
+  // A hex string, not `PDFString.of`: pdf-lib writes a literal string verbatim without
+  // escaping backslashes, so `C:\Users\…` would come back out of its own parser as
+  // `C:Usersghopper…` (the `\U`/`\b` sequences swallowed). Real producers write the
+  // Info dictionary as UTF-16 hex, which is also what pdf-lib's own setters emit.
+  info.set(PDFName.of('SourceFile'), PDFHexString.fromText(METADATA_LEAK.sourcePath));
+
+  // XMP, stored unfiltered as the convention is, so a viewer (and the inspector)
+  // can read the packet without decoding it.
+  const xmp = `<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:xmp="http://ns.adobe.com/xap/1.0/">
+   <dc:creator><rdf:Seq><rdf:li>${METADATA_LEAK.author}</rdf:li></rdf:Seq></dc:creator>
+   <xmp:CreatorTool>Acme Report Writer 4.2</xmp:CreatorTool>
+   <xmp:Label>${METADATA_LEAK.xmpPath}</xmp:Label>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>`;
+  const xmpRef = doc.context.register(
+    doc.context.stream(xmp, { Type: 'Metadata', Subtype: 'XML' })
+  );
+  doc.catalog.set(PDFName.of('Metadata'), xmpRef);
+
+  // Document-level JavaScript, reached through the Names tree the way Acrobat writes it.
+  const actionRef = doc.context.register(
+    doc.context.obj({
+      Type: 'Action',
+      S: 'JavaScript',
+      JS: PDFHexString.fromText(METADATA_LEAK.javascript)
+    })
+  );
+  const jsTree = doc.context.obj({
+    Names: [PDFHexString.fromText('StaplerFixture'), actionRef]
+  });
+  const names = doc.context.obj({ JavaScript: jsTree });
+  doc.catalog.set(PDFName.of('Names'), names);
+
   return doc.save();
 }

@@ -77,10 +77,16 @@ export interface ClassifyOptions {
 }
 
 function imageIsSafe(image: ImageFacts): { safe: boolean; reason?: string } {
-  if (UNDECODABLE_FILTERS.has(image.filter)) {
+  // The whole `/Filter` chain, not just the name at its head: filters apply in
+  // order, so `[/ASCII85Decode /JPXDecode]` is a JPEG2000 image wrapped in
+  // ASCII85. Testing only the first entry reported that as `ASCII85Decode`,
+  // which matches nothing here, and the image went down the surgical path this
+  // list exists to keep it out of.
+  const undecodable = (image.filters ?? [image.filter]).find(name => UNDECODABLE_FILTERS.has(name));
+  if (undecodable) {
     return {
       safe: false,
-      reason: `${image.filter} image (decoder output cannot be re-encoded safely)`
+      reason: `${undecodable} image (decoder output cannot be re-encoded safely)`
     };
   }
   if (UNSAFE_COLOR_SPACES.has(image.colorSpace)) {
@@ -112,6 +118,29 @@ function imageIsSafe(image: ImageFacts): { safe: boolean; reason?: string } {
     return { safe: false, reason: `${image.bitsPerComponent}-bit image` };
   }
   return { safe: true };
+}
+
+/**
+ * The subset of `images` not already accounted for, marking each as counted.
+ *
+ * The same image object reached from ten pages is one stream in the file and one
+ * re-encode in the output, so its bytes belong in the document's actionable
+ * total exactly once; counting it per page inflated both that total and the
+ * pre-flight saving estimate built from it. An image with no object number (a
+ * direct stream, which cannot be replaced at all) is counted where it appears.
+ */
+function countOnce(images: ImageFacts[], counted: Set<number>): ImageFacts[] {
+  const fresh: ImageFacts[] = [];
+  for (const image of images) {
+    if (image.objectNumber < 0) {
+      fresh.push(image);
+      continue;
+    }
+    if (counted.has(image.objectNumber)) continue;
+    counted.add(image.objectNumber);
+    fresh.push(image);
+  }
+  return fresh;
 }
 
 /** Stored pixels per point, i.e. the effective DPI of an image on the page. */
@@ -157,10 +186,68 @@ export function classifyPages(
   const skipped = new Set<string>();
   let actionableBytes = 0;
 
+  const hasTextOn = (pageIndex: number) =>
+    (textByPage.get(pageIndex)?.charCount ?? 0) >= MEANINGFUL_TEXT_CHARS;
+
+  /*
+   * Safety is a property of the image *object*, not of the page it appears on,
+   * and has to be settled document-wide before any page is routed.
+   *
+   * `rebuildCompressed` replaces an XObject by object number, so the replacement
+   * reaches every page referencing it. Judging safety per page therefore lets
+   * one page's verdict override another's: an image's `/ColorSpace` can be a
+   * resource-scoped *name* (`/CS0`) resolved against the resources of whichever
+   * page draws it, so a `/Separation` plate named on page 1 and drawn again on
+   * page 2 through resources that do not name it resolved to `Separation` on
+   * page 1 (correctly refused) and to `CS0` on page 2 (silently a candidate) —
+   * and page 2 winning flattened the ink plate to RGB for the whole document,
+   * the exact outcome this list exists to prevent. Unsafe anywhere is now unsafe
+   * everywhere.
+   */
+  const unsafeReasonByObject = new Map<number, string>();
+  for (const page of inventory) {
+    for (const image of page.images) {
+      const verdict = imageIsSafe(image);
+      if (!verdict.safe && verdict.reason && image.objectNumber >= 0) {
+        unsafeReasonByObject.set(image.objectNumber, verdict.reason);
+      }
+    }
+  }
+  const safetyOf = (image: ImageFacts): { safe: boolean; reason?: string } => {
+    const shared =
+      image.objectNumber >= 0 ? unsafeReasonByObject.get(image.objectNumber) : undefined;
+    return shared ? { safe: false, reason: shared } : imageIsSafe(image);
+  };
+
+  const oversampled = (image: ImageFacts, pageWidth: number, pageHeight: number) =>
+    effectiveDpi(image, pageWidth, pageHeight) > options.rasterDpi * MIN_DOWNSCALE_RATIO;
+
+  /*
+   * Candidacy is document-wide for the same reason. A shared image is re-encoded
+   * once, at the largest size any page displays it at — but that size is only
+   * ever measured (in `render.worker.ts`) on the pages that list the image in
+   * `reencode`. If page A over-samples it and page B, a larger page, does not,
+   * listing it on page A alone sized the single replacement for page A and left
+   * page B's larger placement silently inheriting that downscale. Listing it on
+   * every page that carries it lets "largest use wins" see every use.
+   */
+  const candidateObjects = new Set<number>();
+  for (const page of inventory) {
+    if (!hasTextOn(page.pageIndex)) continue;
+    for (const image of page.images) {
+      if (image.objectNumber < 0) continue;
+      if (!safetyOf(image).safe) continue;
+      if (oversampled(image, page.width, page.height)) candidateObjects.add(image.objectNumber);
+    }
+  }
+
+  /** Object numbers whose bytes have already been added to the totals. */
+  const counted = new Set<number>();
+
   for (const page of inventory) {
     const census = textByPage.get(page.pageIndex);
-    const hasText = (census?.charCount ?? 0) >= MEANINGFUL_TEXT_CHARS;
-    const safety = page.images.map(image => ({ image, ...imageIsSafe(image) }));
+    const hasText = hasTextOn(page.pageIndex);
+    const safety = page.images.map(image => ({ image, ...safetyOf(image) }));
     for (const entry of safety) {
       if (!entry.safe && entry.reason) skipped.add(entry.reason);
     }
@@ -179,7 +266,7 @@ export function classifyPages(
         });
         continue;
       }
-      const bytes = page.images.reduce((n, i) => n + i.byteLength, 0);
+      const bytes = countOnce(page.images, counted).reduce((n, i) => n + i.byteLength, 0);
       actionableBytes += bytes;
       pages.push({
         pageIndex: page.pageIndex,
@@ -194,10 +281,12 @@ export function classifyPages(
 
     const candidates = safety.filter(entry => {
       if (!entry.safe) return false;
-      // Only worth re-encoding if it is meaningfully over-sampled for the target.
-      return (
-        effectiveDpi(entry.image, page.width, page.height) > options.rasterDpi * MIN_DOWNSCALE_RATIO
-      );
+      // Only worth re-encoding if it is meaningfully over-sampled for the target
+      // *on some page* — a shared image is judged once, document-wide, so every
+      // page carrying it reports it and its largest placement decides the size.
+      return entry.image.objectNumber >= 0
+        ? candidateObjects.has(entry.image.objectNumber)
+        : oversampled(entry.image, page.width, page.height);
     });
 
     if (candidates.length === 0) {
@@ -216,10 +305,14 @@ export function classifyPages(
       continue;
     }
 
-    const bytes = candidates.reduce((n, entry) => n + entry.image.byteLength, 0);
+    const fresh = countOnce(
+      candidates.map(entry => entry.image),
+      counted
+    );
+    const bytes = fresh.reduce((n, image) => n + image.byteLength, 0);
     actionableBytes += bytes;
-    const targetPixels = candidates.reduce(
-      (n, entry) => n + targetPixelCount(entry.image, page.width, page.height, options.rasterDpi),
+    const targetPixels = fresh.reduce(
+      (n, image) => n + targetPixelCount(image, page.width, page.height, options.rasterDpi),
       0
     );
     pages.push({

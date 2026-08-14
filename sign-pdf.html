@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sign PDF — Stapler</title>
+    <meta
+      name="description"
+      content="Sign and fill PDFs in your browser: a stamped signature, text, dates, and check marks, with no upload and no account. Try it right on this page."
+    />
+    <link rel="canonical" href="/sign-pdf" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Sign PDF — Stapler" />
+    <meta
+      property="og:description"
+      content="Place a signature, text, dates, and check marks on a PDF, entirely on your device."
+    />
+    <link rel="icon" href="/icons/icon-32.png" />
+  </head>
+  <body>
+    <a class="landingSkipLink" href="#tool">Skip to the sign tool</a>
+
+    <header class="landingHero">
+      <div class="landingHeroInner">
+        <p class="landingEyebrow">Stapler · Offline PDF tools</p>
+        <h1 class="landingTitle">Sign and fill PDFs on your own device</h1>
+        <p class="landingSubtitle">
+          Place a stamped signature, typed text, dates, and check marks anywhere on the page.
+          Existing form fields are detected and filled directly — nothing is uploaded to sign it.
+        </p>
+        <div class="landingCtaRow">
+          <button type="button" class="landingCtaPrimary" disabled>
+            Install from the Chrome Web Store — coming soon
+          </button>
+          <a class="landingCtaSecondary" href="#tool">Use it now, no install needed</a>
+        </div>
+        <p class="landingCtaNote">
+          Works fully on this page. No upload, no account, no daily limit.
+        </p>
+      </div>
+    </header>
+
+    <ul class="landingFeatures">
+      <li class="landingFeatureCard">
+        <h2 class="landingFeatureTitle">Nothing leaves your device</h2>
+        <p class="landingFeatureBody">
+          A signature is sensitive. It is drawn or typed and stamped locally — never sent to a
+          server to be "processed."
+        </p>
+      </li>
+      <li class="landingFeatureCard">
+        <h2 class="landingFeatureTitle">Fills real form fields</h2>
+        <p class="landingFeatureBody">
+          Existing AcroForm text fields, dates, and checkboxes are detected and filled in place, not
+          just drawn over.
+        </p>
+      </li>
+      <li class="landingFeatureCard">
+        <h2 class="landingFeatureTitle">Reusable signature</h2>
+        <p class="landingFeatureBody">
+          Draw or type your signature once and stamp it again on later pages and documents.
+        </p>
+      </li>
+    </ul>
+
+    <section class="landingAppSection">
+      <h2 class="landingAppHeading" id="tool">Try sign & fill right here</h2>
+      <div id="app"></div>
+    </section>
+
+    <noscript>
+      Stapler's tools run in your browser and need JavaScript enabled to work. Everything still runs
+      locally — nothing is ever sent to a server.
+    </noscript>
+
+    <script type="module" src="/src/ui/landing/sign-pdf.entry.ts"></script>
+  </body>
+</html>

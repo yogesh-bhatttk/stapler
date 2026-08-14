@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Compress PDF — Stapler</title>
+    <meta
+      name="description"
+      content="Shrink a PDF's file size in your browser, with no upload and an honest result — if there is nothing to gain, Stapler says so instead of re-saving a bigger file."
+    />
+    <link rel="canonical" href="/compress-pdf" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Compress PDF — Stapler" />
+    <meta
+      property="og:description"
+      content="Reduce a PDF's file size entirely on your device. Try it right on this page — no install required."
+    />
+    <link rel="icon" href="/icons/icon-32.png" />
+  </head>
+  <body>
+    <a class="landingSkipLink" href="#tool">Skip to the compress tool</a>
+
+    <header class="landingHero">
+      <div class="landingHeroInner">
+        <p class="landingEyebrow">Stapler · Offline PDF tools</p>
+        <h1 class="landingTitle">Compress PDFs without the guesswork</h1>
+        <p class="landingSubtitle">
+          Reduce file size, and see the real result before you save it. If a file is already as
+          small as it can get, Stapler tells you honestly rather than emitting something bigger.
+        </p>
+        <div class="landingCtaRow">
+          <button type="button" class="landingCtaPrimary" disabled>
+            Install from the Chrome Web Store — coming soon
+          </button>
+          <a class="landingCtaSecondary" href="#tool">Use it now, no install needed</a>
+        </div>
+        <p class="landingCtaNote">
+          Works fully on this page. No upload, no account, no daily limit.
+        </p>
+      </div>
+    </header>
+
+    <ul class="landingFeatures">
+      <li class="landingFeatureCard">
+        <h2 class="landingFeatureTitle">Nothing leaves your device</h2>
+        <p class="landingFeatureBody">
+          Compression runs locally in a worker thread. No document is ever sent anywhere to be
+          processed.
+        </p>
+      </li>
+      <li class="landingFeatureCard">
+        <h2 class="landingFeatureTitle">Never emits a bigger file</h2>
+        <p class="landingFeatureBody">
+          If compressing would make the file larger, Stapler falls back to the original and says so
+          — it never silently hands back something worse.
+        </p>
+      </li>
+      <li class="landingFeatureCard">
+        <h2 class="landingFeatureTitle">See the size before you save</h2>
+        <p class="landingFeatureBody">
+          Preview the before/after size so you know exactly what you are getting before you export.
+        </p>
+      </li>
+    </ul>
+
+    <section class="landingAppSection">
+      <h2 class="landingAppHeading" id="tool">Try compress right here</h2>
+      <div id="app"></div>
+    </section>
+
+    <noscript>
+      Stapler's tools run in your browser and need JavaScript enabled to work. Everything still runs
+      locally — nothing is ever sent to a server.
+    </noscript>
+
+    <script type="module" src="/src/ui/landing/compress-pdf.entry.ts"></script>
+  </body>
+</html>

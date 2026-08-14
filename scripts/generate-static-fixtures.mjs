@@ -128,6 +128,39 @@ function generateEncodedFixtures() {
     run(`convert -size 400x400 xc:cyan -colorspace CMYK ${cmyk}`, 'ImageMagick (convert)');
   }
 
+  // cmyk-text.pdf: a CMYK image whose /ColorSpace is an *indirect* reference (`10 0 R`),
+  // which is the case that used to fall through to "unknown" and get re-encoded to RGB
+  // regardless of the true colour space (CMP-03).
+  const cmykText = path.join(FIXTURES_DIR, 'cmyk-text.pdf');
+  if (!existsSync(cmykText)) {
+    run(
+      `convert -size 400x400 xc:cyan -fill black -pointsize 32 -annotate +20+60 "CMYK text" -colorspace CMYK ${cmykText}`,
+      'ImageMagick (convert)'
+    );
+  }
+
+  // tiny.jpg: a 10x210 grayscale JPEG. The extreme aspect ratio is the point — it is what
+  // the images-to-PDF orientation and page-fit assertions measure against (CNV-01). Node
+  // has no JPEG encoder, so this cannot be built inside the test the way PNGs are.
+  const tinyJpg = path.join(FIXTURES_DIR, 'tiny.jpg');
+  if (!existsSync(tinyJpg)) {
+    run(
+      `convert -size 10x210 gradient:white-black -colorspace Gray ${tinyJpg}`,
+      'ImageMagick (convert)'
+    );
+  }
+
+  // sample.png / sample.webp / sample.tiff: one 240x160 image in three encodings, so
+  // DOC-02's "accept PNG, JPEG, WebP, TIFF, HEIC" is exercised through the real import
+  // pipeline rather than asserted. (JPEG is covered by tiny.jpg; HEIC has no offline
+  // encoder in this toolchain — see tests/fixtures/README.md.)
+  for (const ext of ['png', 'webp', 'tiff']) {
+    const file = path.join(FIXTURES_DIR, `sample.${ext}`);
+    if (!existsSync(file)) {
+      run(`convert -size 240x160 gradient:red-blue ${file}`, 'ImageMagick (convert)');
+    }
+  }
+
   // encrypted.pdf: a real password-protected PDF via Ghostscript. DOC-02 must detect and
   // explain this, never fail obscurely.
   const encrypted = path.join(FIXTURES_DIR, 'encrypted.pdf');

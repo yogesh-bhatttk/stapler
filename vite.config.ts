@@ -55,6 +55,20 @@ function emitWebIndex(): Plugin {
   };
 }
 
+/**
+ * DIST-03 — the five per-tool landing pages (`/merge-pdf`, `/compress-pdf`,
+ * `/sign-pdf`, `/scan-cleanup`, `/redact-pdf`). Web-only: they are static marketing
+ * entry points for the deployed site, not something the extension ever opens, so
+ * they are excluded from `BUILD_TARGET=ext` the same way `emitWebIndex` is.
+ */
+const LANDING_PAGES: Record<string, string> = {
+  'merge-pdf': 'merge-pdf.html',
+  'compress-pdf': 'compress-pdf.html',
+  'sign-pdf': 'sign-pdf.html',
+  'scan-cleanup': 'scan-cleanup.html',
+  'redact-pdf': 'redact-pdf.html'
+};
+
 export default defineConfig(() => {
   const isExt = process.env.BUILD_TARGET === 'ext';
 
@@ -64,6 +78,10 @@ export default defineConfig(() => {
 
   if (isExt) {
     input.background = resolve(root, 'src/background/service-worker.ts');
+  } else {
+    for (const [name, file] of Object.entries(LANDING_PAGES)) {
+      input[name] = resolve(root, file);
+    }
   }
 
   return {

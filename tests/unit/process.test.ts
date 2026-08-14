@@ -128,6 +128,144 @@ describe('scrubMetadata', () => {
   });
 });
 
+/**
+ * RED-04's acceptance criteria, asserted against the produced bytes rather than
+ * against the parsed convenience accessors alone: everything in the document is
+ * decompressed (object streams included) and searched for the strings, because a
+ * value that merely stopped being *referenced* is still a disclosure.
+ */
+async function everyStringInDocument(bytes: Uint8Array): Promise<string> {
+  const { decodeStream } = await import('../../src/core/pdf/interpreter');
+  const latin1 = new TextDecoder('latin1');
+  let text = latin1.decode(bytes);
+  const doc = await PDFDocument.load(bytes, { updateMetadata: false });
+  for (const [, obj] of doc.context.enumerateIndirectObjects()) {
+    // pdf-lib streams share no exported base class here, so the contents accessor
+    // is duck-typed, as elsewhere in this file.
+    const stream = obj as any;
+    if (typeof stream?.getContents !== 'function') continue;
+    const raw: Uint8Array = stream.getContents();
+    const filter = String(stream.dict?.get(PDFName.of('Filter')) ?? '');
+    try {
+      const decoded = filter.includes('FlateDecode') ? await decodeStream(raw) : raw;
+      text += latin1.decode(decoded);
+    } catch {
+      // Undecodable stream: its raw bytes are already in `text` from the file scan.
+    }
+  }
+  // Info strings are written as UTF-16BE hex literals, so the readable form has to
+  // be appended or a search for the author name would pass vacuously.
+  return text + decodeHexLiterals(text);
+}
+
+describe('RED-04 metadata inspector and scrubber', () => {
+  it('reports the author and the Windows path from every place they hide', async () => {
+    const { metadataLeakPdf, METADATA_LEAK } = await import('../e2e/fixtures');
+    const bytes = await metadataLeakPdf();
+
+    const found = await processWorkerImpl.readMetadata(bytes);
+
+    expect(found.author).toBe(METADATA_LEAK.author);
+    expect(found.producer).toContain(METADATA_LEAK.producerPath);
+    expect(found.customInfo).toContainEqual({
+      key: 'SourceFile',
+      value: METADATA_LEAK.sourcePath
+    });
+    expect(found.hasXmp).toBe(true);
+    expect(found.hasEmbeddedJavaScript).toBe(true);
+
+    // Each of the three hiding places is named, with the toggle that clears it.
+    expect(found.filesystemPaths).toContainEqual({
+      source: 'Producer',
+      value: METADATA_LEAK.producerPath,
+      settingKey: 'producer'
+    });
+    expect(found.filesystemPaths).toContainEqual({
+      source: 'SourceFile (custom property)',
+      value: METADATA_LEAK.sourcePath,
+      settingKey: 'customInfo'
+    });
+    expect(found.filesystemPaths).toContainEqual({
+      source: 'XMP packet',
+      value: METADATA_LEAK.xmpPath,
+      settingKey: 'hasXmp'
+    });
+  });
+
+  it('does not mistake a URL for a filesystem path', async () => {
+    const doc = await PDFDocument.create();
+    // pdf-lib's own default Producer, which contains `s://` — the shape that made the
+    // drive-letter pattern report a path on every document.
+    doc.setProducer('pdf-lib (https://github.com/Hopding/pdf-lib)');
+    const found = await processWorkerImpl.readMetadata(await doc.save());
+    expect(found.filesystemPaths).toEqual([]);
+  });
+
+  it('strips only the ticked items when per-item settings are given', async () => {
+    const { metadataLeakPdf, METADATA_LEAK } = await import('../e2e/fixtures');
+    const bytes = await metadataLeakPdf();
+
+    // Author only: the paths and the JavaScript must survive untouched.
+    const out = await processWorkerImpl.scrubMetadata(bytes, { author: true });
+    const found = await processWorkerImpl.readMetadata(out);
+
+    expect(found.author).toBeUndefined();
+    expect(found.producer).toContain(METADATA_LEAK.producerPath);
+    expect(found.customInfo).toContainEqual({
+      key: 'SourceFile',
+      value: METADATA_LEAK.sourcePath
+    });
+    expect(found.hasEmbeddedJavaScript).toBe(true);
+    // Catalog-level items are the ones the rebuild used to drop unconditionally:
+    // before the carry-across, unticking them changed nothing.
+    expect(found.hasXmp).toBe(true);
+  });
+
+  it('removes the JavaScript when only that item is ticked', async () => {
+    const { metadataLeakPdf, METADATA_LEAK } = await import('../e2e/fixtures');
+    const bytes = await metadataLeakPdf();
+
+    const out = await processWorkerImpl.scrubMetadata(bytes, { hasEmbeddedJavaScript: true });
+    const found = await processWorkerImpl.readMetadata(out);
+
+    expect(found.hasEmbeddedJavaScript).toBe(false);
+    expect(await everyStringInDocument(out)).not.toContain(METADATA_LEAK.javascript);
+    // Nothing else was taken with it.
+    expect(found.author).toBe(METADATA_LEAK.author);
+  });
+
+  it('strip-all leaves no trace of the author or the path in the exported bytes', async () => {
+    const { metadataLeakPdf, METADATA_LEAK } = await import('../e2e/fixtures');
+    const bytes = await metadataLeakPdf();
+
+    const before = await processWorkerImpl.readMetadata(bytes);
+    expect(before.author).toBe(METADATA_LEAK.author);
+    expect(before.filesystemPaths.length).toBeGreaterThanOrEqual(3);
+
+    const out = await processWorkerImpl.scrubMetadata(bytes);
+    const after = await processWorkerImpl.readMetadata(out);
+
+    expect(after.author).toBeUndefined();
+    expect(after.producer).toBeUndefined();
+    expect(after.customInfo).toEqual([]);
+    expect(after.filesystemPaths).toEqual([]);
+    expect(after.hasXmp).toBe(false);
+    expect(after.hasEmbeddedJavaScript).toBe(false);
+
+    // The bytes themselves, decompressed — not just the accessors.
+    const raw = await everyStringInDocument(out);
+    expect(raw).not.toContain(METADATA_LEAK.author);
+    expect(raw).not.toContain('ghopper');
+    expect(raw).not.toContain('board-pack.docx');
+    expect(raw).not.toContain('engine.dll');
+
+    // …and the document is still the document.
+    const doc = await PDFDocument.load(out);
+    expect(doc.getPageCount()).toBe(1);
+    expect(await pageContentText(doc, 0)).toContain('Quarterly board pack');
+  });
+});
+
 describe('applyRedactions', () => {
   it('performs operator-level removal of text within region', async () => {
     // Generate a simple PDF with text
@@ -299,6 +437,61 @@ describe('imageInventory: colour-space detection through indirection (CMP-01 gap
     const bytes = await doc.save({ useObjectStreams: false });
     const [inventory] = await processWorkerImpl.imageInventory(bytes);
     expect(inventory.images[0].colorSpace).toBe('DeviceRGB');
+  });
+});
+
+describe('imageInventory: /Filter chains (CMP-03 skip detection)', () => {
+  /** An image stream carrying whatever /Filter value the caller wants. */
+  function addFiltered(doc: PDFDocument, filter: unknown) {
+    const page = doc.addPage([200, 200]);
+    const img = doc.context.stream(new Uint8Array([0xfa, 0xce, 0xfe]), {
+      Type: 'XObject',
+      Subtype: 'Image',
+      Width: 800,
+      Height: 800,
+      ColorSpace: 'DeviceRGB',
+      BitsPerComponent: 8
+    });
+    img.dict.set(PDFName.of('Filter'), filter as never);
+    (page.node.Resources() as PDFDict).set(
+      PDFName.of('XObject'),
+      doc.context.obj({ Im0: doc.context.register(img) })
+    );
+    return page;
+  }
+
+  /*
+   * `/Filter` is legally a chain, applied left to right, so the *last* entry is
+   * the one that produced the image samples. Reading the head of the array
+   * reported `[/ASCII85Decode /JPXDecode]` as `ASCII85Decode` — a name neither
+   * skip list matches — and a JPX image behind an ASCII85 wrapper was routed to
+   * the surgical re-encode instead of being skipped and reported.
+   */
+  it('reports the image-defining filter at the end of a chain, not the head', async () => {
+    const doc = await PDFDocument.create();
+    addFiltered(doc, doc.context.obj(['ASCII85Decode', 'JPXDecode']));
+    const bytes = await doc.save({ useObjectStreams: false });
+    const [inventory] = await processWorkerImpl.imageInventory(bytes);
+    expect(inventory.images[0].filter).toBe('JPXDecode');
+    expect(inventory.images[0].filters).toEqual(['ASCII85Decode', 'JPXDecode']);
+  });
+
+  it('still reports a single direct filter', async () => {
+    const doc = await PDFDocument.create();
+    addFiltered(doc, PDFName.of('DCTDecode'));
+    const bytes = await doc.save({ useObjectStreams: false });
+    const [inventory] = await processWorkerImpl.imageInventory(bytes);
+    expect(inventory.images[0].filter).toBe('DCTDecode');
+    expect(inventory.images[0].filters).toEqual(['DCTDecode']);
+  });
+
+  it('resolves an indirect /Filter array', async () => {
+    const doc = await PDFDocument.create();
+    const arrayRef = doc.context.register(doc.context.obj(['FlateDecode', 'JBIG2Decode']));
+    addFiltered(doc, arrayRef);
+    const bytes = await doc.save({ useObjectStreams: false });
+    const [inventory] = await processWorkerImpl.imageInventory(bytes);
+    expect(inventory.images[0].filter).toBe('JBIG2Decode');
   });
 });
 
@@ -964,6 +1157,110 @@ describe('XFA is detected and never partially processed (SGN-03)', () => {
 });
 
 describe('CMP-03: resamples SMask when base image is downscaled', () => {
+  /*
+   * The classifier refuses these constructs, and `rebuildCompressed` is meant to
+   * be the second lock on the same door: if a caller ever hands it one anyway,
+   * the original stream must survive untouched rather than be swapped for a
+   * JPEG that cannot carry the construct.
+   */
+  describe('rebuildCompressed refuses what the surgical path must never touch', () => {
+    const TINY_JPEG = new Uint8Array([
+      0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00,
+      0x01, 0x00, 0x01, 0x00, 0x00, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x02, 0x00, 0x02, 0x01,
+      0x01, 0x11, 0x00, 0xff, 0xd9
+    ]);
+
+    /** A page carrying one image whose dict gets `extra` merged in. */
+    async function docWithImage(extra: (doc: PDFDocument) => Record<string, unknown>) {
+      const doc = await PDFDocument.create();
+      const page = doc.addPage([200, 200]);
+      const img = doc.context.stream(new Uint8Array(64).fill(0x7f), {
+        Type: 'XObject',
+        Subtype: 'Image',
+        Width: 8,
+        Height: 8,
+        ColorSpace: 'DeviceRGB',
+        BitsPerComponent: 8
+      });
+      for (const [key, value] of Object.entries(extra(doc))) {
+        img.dict.set(PDFName.of(key), value as never);
+      }
+      const ref = doc.context.register(img);
+      (page.node.Resources() as PDFDict).set(PDFName.of('XObject'), doc.context.obj({ Im0: ref }));
+      page.node.set(
+        PDFName.of('Contents'),
+        doc.context.register(doc.context.flateStream('q 200 0 0 200 0 0 cm /Im0 Do Q'))
+      );
+      return { bytes: await doc.save({ useObjectStreams: false }), objectNumber: ref.objectNumber };
+    }
+
+    async function widthOfIm0(bytes: Uint8Array): Promise<string | undefined> {
+      const { PDFStream } = await import('pdf-lib');
+      const doc = await PDFDocument.load(bytes);
+      const xobjs = doc.getPage(0).node.Resources()?.lookup(PDFName.of('XObject'), PDFDict);
+      const stream = doc.context.lookup(xobjs!.get(PDFName.of('Im0')), PDFStream);
+      return stream.dict.get(PDFName.of('Width'))?.toString();
+    }
+
+    /*
+     * A colour-key `/Mask` is an array of sample ranges, and the ordinary way to
+     * write one is indirectly (`/Mask 12 0 R`). The guard tested only the
+     * unresolved value, so an indirect array read as a plain `PDFRef` and was
+     * copied verbatim onto a downscaled, lossily re-encoded JPEG whose samples
+     * can no longer fall in those ranges — the transparency silently changes.
+     */
+    it('leaves an image alone when /Mask is an indirect colour-key array', async () => {
+      const { bytes, objectNumber } = await docWithImage(doc => ({
+        Mask: doc.context.register(doc.context.obj([0, 10, 0, 10, 0, 10]))
+      }));
+      const result = await processWorkerImpl.rebuildCompressed(
+        bytes,
+        [],
+        { 0: { [objectNumber]: { jpeg: TINY_JPEG, width: 2, height: 2 } } },
+        silentJob
+      );
+      // Still the original 8x8 stream, not the 2x2 replacement.
+      expect(await widthOfIm0(result.keptOriginal ? bytes : result.bytes)).toBe('8');
+    });
+
+    it('leaves an image alone when its /SMask carries /Matte', async () => {
+      const { bytes, objectNumber } = await docWithImage(doc => {
+        const smask = doc.context.stream(new Uint8Array(64).fill(0xff), {
+          Type: 'XObject',
+          Subtype: 'Image',
+          Width: 8,
+          Height: 8,
+          ColorSpace: 'DeviceGray',
+          BitsPerComponent: 8,
+          Matte: [0, 0, 0]
+        });
+        return { SMask: doc.context.register(smask) };
+      });
+      const result = await processWorkerImpl.rebuildCompressed(
+        bytes,
+        [],
+        { 0: { [objectNumber]: { jpeg: TINY_JPEG, width: 2, height: 2 } } },
+        silentJob
+      );
+      expect(await widthOfIm0(result.keptOriginal ? bytes : result.bytes)).toBe('8');
+    });
+
+    it('leaves a stencil /ImageMask alone', async () => {
+      const { PDFBool } = await import('pdf-lib');
+      const { bytes, objectNumber } = await docWithImage(() => ({
+        ImageMask: PDFBool.True,
+        BitsPerComponent: PDFNumber.of(1)
+      }));
+      const result = await processWorkerImpl.rebuildCompressed(
+        bytes,
+        [],
+        { 0: { [objectNumber]: { jpeg: TINY_JPEG, width: 2, height: 2 } } },
+        silentJob
+      );
+      expect(await widthOfIm0(result.keptOriginal ? bytes : result.bytes)).toBe('8');
+    });
+  });
+
   it('rebuildCompressed creates a new SMask of the requested dimensions', async () => {
     const fs = await import('node:fs');
     const { PDFDocument, PDFName, PDFDict, PDFStream, PDFRef } = await import('pdf-lib');

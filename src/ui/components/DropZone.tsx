@@ -5,7 +5,7 @@ import { useRef, useState } from 'preact/hooks';
 import { UploadCloud } from 'lucide-preact';
 import { platform } from '../../platform/current';
 import { PDF_AND_IMAGES, acceptToInputAccept, type OpenedFile } from '../../platform/index';
-import { importFiles, isPdfFile } from '../../core/import';
+import { importFiles, isPdfFile, SUPPORTED_FORMATS } from '../../core/import';
 import { addDocument, makePageRefs } from '../../core/store';
 import { resetHistory } from '../../core/history';
 import { notify, notifyError } from '../../core/notify';
@@ -165,7 +165,7 @@ export function DropZone({ onImported }: DropZoneProps) {
           </span>
           <span className={styles.hint}>
             {state === 'reject'
-              ? 'PDF, PNG, JPEG, WebP, and GIF are supported.'
+              ? `${SUPPORTED_FORMATS} are supported.`
               : 'or choose files — nothing is uploaded'}
           </span>
         </>

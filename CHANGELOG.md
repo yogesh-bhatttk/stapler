@@ -6,9 +6,9 @@ All notable changes to Stapler are documented here. Format follows
 
 ## [Unreleased]
 
-Pre-1.0. See `docs/TICKETS.md` and `docs/STATUS.md` for the ticket-by-ticket state
-of every feature — this file starts tracking user-facing changes from the first
-tagged release onward, not the full development history before it.
+Pre-1.0. See `docs/TICKETS.md` for the ticket-by-ticket state of every feature —
+this file starts tracking user-facing changes from the first tagged release
+onward, not the full development history before it.
 
 ## [0.1.0] — unreleased
 

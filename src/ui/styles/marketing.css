@@ -1,0 +1,179 @@
+/*
+ * Marketing surfaces for the website twin's per-tool landing pages (DIST-03:
+ * `/merge-pdf`, `/compress-pdf`, `/sign-pdf`, `/scan-cleanup`, `/redact-pdf`).
+ *
+ * DESIGN-ADAPTATION §2 retains upstream's marketing components "unchanged for the
+ * website twin only" — hero/display type and feature cards are appropriate here in
+ * a way they are not inside the dense app shell. This file is loaded only by the
+ * landing entries (`mountLanding.tsx`); the extension bundle never imports it.
+ *
+ * Colours only via CSS custom properties defined in tokens.css — no literal
+ * colours (PLAN §5.4 invariant 3).
+ */
+
+.landingSkipLink {
+  position: absolute;
+  top: -48px;
+  left: var(--space-md);
+  z-index: 10;
+  padding: var(--space-xs) var(--space-md);
+  background: var(--surface-1);
+  color: var(--ink);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-md);
+  font: var(--text-body-strong);
+  transition: var(--transition-snappy);
+}
+
+.landingSkipLink:focus {
+  top: var(--space-md);
+}
+
+.landingHero {
+  padding: var(--space-section) var(--space-xl) var(--space-xxl);
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.landingHeroInner {
+  max-width: 760px;
+  margin: 0 auto;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.landingEyebrow {
+  font: var(--text-micro);
+  letter-spacing: var(--text-micro-ls);
+  text-transform: uppercase;
+  color: var(--primary-text);
+}
+
+.landingTitle {
+  font: var(--text-display);
+  letter-spacing: var(--text-display-ls);
+  color: var(--ink);
+  margin: 0;
+}
+
+.landingSubtitle {
+  font: var(--text-body);
+  letter-spacing: var(--text-body-ls);
+  color: var(--ink-subtle);
+  max-width: 56ch;
+  margin: 0;
+}
+
+.landingCtaRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-md);
+  margin-top: var(--space-sm);
+}
+
+.landingCtaPrimary,
+.landingCtaSecondary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  height: var(--control-h);
+  padding: 0 var(--space-lg);
+  border-radius: var(--radius-md);
+  font: var(--text-body-strong);
+  text-decoration: none;
+  transition: var(--transition-snappy);
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+
+.landingCtaPrimary {
+  background: var(--primary);
+  color: var(--on-primary);
+  border: 1px solid transparent;
+}
+
+.landingCtaPrimary:hover {
+  background: var(--primary-hover);
+}
+
+/* The Chrome Web Store listing is not live yet (README: "Coming Soon"), so the
+   install CTA is a real disabled <button>, not a fake/dead link — it never
+   claims to do something it can't. */
+.landingCtaPrimary:disabled {
+  background: var(--surface-3);
+  color: var(--ink-tertiary);
+  cursor: not-allowed;
+}
+
+.landingCtaSecondary {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--hairline-strong);
+}
+
+.landingCtaSecondary:hover {
+  background: var(--surface-hover);
+}
+
+.landingCtaNote {
+  font: var(--text-small);
+  color: var(--ink-tertiary);
+  margin: 0;
+}
+
+.landingFeatures {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: var(--space-xxl) var(--space-xl);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-lg);
+  list-style: none;
+}
+
+.landingFeatureCard {
+  padding: var(--space-lg);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+}
+
+.landingFeatureTitle {
+  font: var(--text-headline);
+  letter-spacing: var(--text-headline-ls);
+  font-size: 16px;
+  color: var(--ink);
+  margin: 0 0 var(--space-xs);
+}
+
+.landingFeatureBody {
+  font: var(--text-body);
+  color: var(--ink-muted);
+  margin: 0;
+}
+
+.landingAppSection {
+  border-top: 1px solid var(--hairline);
+}
+
+.landingAppHeading {
+  font: var(--text-section);
+  letter-spacing: var(--text-section-ls);
+  color: var(--ink);
+  text-align: center;
+  padding: var(--space-lg) var(--space-xl) 0;
+  margin: 0;
+}
+
+/* The embedded app renders its own full-height shell; give it real room instead of
+   whatever height its content happens to produce, so there is no layout shift once
+   the tool paints (Lighthouse CLS). */
+#app {
+  min-height: 640px;
+}

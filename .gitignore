@@ -16,6 +16,11 @@ tests/fixtures/*
 !tests/fixtures/cjk.pdf
 !tests/fixtures/rtl.pdf
 !tests/fixtures/xfa.pdf
+!tests/fixtures/cmyk-text.pdf
+!tests/fixtures/tiny.jpg
+!tests/fixtures/sample.png
+!tests/fixtures/sample.webp
+!tests/fixtures/sample.tiff
 
 # Throwaway probe scripts (see eslint.config.js ignores).
 .scratch/

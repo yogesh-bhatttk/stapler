@@ -18,6 +18,20 @@ import { hasXfaMarker, XFA_MESSAGE } from './pdf/xfa';
 /** Warn rather than refuse — the plan has no size limit, only a warning (§5.1). */
 export const LARGE_FILE_BYTES = 100 * 1024 * 1024;
 
+/** The formats `importFiles` accepts, named once so every message agrees. */
+export const SUPPORTED_FORMATS = 'PDF, PNG, JPEG, WebP, GIF, TIFF, and HEIC';
+
+/**
+ * The oversized warning, or `null` below the threshold.
+ *
+ * Split out of `importPdf` so the boundary is testable without allocating a
+ * 100MB buffer in a test.
+ */
+export function largeFileWarning(byteLength: number): string | null {
+  if (byteLength <= LARGE_FILE_BYTES) return null;
+  return `${(byteLength / 1024 / 1024).toFixed(0)}MB is a large document — operations on it will be slower.`;
+}
+
 export interface ImportedFile {
   originalFile: File;
   source: SourceDocument;
@@ -67,11 +81,8 @@ async function importPdf(file: File, options: JobOptions): Promise<ImportedFile>
   // dropped the evidence.
   const rawXfa = hasXfaMarker(bytes);
 
-  if (bytes.length > LARGE_FILE_BYTES) {
-    warnings.push(
-      `${(bytes.length / 1024 / 1024).toFixed(0)}MB is a large document — operations on it will be slower.`
-    );
-  }
+  const oversized = largeFileWarning(bytes.length);
+  if (oversized) warnings.push(oversized);
 
   // The render worker owns validation because pdf.js distinguishes encrypted from
   // corrupt from XFA, and it is the parse we need anyway for page sizes.
@@ -130,8 +141,13 @@ async function importImages(
 ): Promise<ImportedFile> {
   const job = createJobHandle(options);
   const jpegs: Uint8Array[] = [];
+  const warnings: string[] = [];
   for (let i = 0; i < files.length; i++) {
     options.onProgress?.(i / files.length, `Decoding image ${i + 1} of ${files.length}`);
+    // The size warning is about the source bytes, so it is raised per image: a
+    // 120MB TIFF is as slow to decode as a 120MB PDF is to parse.
+    const oversized = largeFileWarning(files[i].size);
+    if (oversized) warnings.push(`${files[i].name}: ${oversized}`);
     jpegs.push(await imageFileToJpeg(files[i], imageOptions?.quality ?? 0.9));
   }
 
@@ -153,7 +169,7 @@ async function importImages(
         originalFile: files[0],
         source,
         pages: makePageRefs(id, info.pageCount),
-        warnings: []
+        warnings
       };
     } finally {
       await client.lease(api => api.closeDocument(info.handle));
@@ -184,7 +200,7 @@ export async function importFiles(
   const failures: ImportOutcome['failures'] = rejected.map(file => ({
     name: file.name,
     message: unsupported(
-      `${file.type || 'This file type'} cannot be imported. Stapler accepts PDF, PNG, JPEG, WebP, GIF, and HEIC.`
+      `${file.type || 'This file type'} cannot be imported. Stapler accepts ${SUPPORTED_FORMATS}.`
     ).message
   }));
 

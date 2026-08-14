@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Redact PDF — Stapler</title>
+    <meta
+      name="description"
+      content="Permanently remove sensitive content from a PDF in your browser — not just a black box drawn over it. No upload, no account. Try it right on this page."
+    />
+    <link rel="canonical" href="/redact-pdf" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Redact PDF — Stapler" />
+    <meta
+      property="og:description"
+      content="Remove content permanently, then prove it was removed — entirely on your device."
+    />
+    <link rel="icon" href="/icons/icon-32.png" />
+  </head>
+  <body>
+    <a class="landingSkipLink" href="#tool">Skip to the redact tool</a>
+
+    <header class="landingHero">
+      <div class="landingHeroInner">
+        <p class="landingEyebrow">Stapler · Offline PDF tools</p>
+        <h1 class="landingTitle">Redact PDFs, and prove it stuck</h1>
+        <p class="landingSubtitle">
+          Mark the areas to remove and Stapler deletes the underlying text and image data, not just
+          paints a black box over it — the most sensitive documents never leave your device.
+        </p>
+        <div class="landingCtaRow">
+          <button type="button" class="landingCtaPrimary" disabled>
+            Install from the Chrome Web Store — coming soon
+          </button>
+          <a class="landingCtaSecondary" href="#tool">Use it now, no install needed</a>
+        </div>
+        <p class="landingCtaNote">
+          Works fully on this page. No upload, no account, no daily limit.
+        </p>
+      </div>
+    </header>
+
+    <ul class="landingFeatures">
+      <li class="landingFeatureCard">
+        <h2 class="landingFeatureTitle">Nothing leaves your device</h2>
+        <p class="landingFeatureBody">
+          The document you are redacting is, by definition, the one you trust least with an upload.
+          It never gets one.
+        </p>
+      </li>
+      <li class="landingFeatureCard">
+        <h2 class="landingFeatureTitle">Real removal, not a black box</h2>
+        <p class="landingFeatureBody">
+          Marked text and image content is deleted from the underlying PDF, so it cannot be
+          recovered by copy-pasting or lifting a layer.
+        </p>
+      </li>
+      <li class="landingFeatureCard">
+        <h2 class="landingFeatureTitle">Verify it yourself</h2>
+        <p class="landingFeatureBody">
+          Search the exported file for the redacted text afterward — it is gone, not just covered.
+        </p>
+      </li>
+    </ul>
+
+    <section class="landingAppSection">
+      <h2 class="landingAppHeading" id="tool">Try redact right here</h2>
+      <div id="app"></div>
+    </section>
+
+    <noscript>
+      Stapler's tools run in your browser and need JavaScript enabled to work. Everything still runs
+      locally — nothing is ever sent to a server.
+    </noscript>
+
+    <script type="module" src="/src/ui/landing/redact-pdf.entry.ts"></script>
+  </body>
+</html>

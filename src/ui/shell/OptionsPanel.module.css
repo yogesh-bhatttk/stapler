@@ -54,6 +54,13 @@
   color: var(--ink-muted);
 }
 
+/* A row of small secondary actions above a list, e.g. RED-04's select all / none. */
+.actions {
+  display: flex;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+}
+
 .list {
   list-style: none;
   margin: 0;

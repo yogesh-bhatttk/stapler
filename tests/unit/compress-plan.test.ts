@@ -122,14 +122,80 @@ describe('classifyPages', () => {
   });
 
   it('re-encodes the safe images on a page and skips the rest', () => {
+    // Distinct object numbers, because safety is now decided per image *object*
+    // document-wide (a shared image cannot be safe on one page and unsafe on
+    // another — the replacement reaches every page). Two different streams
+    // sharing object number 10 is not a thing a real PDF can contain.
     const plan = classifyPages(
-      [page([image({ name: 'Safe' }), image({ name: 'Unsafe', filter: 'JPXDecode' })])],
+      [
+        page([
+          image({ name: 'Safe', objectNumber: 10 }),
+          image({ name: 'Unsafe', objectNumber: 11, filter: 'JPXDecode' })
+        ])
+      ],
       [text(3000)],
       OPTIONS
     );
     expect(plan.pages[0].route).toBe('surgical');
     expect(plan.pages[0].reencode).toEqual([{ name: 'Safe', objectNumber: 10 }]);
     expect(plan.skipped.join(' ')).toContain('JPXDecode');
+  });
+
+  /*
+   * CMP-03 skip detection, the cross-page half. `rebuildCompressed` replaces an
+   * XObject by object number, so a decision taken on one page reaches every page
+   * that references the same image — which makes a per-page safety verdict
+   * unsound the moment two pages disagree.
+   */
+  it('refuses a shared image everywhere once any page finds it unsafe', () => {
+    // The realistic way two pages disagree: `/ColorSpace` is a resource-scoped
+    // name, so the page whose resources do not define it reports the raw name.
+    const plan = classifyPages(
+      [
+        page([image({ objectNumber: 10, colorSpace: 'Separation' })], 0),
+        page([image({ objectNumber: 10, colorSpace: 'CS0' })], 1)
+      ],
+      [text(3000, 0), text(3000, 1)],
+      OPTIONS
+    );
+    expect(plan.pages.map(p => p.route)).toEqual(['skip', 'skip']);
+    expect(plan.pages.flatMap(p => p.reencode)).toEqual([]);
+    expect(plan.skipped.join(' ')).toContain('Separation');
+  });
+
+  it('detects an undecodable filter that is not the first in the chain', () => {
+    const plan = classifyPages(
+      [page([image({ filter: 'JPXDecode', filters: ['ASCII85Decode', 'JPXDecode'] })])],
+      [text(3000)],
+      OPTIONS
+    );
+    expect(plan.pages[0].route).toBe('skip');
+    expect(plan.skipped.join(' ')).toContain('JPXDecode');
+  });
+
+  /*
+   * A shared image is encoded once, at the largest size any page displays it at,
+   * but that size is only measured on the pages that list it in `reencode`.
+   * Listing it only where it happens to be over-sampled sized the one
+   * replacement for the smaller page and silently downscaled the larger one.
+   */
+  it('lists a shared image on every page that carries it, not just the over-sampled one', () => {
+    const small: PageImageInventory = { pageIndex: 0, images: [image()], width: 595, height: 842 };
+    // A3: the same 2480×3508 image is only ~212 DPI here, below the 150 × 1.15
+    // threshold, so this page alone would never have nominated it.
+    const large: PageImageInventory = { pageIndex: 1, images: [image()], width: 842, height: 1191 };
+    const plan = classifyPages([small, large], [text(3000, 0), text(3000, 1)], OPTIONS);
+    expect(plan.pages.map(p => p.route)).toEqual(['surgical', 'surgical']);
+    expect(plan.pages[1].reencode).toEqual([{ name: 'Im1', objectNumber: 10 }]);
+  });
+
+  it('counts a shared image once in the actionable total', () => {
+    const shared = [0, 1, 2].map(i => page([image()], i));
+    const plan = classifyPages(shared, [text(3000, 0), text(3000, 1), text(3000, 2)], OPTIONS);
+    // One 900_000-byte stream reachable from three pages is 900_000 actionable
+    // bytes, not 2_700_000 — the inflated total made the pre-flight estimate
+    // promise a saving larger than the file's whole image payload.
+    expect(plan.actionableBytes).toBe(900_000);
   });
 
   it('classifies every page independently', () => {

@@ -183,9 +183,17 @@ function renderParams(ctx: OffscreenCanvasRenderingContext2D, viewport: pdfjsLib
 
 const api: RenderJob = {
   async loadDocument(bytes, password) {
-    // pdf.js takes ownership of the buffer it is given, so hand it a copy — the
-    // caller's Uint8Array has to stay usable for the pdf-lib half of the pipeline.
-    const task = openDocument({ data: new Uint8Array(bytes), password });
+    // DOC-02: "never load two full copies of the bytes". `bytes` arrives by
+    // structured clone across the Comlink boundary — no call site wraps this
+    // argument in `Comlink.transfer` — so this array is already private to this
+    // worker, and nothing in this realm reads it after this line. Copying it
+    // again meant a 100MB import held 200MB in the render worker before pdf.js
+    // had started, and the copy protected nobody: the caller on the other side
+    // of the boundary owns a different buffer entirely.
+    //
+    // pdf.js takes ownership of (and may detach) what it is given, which is
+    // exactly right for a buffer with no other reader.
+    const task = openDocument({ data: bytes, password });
     let doc: pdfjsLib.PDFDocumentProxy;
     try {
       doc = await task.promise;

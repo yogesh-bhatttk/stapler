@@ -274,5 +274,9 @@
   "tool.sign.stampDate": "日期",
   "tool.sign.stampText": "文本",
   "tool.sign.useThisPrefix": "使用此",
-  "· page": "· page"
+  "· page": "· page",
+  "Select what to strip": "Select what to strip",
+  "Select none": "Select none",
+  "Filesystem paths": "Filesystem paths",
+  "Each path goes when the item it sits in is stripped above.": "Each path goes when the item it sits in is stripped above."
 }

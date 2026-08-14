@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Scan Cleanup — Stapler</title>
+    <meta
+      name="description"
+      content="Straighten and whiten a photographed or scanned page in your browser. No upload, no account — try it right on this page."
+    />
+    <link rel="canonical" href="/scan-cleanup" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Scan Cleanup — Stapler" />
+    <meta
+      property="og:description"
+      content="Deskew and clean up a phone-camera photo of a document into a proper scanned page, entirely on your device."
+    />
+    <link rel="icon" href="/icons/icon-32.png" />
+  </head>
+  <body>
+    <a class="landingSkipLink" href="#tool">Skip to the scan cleanup tool</a>
+
+    <header class="landingHero">
+      <div class="landingHeroInner">
+        <p class="landingEyebrow">Stapler · Offline PDF tools</p>
+        <h1 class="landingTitle">Turn a phone photo into a clean scan</h1>
+        <p class="landingSubtitle">
+          Straighten a crooked page, even out the lighting, and whiten the background of a
+          photographed or scanned document — all processed locally, nothing uploaded.
+        </p>
+        <div class="landingCtaRow">
+          <button type="button" class="landingCtaPrimary" disabled>
+            Install from the Chrome Web Store — coming soon
+          </button>
+          <a class="landingCtaSecondary" href="#tool">Use it now, no install needed</a>
+        </div>
+        <p class="landingCtaNote">
+          Works fully on this page. No upload, no account, no daily limit.
+        </p>
+      </div>
+    </header>
+
+    <ul class="landingFeatures">
+      <li class="landingFeatureCard">
+        <h2 class="landingFeatureTitle">Nothing leaves your device</h2>
+        <p class="landingFeatureBody">
+          Deskew and cleanup run in a worker on your machine — the photo of your document never
+          reaches a server.
+        </p>
+      </li>
+      <li class="landingFeatureCard">
+        <h2 class="landingFeatureTitle">Automatic straightening</h2>
+        <p class="landingFeatureBody">
+          Detects the page edges in a crooked photo and squares it up, with a manual override when
+          it needs a nudge.
+        </p>
+      </li>
+      <li class="landingFeatureCard">
+        <h2 class="landingFeatureTitle">Even, readable pages</h2>
+        <p class="landingFeatureBody">
+          Corrects uneven lighting and shadow so the result reads like a proper scan, not a photo.
+        </p>
+      </li>
+    </ul>
+
+    <section class="landingAppSection">
+      <h2 class="landingAppHeading" id="tool">Try scan cleanup right here</h2>
+      <div id="app"></div>
+    </section>
+
+    <noscript>
+      Stapler's tools run in your browser and need JavaScript enabled to work. Everything still runs
+      locally — nothing is ever sent to a server.
+    </noscript>
+
+    <script type="module" src="/src/ui/landing/scan-cleanup.entry.ts"></script>
+  </body>
+</html>

@@ -6,9 +6,9 @@ Companion to [`PLAN.md`](PLAN.md) and [`DESIGN-ADAPTATION.md`](DESIGN-ADAPTATION
 **Priority:** `P0` blocks v1.0 · `P1` v1.1–1.2 · `P2` v2.0+
 
 Each ticket carries a **Status** line, audited against the code rather than against
-intent — see [`STATUS.md`](STATUS.md) for the full review, the three defects that made the
-app non-functional end to end, and what to do next. Reproduce the evidence with
-`pnpm check && pnpm test && pnpm test:e2e`.
+intent — this file is the single source of truth for per-ticket state (an earlier
+parallel `STATUS.md` was removed once it drifted out of sync with the entries below).
+Reproduce the evidence with `pnpm check && pnpm test && pnpm test:e2e`.
 
 Every ticket must satisfy this **definition of done**, in addition to its own criteria:
 
@@ -200,7 +200,14 @@ dirty }`. `PageRef` carries source doc id, source index, rotation, crop box, and
 
 ### DOC-02 · Import and validation — `M` `P0`
 
-**Status: Partial** — One pipeline, per-file failure isolation, every unsupported construct explained. TIFF and HEIC are now both accepted (`core/image.ts`); corpus coverage of every import path is not independently re-verified here, so the fixture AC is not freshly re-proven.
+**Status: Done, with one named gap (HEIC).** Re-verified against the real corpus, not against intent.
+
+- **AC, first half — every fixture imports or gets its specific, accurate explanation:** proven by a sweep over the whole corpus, `tests/e2e/import.spec.ts` › "every PDF in the corpus imports or is refused with a specific reason". It reads `tests/fixtures/*.pdf` off disk (41 files on the last run), imports each through the real file input, and requires every refusal to match one of the pipeline's own sentences — a generic "something went wrong" fails the test. Result: 35 imported (including `xfa.pdf`, `jbig2.pdf`, `jpx.pdf`, `cjk.pdf`, `rtl.pdf`, `cmyk*.pdf`, `heavy.pdf`, `text-300.pdf`); 6 refused — `encrypted.pdf` ("requires a password"), `not-a-pdf.pdf` ("does not start with a PDF header"), and four truncation shapes ("its structure is invalid or truncated").
+- **AC, second half — a truncated PDF never crashes the tab:** the pre-existing coverage used `not-a-pdf.pdf`, which is refused by the header check and never reaches pdf.js, so the truncated path was untested and `corruptPdf()` in `tests/e2e/fixtures.ts` was dead code. Now covered three ways (tail-truncated, mid-body, header-only) with a `pageerror` listener asserting no uncaught error, and with a good file imported afterwards in the same tab to prove it still works.
+- **Formats:** PNG, JPEG, WebP and TIFF each import through the real pipeline from a real fixture (`sample.png`, `tiny.jpg`, `sample.webp`, `sample.tiff`), and three at once become one three-page PDF whose bytes re-parse. **HEIC is unverified end to end:** ImageMagick here reads HEIC but cannot write it and no other offline encoder is available, so no fixture exists. Its routing and its failure message are covered; its decode is not. Dropping a real `.heic` file into `tests/fixtures/` is the only way to close this.
+- **Oversized:** `largeFileWarning()` is unit-tested at the boundary (100MB exactly → silent, +1 byte → warns), and an import of a >100MB PDF is proven to warn rather than refuse (`tests/unit/import.test.ts`). The warning now also covers oversized *images*, which it previously did not.
+- **Two full copies of the bytes — one real instance found and fixed:** `render.worker.ts` `loadDocument` did `new Uint8Array(bytes)` before handing the buffer to pdf.js, so a 100MB import held 200MB in the render worker. The copy protected nothing: the argument arrives by structured clone (no call site transfers it), so the array is already private to that worker. Removed; all 34 `tool-flows` E2E tests, which load a document on every path, still pass. The main-thread read (`new Uint8Array(await file.arrayBuffer())`) is a view, not a copy, and was already correct.
+- **Fixed along the way:** `tiny.jpg` and `cmyk-text.pdf` were used by unit tests but neither committed nor generated — a fresh clone failed six tests. Both are now built by `scripts/generate-static-fixtures.mjs` and allow-listed. The unsupported-file message and the drop-zone hint both omitted TIFF while the pipeline accepted it; both now read from one `SUPPORTED_FORMATS` constant.
 
 - **Requirements:** Accept PDF, PNG, JPEG, WebP, TIFF, HEIC. Detect and classify:
   encrypted, XFA, corrupt/truncated, oversized (>100MB warning). Read via streaming where
@@ -344,7 +351,7 @@ reset button, and undo of the reset.
 rotation, start-at numbering, a comma-separated page range, and CJK-safe refusal. An image
 watermark (PNG/JPEG, same grid/opacity/rotation/page-range) and a real header/footer (fixed
 margin band, own page range, left/center/right alignment, `{n}`/`{total}`) were added in
-Chunk 2 — see `docs/FIX-PLAN.md` for exactly what shipped and what was deliberately left out.
+a later pass; the image-watermark and header/footer AC below reflect what shipped.
 
 - **Requirements:** Position (9-point grid), font size, opacity, colour, start-at value,
   page-range targeting, and a text or image watermark with rotation.
@@ -487,6 +494,15 @@ Implements PLAN §4.1 classification.
 
 **Status: Partial** — The path now works: it did nothing at all before, in three independent ways (pdf.js image objects were read before they had been decoded; images were matched by resource name against pdf.js's own object ids, which never match; and JPEG images arrive as a `VideoFrame`, which the decoder did not recognise). SMask and stencil-mask images, DeviceCMYK, Indexed and ICCBased are all re-encoded now, downscaled to displayed size, with the mask re-attached byte-for-byte; a shared image is encoded *and stored* once. Still skipped and reported: `/Separation` and `/DeviceN` (flattening a named ink to RGB destroys the plate), colour-key `/Mask` arrays, `/Matte` pre-blended soft masks, `/ImageMask` stencils, JPX/JBIG2, sub-byte depth. **Correction:** the mask stream is now resampled too (`encodeMask` in `render.worker.ts`, applied in `rebuildCompressed`), shrink-only so a mask already smaller than the new target is left untouched rather than inflated — this row's "never resampled" was stale as of the SMask-resampling pass. A newly found and fixed correctness bug from this audit: image replacement was keyed by resource *name*, which is scoped per dictionary — a page-level image and an unrelated image inside a nested Form XObject could legally share a local name, letting one silently overwrite or misattach the other's re-encoded bytes. Replacement is now keyed by PDF object number, which is unique document-wide.
 
+**Skip-detection audit (this pass).** Four bugs found and fixed; the deliberate skip list itself is unchanged.
+
+1. **`/Filter` chains were read from the wrong end.** A chain applies left to right, so `[/ASCII85Decode /JPXDecode]` is a JPX image — but only the head was read, reporting `ASCII85Decode`, which matches neither undecodable filter. A JPX or JBIG2 image behind any wrapper filter was therefore routed to the surgical re-encode and never reported as skipped. `ImageFacts` now carries the whole chain (`filters`) and `filter` is its last entry.
+2. **A shared image could be judged unsafe on one page and re-encoded because of another.** `/ColorSpace` may be a resource-scoped name (`/CS0`) resolved against the resources of the page that draws it, so the same `/Separation` object read `Separation` on the page that names it and `CS0` on a page that does not — and since replacement is by object number, the page that said "safe" flattened the ink plate for the whole document. Safety is now decided per image *object*, document-wide: unsafe anywhere is unsafe everywhere.
+3. **`rebuildCompressed`'s "second lock" did not actually hold.** It tested `/Mask` unresolved, so the ordinary indirect form (`/Mask 12 0 R` pointing at a colour-key array) read as a plain `PDFRef` and was copied verbatim onto a downscaled JPEG whose samples can no longer fall in those ranges; `/Matte` and `/ImageMask true` were not checked at all. All three are now re-checked against the resolved objects, so the guard no longer depends on the classifier having reached the same conclusion.
+4. **A shared image was sized from whichever pages happened to over-sample it.** The displayed size is only measured on pages listing the image in `reencode`, so an image over-sampled on a small page and correctly sized on a larger one was replaced at the small page's size and the larger placement silently inherited the downscale. Candidacy is now document-wide, so "largest use wins" sees every use. The same pass stopped a shared image's bytes being counted once per page in `actionableBytes`, which had inflated CMP-04's pre-flight estimate.
+
+Still `Partial` only in the sense of its deliberate bounds: the six unsupported constructs are detected before any mutation, left byte-identical, and named in the report (`CompressPanel`, and the commit summary). CMP-05's live preview is the ticket's remaining unbuilt half and is tracked there.
+
 The hardest ticket in v1.0. Budget accordingly.
 
 - **Requirements:** Extract each image XObject via pdf.js operator lists; downscale to
@@ -600,7 +616,28 @@ Implements PLAN §4.2 steps 2–3.
 
 ### RED-04 · Metadata inspector and scrubber — `M` `P1`
 
-**Status: Partial** — Inspector plus rebuild-on-strip so removed objects are absent. **No per-item control**; unverified against a fixture carrying a Windows user path.
+**Status: Done** — Inspector plus rebuild-on-strip so removed objects are absent, with a
+checkbox per finding and `Select all` / `Select none` above the list for the one-click
+strip-all. Findings now include each non-standard Info entry with its value and a
+`Filesystem paths` section naming where every path was found (Producer, a custom property,
+the XMP packet) and therefore which toggle clears it.
+
+Two real defects fixed here, both found by the new fixture: the rebuild copied pages into a
+fresh document and never carried the catalog across, so *keeping* an item was a no-op —
+embedded files, hidden layers, an open action, embedded JavaScript and the XMP packet were
+removed whether or not their box was ticked (the copy now runs through a single
+`PDFObjectCopier` shared with the page copy, so a kept `/OCProperties` still points at the
+objects the page content marks); and `PDFDocument.create()`'s own Producer/Creator/dates
+repopulated categories that had just been stripped.
+
+Verified against `tests/fixtures/metadata-windows-path.pdf` (author `Grace Hopper`; the same
+Windows user path in a custom Info key, in `/Producer`, and in the XMP packet; plus a
+document-level JavaScript action): unit tests assert all three are reported before, that a
+per-item strip removes only the ticked category, and that after strip-all none of the
+strings survive anywhere in the decompressed output while the page and its text remain; the
+e2e test asserts the author and both paths are on screen before, drives a checkbox from the
+keyboard, and asserts absence from the exported bytes. Metadata scrubbing runs automatically
+inside `applyRedactions` (`src/core/operations.ts`).
 
 - **Requirements:** Show everything hidden in the file: author, producer, creator, dates,
   filesystem paths, XMP, embedded thumbnails, embedded JavaScript, launch actions, embedded
@@ -737,7 +774,7 @@ current test actually asserts `< 500`.
 **Status: Done** — [x] **NFR-04** — Implement an i18n framework.
   - *Context*: Some users speak Spanish. The team wants to expand globally, so we need RTL support.
   - *AC*: No hard-coded user-facing strings remain in English; Arabic shifts the UI layout seamlessly without breaking the unified canvas tools.
-  - **Correction found in a later audit:** `initLocale()` was dead code — nothing called it, so no dictionary ever loaded on boot and the only way one loaded at all was the user manually touching the language `<select>`. Strings keyed by their own English text (most of them) rendered correctly by accident; strings keyed symbolically (`header.title`, `tool.batch`, `tool.compare`, and the `tool.annotate.*`/`tool.sign.*` keys added in this pass) rendered their literal dotted key. Fixed by calling `initLocale()` at bootstrap in `src/ui/app.tsx`; see `docs/STATUS.md` for the related signal-reactivity fix (`dictionaryVersion`) needed alongside it.
+  - **Correction found in a later audit:** `initLocale()` was dead code — nothing called it, so no dictionary ever loaded on boot and the only way one loaded at all was the user manually touching the language `<select>`. Strings keyed by their own English text (most of them) rendered correctly by accident; strings keyed symbolically (`header.title`, `tool.batch`, `tool.compare`, and the `tool.annotate.*`/`tool.sign.*` keys added in this pass) rendered their literal dotted key. Fixed by calling `initLocale()` at bootstrap in `src/ui/app.tsx`, alongside a related signal-reactivity fix (`dictionaryVersion`) needed for translated strings to actually re-render on language change.
 
 ---
 
@@ -799,15 +836,17 @@ each has its own QA-01 fixture. Full suite: 55 tests, ~3 minutes headless.
 
 ### DIST-01 · Store listing assets — `M` `P0`
 
-**Status: Partial** — Title, short/long description, keywords, and icon set (16/32/48/128,
+**Status: Done** — Title, short/long description, keywords, and icon set (16/32/48/128,
 generated by `scripts/generate-icons.mjs` — the previous files were 1×1 placeholder pixels,
 undetected because the only test checked the manifest declared a path, never the file's real
 dimensions) are done. 5 screenshots exist (`docs/screenshots/`, generated by
 `scripts/generate-screenshots.mjs` against the real built app), first is scan cleanup
 before/after. Copy explicitly states no upload, no account, no size limit, no watermark, open
 source/MIT — previously only implied some of these. No competitor trademarks; no "legally
-binding" signature claim (`SignPanel.tsx` says the opposite explicitly). **Missing:** the
-1280×800 promo tile and the 440×280 small tile are optional CWS assets, not yet produced.
+binding" signature claim (`SignPanel.tsx` says the opposite explicitly). The 1280×800 promo
+tile and 440×280 small tile now exist too (`docs/promo/`, `scripts/generate-promo-tiles.mjs`,
+`npm run assets:promo`). The 1400×560 marquee tile remains unproduced — optional and outside
+this ticket's AC.
 
 - **Requirements:** Keyword-bearing title (PLAN §7), short and long description, 5
   screenshots (first = scan cleanup before/after), 1280×800 promo tile, icon set. Copy must
@@ -826,14 +865,58 @@ binding" signature claim (`SignPanel.tsx` says the opposite explicitly). **Missi
 
 ### DIST-03 · Website twin with per-tool landing pages — `L` `P1`
 
-**Status: Partial** — `build:web` now emits `index.html`, so the site answers at its root — it previously 404'd. No per-tool landing pages.
+**Status: Partial** — `pnpm build:web` now emits five real static HTML entry points,
+`merge-pdf.html`, `compress-pdf.html`, `sign-pdf.html`, `scan-cleanup.html`,
+`redact-pdf.html`, alongside `index.html`/`editor.html`, each with its own hero, three-item
+feature list, and install CTA, plus the actual tool mounted and usable below the fold.
+Verified with the build output and unit/zero-network tests (see below). **Not done:** the
+Cloudflare Pages deploy itself and a real Lighthouse run — both need infra this environment
+doesn't have, so the ≥95 AC is unverified, not claimed.
 
 - **Requirements:** `pnpm build:web` deployed to Cloudflare Pages; routes `/merge-pdf`,
   `/compress-pdf`, `/sign-pdf`, `/scan-cleanup`, `/redact-pdf`, each server-rendered static
   with the tool preloaded, plus an install CTA. Upstream's marketing components
   (hero/display type, feature cards) are appropriate here.
+  - Implementation: `vite.config.ts` adds these five `.html` files to
+    `rollupOptions.input` only when `BUILD_TARGET` is not `ext` (same gating as the
+    existing `emitWebIndex` plugin), so `build:ext` is untouched — confirmed: `dist/ext`
+    contains only `editor.html`/`privacy.html`, no landing pages.
+  - The routed app tree was pulled out of `app.tsx` into `src/ui/AppRoot.tsx` (exported
+    `App` component, no side effects) so both the editor entry and the landing pages mount
+    the *same* tool code — merge/compress/sign/cleanup/redact are not reimplemented for
+    the marketing site. `src/ui/mountLanding.tsx` sets the initial hash route to the
+    page's tool (`#/tool/<id>`) before mounting, so the tool is preloaded on a direct hit.
+    Global error hooks were factored into `src/ui/errorHooks.ts`, shared by both entries.
+  - Hero/feature/CTA markup lives directly in each static `.html` file (real `<h1>`,
+    description, feature cards, and CTA — present before any script runs), styled by a
+    new `src/ui/styles/marketing.css` using only `var(--token)` from `tokens.css`
+    (`check:tokens` passes). Two new type tokens were added, `--text-display` and
+    `--text-headline`, for the hero — DESIGN-ADAPTATION §3.2 already documents a
+    website-twin-only display ramp; these are the first tokens to use it, deliberately
+    kept far below upstream's 80px.
+  - The install CTA is a disabled `<button>` reading "Install from the Chrome Web
+    Store — coming soon", matching README's own "Coming Soon" status — the store listing
+    is not live (`docs/STORE_LISTING.md`), so this does not link to a placeholder URL that
+    would look real but go nowhere. A second CTA jumps to the embedded tool itself.
 - **AC:** Lighthouse ≥95 on all four categories. Each landing page works fully without the
   extension installed.
+  - Lighthouse ≥95: **unverified here** — no Cloudflare Pages deploy or Lighthouse CI
+    access in this environment. The build has no runtime network requests (zero-network
+    e2e assertion passes against the built site, see below), real per-page meta
+    title/description, semantic headings, and a `min-height` reservation for the mounted
+    app to avoid layout shift, which point at a passing run but were not measured with
+    real Lighthouse.
+  - Works fully without the extension installed: **met**. Each page mounts the real
+    `App`/tool code client-side; nothing in the landing bundle references the extension
+    or `chrome.*` (layer boundary unchanged — landing files import only `core/`/`ui/`).
+  - Evidence: `BUILD_TARGET=web vite build` emits all 6 pages
+    (`dist/web/{index,editor,merge-pdf,compress-pdf,sign-pdf,scan-cleanup,redact-pdf}.html`)
+    with real content, injected per-page CSS/JS by Vite (confirmed by inspecting
+    `dist/web/merge-pdf.html`). `BUILD_TARGET=ext vite build` output is unchanged (only
+    `editor.html`/`privacy.html`). `pnpm check` (type/lint/format/tokens) and
+    `pnpm test` (266 unit tests) pass. The two `tests/e2e/zero-network.spec.ts` cases pass
+    against the built web preview. Full `pnpm test:e2e` and a real Lighthouse/Cloudflare
+    run remain manual follow-ups — add to the `QA-05`/`DIST-05` manual checklist.
 
 ### DIST-04 · Edge and Firefox submissions — `M` `P1`
 
@@ -852,6 +935,227 @@ did not exist before this pass, despite the checklist instructing every release 
 
 - **AC:** Documented checklist: version bump, changelog, `pnpm check`, full test suite,
   QA-05 manual pass, build, zip, submit. No release without a green zero-network test.
+
+---
+
+## EPIC-15 · v1.1 feature expansion
+
+Twenty new tools/features, scoped to fit the product as it exists rather than bolted on.
+Every one of these must still satisfy every hard invariant in `CLAUDE.md` — zero network,
+zero permissions, tokens-only colour, the `core`/`ui`/`platform` layer boundary — and the
+definition of done at the top of this file. None of these revisit the deliberate non-goals
+in `PLAN.md` §1.1 (PDF→Word, Office→PDF, password removal, accounts, analytics); adding
+**password protection** (RED-06) is a distinct, newly-scoped feature, not a reversal of the
+password-*removal* non-goal.
+
+### RED-05 · Pattern-based auto-redaction — `M` `P1`
+
+**Status: Not started**
+
+- **Requirements:** Scan extracted page text for emails, phone numbers, US SSNs, credit
+  card numbers (Luhn-validated), and IPv4/IPv6 addresses. Surface each match as a
+  suggested mark the user can accept, edit, or dismiss individually, or accept all of one
+  category at once — never auto-redact without a confirming click. Reuse the existing
+  redaction mark/commit pipeline; this only changes how marks are proposed.
+- **AC:** A fixture containing one instance of each pattern surfaces exactly those matches,
+  correctly categorized, with zero false positives on the surrounding prose. Declining a
+  suggestion leaves the source text fully intact in the export.
+
+### RED-06 · Add password protection on export — `M` `P1`
+
+**Status: Not started**
+
+- **Requirements:** Optional owner/user password and a permission set (print, copy,
+  modify) applied to the exported PDF only, entirely client-side. Clearly label this as
+  encryption *added* at export, distinct from RED-04's metadata scrubbing and from the
+  password-*removal* non-goal — Stapler still never opens or decrypts a document it
+  doesn't already hold the password for.
+- **AC:** Exported file requires the set password to open in an external viewer (Chrome's
+  own PDF viewer, at minimum) and the unprotected original in the editor is unaffected.
+
+### OPS-10 · Bookmark and outline editor — `M` `P1`
+
+**Status: Not started**
+
+- **Requirements:** List the document's existing outline (`/Outlines`) as an editable
+  tree: rename, add (pointing at the current page), delete, and reorder/reindent entries.
+  Independent of OPS-01's merge-time bookmark preservation, which only carries existing
+  outlines through — this creates and edits them directly.
+- **AC:** Adding, renaming, and deleting entries round-trips through export/re-import with
+  the tree exactly as left, keyboard-operable throughout.
+
+### OPS-11 · Bates numbering — `S` `P1`
+
+**Status: Not started**
+
+- **Requirements:** Sequential legal numbering stamp — prefix, zero-padded digit count,
+  starting number, 9-point placement grid — built on the OPS-08 stamp engine rather than
+  a parallel implementation.
+- **AC:** A 20-page document stamped from 000001 produces strictly sequential, correctly
+  zero-padded numbers across every page, independent of any existing page-number stamp.
+
+### OPS-12 · Split by bookmarks — `S` `P1`
+
+**Status: Not started**
+
+- **Requirements:** A fourth OPS-03 split mode: use the document's top-level outline
+  entries as split boundaries, one output file per top-level bookmark, named from the
+  bookmark's title (sanitized for the filesystem).
+- **AC:** A fixture with N top-level bookmarks produces exactly N files whose page ranges
+  union to the input page set with no overlap, matching OPS-03's existing boundary
+  property test.
+
+### OPS-13 · Flatten page background — `S` `P2`
+
+**Status: Not started**
+
+- **Requirements:** Replace a page's background with solid white (a scan-cleanup-adjacent
+  operation for e.g. a coloured letterhead sheet re-scanned repeatedly) or apply a flat
+  colour tint, without touching foreground text/vector content or existing images beyond
+  the background layer itself.
+- **AC:** On a fixture with a coloured background fill, output shows solid white (or the
+  chosen tint) behind unchanged foreground content, verified pixel-sampled off-text.
+
+### CNV-06 · Extract embedded images — `M` `P1`
+
+**Status: Not started**
+
+- **Requirements:** Pull the original image XObjects out of a PDF byte-for-byte — no
+  re-render, no re-encode — distinct from CNV-02 (which rasterizes whole pages). Output
+  each at its native format/resolution in a ZIP, named by page and position.
+- **AC:** Extracted bytes match the source image object's decoded pixels exactly (no
+  generational loss versus a re-encoded round trip); a page with N images yields N files.
+
+### CNV-07 · Paste image as page — `S` `P2`
+
+**Status: Not started**
+
+- **Requirements:** Read an image directly off the OS clipboard (Clipboard API) and
+  insert it as a new page at the current insertion point, reusing CNV-01's image-to-PDF
+  page composition.
+- **AC:** Pasting a clipboard image inserts a correctly-sized page at the expected index;
+  refused with a clear message if the clipboard holds no image.
+
+### DOC-07 · Compress to a target size — `M` `P1`
+
+**Status: Not started**
+
+- **Requirements:** A compression preset that takes a target size (e.g. "under 10MB")
+  and iterates DPI/quality within CMP-02/CMP-03's existing pipeline to land at or under
+  it, reporting the achieved size; if the floor quality still exceeds the target, say so
+  rather than degrading further.
+- **AC:** A fixture compressible below the target lands at or under it; a fixture that
+  cannot reach the target under the quality floor reports that honestly, never silently
+  overshooting.
+
+### DOC-08 · Linearize export ("fast web view") — `S` `P2`
+
+**Status: Not started**
+
+- **Requirements:** Reorder the exported PDF's objects so the first page's content is
+  available from the start of the byte stream (linearized/optimized structure), improving
+  progressive display in viewers that support it.
+- **AC:** Output re-parses cleanly and page content/order is unchanged; the first page's
+  objects precede later pages' in byte offset.
+
+### SGN-05 · Flatten form and annotations — `S` `P1`
+
+**Status: Not started**
+
+- **Requirements:** Bake filled AcroForm field values and placed annotations/stamps into
+  static page content, removing the underlying interactive fields/widgets so the result
+  can't be re-edited — a natural "finalize" step after SGN-03 fill or ANN-01 annotation.
+- **AC:** Flattened output shows the same visual content with no `/AcroForm` fields and no
+  annotation dictionaries remaining; text extraction still finds the baked-in values.
+
+### SGN-06 · Create form fields — `L` `P2`
+
+**Status: Not started**
+
+- **Requirements:** Draw new text, checkbox, and radio-group fields onto a page (not
+  filling existing ones, which is SGN-03) — placement, sizing, and a name/export-value per
+  field, written into a real `/AcroForm` on export.
+- **AC:** A field drawn and exported opens fillable in Chrome's own PDF viewer with the
+  configured name/type; SGN-03 can fill it back in a second round trip.
+
+### ANN-03 · Search and highlight — `S` `P1`
+
+**Status: Not started**
+
+- **Requirements:** Find text across the document (reusing RED's find-and-mark text
+  location) and turn every match into a real highlight annotation via ANN-01's layer,
+  rather than a redaction mark.
+- **AC:** Searching a term present N times produces N highlight annotations at the correct
+  text locations, undo/redo-integrated per ANN-01's existing model.
+
+### ANN-04 · Export annotation summary — `S` `P2`
+
+**Status: Not started**
+
+- **Requirements:** Collect every sticky note and comment from ANN-01's layer into a
+  printable summary — either an appended page or a separate export — listing each note's
+  page, position, and text.
+- **AC:** A document with N notes across multiple pages produces a summary listing all N,
+  correctly attributed to their page numbers.
+
+### CMP-06 · Compression report export — `S` `P2`
+
+**Status: Not started**
+
+- **Requirements:** Alongside CMP-04's on-screen honest-reporting summary, an exportable
+  per-page/per-image breakdown (sizes before/after, which images were re-encoded vs.
+  skipped and why) as a plain-text or JSON sidecar file.
+- **AC:** Exported report's totals match the actual output file size and the skip reasons
+  match what CMP-04's UI summary shows for the same run.
+
+### ANN-05 · Export visual diff — `S` `P2`
+
+**Status: Not started**
+
+- **Requirements:** Extend the Compare tool (ANN-02) to export its side-by-side or overlay
+  diff view — changed regions highlighted — as a new PDF, rather than only viewing diffs
+  live in the editor.
+- **AC:** Exported diff PDF's highlighted regions match what the live Compare view marks
+  as changed, for both an added-content and a removed-content fixture.
+
+### DOC-09 · Contact sheet export — `S` `P2`
+
+**Status: Not started**
+
+- **Requirements:** Generate a single PDF or image containing a grid of page thumbnails
+  (configurable columns), reusing DOC-03's existing thumbnail cache rather than
+  re-rendering pages.
+- **AC:** A 20-page document at a 4-column setting produces a 5-row contact sheet whose
+  thumbnails are recognizably the source pages in order.
+
+### ACC-01 · Alt-text editor for images — `M` `P1`
+
+**Status: Not started**
+
+- **Requirements:** Let the user attach alt-text to each image XObject on a page, written
+  as real structure-tree/`/Alt` metadata on export — basic PDF/UA-style accessibility
+  tagging, not just an in-app label.
+- **AC:** Alt-text set in the UI round-trips: present in the exported bytes' structure
+  tree and re-readable by re-importing the file into the same editor.
+
+### DS-09 · Custom keyboard shortcut remapping — `S` `P2`
+
+**Status: Not started**
+
+- **Requirements:** Let the user rebind any shortcut listed in DS-08's shortcut sheet,
+  persisted locally (IndexedDB, per F-06), with conflict detection against other bound
+  shortcuts and a reset-to-default action.
+- **AC:** A rebound shortcut fires the original action and no longer fires under its old
+  key; the shortcut sheet reflects the active bindings, not the defaults, once changed.
+
+### BAT-03 · Templated batch output filenames — `S` `P2`
+
+**Status: Not started**
+
+- **Requirements:** A filename pattern field for BAT-01 batch runs supporting tokens like
+  `{basename}`, `{index}`, `{date}`, applied per output file instead of a fixed suffix.
+- **AC:** A batch run with a pattern using all three tokens produces correctly-substituted,
+  collision-free filenames for every input file.
 
 ---
 

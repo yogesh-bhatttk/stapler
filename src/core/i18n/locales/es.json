@@ -276,5 +276,9 @@
   "tool.sign.stampDate": "Fecha",
   "tool.sign.stampText": "Texto",
   "tool.sign.useThisPrefix": "Usar esta",
-  "· page": "· page"
+  "· page": "· page",
+  "Select what to strip": "Select what to strip",
+  "Select none": "Select none",
+  "Filesystem paths": "Filesystem paths",
+  "Each path goes when the item it sits in is stripped above.": "Each path goes when the item it sits in is stripped above."
 }
