@@ -32,7 +32,8 @@ export type ToolId =
   | 'annotate'
   | 'batch'
   | 'md-to-pdf'
-  | 'ocr';
+  | 'ocr'
+  | 'acc';
 
 export type ToolGroup = 'Organize' | 'Convert' | 'Optimize' | 'Document' | 'Automation';
 
@@ -260,6 +261,17 @@ export const TOOLS: readonly ToolDefinition[] = [
     canvasMode: 'grid',
     needsOptionsPanel: true,
     commitLabel: 'Strip & export',
+    selectable: false
+  },
+  {
+    id: 'acc',
+    title: 'Alt-text editor',
+    group: 'Document',
+    summary: 'Attach alt-text to images for PDF/UA accessibility.',
+    icon: 'Accessibility',
+    canvasMode: 'grid',
+    needsOptionsPanel: true,
+    commitLabel: 'Tag & export',
     selectable: false
   },
   {

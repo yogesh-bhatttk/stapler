@@ -36,6 +36,7 @@ import {
 } from '../../core/store';
 import { formatBytes } from '../components/Feedback';
 import type { JobOptions } from '../../core/workers/protocol';
+import { createJobHandle } from '../../core/workers/protocol';
 import type { ToolId } from '../../core/tools';
 import {
   compressMode,
@@ -56,6 +57,7 @@ import { scrubSettings } from './metadata/state';
 import { ocrReport, ocrSettings } from './ocr/state';
 import { runOcr } from '../../core/ocr/runOcr';
 import { renderWorker } from '../../core/workers';
+import { altTextMap } from './acc/state';
 
 /** Strips the extension so suffixes can be appended without doubling `.pdf`. */
 function stem(name: string): string {
@@ -289,6 +291,25 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   crop: exportComposed,
   watermark: exportComposed,
   outline: exportComposed,
+  acc: async ({ doc, job }) => {
+    const altTexts = Object.fromEntries(altTextMap.value);
+    if (Object.keys(altTexts).length === 0) return;
+
+    const bytes = await composeDocument(
+      {
+        pages: doc.pages,
+        annotations: doc.annotations,
+        layerAnnotations: getLayerAnnotations()
+      },
+      job
+    );
+
+    const finalBytes = await processWorker.lease(api =>
+      api.applyAltText(bytes, altTexts, createJobHandle(job))
+    );
+
+    await save(doc, finalBytes, `${stem(doc.name)}-acc.pdf`);
+  },
 
   annotate: async ({ doc, job }) => {
     // ANN-01's own marks are drawn straight into the content stream by

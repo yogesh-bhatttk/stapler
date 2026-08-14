@@ -9,7 +9,12 @@ import { commit } from './history';
  */
 import { processWorker, renderWorker, cvWorker } from './workers';
 import { createJobHandle, type JobOptions } from './workers/protocol';
-import type { ExtractedImages, RedactionRegion, StampSource } from './workers/process.worker';
+import type {
+  ExtractedImages,
+  RedactionRegion,
+  StampSource,
+  ImageAltInfo
+} from './workers/process.worker';
 import type { PatternSuggestion, TextRegion } from './workers/render.worker';
 import {
   MEANINGFUL_SAVING,
@@ -846,6 +851,15 @@ export async function extractEmbeddedImages(
 ): Promise<ExtractedImages> {
   const job = createJobHandle(options);
   return processWorker.lease(api => api.extractImages(bytes, pageIndices, job));
+}
+
+/** ACC-01 — returns thumbnails of all images for the alt-text editor */
+export async function findImagesForAltText(
+  bytes: Uint8Array,
+  options: JobOptions = {}
+): Promise<ImageAltInfo[]> {
+  const job = createJobHandle(options);
+  return processWorker.lease(api => api.findImagesForAltText(bytes, job));
 }
 
 import { normalizeSettings } from '../ui/tools/normalize/state';

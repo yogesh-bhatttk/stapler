@@ -104,6 +104,7 @@ import {
 import type { Rect, GraphicsState, Matrix } from '../pdf/interpreter';
 import { hasXfaMarker, XFA_MESSAGE } from '../pdf/xfa';
 import { encryptPdf, type ProtectionSettings } from '../pdf/encrypt';
+import { applyAltTextToDoc } from '../pdf/accessibility';
 
 /** A page in the output, pointing back at the bytes it came from. */
 export interface PageSource {
@@ -281,6 +282,22 @@ export interface RedactionRegion {
   text?: string;
 }
 
+export interface TextLayerParams {
+  scale: number;
+  width: number;
+  height: number;
+}
+
+export interface ImageAltInfo {
+  pageIndex: number;
+  objectNumber: number;
+  name: string;
+  width: number;
+  height: number;
+  ext: string;
+  bytes: Uint8Array;
+}
+
 /** A region rasterised by the render worker, ready to stamp over a page. */
 export interface RegionStamp {
   pageIndex: number;
@@ -413,9 +430,18 @@ export interface ProcessJob {
    */
   extractImages(
     bytes: Uint8Array,
-    pageIndices?: number[],
+    pageIndices: number[] | null,
     job?: JobHandle
   ): Promise<ExtractedImages>;
+  /** ACC-01 — returns thumbnails of all images for the alt-text editor */
+  findImagesForAltText(bytes: Uint8Array, job: JobHandle): Promise<ImageAltInfo[]>;
+  /** ACC-01 — applies alt-text mapping and rewrites the Structure Tree */
+  applyAltText(
+    bytes: Uint8Array,
+    altTexts: Record<string, string>,
+    job?: JobHandle
+  ): Promise<Uint8Array>;
+
   markdownToPdf(markdown: string): Promise<Uint8Array>;
   readMetadata(bytes: Uint8Array): Promise<MetadataFindings>;
   scrubMetadata(bytes: Uint8Array, settings?: ScrubSettings): Promise<Uint8Array>;
@@ -3140,7 +3166,7 @@ const api: ProcessJob = {
 
     // Image replacement happens on the source document first: once the page's
     // /XObject entry points at the new stream, the old image is unreachable and
-    // copyPages will not carry it into the output. Mutating and re-saving in
+    // copyPages will not carry it into the output. Mutating and re-save in
     // place would keep both copies, which is how "compression" grew files.
     const pages = source.getPages();
 
@@ -3331,6 +3357,19 @@ const api: ProcessJob = {
       return { bytes: transfer(new Uint8Array(bytes)), keptOriginal: true };
     }
     return { bytes: transfer(rebuilt), keptOriginal: false };
+  },
+
+  async applyAltText(bytes, altTexts, job) {
+    const doc = await load(bytes);
+
+    if (job) await checkpoint(job, 0.5, 'Tagging images and building structure tree');
+    await applyAltTextToDoc(doc, altTexts);
+
+    if (job) await checkpoint(job, 0.9, 'Saving accessible document');
+    // We cannot use object streams because it breaks accessibility testing tools
+    // that don't fully support PDF 1.5 object streams (like Acrobat Reader sometimes when debugging).
+    // Plus, it ensures our `/K` arrays in StructTreeRoot are easily readable.
+    return transfer(await doc.save({ useObjectStreams: false }));
   },
 
   async markdownToPdf(markdown: string): Promise<Uint8Array> {
@@ -3540,6 +3579,51 @@ const api: ProcessJob = {
     // Store, not deflate: JPEG, JPEG 2000, and PNG are already compressed, so
     // deflating them again costs seconds and saves nothing (CNV-02 does the same).
     return { bytes: transfer(zipSync(files, { level: 0 })), entries };
+  },
+
+  async findImagesForAltText(bytes, job) {
+    const doc = await load(bytes);
+    const pages = doc.getPages();
+    const images: ImageAltInfo[] = [];
+    const done = new Set<number>();
+
+    for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+      await checkpoint(job, pageIndex / pages.length, `Scanning page ${pageIndex + 1} for images`);
+
+      const resources = pages[pageIndex].node.Resources();
+      const xobjects = resources?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+      if (!xobjects) continue;
+      const refs = collectImageRefs(xobjects, doc.context, new Set(), resources);
+
+      for (const found of refs) {
+        if (done.has(found.ref.objectNumber)) continue;
+
+        const stream = doc.context.lookup(found.ref);
+        if (!(stream instanceof PDFStream)) continue;
+
+        const outcome = extractImageFile(stream, found.resources, doc.context);
+        if (!outcome.ok) {
+          done.add(found.ref.objectNumber);
+          continue;
+        }
+
+        const width = numberOf(stream.dict, 'Width', 0);
+        const height = numberOf(stream.dict, 'Height', 0);
+        const name = found.key.asString().replace(/^\//, '');
+
+        images.push({
+          pageIndex,
+          objectNumber: found.ref.objectNumber,
+          name,
+          width,
+          height,
+          ext: outcome.file.ext,
+          bytes: transfer(outcome.file.bytes)
+        });
+        done.add(found.ref.objectNumber);
+      }
+    }
+    return images;
   },
 
   async readMetadata(bytes) {
