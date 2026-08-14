@@ -23,6 +23,7 @@ import { notify } from '../../../core/notify';
 import { Button } from '../../components/Button';
 import { IconButton } from '../../components/IconButton';
 import { panelStyles } from '../../shell/OptionsPanel';
+import { FlattenOption } from '../FlattenOption';
 import { SignatureModal } from './SignatureModal';
 import { activeStamp, signatureSuggestions, formFields, formValues, type StampType } from './state';
 import { useJob } from '../../useJob';
@@ -229,6 +230,8 @@ export function SignPanel() {
       <Button variant="tertiary" icon={ScanSearch} onClick={detect} disabled={!doc}>
         {t('Detect signature lines')}
       </Button>
+
+      <FlattenOption />
 
       <p className={`${panelStyles.note} ${panelStyles.noteInfo}`}>
         {t('These are stamped signature images. Stapler makes no claim about legal validity.')}

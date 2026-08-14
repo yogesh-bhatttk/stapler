@@ -73,7 +73,11 @@ import {
   PDFTextField,
   degrees,
   StandardFonts,
-  rgb
+  rgb,
+  concatTransformationMatrix,
+  drawObject,
+  popGraphicsState,
+  pushGraphicsState
 } from 'pdf-lib';
 import type { PDFField, PDFImage, PDFContext } from 'pdf-lib';
 import { zipSync } from 'fflate';
@@ -341,6 +345,15 @@ export interface ProcessJob {
     values: Record<string, string | boolean | string[]>,
     flatten: boolean
   ): Promise<Uint8Array>;
+  /**
+   * SGN-05 — bakes interactive content into the page and removes it.
+   *
+   * Separate from `fillFormFields`'s `flatten` argument, which only reaches the
+   * form: this also flattens annotation dictionaries the document already
+   * carried. Returns the report alongside the bytes so the caller states what
+   * was lost (a link's clickability) instead of asserting success.
+   */
+  flattenDocument(bytes: Uint8Array): Promise<{ bytes: Uint8Array } & FlattenReport>;
   compose(
     pages: PageSource[],
     sources: Record<string, Uint8Array>,
@@ -2146,6 +2159,193 @@ async function readXmpText(doc: PDFDocument): Promise<string> {
 }
 
 /* ------------------------------------------------------------------ *
+ * Flatten (SGN-05)
+ * ------------------------------------------------------------------ */
+
+/** `/F` bit 2 — Hidden. The annotation is not drawn, so baking it would add ink. */
+const ANNOT_FLAG_HIDDEN = 1 << 1;
+/** `/F` bit 6 — NoView. Drawn only when printing, so on-screen it is not there. */
+const ANNOT_FLAG_NOVIEW = 1 << 5;
+
+/**
+ * The indirect reference to an annotation's *normal* appearance stream, or
+ * `undefined` when it has none to draw.
+ *
+ * `/AP /N` is either the stream itself or a sub-dictionary keyed by appearance
+ * state — a checkbox's `/Off` and `/Yes`, a stamp's single entry. `/AS` names
+ * which state is current; a sub-dictionary with exactly one entry and no `/AS`
+ * is unambiguous, so it is used, but an ambiguous one is left alone rather than
+ * guessed at (drawing the wrong state is a visual lie, and this ticket's whole
+ * point is that the flattened result is what the user saw).
+ *
+ * A directly-embedded stream is registered so it can be referenced as an
+ * XObject; `newXObject` needs a ref, not an inline object.
+ */
+function normalAppearanceRef(doc: PDFDocument, annot: PDFDict): PDFRef | undefined {
+  const ap = annot.lookupMaybe(PDFName.of('AP'), PDFDict);
+  if (!ap) return undefined;
+
+  const asRef = (value: unknown): PDFRef | undefined => {
+    if (value instanceof PDFRef) {
+      return doc.context.lookupMaybe(value, PDFStream) ? value : undefined;
+    }
+    return value instanceof PDFStream ? doc.context.register(value) : undefined;
+  };
+
+  const normal = ap.get(PDFName.of('N'));
+  const direct = asRef(normal);
+  if (direct) return direct;
+
+  const states = normal instanceof PDFRef ? doc.context.lookupMaybe(normal, PDFDict) : normal;
+  if (!(states instanceof PDFDict)) return undefined;
+
+  const current = annot.get(PDFName.of('AS'));
+  if (current instanceof PDFName) return asRef(states.get(current));
+  const keys = states.keys();
+  return keys.length === 1 ? asRef(states.get(keys[0])) : undefined;
+}
+
+/** `[x1, y1, x2, y2]` from an annotation's `/Rect`, normalised so x1<x2, y1<y2. */
+function annotationRect(annot: PDFDict): [number, number, number, number] | undefined {
+  const rect = annot.lookupMaybe(PDFName.of('Rect'), PDFArray);
+  if (!rect || rect.size() < 4) return undefined;
+  const values: number[] = [];
+  for (let i = 0; i < 4; i++) {
+    const value = rect.lookup(i);
+    if (!(value instanceof PDFNumber)) return undefined;
+    values.push(value.asNumber());
+  }
+  const [a, b, c, d] = values;
+  return [Math.min(a, c), Math.min(b, d), Math.max(a, c), Math.max(b, d)];
+}
+
+/** Four numbers from a stream dictionary array, or `undefined`. */
+function numberArray(dict: PDFDict, key: string, count: number): number[] | undefined {
+  const array = dict.lookupMaybe(PDFName.of(key), PDFArray);
+  if (!array || array.size() < count) return undefined;
+  const values: number[] = [];
+  for (let i = 0; i < count; i++) {
+    const value = array.lookup(i);
+    if (!(value instanceof PDFNumber)) return undefined;
+    values.push(value.asNumber());
+  }
+  return values;
+}
+
+/**
+ * The matrix that maps an appearance stream onto its annotation's `/Rect`.
+ *
+ * This is PDF 32000-1 §12.5.5's algorithm, not a plain translate: the form
+ * XObject's `/BBox` is transformed by its own `/Matrix`, the *bounding box of
+ * that result* is fitted to `/Rect`, and only the fitting transform is pushed —
+ * the viewer applies `/Matrix` itself when it executes the `Do`. Skipping the
+ * `/Matrix` step (or just translating to the rect's corner) puts a rotated or
+ * scaled appearance in the wrong place and at the wrong size, which is exactly
+ * the "looks fine until it doesn't" failure this codebase refuses to ship.
+ */
+function appearanceMatrix(
+  stream: PDFStream,
+  rect: [number, number, number, number]
+): [number, number, number, number, number, number] {
+  const [rx1, ry1, rx2, ry2] = rect;
+  const bbox = numberArray(stream.dict, 'BBox', 4);
+  // /BBox is required for a form XObject. Without one there is nothing to fit,
+  // so fall back to placing the stream's own origin at the rect's corner.
+  if (!bbox) return [1, 0, 0, 1, rx1, ry1];
+
+  const [a, b, c, d, e, f] = numberArray(stream.dict, 'Matrix', 6) ?? [1, 0, 0, 1, 0, 0];
+  const corners: [number, number][] = [
+    [bbox[0], bbox[1]],
+    [bbox[2], bbox[1]],
+    [bbox[2], bbox[3]],
+    [bbox[0], bbox[3]]
+  ].map(([x, y]) => [a * x + c * y + e, b * x + d * y + f]);
+
+  const xs = corners.map(p => p[0]);
+  const ys = corners.map(p => p[1]);
+  const bx1 = Math.min(...xs);
+  const by1 = Math.min(...ys);
+  const spanX = Math.max(...xs) - bx1;
+  const spanY = Math.max(...ys) - by1;
+
+  // A degenerate span would divide by zero; 1 leaves the appearance unscaled
+  // rather than producing NaN operands that would break the content stream.
+  const sx = spanX === 0 ? 1 : (rx2 - rx1) / spanX;
+  const sy = spanY === 0 ? 1 : (ry2 - ry1) / spanY;
+  return [sx, 0, 0, sy, rx1 - bx1 * sx, ry1 - by1 * sy];
+}
+
+/** Counts from one flatten, so the UI can report what happened. */
+export interface FlattenReport {
+  /** Interactive form fields removed; their values are now page content. */
+  fields: number;
+  /** Annotations whose appearance stream was drawn into the page content. */
+  annotationsBaked: number;
+  /** Annotations removed that drew nothing: links, popups, hidden marks. */
+  annotationsDropped: number;
+}
+
+/**
+ * Draws every annotation's appearance into its page's content stream and then
+ * removes `/Annots` entirely.
+ *
+ * `form.flatten()` only handles *widget* annotations — the form's own. A
+ * document that has been through another tool carries `/FreeText`, `/Square`,
+ * `/Highlight`, `/Stamp` and `/Link` dictionaries that `copyPages` faithfully
+ * carries through every compose, so a "flattened" export still handed the
+ * recipient annotations they could move, edit, or delete. This is the other
+ * half of SGN-05's "no annotation dictionaries remaining".
+ *
+ * Annotations with nothing to draw (a `/Link`'s hotspot, a `/Popup`'s window,
+ * anything flagged hidden) are removed rather than baked, and counted
+ * separately so the caller can say so out loud — a flatten does lose a link's
+ * clickability, and that is a fact to report, not to bury.
+ */
+function flattenAnnotations(doc: PDFDocument): { baked: number; dropped: number } {
+  let baked = 0;
+  let dropped = 0;
+
+  for (const page of doc.getPages()) {
+    const annots = page.node.lookupMaybe(PDFName.of('Annots'), PDFArray);
+    if (!annots) continue;
+
+    for (const entry of annots.asArray()) {
+      const annot =
+        entry instanceof PDFDict ? entry : doc.context.lookupMaybe(entry, PDFDict) || undefined;
+      if (!annot) {
+        dropped++;
+        continue;
+      }
+
+      const flagValue = annot.lookup(PDFName.of('F'));
+      const flags = flagValue instanceof PDFNumber ? flagValue.asNumber() : 0;
+      const invisible = (flags & ANNOT_FLAG_HIDDEN) !== 0 || (flags & ANNOT_FLAG_NOVIEW) !== 0;
+
+      const apRef = invisible ? undefined : normalAppearanceRef(doc, annot);
+      const stream = apRef ? doc.context.lookupMaybe(apRef, PDFStream) : undefined;
+      const rect = annotationRect(annot);
+      if (nameOf(annot.get(PDFName.of('Subtype'))) === 'Popup' || !apRef || !stream || !rect) {
+        dropped++;
+        continue;
+      }
+
+      const key = page.node.newXObject('FlatAnnot', apRef);
+      page.pushOperators(
+        pushGraphicsState(),
+        concatTransformationMatrix(...appearanceMatrix(stream, rect)),
+        drawObject(key),
+        popGraphicsState()
+      );
+      baked++;
+    }
+
+    page.node.delete(PDFName.of('Annots'));
+  }
+
+  return { baked, dropped };
+}
+
+/* ------------------------------------------------------------------ *
  * API
  * ------------------------------------------------------------------ */
 
@@ -2316,6 +2516,42 @@ const api: ProcessJob = {
       }
     }
     return transfer(await doc.save({ useObjectStreams: true }));
+  },
+
+  async flattenDocument(bytes) {
+    // Same order of refusals as `fillFormFields`: XFA on the raw bytes first,
+    // because a hybrid form answers `false` to every parsed check.
+    if (hasXfaMarker(bytes)) throw unsupported(XFA_MESSAGE);
+
+    const doc = await load(bytes);
+    const form = doc.getForm();
+    if (form.hasXFA()) throw unsupported(XFA_MESSAGE);
+
+    const fields = form.getFields().length;
+    if (fields > 0) {
+      try {
+        form.flatten();
+      } catch (err) {
+        // Half a flatten is a mangled document: some fields drawn and removed,
+        // the rest still interactive. Refuse, exactly as the fill path does.
+        throw corrupt(
+          'The form could not be drawn into the page (its default appearance is ' +
+            `unusable): ${err instanceof Error ? err.message : String(err)}. Nothing was saved.`
+        );
+      }
+      // pdf-lib leaves an /AcroForm with an empty /Fields behind. Removing the
+      // entry means a viewer sees a document with no form at all, which is what
+      // "finalized" means.
+      doc.catalog.delete(PDFName.of('AcroForm'));
+    }
+
+    const { baked, dropped } = flattenAnnotations(doc);
+    return {
+      bytes: transfer(await doc.save({ useObjectStreams: true })),
+      fields,
+      annotationsBaked: baked,
+      annotationsDropped: dropped
+    };
   },
 
   async compose(

@@ -5,6 +5,8 @@ import { createHash } from 'node:crypto';
 import { unzipSync } from 'fflate';
 import {
   acroformPdf,
+  ANNOTATION_TEXT,
+  annotatedPdf,
   BAND_SAMPLE_POINTS,
   BOOKMARK_CHAPTERS,
   bookmarkedPdf,
@@ -901,6 +903,89 @@ test.describe('tool flows', () => {
     const doc = await PDFDocument.load(bytes);
     expect(doc.getPageCount()).toBe(1);
     expect(await drawnText(bytes)).toContain('Ada Lovelace');
+  });
+
+  /**
+   * SGN-05. The AC is about the exported file's dictionaries, so this asserts on
+   * them and not on the notification: no `/AcroForm`, no `/Annots`, and the
+   * values still findable as text.
+   */
+  test('sign: finalizing removes the form and the annotation dictionaries (SGN-05)', async ({
+    page
+  }) => {
+    const file = await ensureFixture('acroform.pdf', () => acroformPdf());
+    await importFixture(page, file);
+    await gotoTool(page, 'sign');
+
+    const field = page.locator('[data-index="0"] textarea').first();
+    await expect(field).toBeVisible({ timeout: 30_000 });
+    await field.click();
+    await field.fill('Ada Lovelace');
+
+    // Finalize is on by default — the same behaviour the fill path always had,
+    // now as a visible control rather than a hardcoded argument.
+    const flatten = page.getByRole('checkbox', { name: /Flatten form fields/ });
+    await expect(flatten).toBeChecked();
+
+    const bytes = await commitAndRead(page, 'Export signed PDF');
+    const doc = await PDFDocument.load(bytes);
+    expect(doc.getPageCount()).toBe(1);
+    expect(doc.catalog.get(PDFName.of('AcroForm'))).toBeUndefined();
+    expect(doc.getForm().getFields()).toHaveLength(0);
+    expect(doc.getPage(0).node.Annots()).toBeUndefined();
+    expect(await drawnText(bytes)).toContain('Ada Lovelace');
+  });
+
+  /**
+   * The other half of making it a choice: turning it off from the keyboard has to
+   * actually produce a still-fillable form, or the control is decoration.
+   */
+  test('sign: unchecking finalize from the keyboard leaves the form fillable (SGN-05)', async ({
+    page
+  }) => {
+    const file = await ensureFixture('acroform.pdf', () => acroformPdf());
+    await importFixture(page, file);
+    await gotoTool(page, 'sign');
+
+    const field = page.locator('[data-index="0"] textarea').first();
+    await expect(field).toBeVisible({ timeout: 30_000 });
+    await field.click();
+    await field.fill('Ada Lovelace');
+
+    const flatten = page.getByRole('checkbox', { name: /Flatten form fields/ });
+    await flatten.focus();
+    await page.keyboard.press(' ');
+    await expect(flatten).not.toBeChecked();
+
+    const bytes = await commitAndRead(page, 'Export signed PDF');
+    const doc = await PDFDocument.load(bytes);
+    expect(doc.getForm().getTextField('name.first').getText()).toBe('Ada Lovelace');
+  });
+
+  /**
+   * SGN-05's annotation half, end to end: a document that arrives carrying real
+   * annotation dictionaries must export with none, and with their appearances
+   * drawn into the page instead.
+   */
+  test('annotate: finalizing bakes existing annotations into the page (SGN-05)', async ({
+    page
+  }) => {
+    const file = await ensureFixture('annotated.pdf', () => annotatedPdf());
+    await importFixture(page, file);
+    await gotoTool(page, 'annotate');
+
+    await expect(page.getByRole('checkbox', { name: /Flatten form fields/ })).toBeChecked();
+
+    const bytes = await commitAndRead(page, /Export/);
+    const doc = await PDFDocument.load(bytes);
+    expect(doc.getPageCount()).toBe(1);
+    expect(doc.getPage(0).node.Annots()).toBeUndefined();
+
+    const text = await drawnText(bytes);
+    expect(text).toContain(ANNOTATION_TEXT);
+    expect(text).toContain('Stapler fixture page 1');
+    // Hidden annotations draw nothing on screen, so flattening must not reveal one.
+    expect(text).not.toContain('SHOULD NOT APPEAR');
   });
 
   /**
