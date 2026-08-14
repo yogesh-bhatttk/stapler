@@ -1022,6 +1022,12 @@ Independently confirmed outside the JS ecosystem with poppler: `pdfinfo` on the 
 `Encrypted: yes (print:yes copy:no change:no addNotes:no algorithm:AES-256)`, with `pdftotext -opw`
 recovering the page text.
 
+**One caveat, stated rather than glossed:** the AC names Chrome's own viewer, and PDFium was not
+exercised directly — headless Chromium does not run the PDF plugin, so the check would have been
+theatre. Two independent implementations of the handler (pdf.js and poppler) were used instead,
+both of which refuse the file without the password and decrypt it with one. PDFium documents
+support for V5/R6 AES-256, so this is expected to hold, but it is inference, not a measurement.
+
 - **Requirements:** Optional owner/user password and a permission set (print, copy,
   modify) applied to the exported PDF only, entirely client-side. Clearly label this as
   encryption *added* at export, distinct from RED-04's metadata scrubbing and from the

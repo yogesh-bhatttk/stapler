@@ -13,6 +13,8 @@ export interface TextRun {
   transform: number[];
   width: number;
   height: number;
+  /** True when pdf.js ended a line after this run. Used by RED-05's scanner. */
+  hasEOL?: boolean;
 }
 
 /** How pdf.js labels the pixel layout of a decoded image. Mirrors `ImageKind`. */

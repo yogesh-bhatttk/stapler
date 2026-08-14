@@ -15,6 +15,7 @@ import { corrupt, encrypted, internal } from '../errors';
 import { DOC_PAGE_WHITE } from '../doc-colors';
 import { blankCoverageLimit, inkCoverage, layoutText, toRgba, type TextRun } from '../text-layout';
 import type { RedactionRegion } from './process.worker';
+import { locatePatterns, type PatternCategory } from '../patterns';
 
 export interface DocumentInfo {
   handle: string;
@@ -34,6 +35,22 @@ export interface TextRegion {
   width: number;
   height: number;
   text: string;
+}
+
+/**
+ * RED-05 — one proposed redaction, not yet a mark.
+ *
+ * `regions` is a list because a match can straddle two text runs; accepting the
+ * suggestion pushes all of them into the same `pendingRedactions` array the
+ * drawing tool and the text search already write to, so nothing downstream knows
+ * a mark was proposed rather than drawn.
+ */
+export interface PatternSuggestion {
+  id: string;
+  category: PatternCategory;
+  pageIndex: number;
+  text: string;
+  regions: TextRegion[];
 }
 
 export interface PageTextPresence {
@@ -103,6 +120,8 @@ export interface RenderJob {
     matchCase: boolean,
     job?: JobHandle
   ): Promise<TextRegion[]>;
+  /** RED-05 — proposes marks for emails, phones, SSNs, cards, and IP addresses. */
+  findPatterns(handle: string, job?: JobHandle): Promise<PatternSuggestion[]>;
   /** Per-page text — the input to the redaction verifier. */
   documentText(handle: string, job?: JobHandle): Promise<string[]>;
   detectBlankPages(handle: string, threshold: number, job?: JobHandle): Promise<number[]>;
@@ -430,6 +449,31 @@ const api: RenderJob = {
       }
     }
     return regions;
+  },
+
+  async findPatterns(handle, job) {
+    const { doc } = entry(handle);
+    const suggestions: PatternSuggestion[] = [];
+
+    for (let i = 1; i <= doc.numPages; i++) {
+      await checkpoint(job, (i - 1) / doc.numPages, `Scanning page ${i} of ${doc.numPages}`);
+      const page = await doc.getPage(i);
+      try {
+        const viewport = page.getViewport({ scale: 1 });
+        for (const found of locatePatterns(await textRuns(page), viewport.width, viewport.height)) {
+          suggestions.push({
+            id: `${i - 1}:${suggestions.length}:${found.category}`,
+            category: found.category,
+            pageIndex: i - 1,
+            text: found.text,
+            regions: found.boxes.map(box => ({ pageIndex: i - 1, ...box }))
+          });
+        }
+      } finally {
+        page.cleanup();
+      }
+    }
+    return suggestions;
   },
 
   async detectSignatureLines(handle, job) {
