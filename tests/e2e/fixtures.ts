@@ -52,6 +52,50 @@ export async function textPdf(pages: number): Promise<Uint8Array> {
   return doc.save();
 }
 
+/** The chapter starts used by the bookmarked fixture, in page order (0-based). */
+export const BOOKMARK_CHAPTERS = [
+  { title: 'Cover', page: 0 },
+  { title: 'Chapter 2: Costs', page: 3 },
+  { title: 'Appendix', page: 6 }
+];
+
+/**
+ * A 9-page document carrying a real `/Outlines` tree — the fixture OPS-10's editor
+ * and OPS-12's split mode both need. Written by hand because pdf-lib has no outline
+ * API, the same reason `process.worker.ts` walks the raw dictionaries.
+ */
+export async function bookmarkedPdf(): Promise<Uint8Array> {
+  const doc = await PDFDocument.load(await textPdf(9));
+  const ctx = doc.context;
+  const pages = doc.getPages();
+  const outlines = ctx.obj({ Type: 'Outlines' });
+  const outlinesRef = ctx.register(outlines);
+
+  let firstRef: PDFRef | undefined;
+  let prevRef: PDFRef | undefined;
+  let lastRef: PDFRef | undefined;
+  for (const chapter of BOOKMARK_CHAPTERS) {
+    const dict = ctx.obj({
+      Title: PDFHexString.fromText(chapter.title),
+      Parent: outlinesRef,
+      Dest: [pages[chapter.page].ref, PDFName.of('Fit')]
+    });
+    const ref = ctx.register(dict);
+    if (!firstRef) firstRef = ref;
+    if (prevRef) {
+      ctx.lookup(prevRef, PDFDict).set(PDFName.of('Next'), ref);
+      dict.set(PDFName.of('Prev'), prevRef);
+    }
+    prevRef = ref;
+    lastRef = ref;
+  }
+
+  outlines.set(PDFName.of('First'), firstRef!);
+  outlines.set(PDFName.of('Last'), lastRef!);
+  doc.catalog.set(PDFName.of('Outlines'), outlinesRef);
+  return doc.save();
+}
+
 /* ------------------------------------------------------------------ *
  * Image fixtures for CMP-03
  *

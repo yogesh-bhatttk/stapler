@@ -21,6 +21,7 @@ export type ToolId =
   | 'compress'
   | 'crop'
   | 'watermark'
+  | 'outline'
   | 'sign'
   | 'redact'
   | 'metadata'
@@ -152,6 +153,17 @@ export const TOOLS: readonly ToolDefinition[] = [
     group: 'Organize',
     summary: 'Add text watermarks or page numbers.',
     icon: 'Stamp',
+    canvasMode: 'single',
+    needsOptionsPanel: true,
+    commitLabel: 'Export PDF',
+    selectable: false
+  },
+  {
+    id: 'outline',
+    title: 'Bookmarks',
+    group: 'Document',
+    summary: 'Edit the document outline: rename, add, delete, and reorder bookmarks.',
+    icon: 'ListTree',
     canvasMode: 'single',
     needsOptionsPanel: true,
     commitLabel: 'Export PDF',

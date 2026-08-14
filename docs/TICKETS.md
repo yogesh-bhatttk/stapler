@@ -975,7 +975,28 @@ password-*removal* non-goal.
 
 ### OPS-10 · Bookmark and outline editor — `M` `P1`
 
-**Status: Not started**
+**Status: Done** — A `Bookmarks` tool (`src/ui/tools/outline/`) reads the document's
+`/Outlines` through a new `readOutline` worker method and edits it as a tree: rename,
+add pointing at the current page, delete, move up/down, indent/outdent. The tree is held
+in *page keys*, not page indexes, so a bookmark still points at the right page after the
+pages are reordered; it is resolved to output page indexes only at export, where
+`writeOutline` replaces the carried-through source outlines (an emptied tree exports no
+`/Outlines` at all, asserted). The override happens only once the user has actually
+changed something (`outlineEdited`): the tree is read from the *first* page's source
+document, so writing an untouched tree back would have silently narrowed OPS-01's
+merge-time carry-through for a second merged-in document. Reuses OPS-01's raw-dictionary read/write code
+(`registerOutlineSiblings`) and inherits its documented limit: a named destination or a
+non-`GoTo` action cannot be resolved, so it is now *reported* (`pageIndex: -1`, counted in
+the panel) and exports as a heading with no page rather than being dropped or guessed at.
+Titles are now written as UTF-16BE hex strings, which also fixes a latent OPS-01 bug —
+`PDFString.of` does not escape `)` or `\`, so such a title produced a broken outline
+dictionary. Evidence: `tests/unit/outline.test.ts` (9 tests, including the AC round trip
+"round-trips an edited tree through export and re-import, exactly as left") and
+`tests/e2e/tool-flows.spec.ts` → "bookmarks: renaming, reordering, and adding survives
+export (OPS-10)", which reorders from the keyboard (`.press('Enter')` on the row button)
+and re-parses the exported bytes' outline. Every row control is a native
+`<button>`/`<input>` with an accessible name, so the existing registry-driven axe sweep in
+`a11y-and-perf.spec.ts` covers the new tool automatically.
 
 - **Requirements:** List the document's existing outline (`/Outlines`) as an editable
   tree: rename, add (pointing at the current page), delete, and reorder/reindent entries.
@@ -986,7 +1007,18 @@ password-*removal* non-goal.
 
 ### OPS-11 · Bates numbering — `S` `P1`
 
-**Status: Not started**
+**Status: Done** — Built into the OPS-08 stamp engine, not beside it: `composePages`
+draws it in the same per-page pass as the watermark and header/footer, positioned through
+the same `positionOrigin` 9-point grid, and it is configured in the Watermark panel's own
+Bates section (`batesSettings`). The label maths is a pure module (`src/core/bates.ts`) so
+the panel can preview the exact string; a number wider than the padding grows the field
+rather than truncating, since a truncated Bates number would let two pages share an
+identifier. Numbering follows the whole production set across a split via `pageOffset`,
+and it is deliberately independent of the `{n}` page-number substitution. Evidence:
+`tests/unit/outline.test.ts` → "stamps 20 pages strictly sequentially from 000001" (the
+AC, read back off the exported content streams, hex literals decoded), "is independent of
+the header/footer page-number stamp", and "keeps numbering continuous across the files of
+a split"; e2e "bates: a stamped run is sequential and zero-padded (OPS-11)".
 
 - **Requirements:** Sequential legal numbering stamp — prefix, zero-padded digit count,
   starting number, 9-point placement grid — built on the OPS-08 stamp engine rather than
@@ -996,7 +1028,19 @@ password-*removal* non-goal.
 
 ### OPS-12 · Split by bookmarks — `S` `P1`
 
-**Status: Not started**
+**Status: Done** — A fifth mode on the existing four (the requirement below says "fourth",
+written before OPS-03's extract-selection mode was counted). `splitBoundaries('bookmarks',
+…)` takes the top-level bookmarks' start pages and cuts at all but the first, so pages
+before the first bookmark join that bookmark's file instead of forming a nameless extra
+one — which is what makes the count exactly N for N bookmarks while keeping the
+boundary-union property. Filenames come from `sanitizeFileStem`, and the worker de-dupes
+ZIP entry names, because two chapters called "Appendix" keyed into one `Record` would
+have silently dropped a slice of the user's document. Evidence: `tests/unit/outline.test.ts`
+→ "preserves every page exactly once, like the other modes" (the same union/no-overlap
+property OPS-03's `split.test.ts` asserts), "produces exactly one named file per top-level
+bookmark, covering every page" (the AC, on real ZIP output), and "does not lose a file when
+two bookmarks share a title"; e2e "split: bookmark mode writes one file per top-level
+bookmark (OPS-12)".
 
 - **Requirements:** A fourth OPS-03 split mode: use the document's top-level outline
   entries as split boundaries, one output file per top-level bookmark, named from the

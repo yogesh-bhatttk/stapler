@@ -62,6 +62,30 @@ export function hasWatermarkContent(settings: WatermarkSettings): boolean {
   return settings.kind === 'image' ? !!settings.image : !!settings.text.trim();
 }
 
+/**
+ * OPS-11 — Bates numbering, configured alongside the other stamps because it is
+ * drawn by the same engine, but kept as its own settings object: a Bates number is
+ * not a page number and a document can carry both.
+ */
+export interface BatesSettings {
+  enabled: boolean;
+  prefix: string;
+  digits: number;
+  start: number;
+  position: WatermarkPosition;
+  fontSize: number;
+}
+
+export const batesSettings = signal<BatesSettings>({
+  enabled: false,
+  prefix: '',
+  digits: 6,
+  start: 1,
+  // Bottom-right is where a production stamp goes, out of the way of body text.
+  position: 'bottom-right',
+  fontSize: 10
+});
+
 export type HeaderFooterAlign = 'left' | 'center' | 'right';
 
 export interface HeaderFooterSettings {

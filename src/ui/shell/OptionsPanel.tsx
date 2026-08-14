@@ -18,6 +18,7 @@ import { ExtractPanel } from '../tools/extract/ExtractPanel';
 import { CompressPanel } from '../tools/compress/CompressPanel';
 import { CropPanel } from '../tools/crop/CropPanel';
 import { WatermarkPanel } from '../tools/watermark/WatermarkPanel';
+import { OutlinePanel } from '../tools/outline/OutlinePanel';
 import { CleanupPanel } from '../tools/cleanup/CleanupPanel';
 import { SignPanel } from '../tools/sign/SignPanel';
 import { RedactPanel } from '../tools/redact/RedactPanel';
@@ -42,6 +43,7 @@ const BODIES: Record<string, () => preact.JSX.Element | null> = {
   compress: CompressPanel,
   crop: CropPanel,
   watermark: WatermarkPanel,
+  outline: OutlinePanel,
   cleanup: CleanupPanel,
   sign: SignPanel,
   redact: RedactPanel,

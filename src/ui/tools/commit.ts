@@ -18,6 +18,7 @@ import {
   fillFormFields,
   pagesToImageArchive,
   planCompression,
+  sanitizeFileStem,
   splitBoundaries,
   splitDocument
 } from '../../core/operations';
@@ -91,7 +92,14 @@ export interface CommitContext {
 type CommitHandler = (context: CommitContext) => Promise<void>;
 
 import { cropBoxes } from './crop/state';
-import { watermarkSettings, headerFooterSettings } from './watermark/state';
+import { batesSettings, watermarkSettings, headerFooterSettings } from './watermark/state';
+import {
+  entriesToNodes,
+  outlineDocId,
+  outlineEdited,
+  outlineTree,
+  topLevelSlices
+} from './outline/state';
 import { nupSettings } from './nup/state';
 import { pageAnnotations } from './annotate/state';
 
@@ -105,6 +113,46 @@ function getLayerAnnotations(): AnnotationSource[] {
     }
   }
   return result;
+}
+
+/** OPS-11 — the Bates stamp, or nothing when the user has not switched it on. */
+function getBates() {
+  const settings = batesSettings.value;
+  if (!settings.enabled) return undefined;
+  return {
+    prefix: settings.prefix,
+    digits: settings.digits,
+    start: settings.start,
+    position: settings.position,
+    fontSize: settings.fontSize
+  };
+}
+
+/**
+ * OPS-10 — the edited outline, or `undefined` to leave the document's own alone.
+ *
+ * Only the tree loaded *for this document*, and only once the user has actually
+ * changed it. `outlineTree` is a single signal, so another document's bookmarks
+ * would point at pages that are not in this one; and an unedited tree must not be
+ * written back at all, because it was read from the first page's source document
+ * and would silently drop the outlines a second, merged-in document contributed
+ * through OPS-01.
+ */
+function getOutline(doc: StaplerDoc) {
+  if (outlineDocId.value !== doc.id || !outlineEdited.value) return undefined;
+  return entriesToNodes(
+    outlineTree.value,
+    doc.pages.map(page => page.key)
+  );
+}
+
+/** OPS-12 — the loaded outline's top-level entries, as split boundaries and names. */
+function topLevelBookmarkSlices(doc: StaplerDoc) {
+  const tree = outlineDocId.value === doc.id ? outlineTree.value : [];
+  return topLevelSlices(
+    tree,
+    doc.pages.map(page => page.key)
+  );
 }
 
 // Normalize is deliberately not read here: it is its own tool, applied only via
@@ -121,7 +169,9 @@ const exportComposed: CommitHandler = async ({ doc, job }) => {
       watermark: watermarkSettings.value,
       headerFooter: headerFooterSettings.value,
       nup: nupSettings.value,
-      layerAnnotations: getLayerAnnotations()
+      layerAnnotations: getLayerAnnotations(),
+      outline: getOutline(doc),
+      bates: getBates()
     },
     job
   );
@@ -136,6 +186,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   nup: exportComposed,
   crop: exportComposed,
   watermark: exportComposed,
+  outline: exportComposed,
   annotate: exportComposed,
 
   split: async ({ doc, job }) => {
@@ -157,30 +208,52 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       return;
     }
 
+    // OPS-12 — the boundaries and the filenames both come from the outline.
+    const bookmarks = settings.mode === 'bookmarks' ? topLevelBookmarkSlices(doc) : null;
+    if (settings.mode === 'bookmarks' && (!bookmarks || bookmarks.length === 0)) {
+      notify('warning', 'This document has no top-level bookmarks.', {
+        detail: 'Add them in the Bookmarks tool, or choose another split mode.'
+      });
+      return;
+    }
+
     const boundaries = splitBoundaries(settings.mode, doc.pages.length, {
       every: settings.everyN,
-      custom: settings.customBoundaries
+      custom: settings.customBoundaries,
+      bookmarkStarts: bookmarks?.map(bookmark => bookmark.pageIndex)
     });
-    if (boundaries.length === 0) {
+    if (boundaries.length === 0 && !bookmarks) {
       notify('warning', 'That produces a single file.', {
         detail: 'Choose split points inside the document, or use Extract instead.'
       });
       return;
     }
 
+    const fileNames = bookmarks?.map((bookmark, index) =>
+      sanitizeFileStem(
+        bookmark.title,
+        `${stem(doc.name)}-part-${String(index + 1).padStart(2, '0')}`
+      )
+    );
+
     const result = await splitDocument(
       {
         pages: doc.pages,
         annotations: doc.annotations,
         layerAnnotations: getLayerAnnotations(),
+        bates: getBates(),
         boundaries,
-        baseName: stem(doc.name)
+        baseName: stem(doc.name),
+        fileNames
       },
       job
     );
 
     if (!result.isZip) {
-      await save(doc, result.bytes, `${stem(doc.name)}-part-01.pdf`);
+      // A single bookmark means a single file, which is still a valid answer — it
+      // just keeps the bookmark's name rather than arriving in a one-entry ZIP.
+      const single = fileNames?.[0] ?? `${stem(doc.name)}-part-01`;
+      await save(doc, result.bytes, `${single}.pdf`);
       return;
     }
     await save(doc, result.bytes, `${stem(doc.name)}-split.zip`);

@@ -1,15 +1,19 @@
 /**
- * Split and extract options (OPS-03). All four modes the ticket specifies.
+ * Split and extract options (OPS-03, plus OPS-12's bookmark mode).
  */
 import { activeDoc, selectedPageKeys } from '../../../core/store';
 import { splitBoundaries } from '../../../core/operations';
 import { Field, NumberInput, RadioGroup, TextInput } from '../../components/Field';
 import { panelStyles } from '../../shell/OptionsPanel';
 import { splitSettings, type SplitMode } from '../state';
+import { outlineDocId, outlineLoading, outlineTree, topLevelSlices } from '../outline/state';
+import { useDocumentOutline } from '../outline/useOutline';
 import { useTranslation } from '../../../core/i18n';
 
 export function SplitPanel() {
   const t = useTranslation();
+  // OPS-12 needs the same outline the bookmark editor loads, so read it here too.
+  useDocumentOutline();
   const doc = activeDoc.value;
   const settings = splitSettings.value;
   if (!doc) return null;
@@ -18,12 +22,18 @@ export function SplitPanel() {
     splitSettings.value = { ...settings, ...patch };
   };
 
+  const bookmarks = topLevelSlices(
+    outlineDocId.value === doc.id ? outlineTree.value : [],
+    doc.pages.map(page => page.key)
+  );
+
   const boundaries =
     settings.mode === 'extract'
       ? []
       : splitBoundaries(settings.mode, doc.pages.length, {
           every: settings.everyN,
-          custom: settings.customBoundaries
+          custom: settings.customBoundaries,
+          bookmarkStarts: bookmarks.map(bookmark => bookmark.pageIndex)
         });
 
   return (
@@ -37,7 +47,12 @@ export function SplitPanel() {
           { value: 'extract', label: 'Extract selected pages', hint: 'One new file' },
           { value: 'individual', label: 'Split into single pages' },
           { value: 'every_n', label: 'Split every N pages' },
-          { value: 'custom', label: 'Split at chosen pages' }
+          { value: 'custom', label: 'Split at chosen pages' },
+          {
+            value: 'bookmarks',
+            label: 'Split at bookmarks',
+            hint: 'One file per top-level bookmark, named after it'
+          }
         ]}
       />
 
@@ -75,6 +90,18 @@ export function SplitPanel() {
             />
           )}
         </Field>
+      )}
+
+      {settings.mode === 'bookmarks' && (
+        <p className={panelStyles.description}>
+          {outlineLoading.value
+            ? t('Reading bookmarks…')
+            : bookmarks.length === 0
+              ? t('This document has no top-level bookmarks to split at.')
+              : `${bookmarks.length} top-level bookmark(s): ${bookmarks
+                  .map(bookmark => bookmark.title)
+                  .join(', ')}`}
+        </p>
       )}
 
       <p className={panelStyles.description}>
