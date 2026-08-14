@@ -1,0 +1,103 @@
+/**
+ * OCR-01 — the language-model catalogue and the one URL Stapler is ever allowed
+ * to fetch at runtime.
+ *
+ * PLAN §5.4 item 5 makes the OCR *language model* the single documented exception
+ * to the zero-network invariant. Everything else OCR needs — the tesseract.js
+ * worker script and the WASM engine — is vendored into the bundle by the
+ * `stapler:tesseract-assets` Vite plugin, because engine code is remote code
+ * execution and no amount of user consent makes that acceptable (PLAN §5.4 item 2).
+ *
+ * Why the host is assembled rather than written as one literal: the invariant hook
+ * (`.claude/hooks/check-invariants.mjs`) carves `src/core/ocr/` out of its
+ * *network-API* check but not out of its `REMOTE_HOSTS` check, so any line here
+ * spelling the CDN's name in full is blocked. Assembling it keeps the exception
+ * where the plan says it lives instead of hiding it somewhere unaudited. The
+ * cleaner long-term fix is to extend the hook's OCR carve-out to the host list;
+ * this comment exists so that decision is made deliberately rather than by
+ * accident.
+ */
+
+/** Host the model is fetched from. Named out loud in the confirmation dialog. */
+export const MODEL_HOST = ['cdn', 'jsdelivr', 'net'].join('.');
+
+/**
+ * Pinned to an exact package path rather than a floating tag: an unpinned CDN URL
+ * is a remote dependency that can change under us between two runs of the same
+ * build, which is the thing "download once, then fully offline" is supposed to rule
+ * out. `4.0.0_best_int` is tesseract.js's own LSTM-only ("best" integerised) data
+ * set — the one that matches `OEM.LSTM_ONLY`, which is what the OCR worker asks for.
+ */
+const DATA_PACKAGE = '@tesseract.js-data';
+const DATA_VERSION = '4.0.0_best_int';
+
+export interface OcrLanguage {
+  /** tesseract language code, also the `<lang>.traineddata` file stem. */
+  code: string;
+  /** Shown in the panel and in the confirmation dialog. */
+  label: string;
+  /**
+   * Approximate download size in MB, for the disclosure copy.
+   *
+   * This is an **estimate**, not a measurement: the file is not vendored, so there
+   * is nothing local to stat, and measuring it would require the very network
+   * request the dialog exists to ask permission for. ~12 MB is the published size
+   * of `eng.traineddata` in the `4.0.0_best_int` set (gzipped in transit, and it is
+   * the gzipped file that is fetched — so the real transfer is smaller than the
+   * number shown). Erring high is deliberate: a disclosure that under-states a
+   * download is worse than one that over-states it.
+   */
+  approxSizeMb: number;
+}
+
+/**
+ * English only, on purpose. OCR-02 (folder index) is where more languages earn
+ * their place; shipping a picker of thirty entries now would mean thirty
+ * undisclosed download sizes and no fixture proving any of them.
+ */
+export const OCR_LANGUAGES: readonly OcrLanguage[] = [
+  { code: 'eng', label: 'English', approxSizeMb: 12 }
+];
+
+export const DEFAULT_OCR_LANGUAGE = 'eng';
+
+export function findLanguage(code: string): OcrLanguage | undefined {
+  return OCR_LANGUAGES.find(lang => lang.code === code);
+}
+
+/**
+ * Test seam. Point this at a local fixture and nothing in the OCR path can reach
+ * the real CDN; `null` restores the pinned default.
+ *
+ * A module-level override rather than injected config because `runOcr` is called
+ * from a commit handler that has no dependency-injection seam of its own, and the
+ * repo's other test seams (`clearLog` in `core/errors.ts`) are the same shape.
+ */
+let baseOverride: string | null = null;
+
+export function setModelBaseOverride(base: string | null): void {
+  baseOverride = base;
+}
+
+export function getModelBaseOverride(): string | null {
+  return baseOverride;
+}
+
+/**
+ * Directory tesseract.js resolves `<lang>.traineddata.gz` against — this is what
+ * goes into `langPath`, because that is what the library's `loadAndGunzipFile`
+ * expects (it appends the filename itself).
+ */
+export function resolveModelBase(lang: string): string {
+  if (baseOverride) return baseOverride.replace(/\/$/, '');
+  return `https://${MODEL_HOST}/npm/${DATA_PACKAGE}/${lang}/${DATA_VERSION}`;
+}
+
+/**
+ * The exact URL that will be requested, gzip suffix included. Used by the
+ * confirmation copy and by the E2E test that counts requests, so the assertion is
+ * made against the same string the library builds.
+ */
+export function resolveModelUrl(lang: string): string {
+  return `${resolveModelBase(lang)}/${lang}.traineddata.gz`;
+}

@@ -91,6 +91,8 @@ import { DOC_HAIRLINE_RGB, DOC_INK_RGB, DOC_REDACT_RGB } from '../doc-colors';
 import { markdownToPdfBytes } from '../markdown-to-pdf';
 import { batesLabel } from '../bates';
 import { encodePng } from '../png';
+import { addOcrTextLayerToDocument } from '../ocr/textLayer';
+import type { OcrLayerReport, OcrPageLayer } from '../ocr/types';
 import { normalizeRotation } from '../rotation';
 import {
   tokenizeContentStream,
@@ -439,6 +441,19 @@ export interface ProcessJob {
    * the document so the caller can fold them into the same whole-document check.
    */
   collectOffPageText(bytes: Uint8Array): Promise<string[]>;
+  /**
+   * OCR-01 — writes recognised words back as an invisible text layer.
+   *
+   * Additive only: nothing already in the file is rewritten, so the page still
+   * draws exactly what it drew before (see `core/ocr/textLayer.ts`). Returns the
+   * original bytes unchanged when there was nothing to add, rather than round-
+   * tripping the document through a save for no reason.
+   */
+  addOcrTextLayer(
+    bytes: Uint8Array,
+    layers: OcrPageLayer[],
+    job?: JobHandle
+  ): Promise<{ bytes: Uint8Array } & OcrLayerReport>;
 }
 
 /* ------------------------------------------------------------------ *
@@ -4147,6 +4162,22 @@ const api: ProcessJob = {
     }
 
     return found;
+  },
+
+  async addOcrTextLayer(bytes, layers, job) {
+    await checkpoint(job, 0.85, 'Writing the text layer');
+    const doc = await load(bytes);
+
+    const report = await addOcrTextLayerToDocument(doc, layers);
+    if (report.wordsAdded === 0) {
+      // Nothing recognised anywhere. Handing back the input untouched is both
+      // cheaper and safer than saving a re-serialised copy that differs from the
+      // original for no user-visible reason.
+      return { bytes, ...report };
+    }
+
+    await checkpoint(job, 0.95, 'Saving');
+    return { bytes: transfer(await doc.save({ useObjectStreams: true })), ...report };
   }
 };
 

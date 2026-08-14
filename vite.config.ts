@@ -69,6 +69,60 @@ function firefoxManifest(): Plugin {
 }
 
 /**
+ * OCR-01 — tesseract.js resolves *three* things from a URL at runtime, and two of
+ * them are executable code: the nested worker script it spawns (`workerPath`) and
+ * the WASM engine that worker loads (`corePath`). Both default to jsdelivr. Remote
+ * code is forbidden outright (PLAN §5.4 item 2) and would 404 inside the
+ * extension besides, so they ship in the bundle and `ocr.worker.ts` points at
+ * these copies. The third — the language model — is the one sanctioned network
+ * fetch (item 5) and is deliberately *not* vendored: it is 12 MB the vast majority
+ * of users never need, and downloading it only on request is what makes the
+ * disclosure meaningful.
+ *
+ * Exactly one engine variant is copied. `tesseract.js-core` ships six, and
+ * `getCore.js` picks between them by probing for SIMD support — a probe that
+ * resolves to a filename that would not exist here. Naming the `.js` file directly
+ * in `corePath` takes that module's "a specific file was given" branch and skips
+ * detection entirely. SIMD + LSTM-only is the correct single choice for this
+ * project's evergreen-Chrome target and for the `OEM.LSTM_ONLY` the worker asks
+ * for.
+ */
+function copyTesseractAssets(): Plugin {
+  return {
+    name: 'stapler:tesseract-assets',
+    apply: 'build',
+    writeBundle(options) {
+      const out = resolve(root, options.dir ?? 'dist', 'ocr');
+      rmSync(out, { recursive: true, force: true });
+      mkdirSync(out, { recursive: true });
+
+      const files: [string, string][] = [
+        ['node_modules/tesseract.js/dist/worker.min.js', 'worker.min.js'],
+        [
+          'node_modules/tesseract.js-core/tesseract-core-simd-lstm.wasm.js',
+          'tesseract-core-simd-lstm.wasm.js'
+        ],
+        [
+          'node_modules/tesseract.js-core/tesseract-core-simd-lstm.wasm',
+          'tesseract-core-simd-lstm.wasm'
+        ]
+      ];
+
+      for (const [from, to] of files) {
+        const source = resolve(root, from);
+        if (!existsSync(source)) {
+          // A missing engine file means OCR would fail at run time with a 404
+          // against our own origin — the sort of thing that is invisible until a
+          // user tries it. Fail the build instead.
+          throw new Error(`stapler:tesseract-assets — expected ${from} to exist; run install`);
+        }
+        cpSync(source, resolve(out, to));
+      }
+    }
+  };
+}
+
+/**
  * The website twin has to answer at `/`, but the shared entry point is `editor.html`
  * because that is the page the extension's service worker opens. Emitting an
  * `index.html` copy for the web target is what makes `pnpm build:web` deployable
@@ -122,6 +176,7 @@ export default defineConfig(() => {
     plugins: [
       preact(),
       copyPdfJsAssets(),
+      copyTesseractAssets(),
       ...(isFirefox ? [firefoxManifest()] : []),
       ...(isAnyExt ? [] : [emitWebIndex()])
     ],

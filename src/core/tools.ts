@@ -31,7 +31,8 @@ export type ToolId =
   | 'compare'
   | 'annotate'
   | 'batch'
-  | 'md-to-pdf';
+  | 'md-to-pdf'
+  | 'ocr';
 
 export type ToolGroup = 'Organize' | 'Convert' | 'Optimize' | 'Document' | 'Automation';
 
@@ -235,6 +236,20 @@ export const TOOLS: readonly ToolDefinition[] = [
     needsOptionsPanel: true,
     commitLabel: 'Verify & apply',
     selectable: false
+  },
+  {
+    id: 'ocr',
+    title: 'OCR text layer',
+    group: 'Document',
+    summary: 'Read the text in a scan and add an invisible, searchable text layer.',
+    icon: 'ScanText',
+    canvasMode: 'grid',
+    needsOptionsPanel: true,
+    commitLabel: 'Run OCR & export',
+    // A scan is often a handful of pages inside a longer document, and OCR is by
+    // far the slowest operation here — running it on pages that already have text
+    // would cost minutes for nothing.
+    selectable: true
   },
   {
     id: 'metadata',

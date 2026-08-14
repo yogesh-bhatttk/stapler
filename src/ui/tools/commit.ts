@@ -53,6 +53,8 @@ import { pendingRedactions, redactionReport } from './redact/state';
 import { protection, protectionActive, protectionIssue } from './protect/state';
 import type { ProtectionSettings } from '../../core/pdf/encrypt';
 import { scrubSettings } from './metadata/state';
+import { ocrReport, ocrSettings } from './ocr/state';
+import { runOcr } from '../../core/ocr/runOcr';
 import { renderWorker } from '../../core/workers';
 
 /** Strips the extension so suffixes can be appended without doubling `.pdf`. */
@@ -663,6 +665,54 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     );
     await save(doc, scrubbed, `${stem(doc.name)}-scrubbed.pdf`);
   },
+  ocr: async ({ doc, job }) => {
+    const settings = ocrSettings.value;
+
+    // Page indices are resolved against the *exported* document, which is what
+    // `currentDocumentBytes` produces — the same order the grid shows, so a
+    // selection made in the grid means the same pages in the file.
+    let pageIndices: number[] | undefined;
+    if (settings.selectedPagesOnly) {
+      pageIndices = doc.pages
+        .map((page, index) => (selectedPageKeys.value.has(page.key) ? index : -1))
+        .filter(index => index >= 0);
+      if (pageIndices.length === 0) {
+        notify('warning', 'Select the pages to run OCR on first.', {
+          detail: 'Tick pages in the grid, or turn off "Only the pages selected in the grid".'
+        });
+        return;
+      }
+    }
+
+    const original = await currentDocumentBytes(job);
+    const result = await runOcr(original, doc.pages.length, {
+      ...job,
+      lang: settings.lang,
+      pageIndices
+    });
+
+    // `null` is the user declining the model download. That is an answer, not a
+    // failure: no toast, no export, nothing written.
+    if (!result) return;
+
+    ocrReport.value = {
+      wordsAdded: result.wordsAdded,
+      wordsSkipped: result.wordsSkipped,
+      pages: result.pagesTouched
+    };
+
+    if (result.wordsAdded === 0) {
+      notify('warning', 'OCR found no text on those pages.', {
+        detail:
+          'Nothing was exported, and your document is unchanged. A blank, very low-resolution, ' +
+          'or heavily skewed scan is the usual cause — try Scan cleanup first.'
+      });
+      return;
+    }
+
+    await save(doc, await finalize(result.bytes), `${stem(doc.name)}-ocr.pdf`);
+  },
+
   compare: async () => {},
   batch: async () => {},
   'md-to-pdf': async () => {}
