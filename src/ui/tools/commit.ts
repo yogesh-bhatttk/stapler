@@ -16,6 +16,7 @@ import {
   currentDocumentBytes,
   extractDocumentText,
   fillFormFields,
+  flattenDocument,
   pagesToImageArchive,
   planCompression,
   sanitizeFileStem,
@@ -35,7 +36,7 @@ import { formatBytes } from '../components/Feedback';
 import type { JobOptions } from '../../core/workers/protocol';
 import type { ToolId } from '../../core/tools';
 import { compressSettings } from './compress/state';
-import { pdfToImageSettings, removeBlanksThreshold, splitSettings } from './state';
+import { flattenOnExport, pdfToImageSettings, removeBlanksThreshold, splitSettings } from './state';
 import { extractSettings } from './extract/state';
 import { formFields, formValues } from './sign/state';
 import { XFA_MESSAGE } from '../../core/pdf/xfa';
@@ -178,6 +179,37 @@ const exportComposed: CommitHandler = async ({ doc, job }) => {
   await save(doc, bytes, `${stem(doc.name)}-stapler.pdf`);
 };
 
+/**
+ * SGN-05 — the finalize step, run on already-composed bytes.
+ *
+ * Only Sign and Annotate call this, and only when their panel's toggle is on:
+ * flattening is destructive to interactivity, so it is never a side effect of
+ * some other tool's export. Runs *after* compose because `copyPages` carries
+ * `/Annots` through, so flattening earlier would have them copied back in.
+ *
+ * The counts are reported rather than assumed: a flatten really does cost a
+ * link its clickability, and saying so is the difference between a finalize and
+ * a silent loss.
+ */
+async function finalize(bytes: Uint8Array): Promise<Uint8Array> {
+  if (!flattenOnExport.value) return bytes;
+  const result = await flattenDocument(bytes);
+  const parts: string[] = [];
+  if (result.fields > 0) parts.push(`${result.fields} form field${result.fields === 1 ? '' : 's'}`);
+  if (result.annotationsBaked > 0)
+    parts.push(`${result.annotationsBaked} annotation${result.annotationsBaked === 1 ? '' : 's'}`);
+  if (parts.length > 0 || result.annotationsDropped > 0) {
+    notify('info', 'Finalized: the export is no longer editable.', {
+      detail:
+        (parts.length > 0 ? `Drew ${parts.join(' and ')} into the page. ` : '') +
+        (result.annotationsDropped > 0
+          ? `${result.annotationsDropped} annotation${result.annotationsDropped === 1 ? '' : 's'} with nothing to draw (links, popups, hidden marks) ${result.annotationsDropped === 1 ? 'was' : 'were'} removed.`
+          : '')
+    });
+  }
+  return result.bytes;
+}
+
 const HANDLERS: Record<ToolId, CommitHandler> = {
   merge: exportComposed,
   organize: exportComposed,
@@ -187,7 +219,28 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   crop: exportComposed,
   watermark: exportComposed,
   outline: exportComposed,
-  annotate: exportComposed,
+
+  annotate: async ({ doc, job }) => {
+    // ANN-01's own marks are drawn straight into the content stream by
+    // `compose`, so this composes exactly as every other tool does; the
+    // finalize step is here for the fields and annotations the *source*
+    // document brought with it.
+    const bytes = await composeDocument(
+      {
+        pages: doc.pages,
+        annotations: doc.annotations,
+        cropBoxes: cropBoxes.value,
+        watermark: watermarkSettings.value,
+        headerFooter: headerFooterSettings.value,
+        nup: nupSettings.value,
+        layerAnnotations: getLayerAnnotations(),
+        outline: getOutline(doc),
+        bates: getBates()
+      },
+      job
+    );
+    await save(doc, await finalize(bytes), `${stem(doc.name)}-stapler.pdf`);
+  },
 
   split: async ({ doc, job }) => {
     const settings = splitSettings.value;
@@ -371,9 +424,11 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       job
     );
     if (hasValues) {
-      bytes = await fillFormFields(bytes, formValues.value, true);
+      // SGN-05 — the fill path's own flatten is left to `finalize`, so the two
+      // are one decision. With the toggle off the values stay interactive.
+      bytes = await fillFormFields(bytes, formValues.value, false);
     }
-    await save(doc, bytes, `${stem(doc.name)}-signed.pdf`);
+    await save(doc, await finalize(bytes), `${stem(doc.name)}-signed.pdf`);
   },
 
   normalize: async ({ doc, job }) => {

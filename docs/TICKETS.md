@@ -1152,7 +1152,43 @@ bookmark (OPS-12)".
 
 ### SGN-05 · Flatten form and annotations — `S` `P1`
 
-**Status: Not started**
+**Status: Done** — Two thirds of this was already true and is left alone. Stamps and
+ANN-01 marks were never annotation dictionaries: `compose` draws them straight into the
+content stream (`drawAnnotations`). Filled AcroForm values were already flattened by
+`fillFormFields(…, true)` via pdf-lib's `form.flatten()`, which refuses rather than
+half-flattening on a broken `/DA` or a missing `/DR` font.
+
+Two real gaps closed. **(a)** `form.flatten()` only reaches *widget* annotations, and
+`copyPages` carries a source document's `/FreeText`, `/Square`, `/Highlight`, `/Stamp`,
+`/Link` and `/Popup` dictionaries through every compose — so a "flattened" export still
+shipped annotations the recipient could move or delete, failing the AC's "no annotation
+dictionaries remaining". A new `flattenDocument` worker method (`process.worker.ts`,
+`flattenAnnotations`) draws each annotation's `/AP /N` appearance into the page as a form
+XObject and then deletes `/Annots` outright. Placement is PDF 32000-1 §12.5.5's algorithm,
+not a translate: the `/BBox` is transformed by the stream's own `/Matrix`, the bounding box
+of *that* is fitted to `/Rect`, and only the fitting transform is pushed — ignoring
+`/Matrix` draws the fixture's `/FreeText` at double size. `/AP /N` sub-dictionaries are
+resolved through `/AS` (or a single unambiguous entry, never a guess). Annotations with
+nothing to draw — `/Link` hotspots, `/Popup` windows, anything flagged Hidden or NoView —
+are removed rather than baked, and counted separately so the UI can say that a link lost
+its clickability instead of burying it. `/AcroForm` is deleted from the catalog outright,
+not left as an empty `/Fields`. **(b)** Flatten was hardcoded on with no user-facing
+choice, so there was no "finalize" distinct from a normal export. `FlattenOption`
+(`src/ui/tools/FlattenOption.tsx`, a native `Checkbox`) appears in both the Sign and
+Annotate panels — the two tools the requirement names — backed by `flattenOnExport`, on by
+default to preserve the previous behaviour. It is read *only* by those two commit handlers:
+a global settings signal read by every tool's export was the OPS-09 bug.
+
+Evidence: `tests/unit/process.test.ts` → `describe('flattenDocument (SGN-05)')`, 5 tests
+re-parsing the produced bytes — no `/AcroForm` key and no `/Annots` after a
+compose→fill→finalize round trip, `annotationsBaked: 2 / annotationsDropped: 2` on the new
+`annotatedPdf()` fixture, the exact `1 0 0 1 50 700 cm` and `0.5 0 0 0.5 300 400 cm`
+operands proving the `/Matrix` and rect-fitting maths, a hidden annotation that must not
+appear, XFA refused with input bytes unmutated, and a document with neither fields nor
+annotations left structurally intact. `tests/e2e/tool-flows.spec.ts` → three SGN-05 tests:
+the default-on path (no `/AcroForm`, no `/Annots`, value still in drawn text), unchecking
+the toggle *from the keyboard* leaving a genuinely fillable form, and an annotated document
+exporting with its appearances baked in and its hidden annotation still invisible.
 
 - **Requirements:** Bake filled AcroForm field values and placed annotations/stamps into
   static page content, removing the underlying interactive fields/widgets so the result

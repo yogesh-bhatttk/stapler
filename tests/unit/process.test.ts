@@ -1468,3 +1468,113 @@ describe('imagesToPdf options (CNV-01)', () => {
     expect(page.getHeight()).toBe(612);
   });
 });
+
+/**
+ * SGN-05 — flatten form and annotations.
+ *
+ * Asserted against the output bytes' dictionaries rather than against the
+ * report the worker returns: "no annotation dictionaries remaining" is a claim
+ * about what a viewer opens, so the test re-parses the saved PDF and looks.
+ */
+describe('flattenDocument (SGN-05)', () => {
+  async function composeOnePage(bytes: Uint8Array) {
+    return processWorkerImpl.compose(
+      [{ key: 'p0', sourceDocId: 'doc1', sourceIndex: 0, rotation: 0 }],
+      { doc1: bytes },
+      [],
+      null,
+      undefined,
+      null,
+      null,
+      undefined,
+      silentJob
+    );
+  }
+
+  it('removes /AcroForm entirely and bakes the filled value into the page', async () => {
+    const { acroformPdf } = await import('../e2e/fixtures');
+    // The real commit order: compose, fill without flattening, then finalize.
+    const composed = await composeOnePage(await acroformPdf());
+    const filled = await processWorkerImpl.fillFormFields(
+      composed,
+      { 'name.first': 'Grace Hopper', agreed: true },
+      false
+    );
+    const result = await processWorkerImpl.flattenDocument(filled);
+    expect(result.fields).toBe(2);
+
+    const doc = await PDFDocument.load(result.bytes);
+    expect(doc.getPageCount()).toBe(1);
+    // Not "an /AcroForm with an empty /Fields" — no /AcroForm key at all.
+    expect(doc.catalog.get(PDFName.of('AcroForm'))).toBeUndefined();
+    expect(doc.getForm().getFields()).toHaveLength(0);
+    // And no widget annotations left behind on the page.
+    expect(doc.getPage(0).node.Annots()).toBeUndefined();
+    // The value is still findable as text, one XObject down from the page stream.
+    expect(await pageContentText(doc, 0)).toContain('Grace Hopper');
+  });
+
+  it('bakes annotation appearances into the page and removes every /Annots', async () => {
+    const { annotatedPdf, ANNOTATION_TEXT } = await import('../e2e/fixtures');
+    const composed = await composeOnePage(await annotatedPdf());
+
+    // Precondition: the annotations really do survive a compose, which is why
+    // form.flatten() alone was never enough.
+    const before = await PDFDocument.load(composed);
+    expect(before.getPage(0).node.Annots()?.size()).toBe(4);
+
+    const result = await processWorkerImpl.flattenDocument(composed);
+    expect(result.fields).toBe(0);
+    // FreeText and Square carry appearances; Link has none and the /Text is Hidden.
+    expect(result.annotationsBaked).toBe(2);
+    expect(result.annotationsDropped).toBe(2);
+
+    const doc = await PDFDocument.load(result.bytes);
+    expect(doc.getPageCount()).toBe(1);
+    expect(doc.getPage(0).node.Annots()).toBeUndefined();
+
+    const content = await pageContentText(doc, 0);
+    // Baked in, so text extraction finds it.
+    expect(content).toContain(ANNOTATION_TEXT);
+    // The page's own text is untouched.
+    expect(content).toContain('Stapler fixture page 1');
+    // A hidden annotation draws nothing on screen, so it must not appear now.
+    expect(content).not.toContain('SHOULD NOT APPEAR');
+  });
+
+  it('fits each appearance to its /Rect through the stream’s own /Matrix', async () => {
+    const { annotatedPdf } = await import('../e2e/fixtures');
+    const result = await processWorkerImpl.flattenDocument(await annotatedPdf());
+    const doc = await PDFDocument.load(result.bytes);
+    const content = await pageContentText(doc, 0);
+
+    // /FreeText: BBox 100x10 with /Matrix [2 0 0 2 0 0] already covers the
+    // 200x20 /Rect, so the fitting transform is a pure translate. A flatten that
+    // ignored /Matrix would emit "2 0 0 2 …" and draw it at double size.
+    expect(content).toContain('1 0 0 1 50 700 cm');
+    // /Square: BBox 100x100 into a 50x50 /Rect — fitted by halving.
+    expect(content).toContain('0.5 0 0 0.5 300 400 cm');
+  });
+
+  it('refuses an XFA form rather than half-flattening it', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const bytes = new Uint8Array(
+      await readFile(fileURLToPath(new URL('../fixtures/xfa.pdf', import.meta.url)))
+    );
+    const before = Uint8Array.from(bytes);
+    await expect(processWorkerImpl.flattenDocument(bytes)).rejects.toThrow(/XFA form/);
+    expect(bytes).toEqual(before);
+  });
+
+  it('leaves a document with neither fields nor annotations byte-identical in structure', async () => {
+    const { textPdf } = await import('../e2e/fixtures');
+    const plain = await textPdf(3);
+    const result = await processWorkerImpl.flattenDocument(plain);
+    expect(result).toMatchObject({ fields: 0, annotationsBaked: 0, annotationsDropped: 0 });
+
+    const doc = await PDFDocument.load(result.bytes);
+    expect(doc.getPageCount()).toBe(3);
+    expect(await pageContentText(doc, 2)).toContain('Stapler fixture page 3');
+  });
+});

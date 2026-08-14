@@ -418,6 +418,93 @@ export async function acroformPdf(): Promise<Uint8Array> {
   return doc.save();
 }
 
+/** The string baked in by the annotated fixture's `/FreeText` appearance. */
+export const ANNOTATION_TEXT = 'Reviewed by QA';
+
+/**
+ * SGN-05's fixture: a page carrying real annotation dictionaries of the kinds a
+ * flatten has to tell apart.
+ *
+ * Written by hand because pdf-lib has no annotation API beyond widgets, which is
+ * the same reason `flattenAnnotations` walks raw dictionaries.
+ *
+ * - `/FreeText` with a `/Matrix` that is *not* the identity, so a flatten that
+ *   ignores `/Matrix` draws it at twice the size and fails the assertion.
+ * - `/Square` whose `/BBox` is half its `/Rect`, so the rect-fitting scale is
+ *   exercised too.
+ * - `/Link`, which has no appearance at all and must be dropped, not baked.
+ * - `/Text` flagged Hidden, which draws nothing on screen and so must not
+ *   suddenly appear in the flattened page.
+ */
+export async function annotatedPdf(): Promise<Uint8Array> {
+  const doc = await PDFDocument.load(await textPdf(1));
+  const ctx = doc.context;
+  const page = doc.getPage(0);
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+
+  const appearance = (contents: string, bbox: number[], matrix?: number[]) =>
+    ctx.register(
+      ctx.stream(contents, {
+        Type: 'XObject',
+        Subtype: 'Form',
+        BBox: bbox,
+        Resources: { Font: { Helv: font.ref } },
+        ...(matrix ? { Matrix: matrix } : {})
+      })
+    );
+
+  // /Matrix scales by 2, so the 100x10 BBox covers the 200x20 /Rect exactly and
+  // the fitting transform must come out as a pure translate.
+  const freeText = ctx.register(
+    ctx.obj({
+      Type: 'Annot',
+      Subtype: 'FreeText',
+      Rect: [50, 700, 250, 720],
+      F: 4,
+      Contents: PDFHexString.fromText(ANNOTATION_TEXT),
+      AP: {
+        N: appearance(
+          `BT /Helv 6 Tf 0 0 0 rg 1 2 Td (${ANNOTATION_TEXT}) Tj ET`,
+          [0, 0, 100, 10],
+          [2, 0, 0, 2, 0, 0]
+        )
+      }
+    })
+  );
+
+  const square = ctx.register(
+    ctx.obj({
+      Type: 'Annot',
+      Subtype: 'Square',
+      Rect: [300, 400, 350, 450],
+      AP: { N: appearance('1 0 0 RG 2 w 1 1 98 98 re S', [0, 0, 100, 100]) }
+    })
+  );
+
+  const link = ctx.register(
+    ctx.obj({
+      Type: 'Annot',
+      Subtype: 'Link',
+      Rect: [50, 100, 200, 120],
+      Border: [0, 0, 0]
+    })
+  );
+
+  const hidden = ctx.register(
+    ctx.obj({
+      Type: 'Annot',
+      Subtype: 'Text',
+      Rect: [400, 700, 420, 720],
+      // Bit 2 (Hidden) — the viewer draws nothing, so nor may the flatten.
+      F: 2,
+      AP: { N: appearance('BT /Helv 12 Tf 0 0 Td (SHOULD NOT APPEAR) Tj ET', [0, 0, 20, 20]) }
+    })
+  );
+
+  page.node.set(PDFName.of('Annots'), ctx.obj([freeText, square, link, hidden]));
+  return doc.save();
+}
+
 /** A truncated PDF to test error taxonomy and recovery */
 export async function corruptPdf(): Promise<Uint8Array> {
   const valid = await textPdf(1);

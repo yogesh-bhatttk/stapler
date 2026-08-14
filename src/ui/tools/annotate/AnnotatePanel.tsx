@@ -2,6 +2,7 @@ import { useTranslation } from '../../../core/i18n';
 import { ANNOTATION_COLORS } from '../../../core/doc-colors';
 import { RadioGroup, Slider } from '../../components/Field';
 import { panelStyles } from '../../shell/OptionsPanel';
+import { FlattenOption } from '../FlattenOption';
 import {
   activeAnnotationTool,
   annotationColor,
@@ -73,6 +74,8 @@ export function AnnotatePanel() {
           onChange={val => (annotationStrokeWidth.value = val)}
         />
       </div>
+
+      <FlattenOption />
     </>
   );
 }

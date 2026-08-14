@@ -269,6 +269,17 @@ export async function fillFormFields(
   return processWorker.lease(api => api.fillFormFields(bytes, values, flatten));
 }
 
+/**
+ * SGN-05 — bakes form fields and annotations into static page content.
+ *
+ * Run last, on already-composed bytes: `compose` rebuilds the page tree with
+ * `copyPages`, which carries `/Annots` through, so flattening before a compose
+ * would have the annotations copied straight back in.
+ */
+export async function flattenDocument(bytes: Uint8Array) {
+  return processWorker.lease(api => api.flattenDocument(bytes));
+}
+
 /* ------------------------------------------------------------------ *
  * Compression (EPIC-5)
  * ------------------------------------------------------------------ */
