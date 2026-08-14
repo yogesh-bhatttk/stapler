@@ -151,6 +151,65 @@ async function contentDigests(bytes: Uint8Array): Promise<string[]> {
   });
 }
 
+interface HighlightStroke {
+  pageIndex: number;
+  from: { x: number; y: number };
+  to: { x: number; y: number };
+  width: number;
+}
+
+/**
+ * ANN-03 — every highlight stroke a document draws, in PDF page coordinates.
+ *
+ * A highlight exports as `drawSvgPath`, which emits a translate + y-flip pair of
+ * `cm` operators and then the path in flipped coordinates, so the flip is undone
+ * here to get the coordinates a viewer actually paints at. Reading the operators
+ * rather than sampling pixels is what makes "at the correct text location"
+ * checkable against the fixture's known text position.
+ */
+async function highlightStrokes(bytes: Uint8Array): Promise<HighlightStroke[]> {
+  const { inflateSync } = await import('node:zlib');
+  const doc = await PDFDocument.load(bytes);
+  const strokes: HighlightStroke[] = [];
+
+  doc.getPages().forEach((page, pageIndex) => {
+    const contents = page.node.get(PDFName.of('Contents'));
+    const refs =
+      contents instanceof PDFArray
+        ? contents.asArray().filter((entry): entry is PDFRef => entry instanceof PDFRef)
+        : contents instanceof PDFRef
+          ? [contents]
+          : [];
+
+    let text = '';
+    for (const ref of refs) {
+      const stream = doc.context.lookup(ref);
+      if (!(stream instanceof PDFRawStream)) continue;
+      const raw = Buffer.from(stream.contents);
+      const isFlate = String(stream.dict.get(PDFName.of('Filter'))) === '/FlateDecode';
+      try {
+        text += `\n${(isFlate ? inflateSync(raw) : raw).toString('latin1')}`;
+      } catch {
+        /* A stream we cannot decode holds no highlight we could have written. */
+      }
+    }
+
+    const pattern =
+      /1 0 0 1 0 (-?[\d.]+) cm[\s\S]{0,120}?1 0 0 -1 0 0 cm[\s\S]{0,80}?(-?[\d.]+) w[\s\S]{0,40}?(-?[\d.]+) (-?[\d.]+) m\s+(-?[\d.]+) (-?[\d.]+) l/g;
+    for (const match of text.matchAll(pattern)) {
+      const flip = Number(match[1]);
+      strokes.push({
+        pageIndex,
+        width: Number(match[2]),
+        from: { x: Number(match[3]), y: flip - Number(match[4]) },
+        to: { x: Number(match[5]), y: flip - Number(match[6]) }
+      });
+    }
+  });
+
+  return strokes;
+}
+
 /**
  * Every string a document draws on page 0, including inside the form XObjects the
  * page invokes — which is where a flattened form field's value ends up.
@@ -1176,6 +1235,55 @@ test.describe('tool flows', () => {
    * keyboard creation is covered separately by the redact/crop overlays'
    * equivalent tests — this one exercises the pointer path and undo together).
    */
+  /**
+   * ANN-03 — searching turns every match into a real ANN-01 highlight.
+   *
+   * The count and the geometry are both read back out of the exported bytes: the
+   * fixture draws "Line 3 of body text on page N." at a known x/y/size on each of
+   * its 6 pages, so the highlight's own stroke coordinates can be checked against
+   * where the text actually is, not merely counted.
+   */
+  test('annotate: search highlights every match, at the text (ANN-03)', async ({ page }) => {
+    const file = await ensureFixture('text-6.pdf', () => textPdf(6));
+    await importFixture(page, file);
+    await gotoTool(page, 'annotate');
+
+    // Keyboard-only path: focus the field, type, press Enter. No pointer at all.
+    await page.getByLabel('Find and highlight text').focus();
+    await page.keyboard.type('Line 3 of body text');
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('status')).toContainText('Highlighted 6 match(es).', {
+      timeout: 60_000
+    });
+
+    const bytes = await commitAndRead(page, 'Export annotated PDF');
+    const strokes = await highlightStrokes(bytes);
+    expect(strokes).toHaveLength(6);
+
+    // `Line 3 …` is drawn at x=56, baseline y=720-2*22=676, size 11 (fixtures.ts).
+    for (const [index, stroke] of strokes.entries()) {
+      expect(stroke.pageIndex).toBe(index);
+      expect(stroke.from.x).toBeGreaterThan(50);
+      expect(stroke.from.x).toBeLessThan(62);
+      // The stroke runs left to right across the phrase, ~100pt of 11pt Helvetica.
+      expect(stroke.to.x - stroke.from.x).toBeGreaterThan(60);
+      expect(stroke.to.x - stroke.from.x).toBeLessThan(140);
+      expect(stroke.from.y).toBeCloseTo(stroke.to.y, 3);
+      // Centred on the line: above the baseline, below the line above it.
+      expect(stroke.from.y).toBeGreaterThan(676);
+      expect(stroke.from.y).toBeLessThan(694);
+      // As thick as the text is tall, give or take pdf.js's reported glyph height.
+      expect(stroke.width).toBeGreaterThan(7);
+      expect(stroke.width).toBeLessThan(16);
+    }
+
+    // Undo is one step for the whole search (DOC-06), and the export then carries
+    // no highlight at all.
+    await page.keyboard.press('Control+z');
+    const undone = await commitAndRead(page, 'Export annotated PDF');
+    expect(await highlightStrokes(undone)).toHaveLength(0);
+  });
+
   test('annotate: a pointer-drawn whiteout exports, and undo removes it before export', async ({
     page
   }) => {

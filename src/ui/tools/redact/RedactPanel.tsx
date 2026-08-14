@@ -8,11 +8,7 @@
 import { useState } from 'preact/hooks';
 import { Check, ScanSearch, Search, Trash2, X } from 'lucide-preact';
 import { activeDoc } from '../../../core/store';
-import {
-  currentDocumentBytes,
-  scanForPatterns,
-  searchForRedaction
-} from '../../../core/operations';
+import { currentDocumentBytes, scanForPatterns, findTextRegions } from '../../../core/operations';
 import { PATTERN_LABELS, type PatternCategory } from '../../../core/patterns';
 import type { PatternSuggestion } from '../../../core/workers/render.worker';
 import { notify } from '../../../core/notify';
@@ -69,7 +65,7 @@ export function RedactPanel() {
   const search = () =>
     run({ label: `Searching for "${query}"`, scope: 'redact.search' }, async job => {
       const bytes = await currentDocumentBytes(job);
-      const found = await searchForRedaction(bytes, query.trim(), matchCase, job);
+      const found = await findTextRegions(bytes, query.trim(), matchCase, job);
       if (found.length === 0) {
         notify('warning', `No matches for "${query.trim()}".`);
         return;

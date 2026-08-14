@@ -1367,7 +1367,59 @@ exporting with its appearances baked in and its hidden annotation still invisibl
 
 ### ANN-03 · Search and highlight — `S` `P1`
 
-**Status: Not started**
+**Status: Done** — The Annotate panel gains a "Find and highlight text" field over the
+same call RED's find-and-mark makes: `operations.findTextRegions` (renamed from
+`searchForRedaction` when this became its second caller) → the render worker's existing
+`findText`. No second search, no second locator; the redact panel's own call site changed
+by one identifier. What ANN-03 adds is only the conversion, and it is a pure module —
+`src/core/highlight.ts`, `highlightsForRegions` — so the geometry is testable without a
+PDF, exactly like RED-05's `patterns.ts`.
+
+Each match becomes an ANN-01 `highlight` annotation (a stroked segment down the vertical
+centre of the located box, which is the one annotation type both the canvas overlay and
+`drawAnnotations` paint at 0.5 multiply) pushed into `pageAnnotations` on the page *key*
+the match's page index resolves to — not into `pendingRedactions`, and not as an overlay
+of its own. `strokeWidth` is a fraction of page **width** in both renderers while the
+located box's height is a fraction of page **height**, so the conversion multiplies by the
+page's displayed aspect ratio (`displayedAspectRatio`, rotation included); skipping that is
+invisible on a square page and 30% too thin on A4, and a unit test pins the stroke to the
+text height in page units. A match whose page index has no page is *counted and reported*,
+never dropped silently. Undo integration is DOC-06's existing model: one `commit()` and one
+`addAnnotations` write for the whole search, so 40 highlights are one ⌘Z, not 40.
+
+**A real ANN-01 export bug had to be fixed to satisfy this AC.** `drawAnnotations` built its
+SVG path in already-flipped coordinates (`height - y * height`) and passed no `y` option, but
+`drawSvgPath` emits its own `1 0 0 -1 0 y cm` flip about that option (default 0) — so every
+freehand stroke and every highlight was drawn at *negative* y, off the page and invisible in
+the export. Fixed by writing the path in SVG (top-left origin) coordinates and passing
+`y: height`; round line caps/joins were added at the same time so the exported stroke matches
+what the overlay drew. ANN-01's rectangle/text/sticky/whiteout paths were never affected,
+which is why the existing whiteout e2e passed throughout.
+
+Evidence:
+
+- `tests/e2e/tool-flows.spec.ts` → "annotate: search highlights every match, at the text
+  (ANN-03)", the AC, against real exported bytes. `text-6.pdf` draws `Line 3 of body text on
+  page N.` once per page at a known x=56 / baseline y=676 / size 11, so searching
+  `Line 3 of body text` must produce exactly 6 highlights, and the test decompresses every
+  page's content streams, undoes `drawSvgPath`'s y-flip, and asserts each stroke is on its own
+  page, starts at x≈56, spans the phrase, is horizontal, sits between the baseline and the line
+  above, and is as thick as the text is tall. The search is driven **keyboard-only** (focus the
+  field, type, Enter). One `Control+z` then exports zero strokes.
+- `tests/unit/highlight.test.ts` (6 tests): one annotation per match on the match's own page
+  key with distinct ids, the box→segment geometry including the aspect factor, the panel's
+  picked colour, unplaced matches reported rather than dropped, no zero-width stroke, and the
+  empty case.
+- `pnpm check` clean, `pnpm test` 347 passed (25 files), `pnpm test:e2e tool-flows` 42 passed,
+  `a11y-and-perf` 15 passed (the new field, checkbox, and button are native labelled controls,
+  so the registry-driven axe sweep covers them; one flaky first-run failure of the unrelated
+  "shortcut sheet opens with ?" test reproduced neither in isolation nor on re-run).
+
+**Scope note:** the panel reports the count and offers no per-match list — the highlights
+themselves are the list, editable and deletable on the page as ordinary ANN-01 annotations.
+Highlight placement inherits RED's monospace approximation of glyph advances (`findText`), so
+a proportional-font match's box is slightly over-inclusive; for a highlight that is the safe
+direction, and narrowing it belongs to `findText`, not here.
 
 - **Requirements:** Find text across the document (reusing RED's find-and-mark text
   location) and turn every match into a real highlight annotation via ANN-01's layer,

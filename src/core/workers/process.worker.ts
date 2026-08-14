@@ -74,6 +74,7 @@ import {
   degrees,
   decodePDFRawStream,
   StandardFonts,
+  LineCapStyle,
   rgb,
   concatTransformationMatrix,
   drawObject,
@@ -1401,14 +1402,27 @@ async function drawAnnotations(
       ann.points &&
       ann.points.length > 0
     ) {
-      // Build an SVG path
-      // M x y L x y L x y
-      let path = `M ${ann.points[0].x * width} ${height - ann.points[0].y * height}`;
+      // The path is written in SVG coordinates — origin top-left, y downwards —
+      // which is what `drawSvgPath` expects: it emits `1 0 0 -1 0 y cm`, flipping
+      // the y axis about the `y` option. Passing `y: height` therefore maps
+      // SVG y to PDF y = height - y.
+      //
+      // This was `height - y * height` with no `y` option at all, so the same flip
+      // was applied to already-flipped coordinates and every freehand stroke and
+      // highlight landed at *negative* y — off the page, invisible in the export.
+      // ANN-03's e2e test reads the drawn segment's coordinates back out of the
+      // exported page and would fail on the old form.
+      let path = `M ${ann.points[0].x * width} ${ann.points[0].y * height}`;
       for (let i = 1; i < ann.points.length; i++) {
-        path += ` L ${ann.points[i].x * width} ${height - ann.points[i].y * height}`;
+        path += ` L ${ann.points[i].x * width} ${ann.points[i].y * height}`;
       }
       page.drawSvgPath(path, {
+        x: 0,
+        y: height,
         borderColor: color,
+        // Round caps and joins, matching the canvas overlay (`ctx.lineCap`), so
+        // what is exported is the stroke the user saw while drawing it.
+        borderLineCap: LineCapStyle.Round,
         // `strokeWidth` is stored as a fraction of page width (matching x/y),
         // so it reproduces the same relative thickness the user drew on
         // screen regardless of which zoom level that was at.
