@@ -24,3 +24,7 @@ tests/fixtures/*
 
 # Throwaway probe scripts (see eslint.config.js ignores).
 .scratch/
+
+# Agent worktrees (see eslint.config.js ignores) — transient per-session tooling
+# artifacts, never part of the codebase itself.
+.claude/worktrees/

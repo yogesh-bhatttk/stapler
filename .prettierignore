@@ -1,5 +1,6 @@
 dist/
 node_modules/
+.claude/
 tests/fixtures/
 playwright-report/
 test-results/
