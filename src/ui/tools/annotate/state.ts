@@ -43,6 +43,22 @@ export function addAnnotation(pageKey: string, annotation: Annotation) {
   };
 }
 
+/**
+ * ANN-03 — adds many annotations across many pages as one change.
+ *
+ * One signal write, so a search that highlights 40 matches is a single undo entry
+ * (the caller calls `commit()` once before it, exactly as the single-annotation
+ * path does) rather than 40 the user has to press ⌘Z through.
+ */
+export function addAnnotations(entries: readonly { pageKey: string; annotation: Annotation }[]) {
+  if (entries.length === 0) return;
+  const next = { ...pageAnnotations.value };
+  for (const { pageKey, annotation } of entries) {
+    next[pageKey] = [...(next[pageKey] ?? []), annotation];
+  }
+  pageAnnotations.value = next;
+}
+
 export function clearAnnotations(pageKey: string) {
   const updated = { ...pageAnnotations.value };
   delete updated[pageKey];

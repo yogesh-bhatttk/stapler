@@ -575,7 +575,14 @@ export interface RedactionOutcome {
   rasterizedPages: number[];
 }
 
-export async function searchForRedaction(
+/**
+ * Locates every occurrence of `query` and returns its page-normalised box.
+ *
+ * Was `searchForRedaction`; renamed when ANN-03 became its second caller. RED's
+ * find-and-mark turns these regions into redaction marks, ANN-03 turns the same
+ * regions into highlight annotations, and neither owns a search of its own.
+ */
+export async function findTextRegions(
   bytes: Uint8Array,
   query: string,
   matchCase: boolean,
