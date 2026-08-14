@@ -64,6 +64,8 @@ export interface SelectProps<T extends string | number> {
   options: readonly SelectOption<T>[];
   onChange: (value: T) => void;
   disabled?: boolean;
+  /** For a select that has no visible `<label>` of its own (e.g. a unit picker). */
+  ariaLabel?: string;
 }
 
 export function Select<T extends string | number>({
@@ -71,7 +73,8 @@ export function Select<T extends string | number>({
   value,
   options,
   onChange,
-  disabled
+  disabled,
+  ariaLabel
 }: SelectProps<T>) {
   return (
     <select
@@ -79,6 +82,7 @@ export function Select<T extends string | number>({
       className={styles.control}
       value={String(value)}
       disabled={disabled}
+      aria-label={ariaLabel}
       onChange={event => {
         const raw = (event.target as HTMLSelectElement).value;
         // Numeric options round-trip through the DOM as strings; restore the type

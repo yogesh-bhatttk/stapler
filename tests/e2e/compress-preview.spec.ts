@@ -183,3 +183,96 @@ test.describe('CMP-05 quality preview', () => {
     });
   }
 });
+
+/**
+ * DOC-07 — compress to a target size.
+ *
+ * Both criteria are asserted on real bytes: the "reaches it" case reads the byte
+ * length of the file the export actually wrote off disk, and the "cannot reach
+ * it" case asserts that the app said so and wrote nothing behind the user's back.
+ */
+test.describe('DOC-07 compress to a target size', () => {
+  /** Switches the panel into target mode from the keyboard, and sets the size. */
+  async function setTarget(
+    page: import('@playwright/test').Page,
+    amount: number,
+    unit: 'KB' | 'MB'
+  ) {
+    // Keyboard only: focus the first radio in the group and arrow to the second.
+    await page.getByRole('radio', { name: /Choose quality/ }).focus();
+    await page.keyboard.press('ArrowDown');
+    await expect(page.getByRole('radio', { name: /Aim for a size/ })).toBeChecked();
+
+    await page.getByRole('combobox', { name: 'Target size unit' }).selectOption(unit);
+    const amountInput = page.getByRole('spinbutton', { name: 'Target size' });
+    await amountInput.fill(String(amount));
+    await expect(amountInput).toHaveValue(String(amount));
+  }
+
+  test('lands at or under a reachable target, and the written file proves it', async ({ page }) => {
+    test.setTimeout(300_000);
+    // 3.2MB scan: the raster route, where a target of 300KB is reachable but not
+    // free — the search has to walk down the ladder to find it.
+    const file = path.resolve(process.cwd(), 'tests/fixtures/scanned_skewed.pdf');
+    await importFixture(page, file);
+    await gotoTool(page, 'compress');
+    await setTarget(page, 300, 'KB');
+
+    const download = page.waitForEvent('download', { timeout: 240_000 });
+    await page.getByRole('button', { name: 'Compress & export' }).click();
+    const saved = await download;
+    const location = await saved.path();
+    expect(location).toBeTruthy();
+    const actual = readFileSync(location!).length;
+
+    const outcome = page.locator('[data-target-outcome]');
+    await expect(outcome).toHaveAttribute('data-target-outcome', 'reached');
+    const achieved = Number(await outcome.getAttribute('data-target-achieved'));
+    const attempts = Number(await outcome.getAttribute('data-target-attempts'));
+    console.log(
+      `DOC-07 reachable: target 300000 B, achieved ${achieved} B, file on disk ${actual} B, ${attempts} attempt(s)`
+    );
+
+    // The number reported is the number written, and it is under the target.
+    expect(achieved).toBe(actual);
+    expect(actual).toBeLessThanOrEqual(300_000);
+    expect(attempts).toBeGreaterThanOrEqual(1);
+    expect(attempts).toBeLessThanOrEqual(5);
+  });
+
+  test('says so, and writes nothing, when the floor cannot reach the target', async ({ page }) => {
+    test.setTimeout(300_000);
+    const file = path.resolve(process.cwd(), 'tests/fixtures/scanned_skewed.pdf');
+    await importFixture(page, file);
+    await gotoTool(page, 'compress');
+    // 5KB is below anything the quality floor can produce for a full-page scan.
+    await setTarget(page, 5, 'KB');
+
+    let downloaded = false;
+    page.on('download', () => {
+      downloaded = true;
+    });
+
+    await page.getByRole('button', { name: 'Compress & export' }).click();
+
+    // The honest report, not a silently overshooting save.
+    const dialog = page.getByRole('dialog', { name: /Could not reach/ });
+    await expect(dialog).toBeVisible({ timeout: 240_000 });
+    await expect(dialog).toContainText(/smallest Stapler can produce/);
+    await page.getByRole('button', { name: 'Keep the original' }).click();
+
+    const outcome = page.locator('[data-target-outcome]');
+    await expect(outcome).toHaveAttribute('data-target-outcome', 'missed');
+    const achieved = Number(await outcome.getAttribute('data-target-achieved'));
+    const attempts = Number(await outcome.getAttribute('data-target-attempts'));
+    console.log(
+      `DOC-07 unreachable: target 5000 B, smallest achievable ${achieved} B after ${attempts} attempt(s)`
+    );
+    expect(achieved).toBeGreaterThan(5_000);
+    // The floor answers it outright — degrading further is not on offer.
+    expect(attempts).toBe(1);
+
+    await page.waitForTimeout(500);
+    expect(downloaded).toBe(false);
+  });
+});

@@ -10,6 +10,55 @@ export interface CompressSettings {
 
 export const compressSettings = signal<CompressSettings>({ dpi: 150, quality: 0.75 });
 
+/**
+ * DOC-07 — which preset the compress tool is committing.
+ *
+ * `quality` is CMP-02's manual DPI/quality pair. `target` hands those two knobs
+ * to the search in `compress-target.ts` instead, which measures real output at
+ * each rung it tries. Kept as separate signals rather than as fields on
+ * `CompressSettings` because that type is also the cache key for CMP-05's
+ * measured preview: a target size does not change what one page encodes to, and
+ * adding it to the key would throw away a valid measurement on every keystroke.
+ */
+export type CompressMode = 'quality' | 'target';
+
+export const compressMode = signal<CompressMode>('quality');
+
+export type TargetUnit = 'KB' | 'MB';
+
+export interface TargetSize {
+  amount: number;
+  unit: TargetUnit;
+}
+
+export const compressTarget = signal<TargetSize>({ amount: 2, unit: 'MB' });
+
+/** Decimal MB/KB, matching `formatBytes` so the UI never contradicts itself. */
+export function targetSizeBytes(target: TargetSize): number {
+  const scale = target.unit === 'MB' ? 1_000_000 : 1_000;
+  return Math.max(0, Math.round(target.amount * scale));
+}
+
+/**
+ * DOC-07 — what the last target-size run actually produced, in measured bytes.
+ *
+ * Set by the commit path whether or not the target was met, because "could not
+ * reach it, here is the smallest available" is the outcome the panel most needs
+ * to show honestly.
+ */
+export interface TargetOutcome {
+  targetBytes: number;
+  achievedBytes: number;
+  originalBytes: number;
+  reached: boolean;
+  settings: { dpi: number; quality: number } | null;
+  attempts: number;
+  /** Constructs CMP-01/03 deliberately refused to re-encode, for the report. */
+  skipped: string[];
+}
+
+export const compressTargetOutcome = signal<TargetOutcome | null>(null);
+
 /** Last pre-flight analysis, so the panel can show the projection (CMP-04/05). */
 export const compressReport = signal<CompressionReport | null>(null);
 

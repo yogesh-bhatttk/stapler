@@ -18,6 +18,12 @@ import {
   type CompressionPlan
 } from './compress-plan';
 import {
+  MAX_TARGET_TRIALS,
+  searchForTargetSize,
+  type TargetRung,
+  type TargetTrial
+} from './compress-target';
+import {
   activeDoc,
   bytesForPages,
   sources,
@@ -430,6 +436,111 @@ export async function compressDocument(
     originalBytes: bytes.byteLength,
     keptOriginal: result.keptOriginal,
     plan: report.plan
+  };
+}
+
+/**
+ * DOC-07 — the result of a target-size search, described in measured bytes.
+ *
+ * `achievedBytes` is always `bytes.byteLength`: there is no field here that a
+ * model produced. When `reachedTarget` is false, `bytes` is still the smallest
+ * output the search managed to produce (the floor rung) — the caller decides
+ * whether to offer it, and must not present it as having met the target.
+ */
+export interface TargetCompressionResult {
+  bytes: Uint8Array;
+  originalBytes: number;
+  targetBytes: number;
+  achievedBytes: number;
+  reachedTarget: boolean;
+  /** Settings that produced `bytes`, or null when no work was needed. */
+  settings: TargetRung | null;
+  /** True when this run's own safety net discarded a larger output (CMP-04). */
+  keptOriginal: boolean;
+  /** Every real render+encode pass run, in order — the search's evidence. */
+  trials: TargetTrial[];
+  /** Plan of the run that produced `bytes`; null when no work was needed. */
+  plan: CompressionPlan | null;
+}
+
+/**
+ * DOC-07 — compresses towards `targetBytes`, measuring every step.
+ *
+ * Each trial is a complete `planCompression` + `compressDocument` pass, so each
+ * one independently obeys CMP-04's safety net (an output that is not smaller
+ * than the input is discarded and the original returned) and CMP-01's skip
+ * rules. Nothing here loosens either: the search only chooses *which* settings
+ * the existing pipeline runs at.
+ *
+ * Progress spans the whole search rather than restarting per trial, and the
+ * abort signal is checked between trials as well as inside them, so cancelling
+ * mid-search stops at the end of the current page rather than after the run.
+ */
+export async function compressToTargetSize(
+  bytes: Uint8Array,
+  targetBytes: number,
+  options: JobOptions = {}
+): Promise<TargetCompressionResult> {
+  if (!(targetBytes > 0)) throw internal('A target size must be greater than zero.');
+
+  // Nothing to do, and doing it anyway could only make the file worse.
+  if (bytes.byteLength <= targetBytes) {
+    return {
+      bytes,
+      originalBytes: bytes.byteLength,
+      targetBytes,
+      achievedBytes: bytes.byteLength,
+      reachedTarget: true,
+      settings: null,
+      keptOriginal: true,
+      trials: [],
+      plan: null
+    };
+  }
+
+  let completed = 0;
+  const outcome = await searchForTargetSize<CompressionResult>({
+    targetBytes,
+    signal: options.signal,
+    onTrial: (index, maxTrials, settings) => {
+      options.onProgress?.(
+        index / maxTrials,
+        `Trying ${settings.dpi} DPI at ${Math.round(settings.quality * 100)}% (attempt ${index + 1} of up to ${maxTrials})`
+      );
+    },
+    run: async (settings, index) => {
+      const base = index / MAX_TARGET_TRIALS;
+      const trialJob: JobOptions = {
+        signal: options.signal,
+        onProgress: (fraction, label) =>
+          options.onProgress?.(
+            base + (fraction ?? 0) / MAX_TARGET_TRIALS,
+            `${settings.dpi} DPI at ${Math.round(settings.quality * 100)}% — ${label}`
+          )
+      };
+      const report = await planCompression(bytes, settings, trialJob);
+      const result = await compressDocument(bytes, settings, report, trialJob);
+      completed++;
+      return {
+        output: result,
+        byteLength: result.bytes.byteLength,
+        keptOriginal: result.keptOriginal
+      };
+    }
+  });
+  options.onProgress?.(1, `Finished after ${completed} attempt(s)`);
+
+  const chosen = outcome.chosen;
+  return {
+    bytes: chosen.output.bytes,
+    originalBytes: bytes.byteLength,
+    targetBytes,
+    achievedBytes: chosen.output.bytes.byteLength,
+    reachedTarget: outcome.reached,
+    settings: chosen.settings,
+    keptOriginal: chosen.keptOriginal,
+    trials: outcome.trials,
+    plan: chosen.output.plan
   };
 }
 
