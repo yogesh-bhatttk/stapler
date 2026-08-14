@@ -9,28 +9,119 @@ approach it, without re-deriving it from 92 ticket entries.
 original 72 plus the 20 new "EPIC-15 · v1.1 feature expansion" tickets added
 this session).
 
+## Before you touch anything — read this whole section
+
+This project has hard invariants enforced by a `PostToolUse` hook and by
+`pnpm check`, and this session made real mistakes against them that cost real
+time to recover from. If you are a new agent with no memory of how this
+document was produced, do the following **in order**, before writing or
+deleting anything:
+
+1. **Read `CLAUDE.md` at the repo root in full.** It is not optional
+   background — it overrides default behavior, and it lists deliberate
+   non-goals (PDF→Word, Office→PDF, password *removal*, accounts, analytics)
+   that nothing in this plan reverses. If a task here seems to conflict with
+   it, `CLAUDE.md` wins; stop and flag it rather than guessing.
+2. **Run `git worktree list` and `git branch --list 'worktree-agent-*'`
+   before assuming anything about repo state.** Two worktrees may still
+   exist from this session with real, uncommitted, unmerged work in them
+   (exact paths and contents below, as of the last time this file was
+   updated — verify they still exist and re-check their `git status`
+   yourself, since this file goes stale and they may have already been
+   merged or resumed since). **Do not run `git worktree remove --force` or
+   any destructive git command against them without first inspecting
+   `git status`/`git diff` inside each one.** One of them alone represents
+   roughly 15 minutes of a large agent's real work; force-removing it
+   without committing first destroys that permanently.
+3. **Run `pnpm check && pnpm test && pnpm test:e2e` on `master` first**, to
+   get a known-good baseline before changing anything. If any of those are
+   red on a clean `master`, something happened after this file was written —
+   stop and figure out what, don't build on top of a red baseline.
+4. **Never mark a ticket Done in `docs/TICKETS.md` without pasting real
+   command output as evidence in the same edit.** Every prior "Done" in this
+   file was earned by an agent that ran the actual test suite and quoted the
+   result. "It should work" or "the code looks right" is explicitly called
+   out in `CLAUDE.md` as not a passing criterion — an agent that skips this
+   will produce ticket entries the next reader can't trust, which is worse
+   than leaving the ticket honestly "Not started."
+5. **Do not attempt to "fix" CMP-03's six skipped image categories**
+   (Separation/DeviceN, colour-key masks, Matte, ImageMask, JPX/JBIG2,
+   sub-byte depth). They are read `docs/TICKETS.md`'s CMP-03 entry in full —
+   they are deliberately unimplemented because doing so naively would
+   violate the "never corrupt a document" invariant, not an oversight.
+6. **If you are going to dispatch a sub-agent into an isolated git worktree**
+   (the `isolation: "worktree"` option, if your tooling has an equivalent),
+   remember: **the worktree forks from the last *committed* HEAD, not from
+   your uncommitted working tree.** This session lost real time when several
+   agents correctly refused to invent specs because the tickets they were
+   asked to implement existed only as *uncommitted* edits in the main
+   checkout. Commit first, dispatch second — always.
+7. **Keep concurrent agent batches small (≈3), not large (9+).** This
+   session dispatched 9 worktree-isolated agents simultaneously once and hit
+   an account-wide API spend limit that killed all 9 at once, with no
+   partial credit for the ones close to finishing. Batches of 3, merged and
+   verified before the next batch, cost less in wasted work even though they
+   feel slower.
+8. **Merge and run the full verification (`pnpm check && pnpm test &&
+   pnpm test:e2e`) after every single ticket lands, not after a whole
+   batch.** Conflicts and regressions are far cheaper to find one commit at
+   a time than after five have piled up.
+
 ## In-flight work not yet on master (do this first)
 
-Two agents were mid-task when work was paused. Their worktrees still exist
-and were deliberately left unmerged — check `git worktree list` and
-`git branch --list 'worktree-agent-*'` before starting anything else, since
-finishing these is far cheaper than redoing them:
+Two agents were mid-task when work was paused, both forked from master at
+commit `9fdc398` (master has since moved to `b80c4e4` — a docs-only commit,
+so merging either back should be low-conflict). Their worktrees still exist
+and were **deliberately left unmerged and uncommitted** — this is exactly
+the kind of state a careless cleanup pass destroys, so read this section
+fully before running any git command against either path. Re-run
+`git worktree list` / `git status` inside each one yourself; the contents
+below are a snapshot, not a guarantee of current state.
 
 - **ANN-03 · Search and highlight** — implementation is **complete and
-  verified** (`pnpm check` clean, 347/347 unit tests, e2e passing) sitting on
-  worktree branch `worktree-agent-ab79336dc5843c90f`, uncommitted in that
-  worktree's working tree as of the pause. To finish: `cd` into that
-  worktree, `git add -A` (excluding the `node_modules` symlink), commit, then
-  from the main checkout `git merge worktree-agent-ab79336dc5843c90f
-  --no-edit`, resolve any conflicts (recent merges have needed small import-
-  list merges in `src/ui/tools/commit.ts` / `src/core/operations.ts` — nothing
-  structural), run `pnpm check && pnpm test && pnpm test:e2e`, then delete the
-  worktree and branch.
-- **OCR-01 · Tesseract integration** — was still running (general-purpose
-  agent, worktree `worktree-agent-aa5957858ee912aab`) when paused. Check its
-  state before resuming: it may have finished, failed, or still be mid-task.
-  If resuming, send it a message via the agent-resume mechanism rather than
-  restarting from scratch — it will have useful context loaded already.
+  verified** (`pnpm check` clean, 347/347 unit tests, e2e passing — see this
+  ticket's own `docs/TICKETS.md` entry for the exact command output once
+  merged) sitting **uncommitted** in worktree
+  `.claude/worktrees/agent-ab79336dc5843c90f` (branch
+  `worktree-agent-ab79336dc5843c90f`). Last known `git status` there:
+  modified `docs/TICKETS.md`, `src/core/i18n/locales/en.json`,
+  `src/core/operations.ts`, `src/core/workers/process.worker.ts`,
+  `src/ui/tools/annotate/AnnotatePanel.tsx`, `src/ui/tools/annotate/state.ts`,
+  `src/ui/tools/redact/RedactPanel.tsx`, `tests/e2e/tool-flows.spec.ts`; new
+  `src/core/highlight.ts`, `tests/unit/highlight.test.ts`. To finish: `cd`
+  into that worktree, `git add -A` (there is also an untracked
+  `node_modules` — it's a symlink back to the main checkout's own
+  `node_modules`, safe to leave out of the commit or delete, never commit
+  it), commit, then from the main checkout run
+  `git merge worktree-agent-ab79336dc5843c90f --no-edit`. Expect small
+  import-list conflicts in `src/ui/tools/commit.ts` /
+  `src/core/operations.ts` if other tickets landed on master since — resolve
+  by combining both sides' imports, nothing structural. Then
+  `pnpm check && pnpm test && pnpm test:e2e`, then delete the worktree
+  (`git worktree remove --force <path>`) and branch (`git branch -D
+  worktree-agent-ab79336dc5843c90f`) **only after** the merge is committed
+  and green.
+- **OCR-01 · Tesseract integration** — was still **running** (general-purpose
+  agent, worktree `.claude/worktrees/agent-aa5957858ee912aab`, branch
+  `worktree-agent-aa5957858ee912aab`, git-locked) when this session paused,
+  and had spawned at least one sub-agent of its own. Last known `git status`
+  there showed real, substantial, uncommitted work: modified `package.json`,
+  `pnpm-lock.yaml`, `src/core/tools.ts`, `src/core/workers/index.ts`,
+  `src/core/workers/process.worker.ts`, `src/ui/shell/OptionsPanel.tsx`,
+  `src/ui/tools/commit.ts`; new `pnpm-workspace.yaml`, `src/core/ocr/`,
+  `src/core/workers/ocr.worker.ts`, `src/ui/tools/ocr/`. **Do not assume this
+  is finished or safe to discard.** Check whether the agent is still
+  reachable (its resume mechanism) before touching its worktree; if it's
+  gone and the worktree is orphaned, inspect `git diff` there carefully and
+  decide whether to finish it yourself, resume a fresh agent against it, or
+  restart the ticket from scratch — in that order of preference, since the
+  existing work may be most of an `L`-sized ticket's effort. Remember: a
+  prior attempt at this exact ticket left partial `tesseract.js` /
+  `tesseract.js-core` / `idb-keyval` dependency additions in the **main**
+  tree by accident (no worktree isolation that time) and those had to be
+  reverted as unaudited — don't let that happen again; any new dependency
+  needs its transitive tree checked for network calls before it's trusted,
+  per the zero-network invariant.
 
 ## Partial tickets (4)
 
@@ -123,17 +214,16 @@ tool-per-viewer in `RELEASE_CHECKLIST.md`'s existing §1 checkbox for it.
    end, so a bad merge is caught immediately rather than compounding.
 5. SGN-06, then OCR-02 → OCR-03 once OCR-01 is confirmed merged and green.
 
-## Process notes for whoever continues this
+## One more environment gotcha, not covered above
 
-- Committing ticket text to `docs/TICKETS.md` **before** dispatching any
-  worktree-isolated agent is mandatory — `isolation: worktree` forks from the
-  last committed HEAD, not the working tree. This session lost significant
-  time to that exact mistake once; don't repeat it.
-- Batch concurrent agents in groups of ~3, not 9+ at once — this session hit
-  an account-wide API spend limit doing 9 at once, which killed all 9
-  simultaneously with no partial credit for the ones close to finishing.
-- Merge and verify (`pnpm check && pnpm test && pnpm test:e2e`) after each
-  ticket lands, not after a whole batch — conflicts are far easier to
-  resolve one at a time.
-- `.claude/worktrees/` is excluded from `pnpm check`'s prettier pass and from
-  git (see `.prettierignore`/`.gitignore`) — don't re-add it by accident.
+`.claude/worktrees/` is deliberately excluded from `pnpm check`'s prettier
+pass and from git (see `.prettierignore`/`.gitignore`) — a leftover agent
+worktree used to break `pnpm check` for everyone until this was fixed.
+Don't remove that exclusion, and don't be surprised if a *very* old clone
+without it fails `pnpm check` for a reason that has nothing to do with your
+change.
+
+If anything in this document contradicts what you find in `docs/TICKETS.md`
+or the actual repo state, **trust the repo, not this file** — this is a
+snapshot, not a live view, and its entire purpose is to save you rediscovery
+time, not to be obeyed over reality.
