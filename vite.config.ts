@@ -1,8 +1,17 @@
 import { defineConfig, type Plugin } from 'vite';
 import preact from '@preact/preset-vite';
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { transformManifestForFirefox } from './scripts/firefox-manifest.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 
@@ -33,6 +42,28 @@ function copyPdfJsAssets(): Plugin {
         if (file.startsWith('quickjs')) continue;
         cpSync(resolve(from, 'wasm', file), resolve(out, 'wasm', file));
       }
+    }
+  };
+}
+
+/**
+ * DIST-04 — rewrites the `manifest.json` already copied from `public/` (same
+ * `writeBundle` pattern as `copyPdfJsAssets`) into the Firefox-compatible shape via
+ * the pure, unit-tested `transformManifestForFirefox` (`scripts/firefox-manifest.mjs`).
+ * Chrome/Edge and Firefox share every other field — permissions, CSP, icons — so the
+ * two cannot drift apart by hand-editing two manifests.
+ */
+function firefoxManifest(): Plugin {
+  return {
+    name: 'stapler:firefox-manifest',
+    apply: 'build',
+    writeBundle(options) {
+      const dir = resolve(root, options.dir ?? 'dist');
+      const manifestPath = resolve(dir, 'manifest.json');
+      if (!existsSync(manifestPath)) return;
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as Record<string, unknown>;
+      const firefoxManifestJson = transformManifestForFirefox(manifest);
+      writeFileSync(manifestPath, `${JSON.stringify(firefoxManifestJson, null, 2)}\n`);
     }
   };
 }
@@ -70,13 +101,16 @@ const LANDING_PAGES: Record<string, string> = {
 };
 
 export default defineConfig(() => {
-  const isExt = process.env.BUILD_TARGET === 'ext';
+  const target = process.env.BUILD_TARGET;
+  const isExt = target === 'ext';
+  const isFirefox = target === 'firefox';
+  const isAnyExt = isExt || isFirefox;
 
   const input: Record<string, string> = {
     editor: resolve(root, 'editor.html')
   };
 
-  if (isExt) {
+  if (isAnyExt) {
     input.background = resolve(root, 'src/background/service-worker.ts');
   } else {
     for (const [name, file] of Object.entries(LANDING_PAGES)) {
@@ -85,9 +119,14 @@ export default defineConfig(() => {
   }
 
   return {
-    plugins: [preact(), copyPdfJsAssets(), ...(isExt ? [] : [emitWebIndex()])],
+    plugins: [
+      preact(),
+      copyPdfJsAssets(),
+      ...(isFirefox ? [firefoxManifest()] : []),
+      ...(isAnyExt ? [] : [emitWebIndex()])
+    ],
     build: {
-      outDir: isExt ? 'dist/ext' : 'dist/web',
+      outDir: isFirefox ? 'dist/firefox' : isExt ? 'dist/ext' : 'dist/web',
       emptyOutDir: true,
       chunkSizeWarningLimit: 1024,
       rollupOptions: {

@@ -967,10 +967,62 @@ doesn't have, so the ≥95 AC is unverified, not claimed.
 
 ### DIST-04 · Edge and Firefox submissions — `M` `P1`
 
-**Status: Not started** — The download fallback exists and is what E2E drives, but neither store has been submitted.
+**Status: Partial** — Everything doable without a store account or a real Firefox/Edge
+browser is done and verified; the submissions themselves are not, and cannot be, performed
+from this environment.
 
+- Edge Add-ons: no code changes were needed. `public/manifest.json` (empty `permissions`
+  and `host_permissions`, module `background.service_worker`, no content scripts) is
+  already Chromium MV3 as Edge consumes it. The layer-boundary audit
+  (`grep -rl "chrome\." src`) turned up `chrome.*` only in `src/platform/{current,index}.ts`
+  and `src/background/service-worker.ts` — no violation of the `core`/`ui` boundary, so
+  nothing Chrome-specific leaks outside the platform layer that Edge would trip over.
+- Firefox: two real MV3 differences existed and are now handled.
+  1. AMO requires `browser_specific_settings.gecko.id` (+ a minimum version). Chrome's
+     manifest has neither.
+  2. Firefox does not run `background.service_worker`; it needs the classic
+     `background.scripts` + `type: "module"` event-page shape. Same compiled
+     `background.js`, different manifest key.
+  - `pnpm build:ext:firefox` (`BUILD_TARGET=firefox vite build`) now emits a third,
+    independent unpacked directory, `dist/firefox`, byte-identical to `dist/ext` apart
+    from `manifest.json`. The rewrite is a pure function,
+    `transformManifestForFirefox` (`scripts/firefox-manifest.mjs`), applied to the
+    manifest Vite already copied from `public/`, via a `writeBundle` plugin
+    (`firefoxManifest()` in `vite.config.ts`) — the same pattern `copyPdfJsAssets`
+    already used. Permissions, CSP, and icons are untouched, so Chrome/Edge and Firefox
+    cannot drift apart from hand-maintaining two manifest files.
+  - `gecko.id` is a placeholder (`stapler-offline-pdf@stapler.app`, marked `TODO(DIST-04)`
+    in the source) — AMO issues or the submitter chooses the real one at submission time.
+  - The File System Access fallback the AC asks to see "exercised on Firefox" already
+    existed before this ticket: `src/platform/file-system.ts`'s `openFilesViaInput`
+    (`<input type=file>`) and `saveViaDownload` (anchor download), wired in through
+    `hasFileSystemAccess()` checks in both `src/platform/extension.ts` and
+    `src/platform/web.ts`. No new platform code was needed — this was already correct for
+    a browser without `showOpenFilePicker`/`showSaveFilePicker`/`showDirectoryPicker`; it
+    was simply never proven to matter until this ticket asked for a real Firefox build to
+    point it at.
+- **Verified here:** `pnpm check` (type/lint/format/tokens/contrast) green; `pnpm test`
+  green except one pre-existing, unrelated failure (`tests/unit/process.test.ts` —
+  missing fixture `tests/fixtures/oversized-mask.pdf`, not touched by this ticket);
+  `tests/e2e/manifest.spec.ts` (6/6) green against the unmodified Chrome/Edge manifest;
+  new unit test `tests/unit/firefox-manifest.test.ts` (4/4) asserting the Firefox manifest
+  keeps every hard invariant and only changes the two fields above; `pnpm build:ext` and
+  `pnpm build:ext:firefox` both run to completion, each producing a loadable
+  `dist/{ext,firefox}` with `manifest.json`, `background.js`, `editor.html`/`.js`, workers,
+  and icons present; `pnpm build:web` re-run afterward to confirm the website twin is
+  unaffected.
+- **Cannot be verified here (needs a real submission or a real browser):** actually
+  loading `dist/firefox` via `about:debugging` in Firefox, actually loading `dist/ext` in
+  Edge's `edge://extensions`, and the AMO/Edge Add-ons review processes themselves —
+  Playwright in this environment drives Chromium only and cannot load an unpacked
+  extension into Firefox, so this is a manual step, not an automatable one. `QA-05`
+  (external viewer compatibility) is a separate manual checklist and does not cover
+  store-load verification, so this ticket adds a new `RELEASE_CHECKLIST.md` §5b covering
+  both stores: load `dist/ext` in Edge and `dist/firefox` in Firefox before either
+  submission, replace the placeholder `gecko.id`, and zip/submit each.
 - **AC:** Same codebase builds and passes review on Edge Add-ons and Firefox AMO, with
-  File System Access fallbacks exercised on Firefox.
+  File System Access fallbacks exercised on Firefox. — build side confirmed for both
+  targets; "passes review" is inherently unverifiable without submitting to each store.
 
 ### DIST-05 · Release process — `S` `P0`
 

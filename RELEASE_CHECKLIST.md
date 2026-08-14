@@ -54,6 +54,25 @@ so it gets its own explicit step below rather than being buried inside "run veri
 - [ ] **Privacy Policy:** Ensure the Privacy Policy URL is still correct and accessible (or points to the bundled/GitHub version if applicable).
 - [ ] **Submit for Review:** Click "Submit for Review".
 
+## 5b. Edge Add-ons and Firefox AMO (DIST-04)
+- [ ] **Edge:** `dist/ext` is Edge-compatible unmodified — no separate build. Load it via
+      `edge://extensions` → "Load unpacked" and repeat the "No install warning" and
+      "Functionality Check" steps from §3 before uploading the same `.zip` to the
+      [Edge Add-ons Developer Dashboard](https://partner.microsoft.com/en-us/dashboard/microsoftedge/).
+- [ ] **Firefox build:** Run `npm run build:ext:firefox` — emits a second unpacked
+      directory, `dist/firefox`, with an AMO-shaped `manifest.json` (`browser_specific_settings.gecko.id`,
+      `background.scripts` instead of `service_worker`).
+- [ ] **Firefox gecko.id:** Before the first real AMO submission, replace the placeholder
+      `gecko.id` in `scripts/firefox-manifest.mjs` with the ID AMO issues (or the one you
+      chose at registration) — grep the file for `TODO(DIST-04)`.
+- [ ] **Load Temporary Add-on:** `about:debugging#/runtime/this-firefox` → "Load Temporary
+      Add-on" → select `dist/firefox/manifest.json`. Repeat the "Functionality Check" from
+      §3, paying particular attention to file open/save: Firefox has no File System Access
+      API, so opening should fall back to `<input type=file>` and saving to a browser
+      download, not a picker.
+- [ ] **Zip and submit:** zip the contents of `dist/firefox` and submit at
+      [addons.mozilla.org/developers](https://addons.mozilla.org/developers/).
+
 ## 6. Post-Release
 - [ ] **Git Tag:** Create a git tag for the release (e.g., `git tag v1.0.0` and `git push --tags`).
 - [ ] **GitHub Release:** Create a release on GitHub using the tag, copy the changelog notes, and attach the `.zip` file as a release asset.
