@@ -990,7 +990,8 @@ non-`GoTo` action cannot be resolved, so it is now *reported* (`pageIndex: -1`, 
 the panel) and exports as a heading with no page rather than being dropped or guessed at.
 Titles are now written as UTF-16BE hex strings, which also fixes a latent OPS-01 bug —
 `PDFString.of` does not escape `)` or `\`, so such a title produced a broken outline
-dictionary. Evidence: `tests/unit/outline.test.ts` (9 tests, including the AC round trip
+dictionary. Evidence: `tests/unit/outline.test.ts` (10 tests across its two OPS-10
+describe blocks, including the AC round trip
 "round-trips an edited tree through export and re-import, exactly as left") and
 `tests/e2e/tool-flows.spec.ts` → "bookmarks: renaming, reordering, and adding survives
 export (OPS-10)", which reorders from the keyboard (`.press('Enter')` on the row button)
