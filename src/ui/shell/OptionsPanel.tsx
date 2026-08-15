@@ -26,6 +26,7 @@ import { RedactPanel } from '../tools/redact/RedactPanel';
 import { MetadataPanel } from '../tools/metadata/MetadataPanel';
 import { AccPanel } from '../tools/acc/AccPanel';
 import { OcrPanel } from '../tools/ocr/OcrPanel';
+import { TableExtractPanel } from '../tools/ocr/TableExtractPanel';
 import { NormalizePanel } from '../tools/normalize/NormalizePanel';
 import { NUpPanel } from '../tools/nup/NUpPanel';
 import { ComparePanel } from '../tools/compare/ComparePanel';
@@ -56,6 +57,7 @@ const BODIES: Record<string, () => preact.JSX.Element | null> = {
   metadata: MetadataPanel,
   acc: AccPanel,
   ocr: OcrPanel,
+  'table-extract': TableExtractPanel,
   normalize: NormalizePanel,
   nup: NUpPanel,
   compare: ComparePanel,

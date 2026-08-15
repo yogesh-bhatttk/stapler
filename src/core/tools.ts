@@ -33,6 +33,7 @@ export type ToolId =
   | 'batch'
   | 'md-to-pdf'
   | 'ocr'
+  | 'table-extract'
   | 'acc'
   | 'contact-sheet'
   | 'shortcuts';
@@ -252,6 +253,17 @@ export const TOOLS: readonly ToolDefinition[] = [
     // A scan is often a handful of pages inside a longer document, and OCR is by
     // far the slowest operation here — running it on pages that already have text
     // would cost minutes for nothing.
+    selectable: true
+  },
+  {
+    id: 'table-extract',
+    title: 'Table extraction',
+    group: 'Document',
+    summary: 'Extract structured tables from PDF page text positions to CSV, TSV, or XLSX.',
+    icon: 'Table',
+    canvasMode: 'grid',
+    needsOptionsPanel: true,
+    commitLabel: 'Export Table',
     selectable: true
   },
   {
