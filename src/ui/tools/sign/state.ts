@@ -2,7 +2,8 @@ import { signal } from '@preact/signals';
 import type { TextRegion } from '../../../core/workers/render.worker';
 import type { FormFieldData } from '../../../core/workers/process.worker';
 
-export type StampType = 'signature' | 'text' | 'date' | 'check';
+export type StampType =
+  'signature' | 'text' | 'date' | 'check' | 'form-text' | 'form-checkbox' | 'form-radio';
 
 export interface ActiveStamp {
   type: StampType;

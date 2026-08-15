@@ -30,7 +30,9 @@ export interface PageRef {
 export interface Annotation {
   id: string;
   pageKey: string;
-  type: 'signature' | 'text' | 'date' | 'check';
+  type: 'signature' | 'text' | 'date' | 'check' | 'form-text' | 'form-checkbox' | 'form-radio';
+  fieldName?: string;
+  exportValue?: string;
   /** Normalised to the page, origin top-left. */
   x: number;
   y: number;
