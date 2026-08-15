@@ -7,7 +7,9 @@ import {
   PDFName,
   PDFRawStream,
   PDFRef,
-  PDFStream
+  PDFStream,
+  StandardFonts,
+  rgb
 } from 'pdf-lib';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -1199,6 +1201,44 @@ test.describe('tool flows', () => {
 
     await page.keyboard.press('Delete');
     await expect(page.getByText('Marks (1)')).not.toBeVisible();
+  });
+
+  test('cleanup: flatten background preserves text', async ({ page }) => {
+    const file = await ensureFixture('colored-bg.pdf', async () => {
+      const doc = await PDFDocument.create();
+      const pageObj = doc.addPage([595, 842]);
+      pageObj.drawRectangle({ x: 0, y: 0, width: 595, height: 842, color: rgb(0.2, 0.4, 0.6) });
+      const font = await doc.embedFont(StandardFonts.Helvetica);
+      pageObj.drawText('Foreground Text', { x: 50, y: 700, font, size: 24, color: rgb(0, 0, 0) });
+      return Buffer.from(await doc.save());
+    });
+    
+    await importFixture(page, file);
+    await gotoTool(page, 'cleanup');
+
+    await page.getByRole('checkbox', { name: 'Flatten background' }).check();
+    await page.getByLabel('Background color').fill('#ff0000');
+    await page.getByRole('button', { name: 'Apply to this page' }).click();
+    await expect(page.getByText('Page cleaned.')).toBeVisible({ timeout: 30_000 });
+
+    const bytes = await commitAndRead(page, 'Apply & export');
+    
+    // Check that vector text is PRESERVED, not rasterized
+    const text = await drawnText(bytes);
+    expect(text).toContain('Foreground Text');
+    
+    // Background must be flat red, so we test pixels to ensure it changed
+    await openApp(page);
+    await page.locator('input[type="file"]').setInputFiles({
+      name: 'cleaned.pdf',
+      mimeType: 'application/pdf',
+      buffer: Buffer.from(bytes)
+    });
+    await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
+    const [bgPixel] = await samplePage(page, [[0.5, 0.5]]);
+    expect(bgPixel[0]).toBeGreaterThan(240); // R
+    expect(bgPixel[1]).toBeLessThan(20); // G
+    expect(bgPixel[2]).toBeLessThan(20); // B
   });
 
   test('cleanup: applying b&w preset alters the page', async ({ page }) => {

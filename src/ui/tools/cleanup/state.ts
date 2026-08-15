@@ -8,6 +8,8 @@ export interface CleanupSettings {
   brightness: number;
   deskew: boolean;
   despeckle: boolean;
+  flattenBackground: boolean;
+  flattenTint: string;
 }
 
 export const cleanupSettings = signal<CleanupSettings>({
@@ -15,7 +17,9 @@ export const cleanupSettings = signal<CleanupSettings>({
   contrast: 0,
   brightness: 0,
   deskew: true,
-  despeckle: true
+  despeckle: true,
+  flattenBackground: false,
+  flattenTint: '#ffffff'
 });
 
 /**
