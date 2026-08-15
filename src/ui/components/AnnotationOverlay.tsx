@@ -38,7 +38,10 @@ const DEFAULT_SIZE: Record<Annotation['type'], { width: number; height: number }
   signature: { width: 0.28, height: 0.09 },
   text: { width: 0.24, height: 0.035 },
   date: { width: 0.16, height: 0.03 },
-  check: { width: 0.04, height: 0.04 }
+  check: { width: 0.04, height: 0.04 },
+  'form-text': { width: 0.24, height: 0.04 },
+  'form-checkbox': { width: 0.12, height: 0.035 },
+  'form-radio': { width: 0.24, height: 0.035 }
 };
 
 /** Arrow-key nudge, in fractions of the page. Shift is the coarse step. */
@@ -58,6 +61,9 @@ export function AnnotationOverlay({ docId, pageKey, width, height }: AnnotationO
     const currentStamp = activeStamp.value;
     if (!currentStamp) return;
     const size = DEFAULT_SIZE[currentStamp.type];
+    const existingCount =
+      (doc?.annotations ?? []).filter(a => a.type === currentStamp.type).length + 1;
+
     addAnnotation(docId, {
       id: crypto.randomUUID(),
       pageKey,
@@ -69,14 +75,19 @@ export function AnnotationOverlay({ docId, pageKey, width, height }: AnnotationO
         currentStamp.type === 'signature'
           ? (currentStamp.signatureId ?? '')
           : currentStamp.type === 'date'
-            ? // Use the app's active locale so the formatted date matches the language
-              // the user chose in Settings, not whatever the OS default happens to be.
-              // Fallback to 'en-CA' (ISO YYYY-MM-DD) when no locale is set — unambiguous
-              // and guaranteed to be WinAnsi-encodable by the PDF worker.
-              new Date().toLocaleDateString(currentLocale.value ?? 'en-CA')
+            ? new Date().toLocaleDateString(currentLocale.value ?? 'en-CA')
             : currentStamp.type === 'check'
               ? '✓'
-              : ''
+              : '',
+      fieldName:
+        currentStamp.type === 'form-text'
+          ? `text_${existingCount}`
+          : currentStamp.type === 'form-checkbox'
+            ? `check_${existingCount}`
+            : currentStamp.type === 'form-radio'
+              ? `radio_group`
+              : undefined,
+      exportValue: currentStamp.type === 'form-radio' ? `option_${existingCount}` : undefined
     });
     // Disarm so a second click does not place a duplicate by accident.
     activeStamp.value = null;
@@ -335,6 +346,72 @@ function Stamp({
             })
           }
         />
+      )}
+
+      {stamp.type === 'form-text' && (
+        <div className={styles.formFieldContainer}>
+          <span className={styles.formFieldTag}>{t('Text')}</span>
+          <input
+            className={styles.formInput}
+            value={stamp.fieldName || ''}
+            placeholder={t('Field name')}
+            aria-label={t('Field name')}
+            onKeyDown={e => e.stopPropagation()}
+            onInput={event =>
+              updateAnnotation(docId, stamp.id, {
+                fieldName: (event.target as HTMLInputElement).value
+              })
+            }
+          />
+        </div>
+      )}
+
+      {stamp.type === 'form-checkbox' && (
+        <div className={styles.formFieldContainer}>
+          <input type="checkbox" disabled className={styles.checkboxPreview} />
+          <input
+            className={styles.formInput}
+            value={stamp.fieldName || ''}
+            placeholder={t('Name')}
+            aria-label={t('Checkbox name')}
+            onKeyDown={e => e.stopPropagation()}
+            onInput={event =>
+              updateAnnotation(docId, stamp.id, {
+                fieldName: (event.target as HTMLInputElement).value
+              })
+            }
+          />
+        </div>
+      )}
+
+      {stamp.type === 'form-radio' && (
+        <div className={styles.formFieldContainer}>
+          <input type="radio" disabled className={styles.radioPreview} />
+          <input
+            className={styles.formInput}
+            value={stamp.fieldName || ''}
+            placeholder={t('Group')}
+            aria-label={t('Radio group name')}
+            onKeyDown={e => e.stopPropagation()}
+            onInput={event =>
+              updateAnnotation(docId, stamp.id, {
+                fieldName: (event.target as HTMLInputElement).value
+              })
+            }
+          />
+          <input
+            className={styles.formInput}
+            value={stamp.exportValue || ''}
+            placeholder={t('Value')}
+            aria-label={t('Export value')}
+            onKeyDown={e => e.stopPropagation()}
+            onInput={event =>
+              updateAnnotation(docId, stamp.id, {
+                exportValue: (event.target as HTMLInputElement).value
+              })
+            }
+          />
+        </div>
       )}
 
       <button

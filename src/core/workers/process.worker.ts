@@ -357,6 +357,7 @@ export interface ComposeExtras {
    * Split only; ignored by `compose`.
    */
   fileNames?: string[];
+  formFieldsToCreate?: import('../operations').NewFormField[];
 }
 
 export interface ProcessJob {
@@ -1889,6 +1890,56 @@ async function composePages(
   }
 
   reattachAcroForm(outDoc, contributors);
+
+  if (extras.formFieldsToCreate && extras.formFieldsToCreate.length > 0) {
+    const form = outDoc.getForm();
+    for (const fieldSpec of extras.formFieldsToCreate) {
+      const pageIndex = pages.findIndex(p => p.key === fieldSpec.pageKey);
+      if (pageIndex < 0 || pageIndex >= outDoc.getPageCount()) continue;
+      const page = outDoc.getPage(pageIndex);
+      const { width: pWidth, height: pHeight } = page.getSize();
+
+      const pdfX = fieldSpec.x * pWidth;
+      const pdfY = (1 - (fieldSpec.y + fieldSpec.height)) * pHeight;
+      const pdfW = fieldSpec.width * pWidth;
+      const pdfH = fieldSpec.height * pHeight;
+
+      const name = fieldSpec.name || 'field';
+      const type = fieldSpec.type.toLowerCase();
+
+      if (type === 'text' || type === 'textfield' || type === 'form-text') {
+        let textField: PDFTextField;
+        try {
+          textField = form.getTextField(name);
+        } catch {
+          textField = form.createTextField(name);
+        }
+        textField.addToPage(page, { x: pdfX, y: pdfY, width: pdfW, height: pdfH });
+      } else if (type === 'checkbox' || type === 'form-checkbox') {
+        let checkBox: PDFCheckBox;
+        try {
+          checkBox = form.getCheckBox(name);
+        } catch {
+          checkBox = form.createCheckBox(name);
+        }
+        checkBox.addToPage(page, { x: pdfX, y: pdfY, width: pdfW, height: pdfH });
+      } else if (type === 'radio' || type === 'radiogroup' || type === 'form-radio') {
+        let radioGroup: PDFRadioGroup;
+        try {
+          radioGroup = form.getRadioGroup(name);
+        } catch {
+          radioGroup = form.createRadioGroup(name);
+        }
+        const exportValue = fieldSpec.exportValue || 'Choice';
+        radioGroup.addOptionToPage(exportValue, page, {
+          x: pdfX,
+          y: pdfY,
+          width: pdfW,
+          height: pdfH
+        });
+      }
+    }
+  }
   // An explicit outline (even an empty one, meaning "the user deleted them all")
   // replaces the carried-through source outlines rather than adding to them.
   if (extras.outline) writeOutline(outDoc, extras.outline);
@@ -3311,7 +3362,10 @@ Q
     // address the input, not this file's pages — so only the Bates stamp (which is
     // deliberately continuous across the set) crosses into each slice. Source
     // outlines still carry through per slice via `copyOutlines`, unchanged.
-    const sliceExtras: ComposeExtras = { bates: extras?.bates };
+    const sliceExtras: ComposeExtras = {
+      bates: extras?.bates,
+      formFieldsToCreate: extras?.formFieldsToCreate
+    };
 
     const cuts = [...new Set(boundaries)]
       .filter(b => Number.isInteger(b) && b > 0 && b < pages.length)

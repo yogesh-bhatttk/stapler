@@ -78,6 +78,12 @@ async function resolveStamps(pages: PageRef[], annotations: Annotation[]): Promi
   for (const annotation of annotations) {
     // A stamp on a page that has since been deleted must not be drawn anywhere.
     if (!pageKeys.has(annotation.pageKey)) continue;
+    if (
+      annotation.type === 'form-text' ||
+      annotation.type === 'form-checkbox' ||
+      annotation.type === 'form-radio'
+    )
+      continue;
 
     let imagePng: Uint8Array | undefined;
     if (annotation.type === 'signature') {
@@ -106,6 +112,45 @@ async function resolveStamps(pages: PageRef[], annotations: Annotation[]): Promi
   return out;
 }
 
+export interface NewFormField {
+  pageKey: string;
+  type:
+    | 'text'
+    | 'checkbox'
+    | 'radio'
+    | 'TextField'
+    | 'CheckBox'
+    | 'RadioGroup'
+    | 'form-text'
+    | 'form-checkbox'
+    | 'form-radio';
+  name: string;
+  exportValue?: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export function extractFormFieldsToCreate(annotations: Annotation[]): NewFormField[] {
+  const fields: NewFormField[] = [];
+  for (const ann of annotations) {
+    if (ann.type === 'form-text' || ann.type === 'form-checkbox' || ann.type === 'form-radio') {
+      fields.push({
+        pageKey: ann.pageKey,
+        type: ann.type,
+        name: ann.fieldName || ann.data || 'field',
+        exportValue: ann.exportValue,
+        x: ann.x,
+        y: ann.y,
+        width: ann.width,
+        height: ann.height
+      });
+    }
+  }
+  return fields;
+}
+
 export interface ComposeRequest {
   pages: PageRef[];
   annotations: Annotation[];
@@ -119,6 +164,7 @@ export interface ComposeRequest {
   outline?: import('./workers/process.worker').OutlineNode[];
   /** OPS-11 — a Bates stamp for every exported page. */
   bates?: import('./workers/process.worker').BatesData;
+  formFieldsToCreate?: NewFormField[];
 }
 
 /** DOC-05 — compose the current model into output bytes. */
@@ -148,7 +194,12 @@ export async function composeDocument(
       request.nup,
       request.layerAnnotations,
       job,
-      { outline: request.outline, bates: request.bates }
+      {
+        outline: request.outline,
+        bates: request.bates,
+        formFieldsToCreate:
+          request.formFieldsToCreate ?? extractFormFieldsToCreate(request.annotations)
+      }
     )
   );
 }
@@ -184,7 +235,12 @@ export async function splitDocument(request: SplitRequest, options: JobOptions =
       request.baseName,
       request.layerAnnotations,
       job,
-      { bates: request.bates, fileNames: request.fileNames }
+      {
+        bates: request.bates,
+        fileNames: request.fileNames,
+        formFieldsToCreate:
+          request.formFieldsToCreate ?? extractFormFieldsToCreate(request.annotations)
+      }
     )
   );
 }

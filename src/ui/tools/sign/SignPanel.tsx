@@ -5,7 +5,16 @@
  * worker, which expects its own handle, so it threw on every use.
  */
 import { useEffect } from 'preact/hooks';
-import { Calendar, Check, Plus, ScanSearch, Trash2, Type } from 'lucide-preact';
+import {
+  Calendar,
+  Check,
+  CheckSquare,
+  CircleDot,
+  Plus,
+  ScanSearch,
+  Trash2,
+  Type
+} from 'lucide-preact';
 import { useState } from 'preact/hooks';
 import { activeDoc } from '../../../core/store';
 import {
@@ -29,6 +38,12 @@ import { activeStamp, signatureSuggestions, formFields, formValues, type StampTy
 import { useJob } from '../../useJob';
 import styles from './SignPanel.module.css';
 import { useTranslation } from '../../../core/i18n';
+
+const FORM_FIELDS: { type: StampType; labelKey: string; icon: typeof Type }[] = [
+  { type: 'form-text', labelKey: 'Text field', icon: Type },
+  { type: 'form-checkbox', labelKey: 'Checkbox', icon: CheckSquare },
+  { type: 'form-radio', labelKey: 'Radio button', icon: CircleDot }
+];
 
 const STAMPS: { type: StampType; labelKey: string; icon: typeof Type }[] = [
   { type: 'text', labelKey: 'tool.sign.stampText', icon: Type },
@@ -206,6 +221,27 @@ export function SignPanel() {
         <h3 className={panelStyles.title}>{t('Other stamps')}</h3>
         <div className={styles.stampGrid}>
           {STAMPS.map(stamp => {
+            const active = armed?.type === stamp.type;
+            return (
+              <button
+                key={stamp.type}
+                type="button"
+                aria-pressed={active}
+                className={`${styles.stampButton} ${active ? styles.stampActive : ''}`}
+                onClick={() => (activeStamp.value = active ? null : { type: stamp.type })}
+              >
+                <stamp.icon size={18} aria-hidden="true" />
+                {t(stamp.labelKey)}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className={panelStyles.section}>
+        <h3 className={panelStyles.title}>{t('Create form fields')}</h3>
+        <div className={styles.stampGrid}>
+          {FORM_FIELDS.map(stamp => {
             const active = armed?.type === stamp.type;
             return (
               <button
