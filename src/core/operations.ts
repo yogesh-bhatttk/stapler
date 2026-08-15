@@ -791,6 +791,20 @@ async function verifyRedaction(
  * Misc operations
  * ------------------------------------------------------------------ */
 
+export async function extractPageTextItems(
+  bytes: Uint8Array,
+  pageIndex: number
+): Promise<{ text: string; x: number; y: number; width: number; height: number }[]> {
+  return renderWorker.lease(async api => {
+    const { handle } = await api.loadDocument(bytes);
+    try {
+      return await api.extractPageTextItems(handle, pageIndex);
+    } finally {
+      await api.closeDocument(handle);
+    }
+  });
+}
+
 export async function extractDocumentText(
   bytes: Uint8Array,
   pageIndices: number[],

@@ -113,6 +113,10 @@ export interface RenderJob {
     dpi: number
   ): Promise<RegionRaster>;
   extractText(handle: string, pageIndex: number, mode: 'text' | 'markdown'): Promise<string>;
+  extractPageTextItems(
+    handle: string,
+    pageIndex: number
+  ): Promise<{ text: string; x: number; y: number; width: number; height: number }[]>;
   textPresence(handle: string, job?: JobHandle): Promise<PageTextPresence[]>;
   findText(
     handle: string,
@@ -320,6 +324,26 @@ const api: RenderJob = {
     const page = await entry(handle).doc.getPage(pageIndex + 1);
     try {
       return layoutText(await textRuns(page), mode);
+    } finally {
+      page.cleanup();
+    }
+  },
+
+  async extractPageTextItems(handle, pageIndex) {
+    const page = await entry(handle).doc.getPage(pageIndex + 1);
+    try {
+      const viewport = page.getViewport({ scale: 1.0 });
+      const runs = await textRuns(page);
+      return runs.map(run => {
+        const height = Math.abs(run.transform[3]) || run.height || 10;
+        return {
+          text: run.str,
+          x: run.transform[4],
+          y: Math.max(0, viewport.height - run.transform[5]),
+          width: run.width,
+          height
+        };
+      });
     } finally {
       page.cleanup();
     }

@@ -753,6 +753,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   batch: async () => {},
   'md-to-pdf': async () => {},
   shortcuts: async () => {},
+  'table-extract': async () => {},
   'contact-sheet': exportComposed
 };
 
