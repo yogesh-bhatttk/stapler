@@ -4,7 +4,12 @@
  * The panel analyses before committing, so "already optimized — only N% possible"
  * is shown *before* the work rather than after a minute of processing.
  */
-import { Gauge } from 'lucide-preact';
+import { Download, Gauge } from 'lucide-preact';
+import { platform } from '../../../platform/current';
+import {
+  generateCompressionReportText,
+  type CompressionResultStats
+} from '../../../core/compress-report';
 import { activeDoc } from '../../../core/store';
 import { currentDocumentBytes, planCompression } from '../../../core/operations';
 import { Button } from '../../components/Button';
@@ -18,6 +23,7 @@ import {
   compressSettings,
   compressTarget,
   compressTargetOutcome,
+  lastCompressionResult,
   projectedOutput,
   targetSizeBytes,
   type CompressMode,
@@ -95,6 +101,21 @@ export function CompressPanel() {
   const target = compressTarget.value;
   const outcome = compressTargetOutcome.value;
   const targetBytes = targetSizeBytes(target);
+
+  const exportReport = async () => {
+    if (!report) return;
+    const lastResult = lastCompressionResult.value;
+    const plan = lastResult?.plan ?? report.plan;
+    const stats: CompressionResultStats = {
+      originalBytes: lastResult?.originalBytes ?? report.originalBytes,
+      compressedBytes:
+        lastResult?.compressedBytes ?? (projection ? projection.bytes : report.estimatedBytes),
+      keptOriginal: lastResult?.keptOriginal ?? report.alreadyOptimized
+    };
+    const text = generateCompressionReportText(plan, stats);
+    const stem = doc.name.replace(/\.[^.]+$/, '');
+    await platform.saveFileAs(new TextEncoder().encode(text), `${stem}-compression-report.txt`);
+  };
 
   return (
     <>
@@ -286,6 +307,10 @@ export function CompressPanel() {
               {t('. Compressing it is not worth the time.')}
             </p>
           )}
+
+          <Button variant="secondary" icon={Download} onClick={exportReport}>
+            {t('Export Report')}
+          </Button>
         </div>
       )}
     </>

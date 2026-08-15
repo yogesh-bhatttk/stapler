@@ -1,5 +1,6 @@
 import { signal } from '@preact/signals';
 import type { CompressionReport } from '../../../core/operations';
+import type { CompressionPlan } from '../../../core/compress-plan';
 import { refineEstimate, type PreviewMeasurement } from '../../../core/compress-plan';
 
 export interface CompressSettings {
@@ -104,3 +105,12 @@ export function projectedOutput(
     ? { bytes: usable.estimatedBytes, fraction: usable.estimatedFraction, measured: true }
     : { bytes: report.estimatedBytes, fraction: report.estimatedFraction, measured: false };
 }
+
+export interface LastCompressionResult {
+  plan: CompressionPlan;
+  originalBytes: number;
+  compressedBytes: number;
+  keptOriginal?: boolean;
+}
+
+export const lastCompressionResult = signal<LastCompressionResult | null>(null);

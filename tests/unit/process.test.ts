@@ -1264,12 +1264,14 @@ describe('CMP-03: resamples SMask when base image is downscaled', () => {
   it('rebuildCompressed creates a new SMask of the requested dimensions', async () => {
     const fs = await import('node:fs');
     const { PDFDocument, PDFName, PDFDict, PDFStream, PDFRef } = await import('pdf-lib');
-    if (!fs.existsSync("tests/fixtures/oversized-mask.pdf")) {
-      const { oversizedMaskPdf } = await import("../e2e/fixtures");
-      const fixtureBytes = await oversizedMaskPdf();
-      fs.writeFileSync("tests/fixtures/oversized-mask.pdf", fixtureBytes);
+    let bytes: Uint8Array;
+    if (fs.existsSync('tests/fixtures/oversized-mask.pdf')) {
+      bytes = fs.readFileSync('tests/fixtures/oversized-mask.pdf');
+    } else {
+      const { oversizedMaskPdf } = await import('../e2e/fixtures');
+      bytes = await oversizedMaskPdf();
+      fs.writeFileSync('tests/fixtures/oversized-mask.pdf', bytes);
     }
-    const bytes = fs.readFileSync('tests/fixtures/oversized-mask.pdf');
 
     // `replacedImages` is keyed by PDF object number, not resource name — look
     // up the object number `/ImStrip` currently points at on page 0.
