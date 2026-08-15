@@ -1,4 +1,5 @@
 import { useState } from 'preact/hooks';
+import { Download } from 'lucide-preact';
 import { compareSettings } from './state';
 import { Button } from '../../components/Button';
 import { RadioGroup, Slider, Field } from '../../components/Field';
@@ -7,10 +8,14 @@ import { platform } from '../../../platform/current';
 import { importFiles } from '../../../core/import';
 import { logEvent, fromUnknown } from '../../../core/errors';
 import { useTranslation } from '../../../core/i18n';
+import { activeDoc, sources, makePageRefs, type StaplerDoc } from '../../../core/store';
+import { exportVisualDiff } from '../../../core/operations';
+import { useJob } from '../../useJob';
 
 export function ComparePanel() {
   const t = useTranslation();
   const settings = compareSettings.value;
+  const { run, isRunning } = useJob();
   const [loading, setLoading] = useState(false);
 
   const handleOpenCompareFile = async () => {
@@ -33,6 +38,31 @@ export function ComparePanel() {
     }
   };
 
+  const handleExportDiff = () =>
+    run({ label: t('Exporting visual diff'), scope: 'compare' }, async job => {
+      const docA = activeDoc.value;
+      if (!docA || !settings.compareSourceId) return;
+
+      const compareSource = sources.value[settings.compareSourceId];
+      if (!compareSource) return;
+
+      const docB: StaplerDoc = {
+        id: compareSource.id,
+        name: compareSource.name,
+        pages: makePageRefs(compareSource.id, compareSource.pageCount),
+        annotations: [],
+        dirty: false
+      };
+
+      const outBytes = await exportVisualDiff(docA, docB, [], {
+        sensitivity: settings.sensitivity,
+        signal: job.signal
+      });
+
+      const stem = docA.name.replace(/\.[^.]+$/, '');
+      await platform.saveFileAs(outBytes, `${stem}-diff.pdf`);
+    });
+
   const update = (patch: Partial<typeof settings>) => {
     compareSettings.value = { ...settings, ...patch };
   };
@@ -40,7 +70,7 @@ export function ComparePanel() {
   return (
     <>
       <div className={panelStyles.section}>
-        <Button onClick={handleOpenCompareFile} disabled={loading}>
+        <Button onClick={handleOpenCompareFile} disabled={loading || isRunning()}>
           {settings.compareSourceId ? 'Change comparison file...' : 'Open file to compare...'}
         </Button>
       </div>
@@ -74,6 +104,19 @@ export function ComparePanel() {
         <p className={`${panelStyles.note} ${panelStyles.noteInfo}`}>
           {t('Text diff shows structural text changes. Additions are green, deletions are red.')}
         </p>
+      )}
+
+      {settings.compareSourceId && (
+        <div className={panelStyles.section}>
+          <Button
+            id="compare-export-diff-btn"
+            onClick={handleExportDiff}
+            disabled={isRunning() || loading}
+            icon={Download}
+          >
+            {isRunning() ? t('Exporting…') : t('Export Diff PDF')}
+          </Button>
+        </div>
       )}
     </>
   );
