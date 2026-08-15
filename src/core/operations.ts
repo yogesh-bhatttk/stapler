@@ -1014,3 +1014,9 @@ export {
   exportAnnotationSummaryText,
   type SummaryAnnotation
 } from './annotation-summary';
+
+export {
+  exportVisualDiff,
+  type PageDiffResult,
+  type ExportVisualDiffOptions
+} from './visual-diff-export';
