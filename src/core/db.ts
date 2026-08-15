@@ -15,7 +15,27 @@ import { notify } from './notify';
 import type { FsaFileHandle } from '../platform/fsa';
 
 const DB_NAME = 'stapler';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
+
+export interface IndexOccurrence {
+  fileId: string;
+  fileName: string;
+  pageIndex: number;
+  textSnippet: string;
+}
+
+export interface SearchIndexRecord {
+  id: string;
+  type: 'token' | 'doc' | 'meta';
+  token?: string;
+  occurrences?: IndexOccurrence[];
+  fileId?: string;
+  fileName?: string;
+  lastModified?: number;
+  size?: number;
+  handle?: FsaFileHandle;
+  indexedAt?: number;
+}
 
 interface StaplerSchema extends DBSchema {
   handles: {
@@ -45,11 +65,24 @@ interface StaplerSchema extends DBSchema {
     key: string;
     value: unknown;
   };
+  searchIndex: {
+    key: string;
+    value: SearchIndexRecord;
+    indexes: {
+      'by-token': string;
+      'by-type': string;
+      'by-fileId': string;
+    };
+  };
 }
 
 let dbPromise: Promise<IDBPDatabase<StaplerSchema>> | null = null;
+const memorySearchIndexStore = new Map<string, SearchIndexRecord>();
 
 function open(): Promise<IDBPDatabase<StaplerSchema>> {
+  if (typeof globalThis.indexedDB === 'undefined') {
+    return Promise.reject(new Error('IndexedDB unavailable in this environment'));
+  }
   if (!dbPromise) {
     dbPromise = openDB<StaplerSchema>(DB_NAME, DB_VERSION, {
       upgrade(db, oldVersion) {
@@ -62,6 +95,14 @@ function open(): Promise<IDBPDatabase<StaplerSchema>> {
           signatures.createIndex('by-createdAt', 'createdAt');
           db.createObjectStore('presets', { keyPath: 'id' });
           db.createObjectStore('settings');
+        }
+        if (oldVersion < 2) {
+          if (!db.objectStoreNames.contains('searchIndex')) {
+            const searchIndex = db.createObjectStore('searchIndex', { keyPath: 'id' });
+            searchIndex.createIndex('by-token', 'token');
+            searchIndex.createIndex('by-type', 'type');
+            searchIndex.createIndex('by-fileId', 'fileId');
+          }
         }
       },
       blocked() {
@@ -160,4 +201,106 @@ export async function readSetting<T>(key: string): Promise<T | undefined> {
 
 export async function writeSetting(key: string, value: unknown) {
   await guard('db.writeSetting', db => db.put('settings', value, key));
+}
+
+/* ---------------- searchIndex ---------------- */
+
+export async function putSearchIndexRecordsBatch(records: SearchIndexRecord[]): Promise<boolean> {
+  if (typeof globalThis.indexedDB === 'undefined') {
+    for (const rec of records) {
+      memorySearchIndexStore.set(rec.id, rec);
+    }
+    return true;
+  }
+  const result = await guard('db.putSearchIndexRecordsBatch', async db => {
+    const tx = db.transaction('searchIndex', 'readwrite');
+    for (const rec of records) {
+      await tx.store.put(rec);
+    }
+    await tx.done;
+  });
+  return result.ok;
+}
+
+export async function getSearchIndexRecord(id: string): Promise<SearchIndexRecord | null> {
+  if (typeof globalThis.indexedDB === 'undefined') {
+    return memorySearchIndexStore.get(id) ?? null;
+  }
+  const result = await guard('db.getSearchIndexRecord', db => db.get('searchIndex', id));
+  return result.value ?? null;
+}
+
+export async function getSearchIndexRecordsByToken(token: string): Promise<SearchIndexRecord[]> {
+  if (typeof globalThis.indexedDB === 'undefined') {
+    const out: SearchIndexRecord[] = [];
+    for (const rec of memorySearchIndexStore.values()) {
+      if (rec.type === 'token' && rec.token === token) {
+        out.push(rec);
+      }
+    }
+    return out;
+  }
+  const result = await guard('db.getSearchIndexRecordsByToken', db =>
+    db.getAllFromIndex('searchIndex', 'by-token', token)
+  );
+  return result.value ?? [];
+}
+
+export async function getSearchIndexRecordsByType(
+  type: 'token' | 'doc' | 'meta'
+): Promise<SearchIndexRecord[]> {
+  if (typeof globalThis.indexedDB === 'undefined') {
+    const out: SearchIndexRecord[] = [];
+    for (const rec of memorySearchIndexStore.values()) {
+      if (rec.type === type) {
+        out.push(rec);
+      }
+    }
+    return out;
+  }
+  const result = await guard('db.getSearchIndexRecordsByType', db =>
+    db.getAllFromIndex('searchIndex', 'by-type', type)
+  );
+  return result.value ?? [];
+}
+
+export async function clearSearchIndexStore(): Promise<boolean> {
+  if (typeof globalThis.indexedDB === 'undefined') {
+    memorySearchIndexStore.clear();
+    return true;
+  }
+  const result = await guard('db.clearSearchIndexStore', db => db.clear('searchIndex'));
+  return result.ok;
+}
+
+export async function deleteSearchIndexRecordsByFileId(fileId: string): Promise<boolean> {
+  if (typeof globalThis.indexedDB === 'undefined') {
+    for (const [id, rec] of memorySearchIndexStore.entries()) {
+      if (
+        rec.fileId === fileId ||
+        (rec.type === 'token' && rec.occurrences?.some(o => o.fileId === fileId))
+      ) {
+        if (rec.type === 'doc' && rec.fileId === fileId) {
+          memorySearchIndexStore.delete(id);
+        } else if (rec.type === 'token' && rec.occurrences) {
+          const filtered = rec.occurrences.filter(o => o.fileId !== fileId);
+          if (filtered.length === 0) {
+            memorySearchIndexStore.delete(id);
+          } else {
+            memorySearchIndexStore.set(id, { ...rec, occurrences: filtered });
+          }
+        }
+      }
+    }
+    return true;
+  }
+  const result = await guard('db.deleteSearchIndexRecordsByFileId', async db => {
+    const records = await db.getAllFromIndex('searchIndex', 'by-fileId', fileId);
+    const tx = db.transaction('searchIndex', 'readwrite');
+    for (const rec of records) {
+      await tx.store.delete(rec.id);
+    }
+    await tx.done;
+  });
+  return result.ok;
 }
