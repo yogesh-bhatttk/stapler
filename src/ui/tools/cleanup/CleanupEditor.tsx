@@ -182,21 +182,28 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
       const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
       const jpeg = new Uint8Array(await blob.arrayBuffer());
 
-      const originalSize = source?.pageSizes[page.sourceIndex];
-      const bytes = await processWorker.lease(api =>
-        api.imagesToPdf(
-          [jpeg],
-          originalSize
-            ? {
-                pageSize: { width: originalSize.width, height: originalSize.height },
-                orientation: 'portrait',
-                margin: 0,
-                quality: 0.85
-              }
-            : undefined,
-          createJobHandle(job)
-        )
-      );
+      let bytes: Uint8Array;
+      if (settings.flattenBackground) {
+        bytes = await processWorker.lease(api =>
+          api.flattenBackground(source.bytes, page.sourceIndex, settings.flattenTint, createJobHandle(job))
+        );
+      } else {
+        const originalSize = source?.pageSizes[page.sourceIndex];
+        bytes = await processWorker.lease(api =>
+          api.imagesToPdf(
+            [jpeg],
+            originalSize
+              ? {
+                  pageSize: { width: originalSize.width, height: originalSize.height },
+                  orientation: 'portrait',
+                  margin: 0,
+                  quality: 0.85
+                }
+              : undefined,
+            createJobHandle(job)
+          )
+        );
+      }
       // pin() keeps load and close on the same pool instance — two independent
       // lease() calls could land on different instances and leave the close a
       // silent no-op on the wrong one.
@@ -232,84 +239,90 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
 
   const applyToAll = () =>
     run({ label: 'Cleaning all pages', scope: 'cleanup.applyToAll' }, async job => {
-      const jpegs: Uint8Array[] = [];
-      const originalSizes: { width: number; height: number }[] = [];
-
-      for (let i = 0; i < pages.length; i++) {
-        // Checked at a per-page boundary, never mid-page — the same granularity
-        // every other batch loop in this app cancels at. Thrown rather than
-        // `break`ed: falling through to build a replacement source from fewer
-        // JPEGs than `pages.length` would silently drop the untouched pages.
-        if (job.signal?.aborted) throw cancelled();
-        job.onProgress?.(i / pages.length, `Cleaning page ${i + 1} of ${pages.length}`);
-
-        const p = pages[i];
-        const s = sources.value[p.sourceDocId];
-        if (!s) throw new Error(`Source not found for page ${i + 1}`);
-
-        const { handle, client } = await renderHandleFor(s.id, s.bytes);
-        const bitmap = await client.lease(api =>
-          api.renderPage(handle, p.sourceIndex, WORK_DPI / 72)
+      let bytes: Uint8Array;
+      if (settings.flattenBackground) {
+        // Find the first source document (assume single document for batch flatten for simplicity, as other batch tools do)
+        const firstSource = sources.value[pages[0].sourceDocId];
+        if (!firstSource) throw new Error('Source not found');
+        bytes = await processWorker.lease(api =>
+          api.flattenBackground(firstSource.bytes, 'all', settings.flattenTint, createJobHandle(job))
         );
+      } else {
+        const jpegs: Uint8Array[] = [];
+        const originalSizes: { width: number; height: number }[] = [];
 
-        const rotation = normalizeRotation(p.rotation);
-        const swapped = rotation === 90 || rotation === 270;
+        for (let i = 0; i < pages.length; i++) {
+          if (job.signal?.aborted) throw cancelled();
+          job.onProgress?.(i / pages.length, `Cleaning page ${i + 1} of ${pages.length}`);
 
-        const canvas = new OffscreenCanvas(
-          swapped ? bitmap.height : bitmap.width,
-          swapped ? bitmap.width : bitmap.height
-        );
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        if (!ctx) throw new Error(`Failed to create 2d context for page ${i + 1}`);
+          const p = pages[i];
+          const s = sources.value[p.sourceDocId];
+          if (!s) throw new Error(`Source not found for page ${i + 1}`);
 
-        ctx.translate(canvas.width / 2, canvas.height / 2);
-        ctx.rotate((rotation * Math.PI) / 180);
-        ctx.drawImage(bitmap, -bitmap.width / 2, -bitmap.height / 2);
+          const { handle, client } = await renderHandleFor(s.id, s.bytes);
+          const bitmap = await client.lease(api =>
+            api.renderPage(handle, p.sourceIndex, WORK_DPI / 72)
+          );
 
-        bitmap.close();
+          const rotation = normalizeRotation(p.rotation);
+          const swapped = rotation === 90 || rotation === 270;
 
-        const before = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const canvas = new OffscreenCanvas(
+            swapped ? bitmap.height : bitmap.width,
+            swapped ? bitmap.width : bitmap.height
+          );
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          if (!ctx) throw new Error(`Failed to create 2d context for page ${i + 1}`);
 
-        let pageQuad = cornerOverrides.value[p.key];
-        if (!pageQuad) {
-          const detection = await cvWorker.lease(api => api.detectCorners(before));
-          if (!detection.confident) {
-            pageQuad = frameQuad(before.width, before.height);
-          } else {
-            pageQuad = detection.quad;
+          ctx.translate(canvas.width / 2, canvas.height / 2);
+          ctx.rotate((rotation * Math.PI) / 180);
+          ctx.drawImage(bitmap, -bitmap.width / 2, -bitmap.height / 2);
+
+          bitmap.close();
+
+          const before = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+          let pageQuad = cornerOverrides.value[p.key];
+          if (!pageQuad) {
+            const detection = await cvWorker.lease(api => api.detectCorners(before));
+            if (!detection.confident) {
+              pageQuad = frameQuad(before.width, before.height);
+            } else {
+              pageQuad = detection.quad;
+            }
           }
+
+          const after = await cvWorker.lease(api =>
+            api.processScan(before, { ...settings, corners: pageQuad })
+          );
+
+          const afterCanvas = new OffscreenCanvas(after.width, after.height);
+          afterCanvas.getContext('2d')?.putImageData(after, 0, 0);
+          const blob = await afterCanvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
+          jpegs.push(new Uint8Array(await blob.arrayBuffer()));
+
+          const origSize = s.pageSizes[p.sourceIndex];
+          originalSizes.push({
+            width: swapped ? origSize.height : origSize.width,
+            height: swapped ? origSize.width : origSize.height
+          });
         }
 
-        const after = await cvWorker.lease(api =>
-          api.processScan(before, { ...settings, corners: pageQuad })
+        if (jpegs.length === 0) return;
+
+        bytes = await processWorker.lease(api =>
+          api.imagesToPdf(
+            jpegs,
+            {
+              pageSize: originalSizes,
+              orientation: 'portrait',
+              margin: 0,
+              quality: 0.85
+            },
+            createJobHandle(job)
+          )
         );
-
-        const afterCanvas = new OffscreenCanvas(after.width, after.height);
-        afterCanvas.getContext('2d')?.putImageData(after, 0, 0);
-        const blob = await afterCanvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
-        jpegs.push(new Uint8Array(await blob.arrayBuffer()));
-
-        const origSize = s.pageSizes[p.sourceIndex];
-        originalSizes.push({
-          width: swapped ? origSize.height : origSize.width,
-          height: swapped ? origSize.width : origSize.height
-        });
       }
-
-      if (jpegs.length === 0) return;
-
-      const bytes = await processWorker.lease(api =>
-        api.imagesToPdf(
-          jpegs,
-          {
-            pageSize: originalSizes,
-            orientation: 'portrait',
-            margin: 0,
-            quality: 0.85
-          },
-          createJobHandle(job)
-        )
-      );
       const firstSource = sources.value[pages[0].sourceDocId];
 
       // pin() keeps load and close on the same pool instance — two independent

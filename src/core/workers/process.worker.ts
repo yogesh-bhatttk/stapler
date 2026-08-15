@@ -376,6 +376,12 @@ export interface ProcessJob {
    * was lost (a link's clickability) instead of asserting success.
    */
   flattenDocument(bytes: Uint8Array): Promise<{ bytes: Uint8Array } & FlattenReport>;
+  flattenBackground(
+    bytes: Uint8Array,
+    pageIndex: number | 'all',
+    hexColor: string,
+    job?: JobHandle
+  ): Promise<Uint8Array>;
   compose(
     pages: PageSource[],
     sources: Record<string, Uint8Array>,
@@ -2993,6 +2999,171 @@ const api: ProcessJob = {
     return transfer(await doc.save({ useObjectStreams: true }));
   },
 
+  async flattenBackground(
+    bytes: Uint8Array,
+    pageIndex: number | 'all',
+    hexColor: string,
+    job?: JobHandle
+  ): Promise<Uint8Array> {
+    const doc = await load(bytes, true);
+    const pages = doc.getPages();
+    
+    // Parse hexColor (e.g., "#ffffff")
+    const r = parseInt(hexColor.slice(1, 3), 16) / 255;
+    const g = parseInt(hexColor.slice(3, 5), 16) / 255;
+    const b = parseInt(hexColor.slice(5, 7), 16) / 255;
+
+    const indices = pageIndex === 'all' ? pages.map((_, i) => i) : [pageIndex as number];
+    let i = 0;
+    for (const idx of indices) {
+      if (job) await checkpoint(job, `Flattening background (${i + 1} of ${indices.length})`, i / indices.length);
+      i++;
+      const page = pages[idx];
+      const { width, height } = page.getSize();
+      const pageArea = width * height;
+      const thresholdArea = pageArea * 0.95;
+
+      const leaf = page.node;
+      const contents = leaf.Contents();
+      if (!contents) continue;
+
+      let streams: PDFStream[] = [];
+      if (contents instanceof PDFArray) {
+        for (let idx = 0; idx < contents.size(); idx++) {
+          const s = doc.context.lookup(contents.get(idx));
+          if (s instanceof PDFStream) streams.push(s);
+        }
+      } else if (contents instanceof PDFStream) {
+        streams.push(contents);
+      }
+
+      if (streams.length === 0) continue;
+
+      let allTokens: import('../pdf/interpreter').Token[] = [];
+      for (const stream of streams) {
+        const rawBytes = decodePDFRawStream(stream).decode();
+        allTokens.push(...tokenizeContentStream(rawBytes));
+      }
+
+      const statements = parseContentStream(allTokens);
+      
+      const { GraphicsState, multiplyMatrix, transformPoint } = await import('../pdf/interpreter');
+      
+      const state = new GraphicsState();
+      
+      let backgroundRemoved = false;
+      let removedXObjectName = '';
+      const filtered: import('../pdf/interpreter').Statement[] = [];
+      
+      // Determine what a Path Fill looks like. A path is constructed with m, l, c, v, y, re, h.
+      // Then filled with f, F, f*, B, B*, b, b*.
+      // For simplicity, if we encounter a path drawing op and its bounding box is huge, we drop it.
+      // We will track the current path bounds.
+      let pathMinX = Infinity, pathMinY = Infinity, pathMaxX = -Infinity, pathMaxY = -Infinity;
+      const addPathPoint = (x: number, y: number) => {
+        const pt = transformPoint(state.ctm, x, y);
+        pathMinX = Math.min(pathMinX, pt.x);
+        pathMinY = Math.min(pathMinY, pt.y);
+        pathMaxX = Math.max(pathMaxX, pt.x);
+        pathMaxY = Math.max(pathMaxY, pt.y);
+      };
+
+      for (const stmt of statements) {
+        const op = String.fromCharCode(...stmt.operator.bytes);
+        
+        // Track graphics state CTM
+        if (op === 'q') {
+          state.stateStack.push(state.clone());
+        } else if (op === 'Q') {
+          if (state.stateStack.length > 0) {
+            const popped = state.stateStack.pop()!;
+            state.ctm = popped.ctm;
+          }
+        } else if (op === 'cm' && stmt.operands.length === 6) {
+          const m = stmt.operands.map(t => parseFloat(String.fromCharCode(...t.bytes))) as import('../pdf/interpreter').Matrix;
+          state.ctm = multiplyMatrix(m, state.ctm);
+        }
+        
+        // Track path
+        if (op === 'm' || op === 'l') {
+          if (stmt.operands.length >= 2) {
+            addPathPoint(parseFloat(String.fromCharCode(...stmt.operands[0].bytes)), parseFloat(String.fromCharCode(...stmt.operands[1].bytes)));
+          }
+        } else if (op === 're' && stmt.operands.length === 4) {
+          const rx = parseFloat(String.fromCharCode(...stmt.operands[0].bytes));
+          const ry = parseFloat(String.fromCharCode(...stmt.operands[1].bytes));
+          const rw = parseFloat(String.fromCharCode(...stmt.operands[2].bytes));
+          const rh = parseFloat(String.fromCharCode(...stmt.operands[3].bytes));
+          addPathPoint(rx, ry);
+          addPathPoint(rx + rw, ry);
+          addPathPoint(rx, ry + rh);
+          addPathPoint(rx + rw, ry + rh);
+        }
+        // ignoring c, v, y for exactness since rect is most common for background
+        
+        if (!backgroundRemoved) {
+          if (op === 'Do') {
+            let xObjectName = '';
+            if (stmt.operands.length > 0 && stmt.operands[stmt.operands.length - 1].type === 'name') {
+              xObjectName = String.fromCharCode(...stmt.operands[stmt.operands.length - 1].bytes).slice(1);
+            }
+            
+            // Assume unit square for Do (like in filterContentStream)
+            const p1 = transformPoint(state.ctm, 0, 0);
+            const p2 = transformPoint(state.ctm, 1, 1);
+            const area = Math.abs(p2.x - p1.x) * Math.abs(p2.y - p1.y);
+            
+            if (area >= thresholdArea) {
+              backgroundRemoved = true;
+              if (xObjectName) removedXObjectName = xObjectName;
+              continue; // Drop this statement
+            }
+          } else if (op === 'f' || op === 'F' || op === 'f*' || op === 'B' || op === 'B*' || op === 'b' || op === 'b*') {
+            const area = (pathMaxX - pathMinX) * (pathMaxY - pathMinY);
+            if (area >= thresholdArea && pathMaxX > pathMinX && pathMaxY > pathMinY) {
+              backgroundRemoved = true;
+              pathMinX = Infinity; pathMinY = Infinity; pathMaxX = -Infinity; pathMaxY = -Infinity;
+              continue; // Drop this statement
+            }
+          }
+        }
+        
+        // Reset path on n (end path) or after drawing
+        if (op === 'n' || op === 'f' || op === 'F' || op === 'f*' || op === 'B' || op === 'B*' || op === 'b' || op === 'b*' || op === 'S' || op === 's') {
+          pathMinX = Infinity; pathMinY = Infinity; pathMaxX = -Infinity; pathMaxY = -Infinity;
+        }
+
+        filtered.push(stmt);
+      }
+
+      if (removedXObjectName) {
+        const xobjDict = page.node.Resources()?.XObject();
+        if (xobjDict instanceof PDFDict) {
+          xobjDict.delete(PDFName.of(removedXObjectName));
+        }
+      }
+
+      const injectedStream = `
+q
+${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} rg
+0 0 ${width} ${height} re
+f
+Q
+`;
+      const injectedBytes = new TextEncoder().encode(injectedStream);
+      const filteredBytes = serializeStatements(filtered);
+
+      const combined = new Uint8Array(injectedBytes.length + filteredBytes.length);
+      combined.set(injectedBytes, 0);
+      combined.set(filteredBytes, injectedBytes.length);
+
+      const newStream = doc.context.flateStream(combined);
+      const newStreamRef = doc.context.register(newStream);
+      leaf.set(PDFName.of('Contents'), newStreamRef);
+    }
+    
+    return await doc.save();
+  },
   async flattenDocument(bytes) {
     // Same order of refusals as `fillFormFields`: XFA on the raw bytes first,
     // because a hybrid form answers `false` to every parsed check.

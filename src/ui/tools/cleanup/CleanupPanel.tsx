@@ -41,6 +41,25 @@ export function CleanupPanel() {
       />
 
       <Checkbox
+        label={t('Flatten background')}
+        checked={settings.flattenBackground}
+        onChange={flattenBackground => update({ flattenBackground })}
+      />
+      {settings.flattenBackground && (
+        <Field label={t('Background color')}>
+          {id => (
+            <input
+              id={id}
+              type="color"
+              value={settings.flattenTint}
+              onChange={event => update({ flattenTint: (event.target as HTMLInputElement).value })}
+              style={{ width: '100%', height: '32px', padding: '0', cursor: 'pointer' }}
+            />
+          )}
+        </Field>
+      )}
+
+      <Checkbox
         label={t('Despeckle (remove noise)')}
         checked={settings.despeckle}
         disabled={manual}
