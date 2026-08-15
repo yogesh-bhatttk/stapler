@@ -23,6 +23,9 @@ import type { OpenOptions, OpenedFile, OutputDirectory, RecentEntry } from './in
 import { deleteHandle, listHandles, readHandle, writeHandle } from '../core/db';
 
 export async function readClipboardImage(): Promise<File | null> {
+  if (typeof window !== 'undefined' && (window as any).__mockClipboardImage) {
+    return (window as any).__mockClipboardImage;
+  }
   try {
     const items = await navigator.clipboard.read();
     for (const item of items) {

@@ -19,7 +19,10 @@ import { ShortcutModal } from '../components/ShortcutModal';
 import { WelcomeModal } from '../components/WelcomeModal';
 import { isCommandPaletteOpen, isShortcutSheetOpen } from '../../core/ui';
 import { canRedo, canUndo, redo, undo } from '../../core/history';
-import { activeDoc, selectAllPages, insertPages, selectedPageKeys } from '../../core/store';
+import { activeDoc, selectAllPages, insertPages, selectedPageKeys, addDocument, makePageRefs } from '../../core/store';
+import { useLocation } from 'wouter-preact';
+import { toolRoute } from '../../core/tools';
+import { useImageImportOptions } from '../useImageImportOptions';
 import { importFiles } from '../../core/import';
 import { platform } from '../../platform/current';
 import { notify } from '../../core/notify';
@@ -41,6 +44,8 @@ function isTypingTarget(target: EventTarget | null): boolean {
 }
 
 export function AppShell({ children }: { children: ComponentChildren }) {
+  const [, setLocation] = useLocation();
+  const { requestOptions, node } = useImageImportOptions();
   const [showWelcome, setShowWelcome] = useState(false);
   useUnsavedGuard();
 
@@ -100,7 +105,6 @@ export function AppShell({ children }: { children: ComponentChildren }) {
       if (isTypingTarget(event.target)) return;
 
       const doc = activeDoc.value;
-      if (!doc) return;
 
       const file = await platform.readClipboardImage();
       if (!file) {
@@ -108,23 +112,37 @@ export function AppShell({ children }: { children: ComponentChildren }) {
         return;
       }
 
-      const { imported, failures } = await importFiles([file], undefined, undefined);
+      const options = await requestOptions([file]);
+      if (!options) return;
+
+      const { imported, failures } = await importFiles([file], undefined, options);
       if (failures.length > 0) {
         notify('danger', failures[0].message);
         return;
       }
 
       if (imported.length > 0) {
-        let at = doc.pages.length;
-        if (selectedPageKeys.value.size > 0) {
-          const indices = Array.from(selectedPageKeys.value)
-            .map(k => doc.pages.findIndex(p => p.key === k))
-            .filter(i => i >= 0);
-          if (indices.length > 0) {
-            at = Math.max(...indices) + 1;
+        if (doc) {
+          let at = doc.pages.length;
+          if (selectedPageKeys.value.size > 0) {
+            const indices = Array.from(selectedPageKeys.value)
+              .map(k => doc.pages.findIndex(p => p.key === k))
+              .filter(i => i >= 0);
+            if (indices.length > 0) {
+              at = Math.max(...indices) + 1;
+            }
           }
+          insertPages(doc.id, imported[0].pages, at);
+        } else {
+          addDocument({
+            id: crypto.randomUUID(),
+            name: imported[0].source.name,
+            pages: makePageRefs(imported[0].source.id, imported[0].source.pageCount),
+            annotations: [],
+            dirty: false
+          });
+          setLocation(toolRoute('organize'));
         }
-        insertPages(doc.id, imported[0].pages, at);
       }
     };
 
@@ -147,6 +165,7 @@ export function AppShell({ children }: { children: ComponentChildren }) {
       <CommandPalette />
       <ConfirmDialog />
       <ToastRegion />
+      {node}
       {isShortcutSheetOpen.value && (
         <ShortcutModal onClose={() => (isShortcutSheetOpen.value = false)} />
       )}

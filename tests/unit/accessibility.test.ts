@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { PDFDocument, PDFName, PDFDict, PDFArray } from 'pdf-lib';
 import { applyAltTextToDoc } from '../../src/core/pdf/accessibility';
+import { unzipSync } from 'zlib';
 
 describe('accessibility', () => {
   it('applies alt text to a document with an image', async () => {
