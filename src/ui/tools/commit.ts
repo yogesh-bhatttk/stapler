@@ -43,6 +43,7 @@ import {
   compressSettings,
   compressTarget,
   compressTargetOutcome,
+  lastCompressionResult,
   targetSizeBytes
 } from './compress/state';
 import { flattenOnExport, pdfToImageSettings, removeBlanksThreshold, splitSettings } from './state';
@@ -489,6 +490,14 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       }
 
       const outcome = await compressToTargetSize(original, targetBytes, job);
+      if (outcome.plan) {
+        lastCompressionResult.value = {
+          plan: outcome.plan,
+          originalBytes: outcome.originalBytes,
+          compressedBytes: outcome.achievedBytes,
+          keptOriginal: outcome.keptOriginal
+        };
+      }
       compressTargetOutcome.value = {
         targetBytes,
         achievedBytes: outcome.achievedBytes,
@@ -553,6 +562,12 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     }
 
     const result = await compressDocument(original, settings, report, job);
+    lastCompressionResult.value = {
+      plan: result.plan,
+      originalBytes: result.originalBytes,
+      compressedBytes: result.bytes.byteLength,
+      keptOriginal: result.keptOriginal
+    };
     if (result.keptOriginal) {
       notify('warning', 'Kept the original file.', {
         detail:
