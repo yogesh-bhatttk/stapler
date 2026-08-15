@@ -54,8 +54,9 @@ describe('accessibility', () => {
     expect(contents).toBeDefined();
     // In our implementation, we read and rewrite the stream, keeping it as a flateStream
     // We'd have to decode it to see the BDC, but pdf-lib's save() will serialize it
+    const pako = require('pako');
     const savedBytes = await doc.save({ useObjectStreams: false });
-    const text = new TextDecoder().decode(savedBytes);
+    const text = pako.inflate(doc.context.lookup(contents).contents, { to: 'string' });
 
     expect(text).toContain('/Figure << /MCID 0 >> BDC');
     expect(text).toContain('EMC');

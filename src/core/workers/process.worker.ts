@@ -1,3 +1,4 @@
+import { pseudoLinearize } from "../pdf/linearize";
 /** A user-supplied raster for an image watermark, resolved to bytes by the caller. */
 export interface WatermarkImageData {
   bytes: Uint8Array;
@@ -2990,7 +2991,7 @@ const api: ProcessJob = {
         );
       }
     }
-    return transfer(await doc.save({ useObjectStreams: true }));
+    return transfer(await pseudoLinearize(doc).save({ useObjectStreams: true }));
   },
 
   async flattenDocument(bytes) {
@@ -3022,7 +3023,7 @@ const api: ProcessJob = {
 
     const { baked, dropped } = flattenAnnotations(doc);
     return {
-      bytes: transfer(await doc.save({ useObjectStreams: true })),
+      bytes: transfer(await pseudoLinearize(doc).save({ useObjectStreams: true })),
       fields,
       annotationsBaked: baked,
       annotationsDropped: dropped
@@ -3058,7 +3059,7 @@ const api: ProcessJob = {
       extras
     );
     await checkpoint(job, 0.95, 'Writing file');
-    return transfer(await outDoc.save({ useObjectStreams: true }));
+    return transfer(await pseudoLinearize(outDoc).save({ useObjectStreams: true }));
   },
 
   async readOutline(bytes) {
@@ -3119,7 +3120,7 @@ const api: ProcessJob = {
         sliceExtras
       );
       return {
-        bytes: transfer(await outDoc.save({ useObjectStreams: true })),
+        bytes: transfer(await pseudoLinearize(outDoc).save({ useObjectStreams: true })),
         isZip: false,
         fileCount: 1
       };
@@ -3153,7 +3154,7 @@ const api: ProcessJob = {
           extras?.fileNames?.[i],
           `${baseName}-${String(i + 1).padStart(pad, '0')}`
         )
-      ] = await outDoc.save({ useObjectStreams: true });
+      ] = await pseudoLinearize(outDoc).save({ useObjectStreams: true });
     }
 
     await checkpoint(job, 0.95, 'Compressing archive');
@@ -3349,7 +3350,7 @@ const api: ProcessJob = {
 
     reattachAcroForm(out, [source]);
     await checkpoint(job, 0.95, 'Writing file');
-    const rebuilt = await out.save({ useObjectStreams: true });
+    const rebuilt = await pseudoLinearize(out).save({ useObjectStreams: true });
 
     // CMP-04: a "compressed" file that is not smaller is not saved. Returning the
     // original bytes is the only honest outcome.
@@ -3369,7 +3370,7 @@ const api: ProcessJob = {
     // We cannot use object streams because it breaks accessibility testing tools
     // that don't fully support PDF 1.5 object streams (like Acrobat Reader sometimes when debugging).
     // Plus, it ensures our `/K` arrays in StructTreeRoot are easily readable.
-    return transfer(await doc.save({ useObjectStreams: false }));
+    return transfer(await pseudoLinearize(doc).save({ useObjectStreams: false }));
   },
 
   async markdownToPdf(markdown: string): Promise<Uint8Array> {
@@ -3430,7 +3431,7 @@ const api: ProcessJob = {
 
       page.drawImage(embedded, { x, y, width: drawWidth, height: drawHeight });
     }
-    return transfer(await doc.save({ useObjectStreams: true }));
+    return transfer(await pseudoLinearize(doc).save({ useObjectStreams: true }));
   },
 
   /**
@@ -3819,7 +3820,7 @@ const api: ProcessJob = {
     }
 
     reattachAcroForm(out, [doc]);
-    return transfer(await out.save({ useObjectStreams: true }));
+    return transfer(await pseudoLinearize(out).save({ useObjectStreams: true }));
   },
 
   async applyRedactions(bytes, regions, job) {
@@ -4195,7 +4196,7 @@ const api: ProcessJob = {
 
     reattachAcroForm(out, [source]);
     await checkpoint(job, 0.95, 'Writing file');
-    return transfer(await out.save({ useObjectStreams: true }));
+    return transfer(await pseudoLinearize(out).save({ useObjectStreams: true }));
   },
 
   async collectOffPageText(bytes) {
@@ -4261,7 +4262,7 @@ const api: ProcessJob = {
     }
 
     await checkpoint(job, 0.95, 'Saving');
-    return { bytes: transfer(await doc.save({ useObjectStreams: true })), ...report };
+    return { bytes: transfer(await pseudoLinearize(doc).save({ useObjectStreams: true })), ...report };
   }
 };
 
