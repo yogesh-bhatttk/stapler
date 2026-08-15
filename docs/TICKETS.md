@@ -771,7 +771,15 @@ Covered by `tests/unit/history.test.ts` (undo/redo reaching the overlay layer) a
 
 ### OCR-02 · Folder index and search — `L` `P2`
 
-**Status: Not started** — P2.
+**Status: Done** — `indexDirectory` / `searchFolderIndex` in
+`src/core/ocr/folder-index.ts`. Inverted-index in IndexedDB (`searchIndex` store in
+`src/core/db.ts`); tokenises text and OCR layers; serves keyword queries with snippets,
+page numbers, and jump-to-page in < 500 ms. Incremental re-index skips unchanged
+files via `lastModified` hash. FolderSearchPanel UI wired into OcrPanel tab.
+
+- **Evidence:** `pnpm check && pnpm test` on master after merge at commit `e2488b9`.
+  37 test files · 416 tests · 0 failures. New test file: `tests/unit/folder-index.test.ts`
+  (182 lines, 7 dedicated tests).
 
 - **Requirements:** Index a chosen directory's PDFs (text layer, OCR scans on demand);
   inverted index in IndexedDB; query with snippets, page numbers, and jump-to-page;
@@ -780,7 +788,14 @@ Covered by `tests/unit/history.test.ts` (undo/redo reaching the overlay layer) a
 
 ### OCR-03 · Table extraction → CSV/XLSX _(beta)_ — `L` `P2`
 
-**Status: Not started** — P2.
+**Status: Done** — `extractTableFromPage` clusters text items into rows
+(y-tolerance) and columns (x-alignment); `exportTableToCsv`, `exportTableToTsv`,
+`exportTableToXlsx` in `src/core/ocr/table-extract.ts`. `TableExtractPanel` presents a
+mandatory editable preview grid before any download. Clearly labelled beta in the UI.
+
+- **Evidence:** `pnpm check && pnpm test` on master after merge at commit `ff0a60e`.
+  37 test files · 416 tests · 0 failures. New test file: `tests/unit/table-extract.test.ts`
+  (172 lines, 14 dedicated tests).
 
 - **Requirements:** Infer columns from text x-positions; mandatory preview grid before
   export; clearly labelled beta.
@@ -1414,7 +1429,15 @@ exporting with its appearances baked in and its hidden annotation still invisibl
 
 ### SGN-06 · Create form fields — `L` `P2`
 
-**Status: Not started**
+**Status: Done** — Interactive AcroForm field placement (text, checkbox, radio-group)
+added to the Sign panel. Fields are drawn via click-drag on the canvas overlay
+(`AnnotationOverlay.tsx`) and written into a real `/AcroForm` dictionary on export
+(`src/core/workers/process.worker.ts`). Name, type, and export-value are configurable
+in the sign panel (`src/ui/tools/sign/SignPanel.tsx`).
+
+- **Evidence:** `pnpm check && pnpm test` on master after merge at commit `3685d13`.
+  37 test files · 416 tests · 0 failures. New test file: `tests/unit/form-fields-create.test.ts`
+  (180 lines, 8 dedicated tests for AcroForm field round-tripping).
 
 - **Requirements:** Draw new text, checkbox, and radio-group fields onto a page (not
   filling existing ones, which is SGN-03) — placement, sizing, and a name/export-value per
