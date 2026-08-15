@@ -21,6 +21,9 @@ export interface Annotation {
   // For text & sticky:
   text?: string;
   fontSize?: number;
+  author?: string;
+  date?: string;
+  pageKey?: string;
 }
 
 export const activeAnnotationTool = signal<AnnotationType>('freehand');

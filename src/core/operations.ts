@@ -1008,3 +1008,9 @@ export async function exportContactSheet(
 
   return processWorker.lease(pApi => pApi.contactSheetExport(jpegPages, cols, job));
 }
+
+export {
+  exportAnnotationSummary,
+  exportAnnotationSummaryText,
+  type SummaryAnnotation
+} from './annotation-summary';
