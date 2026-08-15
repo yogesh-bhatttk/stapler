@@ -1516,7 +1516,7 @@ direction, and narrowing it belongs to `findText`, not here.
 
 ### DOC-09 · Contact sheet export — `S` `P2`
 
-**Status: Not started**
+**Status: Done** — `contactSheetExport` tiles page thumbnails into a new PDF with configurable columns. Tested in `tests/unit/contact-sheet.test.ts`.
 
 - **Requirements:** Generate a single PDF or image containing a grid of page thumbnails
   (configurable columns), reusing DOC-03's existing thumbnail cache rather than
@@ -1536,7 +1536,7 @@ direction, and narrowing it belongs to `findText`, not here.
 
 ### DS-09 · Custom keyboard shortcut remapping — `S` `P2`
 
-**Status: Not started**
+**Status: Done** — Local IndexedDB shortcut remapping store, conflict detection, reset-to-default, and shortcuts UI. Tested in `tests/unit/shortcuts.test.ts`.
 
 - **Requirements:** Let the user rebind any shortcut listed in DS-08's shortcut sheet,
   persisted locally (IndexedDB, per F-06), with conflict detection against other bound
@@ -1546,7 +1546,7 @@ direction, and narrowing it belongs to `findText`, not here.
 
 ### BAT-03 · Templated batch output filenames — `S` `P2`
 
-**Status: Not started**
+**Status: Done** — Templated pattern token substitution (`{basename}`, `{index}`, `{date}`) and deduplication in `src/core/batch-filename.ts`. Tested in `tests/unit/batch-filename.test.ts`.
 
 - **Requirements:** A filename pattern field for BAT-01 batch runs supporting tokens like
   `{basename}`, `{index}`, `{date}`, applied per output file instead of a fixed suffix.

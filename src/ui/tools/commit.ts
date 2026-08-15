@@ -736,7 +736,9 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
 
   compare: async () => {},
   batch: async () => {},
-  'md-to-pdf': async () => {}
+  'md-to-pdf': async () => {},
+  shortcuts: async () => {},
+  'contact-sheet': exportComposed
 };
 
 export async function commitTool(toolId: ToolId, job: JobOptions): Promise<void> {

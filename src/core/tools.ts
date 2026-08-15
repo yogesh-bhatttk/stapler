@@ -33,7 +33,9 @@ export type ToolId =
   | 'batch'
   | 'md-to-pdf'
   | 'ocr'
-  | 'acc';
+  | 'acc'
+  | 'contact-sheet'
+  | 'shortcuts';
 
 export type ToolGroup = 'Organize' | 'Convert' | 'Optimize' | 'Document' | 'Automation';
 
@@ -272,6 +274,28 @@ export const TOOLS: readonly ToolDefinition[] = [
     canvasMode: 'grid',
     needsOptionsPanel: true,
     commitLabel: 'Tag & export',
+    selectable: false
+  },
+  {
+    id: 'contact-sheet',
+    title: 'Contact sheet',
+    group: 'Document',
+    summary: 'Export a grid of page thumbnails as a single PDF.',
+    icon: 'LayoutGrid',
+    canvasMode: 'grid',
+    needsOptionsPanel: true,
+    commitLabel: 'Export PDF',
+    selectable: false
+  },
+  {
+    id: 'shortcuts',
+    title: 'Custom shortcuts',
+    group: 'Document',
+    summary: 'View and customise keyboard shortcuts.',
+    icon: 'Keyboard',
+    canvasMode: 'grid',
+    needsOptionsPanel: true,
+    commitLabel: 'Done',
     selectable: false
   },
   {

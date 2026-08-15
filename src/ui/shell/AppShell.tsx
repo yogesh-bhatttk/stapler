@@ -19,7 +19,14 @@ import { ShortcutModal } from '../components/ShortcutModal';
 import { WelcomeModal } from '../components/WelcomeModal';
 import { isCommandPaletteOpen, isShortcutSheetOpen } from '../../core/ui';
 import { canRedo, canUndo, redo, undo } from '../../core/history';
-import { activeDoc, selectAllPages, insertPages, selectedPageKeys, addDocument, makePageRefs } from '../../core/store';
+import {
+  activeDoc,
+  selectAllPages,
+  insertPages,
+  selectedPageKeys,
+  addDocument,
+  makePageRefs
+} from '../../core/store';
 import { useLocation } from 'wouter-preact';
 import { toolRoute } from '../../core/tools';
 import { useImageImportOptions } from '../useImageImportOptions';
@@ -27,6 +34,7 @@ import { importFiles } from '../../core/import';
 import { platform } from '../../platform/current';
 import { notify } from '../../core/notify';
 import { readSetting, writeSetting } from '../../core/db';
+import { eventMatchesShortcut, getEffectiveBinding, customShortcuts } from '../../core/shortcuts';
 import { useUnsavedGuard } from '../useUnsavedGuard';
 import styles from './AppShell.module.css';
 
@@ -57,38 +65,36 @@ export function AppShell({ children }: { children: ComponentChildren }) {
     });
   }, []);
 
+  // Access signal to subscribe to changes
+  void customShortcuts.value;
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      const mod = event.metaKey || event.ctrlKey;
       const typing = isTypingTarget(event.target);
 
-      if (mod && event.key.toLowerCase() === 'k') {
+      if (eventMatchesShortcut(event, getEffectiveBinding('palette'))) {
         event.preventDefault();
         isCommandPaletteOpen.value = !isCommandPaletteOpen.value;
         return;
       }
       if (typing) return;
 
-      if (event.key === '?') {
+      if (eventMatchesShortcut(event, getEffectiveBinding('shortcuts'))) {
         event.preventDefault();
         isShortcutSheetOpen.value = true;
         return;
       }
-      if (mod && event.key.toLowerCase() === 'z') {
+      if (eventMatchesShortcut(event, getEffectiveBinding('undo'))) {
         event.preventDefault();
-        if (event.shiftKey) {
-          if (canRedo()) redo();
-        } else if (canUndo()) {
-          undo();
-        }
+        if (canUndo()) undo();
         return;
       }
-      if (mod && event.key.toLowerCase() === 'y') {
+      if (eventMatchesShortcut(event, getEffectiveBinding('redo'))) {
         event.preventDefault();
         if (canRedo()) redo();
         return;
       }
-      if (mod && event.key.toLowerCase() === 'a') {
+      if (eventMatchesShortcut(event, getEffectiveBinding('selectAll'))) {
         const doc = activeDoc.value;
         if (!doc) return;
         event.preventDefault();

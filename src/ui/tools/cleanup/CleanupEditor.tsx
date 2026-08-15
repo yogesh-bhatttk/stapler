@@ -175,7 +175,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
   const apply = () =>
     run({ label: 'Applying cleanup to the page', scope: 'cleanup.apply' }, async job => {
       const after = afterRef.current;
-      if (!after || !page) return;
+      if (!after || !page || !source) return;
 
       const canvas = new OffscreenCanvas(after.width, after.height);
       canvas.getContext('2d')?.putImageData(after, 0, 0);
@@ -185,7 +185,12 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
       let bytes: Uint8Array;
       if (settings.flattenBackground) {
         bytes = await processWorker.lease(api =>
-          api.flattenBackground(source.bytes, page.sourceIndex, settings.flattenTint, createJobHandle(job))
+          api.flattenBackground(
+            source.bytes,
+            page.sourceIndex,
+            settings.flattenTint,
+            createJobHandle(job)
+          )
         );
       } else {
         const originalSize = source?.pageSizes[page.sourceIndex];
@@ -245,7 +250,12 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         const firstSource = sources.value[pages[0].sourceDocId];
         if (!firstSource) throw new Error('Source not found');
         bytes = await processWorker.lease(api =>
-          api.flattenBackground(firstSource.bytes, 'all', settings.flattenTint, createJobHandle(job))
+          api.flattenBackground(
+            firstSource.bytes,
+            'all',
+            settings.flattenTint,
+            createJobHandle(job)
+          )
         );
       } else {
         const jpegs: Uint8Array[] = [];

@@ -1,12 +1,15 @@
 import { PDFDocument, PDFDict, PDFArray, PDFRef, PDFObject, PDFStream } from 'pdf-lib';
 
 export function pseudoLinearize(doc: PDFDocument) {
-  const context = doc.context as any;
+  const context = doc.context as unknown as {
+    __isPseudoLinearized?: boolean;
+    enumerateIndirectObjects: () => [PDFRef, PDFObject][];
+  };
   if (context.__isPseudoLinearized) return doc;
   context.__isPseudoLinearized = true;
 
   const originalEnumerate = context.enumerateIndirectObjects.bind(context);
-  
+
   context.enumerateIndirectObjects = () => {
     const allObjects = originalEnumerate();
     return sortForFastWebView(doc, allObjects);
@@ -31,9 +34,9 @@ function getRefs(obj: PDFObject, refs: PDFRef[] = []): PDFRef[] {
   return refs;
 }
 
-function sortForFastWebView(doc: PDFDocument, allObjects: [PDFRef, any][]) {
+function sortForFastWebView(doc: PDFDocument, allObjects: [PDFRef, PDFObject][]) {
   const context = doc.context;
-  
+
   const pageCount = doc.getPageCount();
   if (pageCount <= 1) return allObjects; // Nothing to reorder for 1-page docs
 
@@ -44,7 +47,7 @@ function sortForFastWebView(doc: PDFDocument, allObjects: [PDFRef, any][]) {
 
   const catalogRef = context.trailerInfo.Root;
   const firstPageSet = new Set<PDFRef>();
-  
+
   const toVisit: PDFRef[] = [];
   if (catalogRef instanceof PDFRef) {
     toVisit.push(catalogRef);
@@ -64,8 +67,8 @@ function sortForFastWebView(doc: PDFDocument, allObjects: [PDFRef, any][]) {
     }
   }
 
-  const firstPageObjects: [PDFRef, any][] = [];
-  const restObjects: [PDFRef, any][] = [];
+  const firstPageObjects: [PDFRef, PDFObject][] = [];
+  const restObjects: [PDFRef, PDFObject][] = [];
 
   for (const entry of allObjects) {
     const [ref] = entry;

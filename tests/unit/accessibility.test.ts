@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { PDFDocument, PDFName, PDFDict, PDFArray } from 'pdf-lib';
 import { applyAltTextToDoc } from '../../src/core/pdf/accessibility';
-import { unzipSync } from 'zlib';
+import { decodeStream } from '../../src/core/pdf/interpreter';
 
 describe('accessibility', () => {
   it('applies alt text to a document with an image', async () => {
@@ -55,9 +55,10 @@ describe('accessibility', () => {
     expect(contents).toBeDefined();
     // In our implementation, we read and rewrite the stream, keeping it as a flateStream
     // We'd have to decode it to see the BDC, but pdf-lib's save() will serialize it
-    const pako = require('pako');
-    const savedBytes = await doc.save({ useObjectStreams: false });
-    const text = pako.inflate(doc.context.lookup(contents).contents, { to: 'string' });
+    await doc.save({ useObjectStreams: false });
+    const stream = doc.context.lookup(contents) as any;
+    const decodedBytes = await decodeStream(stream.getContents());
+    const text = new TextDecoder('latin1').decode(decodedBytes);
 
     expect(text).toContain('/Figure << /MCID 0 >> BDC');
     expect(text).toContain('EMC');

@@ -260,10 +260,12 @@ test('CNV-07: Paste image as page from clipboard', async ({ page, context }) => 
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
     const res = await fetch(`data:image/png;base64,${base64}`);
     const blob = await res.blob();
-    
+
     // Set the mock file
-    (window as any).__mockClipboardImage = new File([blob], 'Pasted Image.png', { type: 'image/png' });
-    
+    (window as any).__mockClipboardImage = new File([blob], 'Pasted Image.png', {
+      type: 'image/png'
+    });
+
     // Dispatch the paste event to trigger the AppShell listener
     window.dispatchEvent(new Event('paste', { bubbles: true, cancelable: true }));
   });

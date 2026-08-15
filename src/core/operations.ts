@@ -975,3 +975,36 @@ export interface ImagesToPdfOptions {
   margin: number;
   quality: number;
 }
+
+/**
+ * DOC-09 — contact sheet export.
+ *
+ * Renders every page in `bytes` at thumbnail scale (150 dpi) and tiles them
+ * into a grid of `cols` columns on A4 portrait pages.  Reuses the render
+ * worker's existing `pageToImageBytes` path so the bitmaps go through
+ * exactly the same pipeline as the thumbnail cache.
+ */
+export async function exportContactSheet(
+  bytes: Uint8Array,
+  cols: number,
+  options?: JobOptions
+): Promise<Uint8Array> {
+  const job = createJobHandle(options);
+
+  const jpegPages: Uint8Array[] = [];
+
+  await renderWorker.lease(async api => {
+    const { handle, pageCount } = await api.loadDocument(bytes);
+    try {
+      for (let i = 0; i < pageCount; i++) {
+        options?.onProgress?.(i / pageCount, `Rendering page ${i + 1} of ${pageCount}`);
+        const jpeg = await api.pageToImageBytes(handle, i, 'jpeg', 150, 0.8);
+        jpegPages.push(jpeg);
+      }
+    } finally {
+      await api.closeDocument(handle).catch(() => {});
+    }
+  });
+
+  return processWorker.lease(pApi => pApi.contactSheetExport(jpegPages, cols, job));
+}

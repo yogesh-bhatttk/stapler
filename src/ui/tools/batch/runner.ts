@@ -3,7 +3,8 @@ import {
   inputDirHandle,
   outputDirHandle,
   activeRecipeId,
-  savedRecipes
+  savedRecipes,
+  outputPattern
 } from './state';
 import { compressSettings } from '../compress/state';
 import { watermarkSettings, headerFooterSettings } from '../watermark/state';
@@ -12,6 +13,11 @@ import { normalizeSettings } from '../normalize/state';
 import { compressDocument, planCompression } from '../../../core/operations';
 import type { WatermarkData } from '../../../core/workers/process.worker';
 import { notify } from '../../../core/notify';
+import {
+  applyFilenamePattern,
+  stripPdfExtension,
+  deduplicateNames
+} from '../../../core/batch-filename';
 
 export async function runBatch(signal?: AbortSignal) {
   const inDir = inputDirHandle.value;
@@ -65,6 +71,15 @@ export async function runBatch(signal?: AbortSignal) {
 
     batchProgress.value = { ...batchProgress.value, total: files.length };
 
+    // BAT-03: pre-resolve all output names so collisions are detected upfront.
+    const runDate = new Date();
+    const pattern = outputPattern.value || '{basename}';
+    const rawNames = files.map((fh, i) =>
+      applyFilenamePattern(pattern, stripPdfExtension(fh.name), i + 1, files.length, runDate)
+    );
+    const resolvedNames = deduplicateNames(rawNames);
+
+    let fileIndex = 0;
     for (const fileHandle of files) {
       if (signal?.aborted) {
         notify('warning', 'Batch Cancelled', { detail: 'Processing was cancelled by the user.' });
@@ -174,7 +189,9 @@ export async function runBatch(signal?: AbortSignal) {
         }
 
         // Save output — safe because we verified inDir !== outDir above.
-        const outHandle = await outDir.getFileHandle(fileHandle.name, { create: true });
+        // BAT-03: use the pre-resolved output name for this file.
+        const outName = resolvedNames[fileIndex++] + '.pdf';
+        const outHandle = await outDir.getFileHandle(outName, { create: true });
         const writable = await outHandle.createWritable();
         await writable.write(currentBytes);
         await writable.close();

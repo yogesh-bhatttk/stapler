@@ -1,4 +1,4 @@
-import { pseudoLinearize } from "../pdf/linearize";
+import { pseudoLinearize } from '../pdf/linearize';
 /** A user-supplied raster for an image watermark, resolved to bytes by the caller. */
 export interface WatermarkImageData {
   bytes: Uint8Array;
@@ -487,6 +487,14 @@ export interface ProcessJob {
     layers: OcrPageLayer[],
     job?: JobHandle
   ): Promise<{ bytes: Uint8Array } & OcrLayerReport>;
+  /**
+   * DOC-09 — contact sheet export.
+   *
+   * Tiles pre-rendered JPEG page images into a grid of `cols` columns on
+   * A4 portrait PDF pages. The caller (operations.ts) renders the bitmaps
+   * via the render worker first; this function only does the PDF assembly.
+   */
+  contactSheetExport(jpegPages: Uint8Array[], cols: number, job?: JobHandle): Promise<Uint8Array>;
 }
 
 /* ------------------------------------------------------------------ *
@@ -3008,7 +3016,7 @@ const api: ProcessJob = {
   ): Promise<Uint8Array> {
     const doc = await load(bytes, true);
     const pages = doc.getPages();
-    
+
     // Parse hexColor (e.g., "#ffffff")
     const r = parseInt(hexColor.slice(1, 3), 16) / 255;
     const g = parseInt(hexColor.slice(3, 5), 16) / 255;
@@ -3017,7 +3025,12 @@ const api: ProcessJob = {
     const indices = pageIndex === 'all' ? pages.map((_, i) => i) : [pageIndex as number];
     let i = 0;
     for (const idx of indices) {
-      if (job) await checkpoint(job, `Flattening background (${i + 1} of ${indices.length})`, i / indices.length);
+      if (job)
+        await checkpoint(
+          job,
+          i / indices.length,
+          `Flattening background (${i + 1} of ${indices.length})`
+        );
       i++;
       const page = pages[idx];
       const { width, height } = page.getSize();
@@ -3028,7 +3041,7 @@ const api: ProcessJob = {
       const contents = leaf.Contents();
       if (!contents) continue;
 
-      let streams: PDFStream[] = [];
+      const streams: PDFStream[] = [];
       if (contents instanceof PDFArray) {
         for (let idx = 0; idx < contents.size(); idx++) {
           const s = doc.context.lookup(contents.get(idx));
@@ -3040,27 +3053,30 @@ const api: ProcessJob = {
 
       if (streams.length === 0) continue;
 
-      let allTokens: import('../pdf/interpreter').Token[] = [];
+      const allTokens: import('../pdf/interpreter').Token[] = [];
       for (const stream of streams) {
-        const rawBytes = decodePDFRawStream(stream).decode();
+        const rawBytes = decodePDFRawStream(stream as unknown as PDFRawStream).decode();
         allTokens.push(...tokenizeContentStream(rawBytes));
       }
 
       const statements = parseContentStream(allTokens);
-      
+
       const { GraphicsState, multiplyMatrix, transformPoint } = await import('../pdf/interpreter');
-      
+
       const state = new GraphicsState();
-      
+
       let backgroundRemoved = false;
       let removedXObjectName = '';
       const filtered: import('../pdf/interpreter').Statement[] = [];
-      
+
       // Determine what a Path Fill looks like. A path is constructed with m, l, c, v, y, re, h.
       // Then filled with f, F, f*, B, B*, b, b*.
       // For simplicity, if we encounter a path drawing op and its bounding box is huge, we drop it.
       // We will track the current path bounds.
-      let pathMinX = Infinity, pathMinY = Infinity, pathMaxX = -Infinity, pathMaxY = -Infinity;
+      let pathMinX = Infinity,
+        pathMinY = Infinity,
+        pathMaxX = -Infinity,
+        pathMaxY = -Infinity;
       const addPathPoint = (x: number, y: number) => {
         const pt = transformPoint(state.ctm, x, y);
         pathMinX = Math.min(pathMinX, pt.x);
@@ -3071,7 +3087,7 @@ const api: ProcessJob = {
 
       for (const stmt of statements) {
         const op = String.fromCharCode(...stmt.operator.bytes);
-        
+
         // Track graphics state CTM
         if (op === 'q') {
           state.stateStack.push(state.clone());
@@ -3081,14 +3097,19 @@ const api: ProcessJob = {
             state.ctm = popped.ctm;
           }
         } else if (op === 'cm' && stmt.operands.length === 6) {
-          const m = stmt.operands.map(t => parseFloat(String.fromCharCode(...t.bytes))) as import('../pdf/interpreter').Matrix;
+          const m = stmt.operands.map(t =>
+            parseFloat(String.fromCharCode(...t.bytes))
+          ) as import('../pdf/interpreter').Matrix;
           state.ctm = multiplyMatrix(m, state.ctm);
         }
-        
+
         // Track path
         if (op === 'm' || op === 'l') {
           if (stmt.operands.length >= 2) {
-            addPathPoint(parseFloat(String.fromCharCode(...stmt.operands[0].bytes)), parseFloat(String.fromCharCode(...stmt.operands[1].bytes)));
+            addPathPoint(
+              parseFloat(String.fromCharCode(...stmt.operands[0].bytes)),
+              parseFloat(String.fromCharCode(...stmt.operands[1].bytes))
+            );
           }
         } else if (op === 're' && stmt.operands.length === 4) {
           const rx = parseFloat(String.fromCharCode(...stmt.operands[0].bytes));
@@ -3101,44 +3122,74 @@ const api: ProcessJob = {
           addPathPoint(rx + rw, ry + rh);
         }
         // ignoring c, v, y for exactness since rect is most common for background
-        
+
         if (!backgroundRemoved) {
           if (op === 'Do') {
             let xObjectName = '';
-            if (stmt.operands.length > 0 && stmt.operands[stmt.operands.length - 1].type === 'name') {
-              xObjectName = String.fromCharCode(...stmt.operands[stmt.operands.length - 1].bytes).slice(1);
+            if (
+              stmt.operands.length > 0 &&
+              stmt.operands[stmt.operands.length - 1].type === 'name'
+            ) {
+              xObjectName = String.fromCharCode(
+                ...stmt.operands[stmt.operands.length - 1].bytes
+              ).slice(1);
             }
-            
+
             // Assume unit square for Do (like in filterContentStream)
             const p1 = transformPoint(state.ctm, 0, 0);
             const p2 = transformPoint(state.ctm, 1, 1);
             const area = Math.abs(p2.x - p1.x) * Math.abs(p2.y - p1.y);
-            
+
             if (area >= thresholdArea) {
               backgroundRemoved = true;
               if (xObjectName) removedXObjectName = xObjectName;
               continue; // Drop this statement
             }
-          } else if (op === 'f' || op === 'F' || op === 'f*' || op === 'B' || op === 'B*' || op === 'b' || op === 'b*') {
+          } else if (
+            op === 'f' ||
+            op === 'F' ||
+            op === 'f*' ||
+            op === 'B' ||
+            op === 'B*' ||
+            op === 'b' ||
+            op === 'b*'
+          ) {
             const area = (pathMaxX - pathMinX) * (pathMaxY - pathMinY);
             if (area >= thresholdArea && pathMaxX > pathMinX && pathMaxY > pathMinY) {
               backgroundRemoved = true;
-              pathMinX = Infinity; pathMinY = Infinity; pathMaxX = -Infinity; pathMaxY = -Infinity;
+              pathMinX = Infinity;
+              pathMinY = Infinity;
+              pathMaxX = -Infinity;
+              pathMaxY = -Infinity;
               continue; // Drop this statement
             }
           }
         }
-        
+
         // Reset path on n (end path) or after drawing
-        if (op === 'n' || op === 'f' || op === 'F' || op === 'f*' || op === 'B' || op === 'B*' || op === 'b' || op === 'b*' || op === 'S' || op === 's') {
-          pathMinX = Infinity; pathMinY = Infinity; pathMaxX = -Infinity; pathMaxY = -Infinity;
+        if (
+          op === 'n' ||
+          op === 'f' ||
+          op === 'F' ||
+          op === 'f*' ||
+          op === 'B' ||
+          op === 'B*' ||
+          op === 'b' ||
+          op === 'b*' ||
+          op === 'S' ||
+          op === 's'
+        ) {
+          pathMinX = Infinity;
+          pathMinY = Infinity;
+          pathMaxX = -Infinity;
+          pathMaxY = -Infinity;
         }
 
         filtered.push(stmt);
       }
 
       if (removedXObjectName) {
-        const xobjDict = page.node.Resources()?.XObject();
+        const xobjDict = page.node.Resources()?.lookupMaybe(PDFName.of('XObject'), PDFDict);
         if (xobjDict instanceof PDFDict) {
           xobjDict.delete(PDFName.of(removedXObjectName));
         }
@@ -3162,7 +3213,7 @@ Q
       const newStreamRef = doc.context.register(newStream);
       leaf.set(PDFName.of('Contents'), newStreamRef);
     }
-    
+
     return await doc.save();
   },
   async flattenDocument(bytes) {
@@ -4433,7 +4484,55 @@ Q
     }
 
     await checkpoint(job, 0.95, 'Saving');
-    return { bytes: transfer(await pseudoLinearize(doc).save({ useObjectStreams: true })), ...report };
+    return {
+      bytes: transfer(await pseudoLinearize(doc).save({ useObjectStreams: true })),
+      ...report
+    };
+  },
+
+  // DOC-09 — contact sheet
+  async contactSheetExport(jpegPages, cols, job) {
+    await checkpoint(job, 0, 'Building contact sheet');
+
+    // A4 portrait in points (72 pt/in)
+    const PAGE_W = 595.28;
+    const PAGE_H = 841.89;
+    const MARGIN = 20;
+    const GAP = 8;
+
+    const rows = Math.ceil(jpegPages.length / cols);
+    const cellW = (PAGE_W - MARGIN * 2 - GAP * (cols - 1)) / cols;
+    const cellH = (PAGE_H - MARGIN * 2 - GAP * (rows - 1)) / rows;
+
+    const out = await PDFDocument.create();
+
+    // How many sheet pages do we need?
+    // We fit all rows on one A4 page since we normalise cell size across all rows.
+    // For very large counts the cells simply get smaller — still recognisable.
+    const sheetPage = out.addPage([PAGE_W, PAGE_H]);
+
+    for (let i = 0; i < jpegPages.length; i++) {
+      await checkpoint(job, i / jpegPages.length, `Embedding thumbnail ${i + 1}`);
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const x = MARGIN + col * (cellW + GAP);
+      // PDF y-axis is bottom-up; place from top
+      const y = PAGE_H - MARGIN - (row + 1) * cellH - row * GAP;
+
+      const img = await out.embedJpg(jpegPages[i]);
+      const { width: iw, height: ih } = img;
+      // Fit within cell, preserving aspect ratio
+      const scale = Math.min(cellW / iw, cellH / ih);
+      const dw = iw * scale;
+      const dh = ih * scale;
+      const dx = x + (cellW - dw) / 2;
+      const dy = y + (cellH - dh) / 2;
+
+      sheetPage.drawImage(img, { x: dx, y: dy, width: dw, height: dh });
+    }
+
+    await checkpoint(job, 0.95, 'Saving');
+    return transfer(await pseudoLinearize(out).save({ useObjectStreams: false }));
   }
 };
 
@@ -4444,5 +4543,10 @@ function isJavaScriptAction(dict: PDFDict): boolean {
   return isAction && action === PDFName.of('JavaScript');
 }
 
-Comlink.expose(api);
+if (
+  typeof self !== 'undefined' &&
+  typeof (self as unknown as { addEventListener?: unknown }).addEventListener === 'function'
+) {
+  Comlink.expose(api);
+}
 export const processWorkerImpl = api;

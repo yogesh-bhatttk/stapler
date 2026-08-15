@@ -26,6 +26,7 @@ import {
 import { beginTransaction } from '../../core/history';
 import { displayedAspectRatio } from '../../core/rotation';
 import { Thumbnail } from '../components/Thumbnail';
+import { eventMatchesShortcut, getEffectiveBinding, customShortcuts } from '../../core/shortcuts';
 import styles from './PageGrid.module.css';
 
 /** Matches the `minmax()` floor below; both must change together. */
@@ -41,6 +42,7 @@ export interface PageGridProps {
 }
 
 export function PageGrid({ doc, selection, selectable }: PageGridProps) {
+  void customShortcuts.value;
   const scrollerRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const [metrics, setMetrics] = useState({ columns: 1, width: MIN_TILE, height: 0 });
@@ -148,6 +150,27 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
       return;
     }
 
+    if (eventMatchesShortcut(event, getEffectiveBinding('rotatePage'))) {
+      event.preventDefault();
+      rotatePages(
+        doc.id,
+        selection.has(page.key) ? selection : [page.key],
+        event.shiftKey ? -90 : 90
+      );
+      return;
+    }
+    if (eventMatchesShortcut(event, getEffectiveBinding('deletePage'))) {
+      event.preventDefault();
+      deletePages(doc.id, selection.has(page.key) ? selection : [page.key]);
+      move(Math.min(index, doc.pages.length - 2));
+      return;
+    }
+    if (eventMatchesShortcut(event, getEffectiveBinding('selectAll')) && selectable) {
+      event.preventDefault();
+      selectAllPages(doc.id);
+      return;
+    }
+
     switch (event.key) {
       case 'ArrowRight':
         event.preventDefault();
@@ -184,26 +207,6 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
           }
         }
         break;
-      case 'r':
-      case 'R':
-        event.preventDefault();
-        rotatePages(
-          doc.id,
-          selection.has(page.key) ? selection : [page.key],
-          event.shiftKey ? -90 : 90
-        );
-        break;
-      case 'Delete':
-      case 'Backspace':
-        event.preventDefault();
-        deletePages(doc.id, selection.has(page.key) ? selection : [page.key]);
-        move(Math.min(index, doc.pages.length - 2));
-        break;
-      default:
-        if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a' && selectable) {
-          event.preventDefault();
-          selectAllPages(doc.id);
-        }
     }
   };
 

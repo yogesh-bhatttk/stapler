@@ -1,6 +1,7 @@
 import { signal } from '@preact/signals';
 import type { Preset } from '../../../core/cv/enhance';
 import type { Quad } from '../../../core/cv/imageUtils';
+import { DOC_PAGE_WHITE } from '../../../core/doc-colors';
 
 export interface CleanupSettings {
   preset: Preset;
@@ -19,7 +20,7 @@ export const cleanupSettings = signal<CleanupSettings>({
   deskew: true,
   despeckle: true,
   flattenBackground: false,
-  flattenTint: '#ffffff'
+  flattenTint: DOC_PAGE_WHITE
 });
 
 /**

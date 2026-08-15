@@ -46,3 +46,15 @@ export const batchProgress = signal<BatchProgress>({
   currentFile: '',
   isProcessing: false
 });
+
+/**
+ * BAT-03 — output filename pattern. Tokens: {basename}, {index}, {date}.
+ * Defaults to '{basename}' which preserves the pre-BAT-03 behaviour exactly.
+ */
+export const outputPattern = signal<string>(
+  localStorage.getItem('stapler:batch:outputPattern') ?? '{basename}'
+);
+
+outputPattern.subscribe(p => {
+  localStorage.setItem('stapler:batch:outputPattern', p);
+});

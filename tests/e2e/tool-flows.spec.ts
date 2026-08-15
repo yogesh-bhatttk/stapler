@@ -1212,7 +1212,7 @@ test.describe('tool flows', () => {
       pageObj.drawText('Foreground Text', { x: 50, y: 700, font, size: 24, color: rgb(0, 0, 0) });
       return Buffer.from(await doc.save());
     });
-    
+
     await importFixture(page, file);
     await gotoTool(page, 'cleanup');
 
@@ -1222,11 +1222,11 @@ test.describe('tool flows', () => {
     await expect(page.getByText('Page cleaned.')).toBeVisible({ timeout: 30_000 });
 
     const bytes = await commitAndRead(page, 'Apply & export');
-    
+
     // Check that vector text is PRESERVED, not rasterized
     const text = await drawnText(bytes);
     expect(text).toContain('Foreground Text');
-    
+
     // Background must be flat red, so we test pixels to ensure it changed
     await openApp(page);
     await page.locator('input[type="file"]').setInputFiles({

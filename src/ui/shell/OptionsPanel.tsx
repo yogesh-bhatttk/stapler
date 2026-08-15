@@ -32,6 +32,8 @@ import { ComparePanel } from '../tools/compare/ComparePanel';
 import { AnnotatePanel } from '../tools/annotate/AnnotatePanel';
 import { BatchPanel } from '../tools/batch/BatchPanel';
 import { MarkdownToPdfPanel } from '../tools/convert/MarkdownToPdfPanel';
+import { ContactSheetPanel } from '../tools/contact-sheet/ContactSheetPanel';
+import { ShortcutsPanel } from '../tools/shortcuts/ShortcutsPanel';
 import styles from './OptionsPanel.module.css';
 import { useTranslation } from '../../core/i18n';
 
@@ -59,7 +61,9 @@ const BODIES: Record<string, () => preact.JSX.Element | null> = {
   compare: ComparePanel,
   annotate: AnnotatePanel,
   batch: BatchPanel,
-  'md-to-pdf': MarkdownToPdfPanel
+  'md-to-pdf': MarkdownToPdfPanel,
+  'contact-sheet': ContactSheetPanel,
+  shortcuts: ShortcutsPanel
 };
 
 export function OptionsPanel() {

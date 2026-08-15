@@ -7,6 +7,7 @@ import {
   savedRecipes,
   activeRecipeId,
   batchProgress,
+  outputPattern,
   Recipe
 } from './state';
 import { compressSettings } from '../compress/state';
@@ -102,6 +103,24 @@ export function BatchPanel() {
         <Button onClick={handleSaveRecipe} variant="secondary">
           {t('Save current as recipe')}
         </Button>
+      </div>
+
+      <div className={panelStyles.section}>
+        <Field label={t('Output filename pattern')}>
+          {id => (
+            <input
+              id={id}
+              type="text"
+              value={outputPattern.value}
+              onInput={e => (outputPattern.value = (e.target as HTMLInputElement).value)}
+              placeholder="{basename}"
+              style={{ width: '100%', fontFamily: 'monospace', fontSize: '0.85em' }}
+            />
+          )}
+        </Field>
+        <p style={{ fontSize: '0.75em', opacity: 0.7, margin: '4px 0 0' }}>
+          Tokens: <code>{'{basename}'}</code>, <code>{'{index}'}</code>, <code>{'{date}'}</code>
+        </p>
       </div>
 
       {batchProgress.value.isProcessing && (
