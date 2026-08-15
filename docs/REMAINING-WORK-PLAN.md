@@ -5,7 +5,7 @@ single source of truth for per-ticket status. This file exists only to give
 whoever picks this up next a single place to see what's left and how to
 approach it, without re-deriving it from 92 ticket entries.
 
-**Tally: 72 Done · 4 Partial · 16 Not started** (92 tickets total: the
+**Tally: 78 Done · 4 Partial · 10 Not started** (92 tickets total: the
 original 72 plus the 20 new "EPIC-15 · v1.1 feature expansion" tickets added
 this session).
 
@@ -67,61 +67,12 @@ deleting anything:
    batch.** Conflicts and regressions are far cheaper to find one commit at
    a time than after five have piled up.
 
-## In-flight work not yet on master (do this first)
+## In-flight work not yet on master ✅ RESOLVED
 
-Two agents were mid-task when work was paused, both forked from master at
-commit `9fdc398` (master has since moved to `b80c4e4` — a docs-only commit,
-so merging either back should be low-conflict). Their worktrees still exist
-and were **deliberately left unmerged and uncommitted** — this is exactly
-the kind of state a careless cleanup pass destroys, so read this section
-fully before running any git command against either path. Re-run
-`git worktree list` / `git status` inside each one yourself; the contents
-below are a snapshot, not a guarantee of current state.
+Both previously in-flight items are now **fully merged into master**:
 
-- **ANN-03 · Search and highlight** — implementation is **complete and
-  verified** (`pnpm check` clean, 347/347 unit tests, e2e passing — see this
-  ticket's own `docs/TICKETS.md` entry for the exact command output once
-  merged) sitting **uncommitted** in worktree
-  `.claude/worktrees/agent-ab79336dc5843c90f` (branch
-  `worktree-agent-ab79336dc5843c90f`). Last known `git status` there:
-  modified `docs/TICKETS.md`, `src/core/i18n/locales/en.json`,
-  `src/core/operations.ts`, `src/core/workers/process.worker.ts`,
-  `src/ui/tools/annotate/AnnotatePanel.tsx`, `src/ui/tools/annotate/state.ts`,
-  `src/ui/tools/redact/RedactPanel.tsx`, `tests/e2e/tool-flows.spec.ts`; new
-  `src/core/highlight.ts`, `tests/unit/highlight.test.ts`. To finish: `cd`
-  into that worktree, `git add -A` (there is also an untracked
-  `node_modules` — it's a symlink back to the main checkout's own
-  `node_modules`, safe to leave out of the commit or delete, never commit
-  it), commit, then from the main checkout run
-  `git merge worktree-agent-ab79336dc5843c90f --no-edit`. Expect small
-  import-list conflicts in `src/ui/tools/commit.ts` /
-  `src/core/operations.ts` if other tickets landed on master since — resolve
-  by combining both sides' imports, nothing structural. Then
-  `pnpm check && pnpm test && pnpm test:e2e`, then delete the worktree
-  (`git worktree remove --force <path>`) and branch (`git branch -D
-  worktree-agent-ab79336dc5843c90f`) **only after** the merge is committed
-  and green.
-- **OCR-01 · Tesseract integration** — was still **running** (general-purpose
-  agent, worktree `.claude/worktrees/agent-aa5957858ee912aab`, branch
-  `worktree-agent-aa5957858ee912aab`, git-locked) when this session paused,
-  and had spawned at least one sub-agent of its own. Last known `git status`
-  there showed real, substantial, uncommitted work: modified `package.json`,
-  `pnpm-lock.yaml`, `src/core/tools.ts`, `src/core/workers/index.ts`,
-  `src/core/workers/process.worker.ts`, `src/ui/shell/OptionsPanel.tsx`,
-  `src/ui/tools/commit.ts`; new `pnpm-workspace.yaml`, `src/core/ocr/`,
-  `src/core/workers/ocr.worker.ts`, `src/ui/tools/ocr/`. **Do not assume this
-  is finished or safe to discard.** Check whether the agent is still
-  reachable (its resume mechanism) before touching its worktree; if it's
-  gone and the worktree is orphaned, inspect `git diff` there carefully and
-  decide whether to finish it yourself, resume a fresh agent against it, or
-  restart the ticket from scratch — in that order of preference, since the
-  existing work may be most of an `L`-sized ticket's effort. Remember: a
-  prior attempt at this exact ticket left partial `tesseract.js` /
-  `tesseract.js-core` / `idb-keyval` dependency additions in the **main**
-  tree by accident (no worktree isolation that time) and those had to be
-  reverted as unaudited — don't let that happen again; any new dependency
-  needs its transitive tree checked for network calls before it's trusted,
-  per the zero-network invariant.
+- **ANN-03 · Search and highlight** — ✅ Done. Merged via `worktree-agent-ab79336dc5843c90f` (commit `20b4448`). Annotate panel gains a "Find and highlight text" field; text layer extraction and highlight geometry live in `src/core/highlight.ts`.
+- **OCR-01 · Tesseract integration** — ✅ Done. Merged via `worktree-agent-aa5957858ee912aab` (commit `4f404a7`). Lazy `tesseract.js` with user-confirmed model download. Code in `src/core/ocr/`, `src/ui/tools/ocr/`, `src/core/workers/ocr.worker.ts`. The stale worktree at `.claude/worktrees/agent-aa5957858ee912aab` may be removed with `git worktree remove --force` followed by `git branch -D worktree-agent-aa5957858ee912aab`.
 
 ## Partial tickets (4)
 
@@ -149,20 +100,6 @@ tool-per-viewer in `RELEASE_CHECKLIST.md`'s existing §1 checkbox for it.
 
 ### Independent, small, code-only (good next picks — no cross-ticket dependency)
 
-- **OPS-13 · Flatten page background** (`S` `P2`) — solid-white or flat-tint
-  background replacement, scan-cleanup-adjacent. Touches
-  `src/core/workers/render.worker.ts`/`process.worker.ts` image-path code and
-  a new cleanup-panel option. Verify pixel-sampled off-text on a fixture with
-  a coloured background fill.
-- **CNV-07 · Paste image as page** (`S` `P2`) — Clipboard API read → reuse
-  CNV-01's image-to-PDF page composition. Small, self-contained; the main
-  work is wiring `navigator.clipboard.read()` through the platform adapter
-  (`src/platform/`) per the layer-boundary rule, with a clear refusal message
-  when the clipboard holds no image.
-- **DOC-08 · Linearize export** (`S` `P2`) — reorder the exported PDF's
-  objects so page 1's content precedes later pages' in byte offset. Verify
-  by re-parsing and diffing object byte offsets, not by trusting a "linearize"
-  flag exists.
 - **DOC-09 · Contact sheet export** (`S` `P2`) — grid of page thumbnails as
   one PDF/image. Reuse DOC-03's thumbnail cache; don't re-render pages.
 - **DS-09 · Custom keyboard shortcut remapping** (`S` `P2`) — rebind any
@@ -180,11 +117,6 @@ tool-per-viewer in `RELEASE_CHECKLIST.md`'s existing §1 checkbox for it.
 
 ### Independent, medium (need a bit more design care)
 
-- **ACC-01 · Alt-text editor for images** (`M` `P1`) — attach alt-text to
-  image XObjects, written as real structure-tree/`/Alt` metadata on export
-  (not just an in-app label — the AC requires it survive a re-import). This
-  is the highest-priority item left after QA-05; worth doing before most of
-  the P2 list above.
 - **ANN-05 · Export visual diff** (`S` `P2`) — extend the Compare tool
   (ANN-02) to export its highlighted-diff view as a new PDF.
 
@@ -204,15 +136,11 @@ tool-per-viewer in `RELEASE_CHECKLIST.md`'s existing §1 checkbox for it.
 
 ## Suggested order
 
-1. Finish and merge ANN-03 (already done, just needs merging) and check on
-   OCR-01's state.
+1. ~~Finish and merge ANN-03 and OCR-01~~ — **Done**.
 2. QA-05 manual pass (closes DOC-05, gives real evidence for DIST-03/DIST-04).
-3. ACC-01 (highest remaining priority, P1).
-4. The eight small independent P2 tickets, in any order, in worktree-isolated
-   parallel batches of 3 like this session used — merge and
-   `pnpm check && pnpm test && pnpm test:e2e` after every batch, not at the
-   end, so a bad merge is caught immediately rather than compounding.
-5. SGN-06, then OCR-02 → OCR-03 once OCR-01 is confirmed merged and green.
+3. ~~ACC-01~~ — **Done**.
+4. The remaining small independent P2 tickets (`DOC-09`, `DS-09`, `BAT-03`, `CMP-06`, `ANN-04`, `ANN-05`), in worktree-isolated parallel batches of 3 — merge and `pnpm check && pnpm test && pnpm test:e2e` after every batch.
+5. SGN-06, then OCR-02 → OCR-03 (OCR-01 now confirmed merged and green — these are unblocked).
 
 ## One more environment gotcha, not covered above
 

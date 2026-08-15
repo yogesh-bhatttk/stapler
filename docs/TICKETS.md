@@ -760,7 +760,7 @@ Covered by `tests/unit/history.test.ts` (undo/redo reaching the overlay layer) a
 
 ### OCR-01 · Tesseract integration with disclosed model download — `L` `P2`
 
-**Status: Not started** — P2.
+**Status: Done** — Merged via `worktree-agent-aa5957858ee912aab`. Lazy `tesseract.js` with user-confirmed model download, cached offline in CacheStorage/IndexedDB. Searchable text layer produced over the original scan.
 
 - **Requirements:** Lazy `tesseract.js`; language model fetched **once** on explicit user
   confirmation, cached in CacheStorage/IndexedDB, then fully offline. Confirmation dialog
@@ -1219,7 +1219,7 @@ bookmark (OPS-12)".
 
 ### OPS-13 · Flatten page background — `S` `P2`
 
-**Status: Not started**
+**Status: Done**
 
 - **Requirements:** Replace a page's background with solid white (a scan-cleanup-adjacent
   operation for e.g. a coloured letterhead sheet re-scanned repeatedly) or apply a flat
@@ -1284,7 +1284,7 @@ converted is asking for CNV-02.
 
 ### CNV-07 · Paste image as page — `S` `P2`
 
-**Status: Not started**
+**Status: Done**
 
 - **Requirements:** Read an image directly off the OS clipboard (Clipboard API) and
   insert it as a new page at the current insertion point, reusing CNV-01's image-to-PDF
@@ -1358,7 +1358,7 @@ better.
 
 ### DOC-08 · Linearize export ("fast web view") — `S` `P2`
 
-**Status: Not started**
+**Status: Done**
 
 - **Requirements:** Reorder the exported PDF's objects so the first page's content is
   available from the start of the byte stream (linearized/optimized structure), improving
@@ -1526,7 +1526,7 @@ direction, and narrowing it belongs to `findText`, not here.
 
 ### ACC-01 · Alt-text editor for images — `M` `P1`
 
-**Status: Not started**
+**Status: Done**
 
 - **Requirements:** Let the user attach alt-text to each image XObject on a page, written
   as real structure-tree/`/Alt` metadata on export — basic PDF/UA-style accessibility
