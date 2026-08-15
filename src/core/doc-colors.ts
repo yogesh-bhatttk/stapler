@@ -51,3 +51,37 @@ export const ANNOTATION_COLORS: readonly string[] = [
   '#000000', // --annotation-black
   '#ffffff' // --annotation-white
 ];
+
+/** Document annotation summary colors (ANN-04). */
+export const SUMMARY_TITLE_RGB: readonly [number, number, number] = [25 / 255, 25 / 255, 51 / 255];
+export const SUMMARY_MUTED_RGB: readonly [number, number, number] = [
+  100 / 255,
+  100 / 255,
+  100 / 255
+];
+export const SUMMARY_LINE_RGB: readonly [number, number, number] = [
+  200 / 255,
+  200 / 255,
+  200 / 255
+];
+export const SUMMARY_CARD_BG_RGB: readonly [number, number, number] = [
+  247 / 255,
+  250 / 255,
+  255 / 255
+];
+export const SUMMARY_CARD_BORDER_RGB: readonly [number, number, number] = [
+  217 / 255,
+  224 / 255,
+  237 / 255
+];
+export const SUMMARY_ACCENT_RGB: readonly [number, number, number] = [
+  51 / 255,
+  102 / 255,
+  204 / 255
+];
+export const SUMMARY_HEADER_RGB: readonly [number, number, number] = [
+  38 / 255,
+  51 / 255,
+  102 / 255
+];
+export const SUMMARY_TEXT_RGB: readonly [number, number, number] = [25 / 255, 25 / 255, 25 / 255];

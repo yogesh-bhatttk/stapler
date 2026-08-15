@@ -1,5 +1,8 @@
 import { useState } from 'preact/hooks';
-import { Search } from 'lucide-preact';
+import { Search, FileText } from 'lucide-preact';
+import { platform } from '../../../platform/current';
+import { exportAnnotationSummary, type SummaryAnnotation } from '../../../core/annotation-summary';
+import { pageAnnotations } from './state';
 import { useTranslation } from '../../../core/i18n';
 import { ANNOTATION_COLORS } from '../../../core/doc-colors';
 import { commit } from '../../../core/history';
@@ -44,6 +47,47 @@ export function AnnotatePanel() {
    * find-and-mark uses; only what is built from the result differs. `commit()` is
    * called once before the batch, so the whole search is one undo step (DOC-06).
    */
+  const handleExportSummary = async () => {
+    const current = activeDoc.value;
+    if (!current) return;
+
+    const allLayerAnns: SummaryAnnotation[] = [];
+    for (const [pageKey, anns] of Object.entries(pageAnnotations.value)) {
+      for (const ann of anns) {
+        allLayerAnns.push({ ...ann, pageKey });
+      }
+    }
+
+    const docAnns: SummaryAnnotation[] = (current.annotations || []).map(a => ({
+      id: a.id,
+      type: a.type,
+      x: a.x,
+      y: a.y,
+      rect: { x: a.x, y: a.y, width: a.width, height: a.height },
+      text: a.data,
+      pageKey: a.pageKey
+    }));
+
+    const combined = [...allLayerAnns, ...docAnns];
+    if (combined.length === 0) {
+      notify('warning', 'No annotations to export.');
+      return;
+    }
+
+    try {
+      const summaryBytes = await exportAnnotationSummary(current, combined);
+      const fileStem = current.name.replace(/\.[^.]+$/, '') || 'document';
+      const saved = await platform.saveFileAs(summaryBytes, `${fileStem}-annotation-summary.pdf`);
+      if (saved) {
+        notify('success', 'Exported annotation summary PDF.');
+      }
+    } catch (err) {
+      notify('danger', 'Could not export annotation summary.', {
+        detail: err instanceof Error ? err.message : String(err)
+      });
+    }
+  };
+
   const highlightMatches = () =>
     run({ label: `Searching for "${query.trim()}"`, scope: 'annotate.search' }, async job => {
       const current = activeDoc.value;
@@ -158,6 +202,11 @@ export function AnnotatePanel() {
           onChange={val => (annotationStrokeWidth.value = val)}
         />
       </div>
+
+      <hr className={panelStyles.divider} />
+      <Button variant="secondary" icon={FileText} disabled={!doc} onClick={handleExportSummary}>
+        Export annotation summary
+      </Button>
 
       <FlattenOption />
     </>
