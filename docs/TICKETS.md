@@ -1486,7 +1486,7 @@ direction, and narrowing it belongs to `findText`, not here.
 
 ### ANN-04 · Export annotation summary — `S` `P2`
 
-**Status: Not started**
+**Status: Done** — `exportAnnotationSummary` exports PDF/text summary listing all notes, positions, and page numbers. Tested in `tests/unit/annotation-summary.test.ts`.
 
 - **Requirements:** Collect every sticky note and comment from ANN-01's layer into a
   printable summary — either an appended page or a separate export — listing each note's
@@ -1496,7 +1496,7 @@ direction, and narrowing it belongs to `findText`, not here.
 
 ### CMP-06 · Compression report export — `S` `P2`
 
-**Status: Not started**
+**Status: Done** — `generateCompressionReportText` and JSON export breakdown in `src/core/compress-report.ts`. Tested in `tests/unit/compress-report.test.ts`.
 
 - **Requirements:** Alongside CMP-04's on-screen honest-reporting summary, an exportable
   per-page/per-image breakdown (sizes before/after, which images were re-encoded vs.
@@ -1506,7 +1506,7 @@ direction, and narrowing it belongs to `findText`, not here.
 
 ### ANN-05 · Export visual diff — `S` `P2`
 
-**Status: Not started**
+**Status: Done** — `exportVisualDiff` in `src/core/visual-diff-export.ts` renders visual diff overlays into PDF. Tested in `tests/unit/visual-diff-export.test.ts`.
 
 - **Requirements:** Extend the Compare tool (ANN-02) to export its side-by-side or overlay
   diff view — changed regions highlighted — as a new PDF, rather than only viewing diffs

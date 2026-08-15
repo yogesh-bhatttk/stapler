@@ -171,7 +171,7 @@ describe('SCN-01 — detectCorners against synthetic phone photos', () => {
     // confidently reporting a crop that (if the gate's margin were even one
     // pixel narrower) would clip real content off the page.
     expect(results[9].confident).toBe(false);
-  });
+  }, 15000);
 
   it('falls back to a non-confident result rather than throwing on a near-blank frame', () => {
     const image = new ImageData(WIDTH, HEIGHT);

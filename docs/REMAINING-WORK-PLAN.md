@@ -5,7 +5,7 @@ single source of truth for per-ticket status. This file exists only to give
 whoever picks this up next a single place to see what's left and how to
 approach it, without re-deriving it from 92 ticket entries.
 
-**Tally: 81 Done · 4 Partial · 7 Not started** (92 tickets total: the
+**Tally: 84 Done · 4 Partial · 4 Not started** (92 tickets total: the
 original 72 plus the 20 new "EPIC-15 · v1.1 feature expansion" tickets added
 this session).
 
@@ -96,27 +96,16 @@ representative output from each P0 tool in Chrome's own viewer, Acrobat
 Reader, macOS Preview, and Firefox's pdf.js; record pass/fail per
 tool-per-viewer in `RELEASE_CHECKLIST.md`'s existing §1 checkbox for it.
 
-## Not started (7) — grouped by what they need
+## Not started (4) — grouped by what they need
 
 ### Completed in this session ✅
 
 - **DOC-09 · Contact sheet export** (`S` `P2`) — ✅ Done. `contactSheetExport` tiles page thumbnails into a new PDF with configurable columns. Tested in `tests/unit/contact-sheet.test.ts`.
 - **DS-09 · Custom keyboard shortcut remapping** (`S` `P2`) — ✅ Done. Local IndexedDB shortcut remapping store, conflict detection, reset-to-default, and shortcuts UI. Tested in `tests/unit/shortcuts.test.ts`.
 - **BAT-03 · Templated batch output filenames** (`S` `P2`) — ✅ Done. Templated pattern token substitution (`{basename}`, `{index}`, `{date}`) and deduplication in `src/core/batch-filename.ts`. Tested in `tests/unit/batch-filename.test.ts`.
-
-### Independent, small, code-only (good next picks — no cross-ticket dependency)
-
-- **CMP-06 · Compression report export** (`S` `P2`) — sidecar text/JSON
-  breakdown alongside CMP-04's on-screen summary. Pure reporting; no new
-  compression logic.
-- **ANN-04 · Export annotation summary** (`S` `P2`) — collect ANN-01 sticky
-  notes/comments into a printable list. Pure reporting over an existing data
-  model.
-
-### Independent, medium (need a bit more design care)
-
-- **ANN-05 · Export visual diff** (`S` `P2`) — extend the Compare tool
-  (ANN-02) to export its highlighted-diff view as a new PDF.
+- **CMP-06 · Compression report export** (`S` `P2`) — ✅ Done. `generateCompressionReportText` and JSON export breakdown in `src/core/compress-report.ts`. Tested in `tests/unit/compress-report.test.ts`.
+- **ANN-04 · Export annotation summary** (`S` `P2`) — ✅ Done. `exportAnnotationSummary` exports PDF/text summary listing all notes, positions, and page numbers. Tested in `tests/unit/annotation-summary.test.ts`.
+- **ANN-05 · Export visual diff** (`S` `P2`) — ✅ Done. `exportVisualDiff` in `src/core/visual-diff-export.ts` renders visual diff overlays into PDF. Tested in `tests/unit/visual-diff-export.test.ts`.
 
 ### Depends on another ticket in this list
 
