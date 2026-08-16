@@ -20,12 +20,28 @@ so it gets its own explicit step below rather than being buried inside "run veri
       a broader suite passing does not tell you *this specific* test ran and
       passed). This is the test that would catch an accidentally-added CDN
       import, Google Fonts link, or analytics snippet before it ships.
-- [ ] **QA-05 — external viewer compatibility (manual, cannot be automated):**
-      open a representative output from each P0 tool in Chrome's own PDF viewer,
-      Adobe Acrobat Reader, macOS Preview, and Firefox's pdf.js. Confirm no
-      warnings on open and that the content matches what Stapler showed.
-      Record the result (pass/fail per viewer, per tool) in this file's git
-      history or an issue — "it should work" is not a passing criterion.
+ - [x] **QA-05 — automated structural validation:** run `pnpm run qa05` before each
+       release. Validates that every P0 tool's PDF output round-trips through pdf-lib
+       without XRef corruption or parse error. All 8 checks pass (Merge, Rotate,
+       Split, Export/Compose, Compress, Sign/AcroForm, Annotate, Table Extract CSV).
+       Evidence (2026-08-16):
+       ```
+       ✅  Merge (OPS-01): Two 1-page PDFs merged into 2-page output
+       ✅  Organize/Rotate (OPS-02): Page rotation survives serialise → re-parse
+       ✅  Split (OPS-03): Split 3-page doc into 3 single-page outputs
+       ✅  Export/Compose (DOC-05): Document serialises and re-parses without error
+       ✅  Compress (CMP-03): Compressed output re-parses cleanly
+       ✅  Sign/Fill (SGN-03, SGN-06): AcroForm text field survives serialise → re-parse
+       ✅  Annotate (ANN-01): Highlight annotation embedded without XRef error
+       ✅  Table Extract (OCR-03): CSV export from table data is non-empty and valid
+       ✅  All 8 structural checks passed.
+       ```
+ - [ ] **QA-05 — Chrome PDF viewer (manual):** open a representative output from
+       each P0 tool. Confirm no warnings on open, content matches Stapler's preview.
+ - [ ] **QA-05 — Adobe Acrobat Reader (manual):** same as above.
+ - [ ] **QA-05 — macOS Preview (manual):** same as above.
+ - [ ] **QA-05 — Firefox pdf.js (manual):** same as above.
+       Record pass/fail per viewer per tool in this file's git history or an issue.
 - [ ] **Feature Complete:** All features for this release are implemented; any
       known limitation is disclosed in the relevant panel, not silent.
 

@@ -35,6 +35,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "qa05": "node scripts/qa05-validate.mjs",
+    "validate:builds": "node scripts/validate-builds.mjs",
     "verify": "run-s check test check:bundle test:e2e"
   },
   "dependencies": {
