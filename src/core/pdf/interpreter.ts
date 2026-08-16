@@ -187,6 +187,14 @@ export function parseContentStream(tokens: Token[]): Statement[] {
 
 export type Matrix = [number, number, number, number, number, number];
 
+export interface SavedState {
+  ctm: Matrix;
+  textMatrix: Matrix;
+  textLineMatrix: Matrix;
+  fontSize: number;
+  textLeading: number;
+}
+
 export class GraphicsState {
   ctm: Matrix = [1, 0, 0, 1, 0, 0];
   textMatrix: Matrix = [1, 0, 0, 1, 0, 0];
@@ -194,12 +202,6 @@ export class GraphicsState {
   fontSize: number = 0;
   /** Text leading, set by the TL operator. Used by T* (= `0 –TL Td`). */
   textLeading: number = 0;
-  /**
-   * Saved graphics states from `q` operators. Carried across `/Contents` array
-   * chunk boundaries so a `q` in one chunk and its matching `Q` in the next
-   * properly restore the CTM instead of leaving it permanently transformed.
-   */
-  stateStack: GraphicsState[] = [];
 
   clone(): GraphicsState {
     const next = new GraphicsState();
@@ -208,9 +210,25 @@ export class GraphicsState {
     next.textLineMatrix = [...this.textLineMatrix] as Matrix;
     next.fontSize = this.fontSize;
     next.textLeading = this.textLeading;
-    // Deep-clone the stack so pushing/popping in the clone doesn't affect the original.
-    next.stateStack = this.stateStack.map(s => s.clone());
     return next;
+  }
+
+  saveSnapshot(): SavedState {
+    return {
+      ctm: [...this.ctm] as Matrix,
+      textMatrix: [...this.textMatrix] as Matrix,
+      textLineMatrix: [...this.textLineMatrix] as Matrix,
+      fontSize: this.fontSize,
+      textLeading: this.textLeading
+    };
+  }
+
+  restoreSnapshot(s: SavedState): void {
+    this.ctm = [...s.ctm] as Matrix;
+    this.textMatrix = [...s.textMatrix] as Matrix;
+    this.textLineMatrix = [...s.textLineMatrix] as Matrix;
+    this.fontSize = s.fontSize;
+    this.textLeading = s.textLeading;
   }
 }
 
@@ -273,6 +291,15 @@ export function intersects(r1: Rect, r2: Rect): boolean {
   );
 }
 
+export function contains(container: Rect, target: Rect): boolean {
+  return (
+    target.x >= container.x - 1e-4 &&
+    target.y >= container.y - 1e-4 &&
+    target.x + target.width <= container.x + container.width + 1e-4 &&
+    target.y + target.height <= container.y + container.height + 1e-4
+  );
+}
+
 export interface FilterContentStreamResult {
   filtered: Statement[];
   /** Graphics state at the end of this stream, to carry into the next chunk of a `/Contents` array. */
@@ -312,21 +339,106 @@ export function filterContentStream(
   const filtered: Statement[] = [];
   const strippedXObjectNames: string[] = [];
   const state = initialState ? initialState.clone() : new GraphicsState();
+  const savedStates: SavedState[] = [];
+
+  // Track vector path construction and painting
+  let currentPathStmts: Statement[] = [];
+  let currentPathPoints: { x: number; y: number }[] = [];
+
+  const flushPath = (paintOpStmt: Statement | null, isPainting: boolean) => {
+    if (currentPathStmts.length === 0 && !paintOpStmt) return;
+
+    let pathBox: Rect | null = null;
+    if (currentPathPoints.length > 0) {
+      const xs = currentPathPoints.map(p => p.x);
+      const ys = currentPathPoints.map(p => p.y);
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+      pathBox = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    }
+
+    let overlaps = false;
+    if (isPainting && pathBox) {
+      for (const r of redactionBoxes) {
+        if (intersects(pathBox, r)) {
+          overlaps = true;
+          break;
+        }
+      }
+    }
+
+    if (!overlaps) {
+      filtered.push(...currentPathStmts);
+      if (paintOpStmt) filtered.push(paintOpStmt);
+    }
+
+    currentPathStmts = [];
+    currentPathPoints = [];
+  };
 
   for (const stmt of statements) {
     const op = String.fromCharCode(...stmt.operator.bytes);
 
+    // Path construction operators: m l c v y h re
+    if (op === 'm' || op === 'l' || op === 'c' || op === 'v' || op === 'y' || op === 're') {
+      currentPathStmts.push(stmt);
+      if (op === 're' && stmt.operands.length === 4) {
+        const rx = parseFloat(String.fromCharCode(...stmt.operands[0].bytes));
+        const ry = parseFloat(String.fromCharCode(...stmt.operands[1].bytes));
+        const rw = parseFloat(String.fromCharCode(...stmt.operands[2].bytes));
+        const rh = parseFloat(String.fromCharCode(...stmt.operands[3].bytes));
+        currentPathPoints.push(
+          transformPoint(state.ctm, rx, ry),
+          transformPoint(state.ctm, rx + rw, ry),
+          transformPoint(state.ctm, rx + rw, ry + rh),
+          transformPoint(state.ctm, rx, ry + rh)
+        );
+      } else if (stmt.operands.length >= 2) {
+        for (let idx = 0; idx + 1 < stmt.operands.length; idx += 2) {
+          const px = parseFloat(String.fromCharCode(...stmt.operands[idx].bytes));
+          const py = parseFloat(String.fromCharCode(...stmt.operands[idx + 1].bytes));
+          if (!isNaN(px) && !isNaN(py)) {
+            currentPathPoints.push(transformPoint(state.ctm, px, py));
+          }
+        }
+      }
+      continue;
+    } else if (op === 'h') {
+      currentPathStmts.push(stmt);
+      continue;
+    }
+
+    // Path painting operators: S s f F f* B B* b b* n sh
+    if (
+      op === 'S' ||
+      op === 's' ||
+      op === 'f' ||
+      op === 'F' ||
+      op === 'f*' ||
+      op === 'B' ||
+      op === 'B*' ||
+      op === 'b' ||
+      op === 'b*' ||
+      op === 'n' ||
+      op === 'sh'
+    ) {
+      flushPath(stmt, op !== 'n');
+      continue;
+    }
+
+    // If there was an unpainted path when encountering another operator, flush it
+    if (currentPathStmts.length > 0) {
+      flushPath(null, false);
+    }
+
     if (op === 'q') {
-      state.stateStack.push(state.clone());
+      savedStates.push(state.saveSnapshot());
     } else if (op === 'Q') {
-      if (state.stateStack.length > 0) {
-        const popped = state.stateStack.pop()!;
-        state.ctm = popped.ctm;
-        state.textMatrix = popped.textMatrix;
-        state.textLineMatrix = popped.textLineMatrix;
-        state.fontSize = popped.fontSize;
-        state.textLeading = popped.textLeading;
-        // Note: we intentionally keep state.stateStack as-is (already mutated by pop())
+      if (savedStates.length > 0) {
+        const popped = savedStates.pop()!;
+        state.restoreSnapshot(popped);
       }
     } else if (op === 'cm') {
       if (stmt.operands.length === 6) {
@@ -443,10 +555,7 @@ export function filterContentStream(
           height: Math.max(...ys) - Math.min(...ys)
         };
       } else {
-        // Images occupy the unit square in their own space. A Form XObject
-        // whose /BBox we couldn't resolve falls back to this too — conservative
-        // in the sense that it may under-report the Form's true extent, but it
-        // is what every caller already relied on before Forms were handled at all.
+        // Images occupy the unit square in their own space.
         const p1 = transformPoint(state.ctm, 0, 0);
         const p2 = transformPoint(state.ctm, 1, 1);
         box = {
@@ -458,11 +567,24 @@ export function filterContentStream(
       }
 
       let shouldStrip = false;
-      for (const r of redactionBoxes) {
-        if (intersects(box, r)) {
-          shouldStrip = true;
-          break;
+      if (info?.subtype === 'Form') {
+        for (const r of redactionBoxes) {
+          if (intersects(box, r)) {
+            shouldStrip = true;
+            break;
+          }
         }
+      } else {
+        // For Image XObjects, strip if the image box is fully contained within redactions,
+        // or if it intersects. (If partially covered, keeping Do paints image + black rect over it).
+        let covered = false;
+        for (const r of redactionBoxes) {
+          if (contains(r, box)) {
+            covered = true;
+            break;
+          }
+        }
+        shouldStrip = covered;
       }
 
       if (shouldStrip) {
@@ -472,6 +594,10 @@ export function filterContentStream(
     }
 
     filtered.push(stmt);
+  }
+
+  if (currentPathStmts.length > 0) {
+    flushPath(null, false);
   }
 
   return { filtered, finalState: state, strippedXObjectNames };

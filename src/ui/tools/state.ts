@@ -45,4 +45,4 @@ export const removeBlanksThreshold = signal(50);
  * every tool's export was OPS-09 — merge and crop silently inherited a setting
  * the user set somewhere else and never saw again.
  */
-export const flattenOnExport = signal(true);
+export const flattenOnExport = signal(false);

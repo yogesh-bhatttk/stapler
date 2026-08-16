@@ -260,18 +260,36 @@ export function classifyPages(
     const hasText = hasTextOn(page.pageIndex);
     const imagePixels = page.images.reduce((n, image) => n + image.width * image.height, 0);
     const safety = page.images.map(image => ({ image, ...safetyOf(image) }));
+    let hasUnsafeImage = false;
     for (const entry of safety) {
-      if (!entry.safe && entry.reason) skipped.add(entry.reason);
+      if (!entry.safe && entry.reason) {
+        skipped.add(entry.reason);
+      }
+      if (!entry.safe || entry.image.hasSMask || entry.image.hasMask) {
+        hasUnsafeImage = true;
+      }
     }
 
     if (!hasText) {
-      // No text to preserve, so the whole page can become one image. This is the
-      // path that delivers 70–90% on a scan.
+      // No text to preserve, so the whole page can become one image — provided it has no unsafe images.
       if (page.images.length === 0 && (census?.runCount ?? 0) === 0) {
         pages.push({
           pageIndex: page.pageIndex,
           route: 'already-optimized',
           reason: 'Page has neither text nor images',
+          reencode: [],
+          actionableBytes: 0,
+          targetPixels: 0,
+          imagePixels
+        });
+        continue;
+      }
+      if (hasUnsafeImage) {
+        pages.push({
+          pageIndex: page.pageIndex,
+          route: 'already-optimized',
+          reason:
+            'Page contains specialized images (e.g. spot colors or masks) that cannot be safely rasterized',
           reencode: [],
           actionableBytes: 0,
           targetPixels: 0,

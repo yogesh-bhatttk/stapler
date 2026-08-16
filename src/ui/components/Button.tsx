@@ -1,4 +1,5 @@
 import { ComponentChildren, JSX } from 'preact';
+import { forwardRef } from 'preact/compat';
 import { Icon } from './Icon';
 import type { LucideIcon } from 'lucide-preact';
 import styles from './Button.module.css';
@@ -16,25 +17,28 @@ export interface ButtonProps extends JSX.HTMLAttributes<HTMLButtonElement> {
   disabled?: boolean;
 }
 
-export function Button({
-  children,
-  variant = 'secondary',
-  size = 'default',
-  icon,
-  iconPosition = 'left',
-  className = '',
-  disabled,
-  ...props
-}: ButtonProps) {
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
+  {
+    children,
+    variant = 'secondary',
+    size = 'default',
+    icon,
+    iconPosition = 'left',
+    className = '',
+    disabled,
+    ...props
+  },
+  ref
+) {
   const classes = [styles.button, styles[`variant-${variant}`], styles[`size-${size}`], className]
     .filter(Boolean)
     .join(' ');
 
   return (
-    <button className={classes} disabled={disabled} {...props}>
+    <button ref={ref} className={classes} disabled={disabled} {...props}>
       {icon && iconPosition === 'left' && <Icon icon={icon} size={size === 'compact' ? 14 : 16} />}
       {children}
       {icon && iconPosition === 'right' && <Icon icon={icon} size={size === 'compact' ? 14 : 16} />}
     </button>
   );
-}
+});

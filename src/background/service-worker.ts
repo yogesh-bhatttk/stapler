@@ -1,17 +1,24 @@
+let isOpening = false;
+
 chrome.action.onClicked.addListener(async () => {
-  const editorUrl = chrome.runtime.getURL('editor.html');
-  const tabs = await chrome.tabs.query({ url: `${editorUrl}*` });
-  if (tabs.length > 0) {
-    const tabId = tabs[0].id;
-    const windowId = tabs[0].windowId;
-    if (tabId) {
-      await chrome.tabs.update(tabId, { active: true });
-      if (windowId) {
-        await chrome.windows.update(windowId, { focused: true });
+  if (isOpening) return;
+  isOpening = true;
+  try {
+    const editorUrl = chrome.runtime.getURL('editor.html');
+    const tabs = await chrome.tabs.query({ url: `${editorUrl}*` });
+    if (tabs.length > 0) {
+      const tab = tabs.find(t => t.id !== undefined) ?? tabs[0];
+      if (tab.id !== undefined) {
+        await chrome.tabs.update(tab.id, { active: true });
+        if (tab.windowId !== undefined) {
+          await chrome.windows.update(tab.windowId, { focused: true });
+        }
       }
+    } else {
+      await chrome.tabs.create({ url: editorUrl });
     }
-  } else {
-    await chrome.tabs.create({ url: editorUrl });
+  } finally {
+    isOpening = false;
   }
 });
 

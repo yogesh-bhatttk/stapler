@@ -44,7 +44,7 @@ const REMOTE_IMPORT = [
 // constructor consuming a token, not a hard-coded colour, so the numeric-argument
 // lookahead matters.
 const RAW_COLOR =
-  /(#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b|\b(?:rgba?|hsla?)\s*\(\s*(?:\d|\.\d)|\bcolor\s*:\s*(?:red|green|blue|white|black|orange|yellow|purple|gray|grey)\b)/;
+  /(#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b|\b(?:rgba?|hsla?)\s*\(\s*(?:\d|\.\d)|\bcolor\s*:\s*['"]?(?:red|green|blue|white|black|orange|yellow|purple|gray|grey)['"]?\b)/;
 
 const TOKENS_FILE = 'src/ui/styles/tokens.css';
 

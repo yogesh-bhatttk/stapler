@@ -129,8 +129,17 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
       const clamped = Math.max(0, Math.min(doc.pages.length - 1, to));
       setFocusIndex(clamped);
       const target = viewportRef.current?.querySelector<HTMLElement>(`[data-index="${clamped}"]`);
-      target?.focus();
-      target?.scrollIntoView({ block: 'nearest' });
+      if (target) {
+        target.focus();
+        target.scrollIntoView({ block: 'nearest' });
+      } else if (viewportRef.current) {
+        const row = Math.floor(clamped / columns);
+        viewportRef.current.scrollTop = row * metrics.height;
+        requestAnimationFrame(() => {
+          const el = viewportRef.current?.querySelector<HTMLElement>(`[data-index="${clamped}"]`);
+          el?.focus();
+        });
+      }
     };
 
     // Alt+arrow reorders — the accessible alternative to dragging.

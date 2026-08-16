@@ -280,5 +280,9 @@
   "Select what to strip": "Select what to strip",
   "Select none": "Select none",
   "Filesystem paths": "Filesystem paths",
-  "Each path goes when the item it sits in is stripped above.": "Each path goes when the item it sits in is stripped above."
+  "Each path goes when the item it sits in is stripped above.": "Each path goes when the item it sits in is stripped above.",
+  "tool.annotate.findPlaceholder": "Term to highlight…",
+  "tool.annotate.findText": "Find and highlight text",
+  "tool.annotate.highlightEvery": "Highlight every match",
+  "tool.annotate.matchCase": "Match case"
 }

@@ -78,7 +78,7 @@ export function TopBar() {
           aria-label="Change Language"
         >
           {locales.map(loc => (
-            <option key={loc} value={loc} style={{ color: 'black' }}>
+            <option key={loc} value={loc} style={{ color: 'var(--ink)' }}>
               {loc.toUpperCase()}
             </option>
           ))}

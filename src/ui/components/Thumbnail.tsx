@@ -122,7 +122,7 @@ export function Thumbnail({ page, docId, width, aspect, isSelected, selectable }
       cancelled = true;
       thumbnailCache.release(key);
     };
-  }, [visible, source, page.sourceIndex, scale]);
+  }, [visible, source, page.sourceIndex, page.rotation, scale]);
 
   const rotation = normalizeRotation(page.rotation);
   const actualAspect = pageSize

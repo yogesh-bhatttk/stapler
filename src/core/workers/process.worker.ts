@@ -1584,6 +1584,36 @@ function wrapTextForPdf(
   return lines;
 }
 
+function preserveDocumentCatalog(
+  source: PDFDocument,
+  out: PDFDocument,
+  copier?: PDFObjectCopier
+): void {
+  const c = copier ?? PDFObjectCopier.for(source.context, out.context);
+  const keysToCopy = [
+    'Outlines',
+    'StructTreeRoot',
+    'OCProperties',
+    'PageLabels',
+    'Names',
+    'Dests',
+    'ViewerPreferences',
+    'MarkInfo',
+    'Lang',
+    'SpiderInfo',
+    'PieceInfo',
+    'OutputIntents',
+    'Perms',
+    'Legal'
+  ];
+  for (const key of keysToCopy) {
+    const val = source.catalog.get(PDFName.of(key));
+    if (val !== undefined && out.catalog.get(PDFName.of(key)) === undefined) {
+      out.catalog.set(PDFName.of(key), c.copy(val));
+    }
+  }
+}
+
 /**
  * Draws a fixed, unrotated header and/or footer line — small running text in the
  * top/bottom margin band, distinct from the single positioned/rotatable
@@ -1688,6 +1718,7 @@ async function composePages(
   const contributorDocIds = new Map<PDFDocument, string>();
   /** `${sourceDocId}:${sourceIndex}` → the copied page's ref in `outDoc`, for OPS-01. */
   const pageRefMap = new Map<string, PDFRef>();
+  const copiers = new Map<PDFDocument, PDFObjectCopier>();
 
   for (let i = 0; i < pages.length; i++) {
     const ref = pages[i];
@@ -1705,7 +1736,21 @@ async function composePages(
       });
     }
 
-    const [copied] = await outDoc.copyPages(srcDoc, [ref.sourceIndex]);
+    const srcPageKey = `${ref.sourceDocId}:${ref.sourceIndex}`;
+    const isDuplicatePage = pageRefMap.has(srcPageKey);
+    let copier = isDuplicatePage
+      ? PDFObjectCopier.for(srcDoc.context, outDoc.context)
+      : copiers.get(srcDoc);
+    if (!copier) {
+      copier = PDFObjectCopier.for(srcDoc.context, outDoc.context);
+      copiers.set(srcDoc, copier);
+    }
+
+    const srcPage = srcDoc.getPage(ref.sourceIndex);
+    const leaf = copier.copy(srcPage.node);
+    const leafRef = outDoc.context.register(leaf);
+    const copied = PDFPage.of(leaf, leafRef, outDoc);
+
     if (ref.rotation !== 0) {
       // /Rotate must be a non-negative multiple of 90; the previous code could
       // produce -90 by taking a plain modulo of a negative sum.
@@ -1782,12 +1827,34 @@ async function composePages(
     pageRefMap.set(`${ref.sourceDocId}:${ref.sourceIndex}`, copied.ref);
 
     if (ref.cropBox) {
-      // PDF-lib coordinates are bottom-left. The incoming cropBox is top-left normalized [0,1].
+      // PDF-lib coordinates are bottom-left. The incoming cropBox is top-left normalized [0,1] in display space.
       const { width, height } = copied.getSize();
-      const cropX = ref.cropBox.x * width;
-      const cropY = (1 - (ref.cropBox.y + ref.cropBox.height)) * height;
-      const cropW = ref.cropBox.width * width;
-      const cropH = ref.cropBox.height * height;
+      const pageRotation = normalizeRotation(copied.getRotation().angle);
+
+      let unrotatedX = ref.cropBox.x;
+      let unrotatedY = ref.cropBox.y;
+      let unrotatedW = ref.cropBox.width;
+      let unrotatedH = ref.cropBox.height;
+
+      if (pageRotation === 90) {
+        unrotatedX = ref.cropBox.y;
+        unrotatedY = 1 - ref.cropBox.x - ref.cropBox.width;
+        unrotatedW = ref.cropBox.height;
+        unrotatedH = ref.cropBox.width;
+      } else if (pageRotation === 180) {
+        unrotatedX = 1 - ref.cropBox.x - ref.cropBox.width;
+        unrotatedY = 1 - ref.cropBox.y - ref.cropBox.height;
+      } else if (pageRotation === 270) {
+        unrotatedX = 1 - ref.cropBox.y - ref.cropBox.height;
+        unrotatedY = ref.cropBox.x;
+        unrotatedW = ref.cropBox.height;
+        unrotatedH = ref.cropBox.width;
+      }
+
+      const cropX = unrotatedX * width;
+      const cropY = (1 - (unrotatedY + unrotatedH)) * height;
+      const cropW = unrotatedW * width;
+      const cropH = unrotatedH * height;
       copied.setCropBox(cropX, cropY, cropW, cropH);
     }
 
@@ -3044,6 +3111,11 @@ const api: ProcessJob = {
 
     if (flatten) {
       try {
+        try {
+          form.updateFieldAppearances();
+        } catch {
+          // ignore appearance generation fallback errors
+        }
         form.flatten();
       } catch (err) {
         // Flatten generates an appearance stream per field; a form with a broken
@@ -3136,16 +3208,18 @@ const api: ProcessJob = {
         pathMaxY = Math.max(pathMaxY, pt.y);
       };
 
+      const stateStack: import('../pdf/interpreter').Matrix[] = [];
+
       for (const stmt of statements) {
         const op = String.fromCharCode(...stmt.operator.bytes);
 
         // Track graphics state CTM
         if (op === 'q') {
-          state.stateStack.push(state.clone());
+          stateStack.push([...state.ctm]);
         } else if (op === 'Q') {
-          if (state.stateStack.length > 0) {
-            const popped = state.stateStack.pop()!;
-            state.ctm = popped.ctm;
+          const popped = stateStack.pop();
+          if (popped) {
+            state.ctm = popped;
           }
         } else if (op === 'cm' && stmt.operands.length === 6) {
           const m = stmt.operands.map(t =>
@@ -3279,6 +3353,11 @@ Q
     const fields = form.getFields().length;
     if (fields > 0) {
       try {
+        try {
+          form.updateFieldAppearances();
+        } catch {
+          // ignore appearance generation fallback errors
+        }
         form.flatten();
       } catch (err) {
         // Half a flatten is a mangled document: some fields drawn and removed,
@@ -3594,7 +3673,15 @@ Q
     }
 
     const out = await PDFDocument.create();
+    preserveDocumentCatalog(source, out);
     const total = source.getPageCount();
+
+    const hasRaster =
+      Object.keys(rasterPages).length > 0 && Object.values(rasterPages).some(Boolean);
+    const hasReencoded = embedded.size > 0;
+    if (!hasRaster && !hasReencoded) {
+      return { bytes: transfer(new Uint8Array(bytes)), keptOriginal: true, rasterizedPages: [] };
+    }
 
     // Every kept page is copied in one call. pdf-lib builds a fresh object
     // copier per `copyPages` call, so copying page by page duplicates anything
@@ -3631,9 +3718,9 @@ Q
     // CMP-04: a "compressed" file that is not smaller is not saved. Returning the
     // original bytes is the only honest outcome.
     if (rebuilt.byteLength >= bytes.byteLength) {
-      return { bytes: transfer(new Uint8Array(bytes)), keptOriginal: true };
+      return { bytes: transfer(new Uint8Array(bytes)), keptOriginal: true, rasterizedPages: [] };
     }
-    return { bytes: transfer(rebuilt), keptOriginal: false };
+    return { bytes: transfer(rebuilt), keptOriginal: false, rasterizedPages: [] };
   },
 
   async applyAltText(bytes, altTexts, job) {
@@ -4110,6 +4197,7 @@ Q
     }
 
     const out = await PDFDocument.create();
+    preserveDocumentCatalog(source, out);
     const total = sourcePages.length;
 
     for (let i = 0; i < total; i++) {
@@ -4131,9 +4219,7 @@ Q
       // coordinates the UI produced are in the *rotated* frame. We must apply
       // the inverse rotation to map them back to unrotated PDF content-space
       // before passing them to filterContentStream or drawRectangle.
-      const rotateVal = copied.node.get(PDFName.of('Rotate'));
-      const rotateDeg =
-        rotateVal instanceof PDFNumber ? normalizeRotation(rotateVal.asNumber()) : 0;
+      const rotateDeg = normalizeRotation(copied.getRotation().angle);
 
       function normalizedToContentSpace(r: RedactionRegion): Rect {
         // Start in the rotated frame: (r.x, r.y) are top-left fractions.
@@ -4554,35 +4640,36 @@ Q
     const MARGIN = 20;
     const GAP = 8;
 
-    const rows = Math.ceil(jpegPages.length / cols);
-    const cellW = (PAGE_W - MARGIN * 2 - GAP * (cols - 1)) / cols;
-    const cellH = (PAGE_H - MARGIN * 2 - GAP * (rows - 1)) / rows;
+    const maxRowsPerPage = 5;
+    const itemsPerPage = cols * maxRowsPerPage;
+    const totalSheets = Math.max(1, Math.ceil(jpegPages.length / itemsPerPage));
 
     const out = await PDFDocument.create();
 
-    // How many sheet pages do we need?
-    // We fit all rows on one A4 page since we normalise cell size across all rows.
-    // For very large counts the cells simply get smaller — still recognisable.
-    const sheetPage = out.addPage([PAGE_W, PAGE_H]);
+    for (let p = 0; p < totalSheets; p++) {
+      const sheetPage = out.addPage([PAGE_W, PAGE_H]);
+      const pageItems = jpegPages.slice(p * itemsPerPage, (p + 1) * itemsPerPage);
+      const cellW = (PAGE_W - MARGIN * 2 - GAP * (cols - 1)) / cols;
+      const cellH = (PAGE_H - MARGIN * 2 - GAP * (maxRowsPerPage - 1)) / maxRowsPerPage;
 
-    for (let i = 0; i < jpegPages.length; i++) {
-      await checkpoint(job, i / jpegPages.length, `Embedding thumbnail ${i + 1}`);
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      const x = MARGIN + col * (cellW + GAP);
-      // PDF y-axis is bottom-up; place from top
-      const y = PAGE_H - MARGIN - (row + 1) * cellH - row * GAP;
+      for (let i = 0; i < pageItems.length; i++) {
+        const globalIdx = p * itemsPerPage + i;
+        await checkpoint(job, globalIdx / jpegPages.length, `Embedding thumbnail ${globalIdx + 1}`);
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        const x = MARGIN + col * (cellW + GAP);
+        const y = PAGE_H - MARGIN - (row + 1) * cellH - row * GAP;
 
-      const img = await out.embedJpg(jpegPages[i]);
-      const { width: iw, height: ih } = img;
-      // Fit within cell, preserving aspect ratio
-      const scale = Math.min(cellW / iw, cellH / ih);
-      const dw = iw * scale;
-      const dh = ih * scale;
-      const dx = x + (cellW - dw) / 2;
-      const dy = y + (cellH - dh) / 2;
+        const img = await out.embedJpg(pageItems[i]);
+        const { width: iw, height: ih } = img;
+        const scale = Math.min(cellW / iw, cellH / ih);
+        const dw = iw * scale;
+        const dh = ih * scale;
+        const dx = x + (cellW - dw) / 2;
+        const dy = y + (cellH - dh) / 2;
 
-      sheetPage.drawImage(img, { x: dx, y: dy, width: dw, height: dh });
+        sheetPage.drawImage(img, { x: dx, y: dy, width: dw, height: dh });
+      }
     }
 
     await checkpoint(job, 0.95, 'Saving');

@@ -202,7 +202,11 @@ describe('classifyPages', () => {
 
   it('classifies every page independently', () => {
     const plan = classifyPages(
-      [page([image()], 0), page([], 1), page([image({ filter: 'JPXDecode' })], 2)],
+      [
+        page([image({ objectNumber: 10 })], 0),
+        page([], 1),
+        page([image({ filter: 'JPXDecode', objectNumber: 12 })], 2)
+      ],
       [text(0, 0), text(2000, 1), text(2000, 2)],
       OPTIONS
     );

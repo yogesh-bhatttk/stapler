@@ -49,11 +49,11 @@ export async function runBatch(signal?: AbortSignal) {
   // Fall back to sensible defaults when no recipe is active.
   const activeTools: string[] = recipe?.tools ?? ['watermark', 'compress'];
 
-  const compress = recipe?.settings.compress ?? compressSettings.value;
-  const watermark = recipe?.settings.watermark ?? watermarkSettings.value;
-  const headerFooter = recipe?.settings.headerFooter ?? headerFooterSettings.value;
-  const nup = recipe?.settings.nup ?? nupSettings.value;
-  const normalize = recipe?.settings.normalize ?? normalizeSettings.value;
+  const compress = recipe ? recipe.settings.compress : compressSettings.value;
+  const watermark = recipe ? recipe.settings.watermark : watermarkSettings.value;
+  const headerFooter = recipe ? recipe.settings.headerFooter : headerFooterSettings.value;
+  const nup = recipe ? recipe.settings.nup : nupSettings.value;
+  const normalize = recipe ? recipe.settings.normalize : normalizeSettings.value;
 
   batchProgress.value = {
     total: 0,
@@ -86,8 +86,8 @@ export async function runBatch(signal?: AbortSignal) {
     );
     const resolvedNames = deduplicateNames(rawNames);
 
-    let fileIndex = 0;
-    for (const fileHandle of files) {
+    for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
+      const fileHandle = files[fileIndex];
       if (signal?.aborted) {
         notify('warning', 'Batch Cancelled', { detail: 'Processing was cancelled by the user.' });
         break;
@@ -175,7 +175,7 @@ export async function runBatch(signal?: AbortSignal) {
 
         // Save output — safe because we verified inDir !== outDir above.
         // BAT-03: use the pre-resolved output name for this file.
-        const outName = resolvedNames[fileIndex++] + '.pdf';
+        const outName = resolvedNames[fileIndex] + '.pdf';
         const outHandle = await outDir.getFileHandle(outName, { create: true });
         const writable = await outHandle.createWritable();
         try {

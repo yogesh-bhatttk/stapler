@@ -749,12 +749,25 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     await save(doc, await finalize(result.bytes), `${stem(doc.name)}-ocr.pdf`);
   },
 
+  'table-extract': async ({ doc, job }) => {
+    const { extractPageTextItems } = await import('../../core/operations');
+    const { extractTableFromPage, exportTableToCsv } = await import('../../core/ocr/table-extract');
+    const bytes = await currentDocumentBytes(job);
+    const items = await extractPageTextItems(bytes, 0);
+    const extracted = extractTableFromPage(items);
+    const csv = exportTableToCsv(extracted);
+    await save(doc, new TextEncoder().encode(csv), `${stem(doc.name)}-table.csv`);
+  },
+  'contact-sheet': async ({ doc, job }) => {
+    const { exportContactSheet } = await import('../../core/operations');
+    const bytes = await currentDocumentBytes(job);
+    const sheet = await exportContactSheet(bytes, 4, job);
+    await save(doc, sheet, `${stem(doc.name)}-contact-sheet.pdf`);
+  },
   compare: async () => {},
   batch: async () => {},
   'md-to-pdf': async () => {},
-  shortcuts: async () => {},
-  'table-extract': async () => {},
-  'contact-sheet': exportComposed
+  shortcuts: async () => {}
 };
 
 export async function commitTool(toolId: ToolId, job: JobOptions): Promise<void> {
