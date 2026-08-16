@@ -22,6 +22,7 @@
 export function transformManifestForFirefox(manifest) {
   return {
     ...manifest,
+    permissions: Array.from(new Set([...(manifest.permissions || []), 'tabs'])),
     background: { scripts: ['background.js'], type: 'module' },
     browser_specific_settings: {
       gecko: {

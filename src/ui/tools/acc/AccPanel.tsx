@@ -16,19 +16,23 @@ export function AccPanel() {
 
   useEffect(() => {
     if (!doc) return;
+    let activeUrls: string[] = [];
     run({ label: 'Scanning for images...', scope: 'acc' }, async (job: JobOptions) => {
       const bytes = await currentDocumentBytes({ ...job, signal: job.signal }, true);
       const result = await findImagesForAltText(bytes, { ...job, signal: job.signal });
-      const withUrls = result.map(img => ({
-        ...img,
-        url: URL.createObjectURL(new Blob([img.bytes], { type: `image/${img.ext}` }))
-      }));
+      if (job.signal?.aborted) return;
+      const withUrls = result.map(img => {
+        const url = URL.createObjectURL(new Blob([img.bytes], { type: `image/${img.ext}` }));
+        activeUrls.push(url);
+        return { ...img, url };
+      });
       setImages(withUrls);
     });
 
     return () => {
       // Clean up object URLs when unmounting or doc changes
-      images.forEach(img => URL.revokeObjectURL(img.url));
+      activeUrls.forEach(url => URL.revokeObjectURL(url));
+      activeUrls = [];
     };
   }, [doc, run]);
 

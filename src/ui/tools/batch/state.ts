@@ -28,8 +28,10 @@ savedRecipes.subscribe(recipes => {
 
 export const activeRecipeId = signal<string | null>(null);
 
-export const inputDirHandle = signal<FileSystemDirectoryHandle | null>(null);
-export const outputDirHandle = signal<FileSystemDirectoryHandle | null>(null);
+import type { FsaDirectoryHandle } from '../../../platform/fsa';
+
+export const inputDirHandle = signal<FsaDirectoryHandle | FileSystemDirectoryHandle | null>(null);
+export const outputDirHandle = signal<FsaDirectoryHandle | FileSystemDirectoryHandle | null>(null);
 
 export interface BatchProgress {
   total: number;

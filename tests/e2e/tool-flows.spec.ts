@@ -1119,7 +1119,7 @@ test.describe('tool flows', () => {
 
     await expect(page.getByRole('checkbox', { name: /Flatten form fields/ })).toBeChecked();
 
-    const bytes = await commitAndRead(page, /Export/);
+    const bytes = await commitAndRead(page, /Export annotated PDF/);
     const doc = await PDFDocument.load(bytes);
     expect(doc.getPageCount()).toBe(1);
     expect(doc.getPage(0).node.Annots()).toBeUndefined();

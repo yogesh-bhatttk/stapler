@@ -31,6 +31,7 @@ export interface FsaDirectoryHandle {
   getFileHandle(name: string, options?: { create?: boolean }): Promise<FsaFileHandle>;
   queryPermission(descriptor?: { mode?: 'read' | 'readwrite' }): Promise<PermissionState>;
   requestPermission(descriptor?: { mode?: 'read' | 'readwrite' }): Promise<PermissionState>;
+  isSameEntry?(other: unknown): Promise<boolean>;
 }
 
 interface FsaPickerTypes {

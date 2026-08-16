@@ -1,22 +1,18 @@
-chrome.action.onClicked.addListener(() => {
+chrome.action.onClicked.addListener(async () => {
   const editorUrl = chrome.runtime.getURL('editor.html');
-
-  chrome.tabs.query({ url: `${editorUrl}*` }, tabs => {
-    if (tabs.length > 0) {
-      // Focus existing tab
-      const tabId = tabs[0].id;
-      const windowId = tabs[0].windowId;
-      if (tabId) {
-        chrome.tabs.update(tabId, { active: true });
-        if (windowId) {
-          chrome.windows.update(windowId, { focused: true });
-        }
+  const tabs = await chrome.tabs.query({ url: `${editorUrl}*` });
+  if (tabs.length > 0) {
+    const tabId = tabs[0].id;
+    const windowId = tabs[0].windowId;
+    if (tabId) {
+      await chrome.tabs.update(tabId, { active: true });
+      if (windowId) {
+        await chrome.windows.update(windowId, { focused: true });
       }
-    } else {
-      // Open new tab
-      chrome.tabs.create({ url: editorUrl });
     }
-  });
+  } else {
+    await chrome.tabs.create({ url: editorUrl });
+  }
 });
 
 chrome.runtime.onInstalled.addListener(details => {

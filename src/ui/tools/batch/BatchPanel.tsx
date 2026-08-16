@@ -21,27 +21,42 @@ import { useTranslation } from '../../../core/i18n';
 
 import { useRef } from 'preact/hooks';
 
+import { hasDirectoryPicker, showDirectoryPicker, isAbort } from '../../../platform/fsa';
+import { notify } from '../../../core/notify';
+
 export function BatchPanel() {
   const t = useTranslation();
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const handleSelectInput = async () => {
+    if (!hasDirectoryPicker()) {
+      notify('warning', 'Directory selection unavailable', {
+        detail:
+          'Folder processing requires a browser with File System Access support (Chrome or Edge).'
+      });
+      return;
+    }
     try {
-      // @ts-expect-error TODO: fix type
-      const dir = await window.showDirectoryPicker({ mode: 'read' });
+      const dir = await showDirectoryPicker({ mode: 'read' });
       inputDirHandle.value = dir;
     } catch (e) {
-      console.error(e);
+      if (!isAbort(e)) console.error(e);
     }
   };
 
   const handleSelectOutput = async () => {
+    if (!hasDirectoryPicker()) {
+      notify('warning', 'Directory selection unavailable', {
+        detail:
+          'Folder processing requires a browser with File System Access support (Chrome or Edge).'
+      });
+      return;
+    }
     try {
-      // @ts-expect-error TODO: fix type
-      const dir = await window.showDirectoryPicker({ mode: 'readwrite' });
+      const dir = await showDirectoryPicker({ mode: 'readwrite' });
       outputDirHandle.value = dir;
     } catch (e) {
-      console.error(e);
+      if (!isAbort(e)) console.error(e);
     }
   };
 

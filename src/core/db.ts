@@ -296,9 +296,20 @@ export async function deleteSearchIndexRecordsByFileId(fileId: string): Promise<
   }
   const result = await guard('db.deleteSearchIndexRecordsByFileId', async db => {
     const records = await db.getAllFromIndex('searchIndex', 'by-fileId', fileId);
+    const tokenRecords = await db.getAllFromIndex('searchIndex', 'by-type', 'token');
     const tx = db.transaction('searchIndex', 'readwrite');
     for (const rec of records) {
       await tx.store.delete(rec.id);
+    }
+    for (const rec of tokenRecords) {
+      if (rec.occurrences?.some(o => o.fileId === fileId)) {
+        const filtered = rec.occurrences.filter(o => o.fileId !== fileId);
+        if (filtered.length === 0) {
+          await tx.store.delete(rec.id);
+        } else {
+          await tx.store.put({ ...rec, occurrences: filtered });
+        }
+      }
     }
     await tx.done;
   });

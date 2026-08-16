@@ -150,6 +150,9 @@ export function createWorkerClient<T>(
       let released = false;
       return {
         async lease(fn) {
+          if (released) {
+            throw new Error('Cannot lease from a released pinned client');
+          }
           inst.leases += 1;
           try {
             return await fn(inst.proxy);

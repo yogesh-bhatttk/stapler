@@ -28,7 +28,10 @@ export async function runBatch(signal?: AbortSignal) {
   // a batch run would overwrite the source files in-place with no backup —
   // the output handle is opened with { create: true } using the same filename,
   // silently destroying the original. Reject upfront with a clear message.
-  if (await inDir.isSameEntry(outDir)) {
+  if (
+    typeof inDir.isSameEntry === 'function' &&
+    (await inDir.isSameEntry(outDir as unknown as FileSystemHandle))
+  ) {
     notify('danger', 'Input and output folders are the same', {
       detail:
         'Choose a different output folder. Running batch in-place would overwrite your originals.'
@@ -62,10 +65,14 @@ export async function runBatch(signal?: AbortSignal) {
 
   try {
     const files: FileSystemFileHandle[] = [];
-    // @ts-expect-error TODO: fix type
-    for await (const entry of inDir.values()) {
-      if (entry.kind === 'file' && entry.name.toLowerCase().endsWith('.pdf')) {
-        files.push(entry);
+    const inDirIterable = inDir as unknown as {
+      values: () => AsyncIterableIterator<FileSystemFileHandle>;
+    };
+    if (typeof inDirIterable.values === 'function') {
+      for await (const entry of inDirIterable.values()) {
+        if (entry.kind === 'file' && entry.name.toLowerCase().endsWith('.pdf')) {
+          files.push(entry);
+        }
       }
     }
 
@@ -90,90 +97,71 @@ export async function runBatch(signal?: AbortSignal) {
         const file = await fileHandle.getFile();
         const bytes = new Uint8Array(await file.arrayBuffer());
 
-        // Load WITHOUT ignoreEncryption so encrypted files surface as an error
-        // rather than silently producing garbled output. The previous code used
-        // `ignoreEncryption: true`, which caused compose to write empty or
-        // corrupted pages for password-protected files without any warning.
-        const { PDFDocument } = await import('pdf-lib');
-        let doc: Awaited<ReturnType<typeof PDFDocument.load>>;
-        try {
-          doc = await PDFDocument.load(bytes);
-        } catch (loadErr) {
-          const msg = String(loadErr);
-          const isEncrypted = msg.toLowerCase().includes('encrypt') || msg.includes('password');
-          if (isEncrypted) {
-            throw new Error(`${fileHandle.name} is password-protected — skipping.`, {
-              cause: loadErr
-            });
-          }
-          throw loadErr;
-        }
-        const pageCount = doc.getPageCount();
-
-        const pages = Array.from({ length: pageCount }).map((_, i) => ({
-          key: `${fileHandle.name}-${i}`,
-          sourceDocId: fileHandle.name,
-          sourceIndex: i,
-          rotation: 0
-        }));
-
         const { processWorker } = await import('../../../core/workers');
-        const { hasWatermarkContent } = await import('../watermark/state');
-        const { hasHeaderFooterContent } = await import('../watermark/state');
+        const { hasWatermarkContent, hasHeaderFooterContent } = await import('../watermark/state');
 
         let currentBytes = bytes;
 
         // Apply tools in the order declared by recipe.tools (or defaults).
-        // Previously every tool was always applied in a hardcoded compose→compress
-        // sequence, ignoring recipe.tools entirely.
         for (const toolId of activeTools) {
-          if (toolId === 'watermark') {
-            // Watermark and header/footer share the compose call.
-            const applyWatermark = watermark && hasWatermarkContent(watermark);
-            const applyHF = headerFooter && hasHeaderFooterContent(headerFooter);
-            if (applyWatermark || applyHF) {
+          if (toolId === 'watermark' || toolId === 'normalize' || toolId === 'nup') {
+            // Re-inspect current bytes so page maps reflect the document state
+            // after any preceding tools (e.g. nup layout changes).
+            const inspect = await processWorker.lease(api => api.inspect(currentBytes));
+            const pages = Array.from({ length: inspect.pageCount }).map((_, i) => ({
+              key: `${fileHandle.name}-${i}`,
+              sourceDocId: fileHandle.name,
+              sourceIndex: i,
+              rotation: 0
+            }));
+
+            if (toolId === 'watermark') {
+              const applyWatermark = watermark && hasWatermarkContent(watermark);
+              const applyHF = headerFooter && hasHeaderFooterContent(headerFooter);
+              if (applyWatermark || applyHF) {
+                currentBytes = await processWorker.lease(api =>
+                  api.compose(
+                    pages,
+                    { [fileHandle.name]: currentBytes },
+                    [],
+                    applyWatermark ? (watermark as unknown as WatermarkData) : undefined,
+                    applyHF ? headerFooter : undefined,
+                    undefined,
+                    undefined,
+                    [],
+                    undefined
+                  )
+                );
+              }
+            } else if (toolId === 'normalize') {
               currentBytes = await processWorker.lease(api =>
                 api.compose(
                   pages,
                   { [fileHandle.name]: currentBytes },
                   [],
-                  applyWatermark ? (watermark as unknown as WatermarkData) : undefined,
-                  applyHF ? headerFooter : undefined,
-                  undefined, // normalize — handled separately
-                  undefined, // nup — handled separately
+                  undefined,
+                  undefined,
+                  normalize,
+                  undefined,
+                  [],
+                  undefined
+                )
+              );
+            } else if (toolId === 'nup') {
+              currentBytes = await processWorker.lease(api =>
+                api.compose(
+                  pages,
+                  { [fileHandle.name]: currentBytes },
+                  [],
+                  undefined,
+                  undefined,
+                  undefined,
+                  nup,
                   [],
                   undefined
                 )
               );
             }
-          } else if (toolId === 'normalize') {
-            currentBytes = await processWorker.lease(api =>
-              api.compose(
-                pages,
-                { [fileHandle.name]: currentBytes },
-                [],
-                undefined,
-                undefined,
-                normalize,
-                undefined,
-                [],
-                undefined
-              )
-            );
-          } else if (toolId === 'nup') {
-            currentBytes = await processWorker.lease(api =>
-              api.compose(
-                pages,
-                { [fileHandle.name]: currentBytes },
-                [],
-                undefined,
-                undefined,
-                undefined,
-                nup,
-                [],
-                undefined
-              )
-            );
           } else if (toolId === 'compress' && compress) {
             const report = await planCompression(currentBytes, compress);
             if (!report.alreadyOptimized) {
@@ -183,9 +171,6 @@ export async function runBatch(signal?: AbortSignal) {
               }
             }
           }
-          // Other tool IDs (redact, sign, etc.) are not batch-applicable yet
-          // and are silently skipped — the recipe will still apply whatever
-          // tools it does support.
         }
 
         // Save output — safe because we verified inDir !== outDir above.
@@ -193,8 +178,13 @@ export async function runBatch(signal?: AbortSignal) {
         const outName = resolvedNames[fileIndex++] + '.pdf';
         const outHandle = await outDir.getFileHandle(outName, { create: true });
         const writable = await outHandle.createWritable();
-        await writable.write(currentBytes);
-        await writable.close();
+        try {
+          await writable.write(currentBytes);
+          await writable.close();
+        } catch (writeErr) {
+          await (writable as unknown as { abort(): Promise<void> }).abort().catch(() => {});
+          throw writeErr;
+        }
 
         batchProgress.value = {
           ...batchProgress.value,
