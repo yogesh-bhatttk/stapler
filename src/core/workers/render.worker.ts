@@ -163,6 +163,23 @@ export interface RenderJob {
     targetDpi: number,
     wanted?: number[]
   ): Promise<ExtractedImage[]>;
+  /**
+   * CMP-03, document-wide — re-encodes each distinct image XObject **once**, at
+   * the largest size any page displays it at.
+   *
+   * `extractPageImages` works a page at a time, so a logo on ten pages was
+   * decoded, downscaled and JPEG-encoded ten times and nine of those results were
+   * thrown away (only the largest is embedded). The cost was proportional to page
+   * count for no benefit. This decides the winning size for every image *before*
+   * any pixel work, then does that work exactly once per object.
+   */
+  extractSharedImages(
+    handle: string,
+    requests: { pageIndex: number; objectNumbers: number[] }[],
+    quality: number,
+    targetDpi: number,
+    job?: JobHandle
+  ): Promise<ExtractedImage[]>;
   checkRegionText(
     handle: string,
     regions: RedactionRegion[]
@@ -1079,6 +1096,139 @@ const api: RenderJob = {
     }
   },
 
+  async extractSharedImages(handle, requests, quality, targetDpi, job) {
+    const { doc } = entry(handle);
+    if (requests.length === 0) return [];
+
+    /**
+     * The winning placement per image, and the result already produced for it.
+     * `encodedFor` records *which* target a result came from, so a later, larger
+     * placement can be recognised as needing a fresh encode and anything already
+     * at its final size is never encoded twice.
+     */
+    const winners = new Map<number, ImageEncodeTarget>();
+    const results = new Map<number, ExtractedImage>();
+    const encodedFor = new Map<number, ImageEncodeTarget>();
+
+    /**
+     * Pages whose decoded images are still needed, oldest first.
+     *
+     * A page cannot be released until every image it currently wins has been
+     * encoded: `page.cleanup()` empties that page's decoded-object store, and
+     * pdf.js will not resend an image it has already delivered, so asking for one
+     * afterwards waits for an object that never arrives. (Images promoted to the
+     * document-wide `commonObjs` do survive, but which images those are is
+     * pdf.js's decision, not something this code may assume.)
+     */
+    const held = new Map<number, pdfjsLib.PDFPageProxy>();
+
+    const encode = async (target: ImageEncodeTarget) => {
+      const page = held.get(target.pageIndex);
+      if (!page) return;
+      const decoded = await decodeImage(page, target.placement.objId);
+      // A null decode is pdf.js telling us it could not read the image
+      // (JBIG2/JPX without a decoder, a broken stream). Leaving the original in
+      // place is the only safe answer — PLAN §5.2.
+      if (!decoded) {
+        encodedFor.set(target.objectNumber, target);
+        return;
+      }
+
+      const size = targetSize(target.placement, decoded, targetDpi);
+      const jpeg = await encodeJpeg(decoded, size, quality);
+      // A mask is resampled to `size` whenever one exists, not only when the
+      // *colour* image's own dimensions changed — see `extractPageImages`.
+      const maskBytes = decoded.mask
+        ? await encodeMask(decoded.mask, decoded.width, decoded.height, size)
+        : undefined;
+
+      results.set(decoded.objectNumber, {
+        objectNumber: decoded.objectNumber,
+        jpeg,
+        width: size.width,
+        height: size.height,
+        sourceWidth: decoded.width,
+        sourceHeight: decoded.height,
+        hadTransparency: decoded.hadTransparency,
+        maskBytes
+      });
+      encodedFor.set(target.objectNumber, target);
+    };
+
+    /** Releases every held page that no unencoded winner still depends on. */
+    const releaseSettled = () => {
+      const needed = new Set<number>();
+      for (const [objectNumber, target] of winners) {
+        if (encodedFor.get(objectNumber) !== target) needed.add(target.pageIndex);
+      }
+      for (const [pageIndex, page] of held) {
+        if (needed.has(pageIndex)) continue;
+        page.cleanup();
+        held.delete(pageIndex);
+      }
+    };
+
+    try {
+      for (let i = 0; i < requests.length; i++) {
+        const { pageIndex, objectNumbers } = requests[i];
+        await checkpoint(job, i / requests.length, `Re-encoding images on page ${pageIndex + 1}`);
+        const wanted = new Set(objectNumbers);
+        if (wanted.size === 0) continue;
+
+        const page = await doc.getPage(pageIndex + 1);
+        held.set(pageIndex, page);
+
+        // Nothing is decoded to pixels here: the operator list gives the
+        // placement, and the decoded object is read only for its `ref`, which is
+        // the object number the pdf-lib half of the pipeline addresses.
+        for (const placement of imagePlacements(await page.getOperatorList())) {
+          const resolved = await awaitImageObject(page, placement.objId);
+          const objectNumber = refObjectNumber((resolved?.data as { ref?: unknown })?.ref);
+          if (objectNumber < 0 || !wanted.has(objectNumber)) continue;
+          const previous = winners.get(objectNumber);
+          if (!previous || largerPlacement(placement, previous.placement)) {
+            winners.set(objectNumber, { objectNumber, pageIndex, placement });
+          }
+        }
+
+        releaseSettled();
+
+        // Memory valve. Holding a page keeps its decoded images alive, so a long
+        // document with a different large image on every page would otherwise
+        // grow without bound. Past the cap the oldest page's images are encoded
+        // at the best size seen *so far* and the page is let go; if a later page
+        // turns out to display one of them larger, that one image is encoded a
+        // second time. Correctness never depends on the cap — only the promise of
+        // exactly one encode does, and only under memory pressure.
+        while (held.size > MAX_HELD_PAGES) {
+          const oldest = held.keys().next().value;
+          if (oldest === undefined) break;
+          for (const [objectNumber, target] of winners) {
+            if (target.pageIndex === oldest && encodedFor.get(objectNumber) !== target) {
+              await encode(target);
+            }
+          }
+          const page = held.get(oldest);
+          page?.cleanup();
+          held.delete(oldest);
+        }
+      }
+
+      for (const [objectNumber, target] of winners) {
+        if (encodedFor.get(objectNumber) !== target) await encode(target);
+      }
+    } finally {
+      for (const page of held.values()) page.cleanup();
+      held.clear();
+    }
+
+    const out = [...results.values()];
+    return Comlink.transfer(
+      out,
+      out.map(o => o.jpeg.buffer)
+    );
+  },
+
   async redactPageImages(handle, pageIndex, requests) {
     if (requests.length === 0) return [];
     const page = await entry(handle).doc.getPage(pageIndex + 1);
@@ -1217,6 +1367,38 @@ interface ImagePlacement {
 
 function isMatrix(value: unknown): value is Matrix {
   return Array.isArray(value) && value.length === 6 && value.every(n => typeof n === 'number');
+}
+
+/**
+ * How many pages `extractSharedImages` may keep decoded at once. Each held page
+ * is one page's worth of decoded images; eight is a few tens of MB on ordinary
+ * content and keeps the encode-once guarantee for any realistic shared logo,
+ * which is what this exists for.
+ */
+const MAX_HELD_PAGES = 8;
+
+/** Which page's placement of a shared image decides the size it is encoded at. */
+interface ImageEncodeTarget {
+  objectNumber: number;
+  pageIndex: number;
+  placement: ImagePlacement;
+}
+
+/**
+ * True when `candidate` needs at least as many pixels as `incumbent` — the rule
+ * that picks the one size a shared image is encoded at.
+ *
+ * An *unmeasured* placement wins outright: `targetSize` refuses to downscale one
+ * (it cannot know how large the image is really drawn), so it needs the source
+ * resolution, which is the largest anything can ask for. Between two measured
+ * placements, displayed area decides. Exported for testing: getting this backwards
+ * means every other page inherits a too-small encode and shows a blurry image,
+ * which is exactly the bug that made the per-page encode look necessary.
+ */
+export function largerPlacement(candidate: ImagePlacement, incumbent: ImagePlacement): boolean {
+  if (!candidate.measured) return true;
+  if (!incumbent.measured) return false;
+  return candidate.widthPt * candidate.heightPt > incumbent.widthPt * incumbent.heightPt;
 }
 
 /**

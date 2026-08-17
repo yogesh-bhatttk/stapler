@@ -494,17 +494,19 @@ export async function compressDocument(
   type EncodedImage = { jpeg: Uint8Array; width: number; height: number; maskBytes?: Uint8Array };
   const replacedImages: Record<number, Record<number, EncodedImage>> = {};
 
-  // A shared image (the same object referenced from several pages) is re-encoded
-  // once *per page that displays it*, not once total — the same object number
-  // can legitimately be drawn at very different sizes on different pages (a logo
-  // shown small on a cover and full-bleed five pages later), and keeping only
-  // whichever page happened to be processed first meant every other placement
-  // inherited that page's size, upscaling a tiny encode into a blurry full-page
-  // image. `bestByObjectNumber` keeps the largest (by pixel area) result seen
-  // across all of a shared image's pages; the per-page assignment pass below
-  // then points every page that wants it at that one winning encode, so a shared
-  // image still ends up embedded exactly once in the output.
-  const bestByObjectNumber = new Map<number, EncodedImage>();
+  // A shared image (the same object referenced from several pages) is decoded,
+  // downscaled and encoded **once**, at the largest size any page displays it at.
+  //
+  // It used to be encoded once per page that displays it, and all but the largest
+  // result was discarded — a logo on ten pages cost ten decodes and ten JPEG
+  // encodes to embed one stream, i.e. work proportional to page count for no
+  // benefit. `extractSharedImages` chooses the winning size for every image
+  // before any pixel work starts (the same "largest use wins" rule the per-page
+  // pass applied afterwards, so the chosen size is unchanged), which is also what
+  // stops a page that shows the logo full-bleed from inheriting a thumbnail-sized
+  // encode. The per-page assignment below then points every page that wants the
+  // image at that one encode, so it is still embedded exactly once in the output.
+  const encodedByObjectNumber = new Map<number, EncodedImage>();
   const namesByPage: Record<number, { name: string; objectNumber: number }[]> = {};
 
   // One lease for every read, so every call reaches the instance that owns the
@@ -513,9 +515,14 @@ export async function compressDocument(
     const { handle } = await api.loadDocument(bytes);
     try {
       const work = report.plan.pages.filter(p => p.route === 'raster' || p.route === 'surgical');
+      const surgical: { pageIndex: number; objectNumbers: number[] }[] = [];
+
       for (let i = 0; i < work.length; i++) {
         const page = work[i];
-        options.onProgress?.(i / Math.max(1, work.length), `Processing page ${page.pageIndex + 1}`);
+        options.onProgress?.(
+          (i / Math.max(1, work.length)) * 0.6,
+          `Processing page ${page.pageIndex + 1}`
+        );
         if (options.signal?.aborted) break;
 
         if (page.route === 'raster') {
@@ -531,26 +538,30 @@ export async function compressDocument(
 
         if (page.reencode.length === 0) continue;
         namesByPage[page.pageIndex] = page.reencode;
+        surgical.push({
+          pageIndex: page.pageIndex,
+          objectNumbers: page.reencode.map(e => e.objectNumber)
+        });
+      }
 
-        const extracted = await api.extractPageImages(
+      if (surgical.length > 0 && !options.signal?.aborted) {
+        options.onProgress?.(0.6, 'Re-encoding images');
+        // One call for the whole document, not one per page: the encode-once rule
+        // can only be enforced where every page's placements are visible at once.
+        const extracted = await api.extractSharedImages(
           handle,
-          page.pageIndex,
+          surgical,
           settings.quality,
           settings.dpi,
-          page.reencode.map(e => e.objectNumber)
+          job
         );
-
         for (const image of extracted) {
-          const encoded = {
+          encodedByObjectNumber.set(image.objectNumber, {
             jpeg: image.jpeg,
             width: image.width,
             height: image.height,
             maskBytes: image.maskBytes
-          };
-          const existing = bestByObjectNumber.get(image.objectNumber);
-          if (!existing || image.width * image.height > existing.width * existing.height) {
-            bestByObjectNumber.set(image.objectNumber, encoded);
-          }
+          });
         }
       }
     } finally {
@@ -566,8 +577,8 @@ export async function compressDocument(
     // A name-keyed map would let one collide with and shadow the other.
     const replacements: Record<number, EncodedImage> = {};
     for (const { objectNumber } of entries) {
-      const best = bestByObjectNumber.get(objectNumber);
-      if (best) replacements[objectNumber] = best;
+      const encoded = encodedByObjectNumber.get(objectNumber);
+      if (encoded) replacements[objectNumber] = encoded;
     }
     if (Object.keys(replacements).length > 0) replacedImages[pageIndex] = replacements;
   }
