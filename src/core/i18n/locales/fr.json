@@ -279,10 +279,10 @@
   "Select none": "Select none",
   "Filesystem paths": "Filesystem paths",
   "Each path goes when the item it sits in is stripped above.": "Each path goes when the item it sits in is stripped above.",
-  "tool.annotate": "Annotate",
-  "tool.annotate.desc": "Draw highlights, shapes, and notes on pages.",
-  "tool.annotate.findPlaceholder": "Term to highlight…",
-  "tool.annotate.findText": "Find and highlight text",
-  "tool.annotate.highlightEvery": "Highlight every match",
-  "tool.annotate.matchCase": "Match case"
+  "tool.annotate": "Annoter",
+  "tool.annotate.desc": "Dessinez des surlignages, formes et notes sur les pages.",
+  "tool.annotate.findPlaceholder": "Terme à surligner…",
+  "tool.annotate.findText": "Rechercher et surligner du texte",
+  "tool.annotate.highlightEvery": "Surligner toutes les correspondances",
+  "tool.annotate.matchCase": "Respecter la casse"
 }
