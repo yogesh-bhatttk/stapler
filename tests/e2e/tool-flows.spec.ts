@@ -99,6 +99,24 @@ interface ImageEntry {
  */
 const CMYK_COLOUR_TOLERANCE = 10;
 
+/**
+ * The raw, still-encoded bytes of the document's first image XObject — the thing
+ * an image extractor would pull out of the file.
+ */
+async function imageStreamBytes(bytes: Uint8Array): Promise<Uint8Array | null> {
+  const doc = await PDFDocument.load(bytes);
+  for (const page of doc.getPages()) {
+    const xobjects = page.node.Resources()?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+    for (const [key] of xobjects?.entries() ?? []) {
+      const stream = xobjects!.lookup(key);
+      if (!(stream instanceof PDFRawStream)) continue;
+      if (String(stream.dict.get(PDFName.of('Subtype'))) !== '/Image') continue;
+      return stream.contents;
+    }
+  }
+  return null;
+}
+
 /** Every image XObject in the document, with enough detail to diff two versions. */
 async function imageEntries(bytes: Uint8Array): Promise<ImageEntry[]> {
   const doc = await PDFDocument.load(bytes);
@@ -1174,6 +1192,51 @@ test.describe('tool flows', () => {
     expect(await drawnText(bytes)).not.toContain('Line 1 of body text on page 1.');
     expect(await drawnText(bytes)).toContain('Line 2 of body text on page 1.');
     expect(output.getPageCount()).toBe(6);
+  });
+
+  test('redact: a mark over part of an image destroys those pixels, not just the view', async ({
+    page
+  }) => {
+    // The bug this covers: a redaction rectangle that overlaps an image without
+    // covering it whole used to leave the image untouched and paint a black box
+    // on top. The page looked redacted; `pdfimages` handed back the original.
+    const file = await ensureFixture('mixed-text-image.pdf', () => mixedTextImagePdf());
+    const sourceImages = await imageEntries(new Uint8Array(readFileSync(file)));
+    expect(sourceImages).toHaveLength(1);
+    const sourceStream = await imageStreamBytes(new Uint8Array(readFileSync(file)));
+
+    await importFixture(page, file);
+    await gotoTool(page, 'redact');
+
+    // The fixture draws its image across x≈0.07–0.82 and y≈0.45–0.86 of the
+    // page. This rectangle sits inside that, covering part of the image only.
+    const drawingArea = page.getByRole('group', { name: /Redaction drawing area/ });
+    const box = await drawingArea.boundingBox();
+    if (!box) throw new Error('missing drawing area geometry');
+    await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.55);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width * 0.45, box.y + box.height * 0.7, { steps: 5 });
+    await page.mouse.up();
+    await expect(page.getByText('Marks (1)')).toBeVisible();
+
+    await page.getByRole('button', { name: 'Verify & apply' }).click();
+    await expect(page.getByText('Redaction verified and applied')).toBeVisible({
+      timeout: 60_000
+    });
+    await page.getByRole('button', { name: 'Dismiss notification' }).click();
+
+    await gotoTool(page, 'organize');
+    const bytes = await commitAndRead(page, 'Export PDF');
+
+    // The page still draws an image — the uncovered part of it is content the
+    // user kept — but it is not the same image any more, and the original
+    // samples are nowhere in the file.
+    const outImages = await imageEntries(bytes);
+    expect(outImages).toHaveLength(1);
+    const outStream = await imageStreamBytes(bytes);
+    expect(outStream).not.toBeNull();
+    expect(Buffer.compare(Buffer.from(outStream!), Buffer.from(sourceStream!))).not.toBe(0);
+    expect(Buffer.from(bytes).includes(Buffer.from(sourceStream!))).toBe(false);
   });
 
   test('redact: a keyboard-only user can create, move, and delete a region', async ({ page }) => {

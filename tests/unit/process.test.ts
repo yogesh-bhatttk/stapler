@@ -1585,3 +1585,462 @@ describe('flattenDocument (SGN-05)', () => {
     expect(await pageContentText(doc, 2)).toContain('Stapler fixture page 3');
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * RED-02 — an overlay is not a redaction
+ * ------------------------------------------------------------------ */
+
+/**
+ * A page whose entire surface is one image XObject, the way a scan is. The
+ * image's samples are readable ASCII so a test can assert on the output *bytes*
+ * rather than on a report that says the job succeeded.
+ */
+async function scannedPagePdf(secret: string): Promise<{ bytes: Uint8Array; samples: string }> {
+  const { PDFRawStream } = await import('pdf-lib');
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([600, 800]);
+
+  // 8-bit DeviceRGB, so three bytes per pixel: the string is the pixel data.
+  const samples = secret.repeat(3).slice(0, 15);
+  const stream = PDFRawStream.of(
+    doc.context.obj({
+      Type: 'XObject',
+      Subtype: 'Image',
+      Width: 5,
+      Height: 1,
+      ColorSpace: 'DeviceRGB',
+      BitsPerComponent: 8
+    }),
+    new TextEncoder().encode(samples)
+  );
+  const imageRef = doc.context.register(stream);
+  (page.node.Resources() as PDFDict).set(PDFName.of('XObject'), doc.context.obj({ Im0: imageRef }));
+  page.node.set(
+    PDFName.of('Contents'),
+    doc.context.register(doc.context.flateStream('q 600 0 0 800 0 0 cm /Im0 Do Q'))
+  );
+  return { bytes: await doc.save({ useObjectStreams: false }), samples };
+}
+
+/** Every indirect object in the saved file as text — object streams included. */
+async function allObjectsAsText(bytes: Uint8Array): Promise<string> {
+  const doc = await PDFDocument.load(bytes);
+  let text = '';
+  for (const [, object] of doc.context.enumerateIndirectObjects()) {
+    text += `${object}\n`;
+    const contents = (object as any).contents;
+    if (contents instanceof Uint8Array) text += new TextDecoder('latin1').decode(contents);
+  }
+  return text;
+}
+
+describe('applyRedactions: an image only partly covered by a mark (RED-02)', () => {
+  it('refuses rather than drawing a black box over intact pixels', async () => {
+    const { bytes } = await scannedPagePdf('SECRETIMAGE');
+
+    // A small mark inside a full-page image: the old code kept the image, drew a
+    // rectangle on top, and reported success.
+    await expect(
+      processWorkerImpl.applyRedactions(bytes, [
+        { pageIndex: 0, x: 0.1, y: 0.1, width: 0.2, height: 0.2 }
+      ])
+    ).rejects.toThrow(/only partly covered/);
+  });
+
+  it('substitutes the blacked-out pixels when the caller supplies them', async () => {
+    const { bytes, samples } = await scannedPagePdf('SECRETIMAGE');
+    const { readFile } = await import('node:fs/promises');
+    const replacement = new Uint8Array(
+      await readFile(new URL('../fixtures/tiny.jpg', import.meta.url))
+    );
+
+    const out = await processWorkerImpl.applyRedactions(
+      bytes,
+      [{ pageIndex: 0, x: 0.1, y: 0.1, width: 0.2, height: 0.2 }],
+      { 0: { Im0: { bytes: replacement, format: 'jpeg', width: 5, height: 1 } } }
+    );
+
+    // The original samples must be gone from the file, not merely unreferenced.
+    expect(await allObjectsAsText(out)).not.toContain(samples);
+
+    const doc = await PDFDocument.load(out);
+    const xobjects = doc.getPage(0).node.Resources()?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+    expect(xobjects?.keys().map(String)).toContain('/Im0');
+    expect(doc.getPageCount()).toBe(1);
+  });
+
+  it('still drops an image a mark fully contains, and its bytes with it', async () => {
+    const { bytes, samples } = await scannedPagePdf('SECRETIMAGE');
+    const out = await processWorkerImpl.applyRedactions(bytes, [
+      { pageIndex: 0, x: 0, y: 0, width: 1, height: 1 }
+    ]);
+    expect(await allObjectsAsText(out)).not.toContain(samples);
+  });
+
+  it('reports the covered area in the image own unit space', async () => {
+    const { filterContentStream, tokenizeContentStream, parseContentStream } =
+      await import('../../src/core/pdf/interpreter');
+    const statements = parseContentStream(
+      tokenizeContentStream(new TextEncoder().encode('q 600 0 0 800 0 0 cm /Im0 Do Q'))
+    );
+    // The bottom-left quarter of the page, in PDF user space.
+    const { partialImageCoverage, strippedXObjectNames } = filterContentStream(
+      statements,
+      [{ x: 0, y: 0, width: 300, height: 400 }],
+      undefined,
+      () => ({ subtype: 'Image' })
+    );
+    expect(strippedXObjectNames).toEqual([]);
+    expect(partialImageCoverage).toHaveLength(1);
+    expect(partialImageCoverage[0].name).toBe('Im0');
+    const rect = partialImageCoverage[0].rects[0];
+    expect(rect.x).toBeCloseTo(0);
+    expect(rect.y).toBeCloseTo(0);
+    expect(rect.width).toBeCloseTo(0.5);
+    expect(rect.height).toBeCloseTo(0.5);
+  });
+});
+
+describe('applyRedactions: annotations are deleted, not just unhooked (RED-03)', () => {
+  it('removes a redacted annotation object from the output bytes', async () => {
+    const SECRET = 'SSN-123-45-6789';
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([600, 800]);
+    const annot = doc.context.obj({
+      Type: 'Annot',
+      Subtype: 'Text',
+      Rect: [50, 700, 250, 750],
+      Contents: PDFString.of(`Client ${SECRET} flagged`)
+    });
+    page.node.set(PDFName.of('Annots'), doc.context.obj([doc.context.register(annot)]));
+    const bytes = await doc.save({ useObjectStreams: false });
+
+    // A mark over the annotation's own rectangle (top of the page).
+    const out = await processWorkerImpl.applyRedactions(bytes, [
+      { pageIndex: 0, x: 0.05, y: 0.05, width: 0.5, height: 0.1 }
+    ]);
+
+    expect(await allObjectsAsText(out)).not.toContain(SECRET);
+    expect(await processWorkerImpl.collectOffPageText(out)).toEqual([]);
+  });
+
+  it('removes a redacted form field value from the output bytes', async () => {
+    const SECRET = 'Ada Lovelace';
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([600, 800]);
+    const form = doc.getForm();
+    const field = form.createTextField('name');
+    field.setText(SECRET);
+    field.addToPage(page, { x: 100, y: 700, width: 200, height: 40 });
+    const bytes = await doc.save({ useObjectStreams: false });
+
+    const out = await processWorkerImpl.applyRedactions(bytes, [
+      { pageIndex: 0, x: 0.1, y: 0.05, width: 0.5, height: 0.2, text: SECRET }
+    ]);
+
+    expect(await processWorkerImpl.collectOffPageText(out)).toEqual([]);
+    expect(await allObjectsAsText(out)).not.toContain(SECRET);
+  });
+
+  it('leaves an annotation that does not overlap any mark alone', async () => {
+    const KEPT = 'keep this note';
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([600, 800]);
+    const annot = doc.context.obj({
+      Type: 'Annot',
+      Subtype: 'Text',
+      Rect: [50, 50, 250, 100],
+      Contents: PDFString.of(KEPT)
+    });
+    page.node.set(PDFName.of('Annots'), doc.context.obj([doc.context.register(annot)]));
+    const bytes = await doc.save({ useObjectStreams: false });
+
+    const out = await processWorkerImpl.applyRedactions(bytes, [
+      { pageIndex: 0, x: 0.05, y: 0.05, width: 0.3, height: 0.1 }
+    ]);
+    expect(await processWorkerImpl.collectOffPageText(out)).toEqual([KEPT]);
+  });
+});
+
+describe('applyRedactions: content-stream filter chains', () => {
+  /** A page whose content stream is deflated and then hex-encoded. */
+  async function chainedContentPdf(): Promise<Uint8Array> {
+    const { PDFRawStream, StandardFonts } = await import('pdf-lib');
+    const { deflateSync } = await import('node:zlib');
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const page = doc.addPage([600, 800]);
+    (page.node.Resources() as PDFDict).set(
+      PDFName.of('Font'),
+      doc.context.obj({ F1: (font as any).ref })
+    );
+
+    const source =
+      'BT /F1 24 Tf 1 0 0 1 50 760 Tm (TOP SECRET) Tj ET\n' +
+      'BT /F1 24 Tf 1 0 0 1 50 100 Tm (BOTTOM KEPT) Tj ET';
+    const deflated = deflateSync(Buffer.from(source, 'latin1'));
+    const hex = new TextEncoder().encode(deflated.toString('hex') + '>');
+
+    const stream = PDFRawStream.of(
+      doc.context.obj({ Filter: ['ASCIIHexDecode', 'FlateDecode'] }),
+      hex
+    );
+    page.node.set(PDFName.of('Contents'), doc.context.register(stream));
+    return doc.save({ useObjectStreams: false });
+  }
+
+  it('decodes a multi-filter chain instead of tokenising raw bytes', async () => {
+    const bytes = await chainedContentPdf();
+    const out = await processWorkerImpl.applyRedactions(bytes, [
+      { pageIndex: 0, x: 0, y: 0, width: 1, height: 0.2 }
+    ]);
+    const text = await pageContentText(await PDFDocument.load(out), 0);
+    expect(text).not.toContain('TOP SECRET');
+    expect(text).toContain('BOTTOM KEPT');
+  });
+
+  it('refuses a filter it cannot decode rather than corrupting the page', async () => {
+    const { PDFRawStream } = await import('pdf-lib');
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([600, 800]);
+    const stream = PDFRawStream.of(
+      doc.context.obj({ Filter: 'Crypt' }),
+      new TextEncoder().encode('not really encrypted')
+    );
+    page.node.set(PDFName.of('Contents'), doc.context.register(stream));
+    const bytes = await doc.save({ useObjectStreams: false });
+
+    await expect(
+      processWorkerImpl.applyRedactions(bytes, [
+        { pageIndex: 0, x: 0, y: 0, width: 1, height: 0.5 }
+      ])
+    ).rejects.toThrow(/cannot decode/);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * compose: the catalog, page ranges, duplicated pages, XFA
+ * ------------------------------------------------------------------ */
+
+function pageRefs(count: number, docId = 'source') {
+  return Array.from({ length: count }, (_, sourceIndex) => ({
+    key: `p${sourceIndex}`,
+    sourceDocId: docId,
+    sourceIndex,
+    rotation: 0
+  }));
+}
+
+/** Compose with everything optional left off. */
+function composePlain(pages: ReturnType<typeof pageRefs>, sources: Record<string, Uint8Array>) {
+  return processWorkerImpl.compose(
+    pages,
+    sources,
+    [],
+    undefined,
+    undefined,
+    null,
+    null,
+    undefined,
+    silentJob
+  );
+}
+
+describe('composePages preserves the document catalog (OPS-01 gap)', () => {
+  /** A document carrying the catalog entries `copyPages` does not bring across. */
+  async function taggedPdf(): Promise<Uint8Array> {
+    const { textPdf } = await import('../e2e/fixtures');
+    const doc = await PDFDocument.load(await textPdf(3));
+    doc.catalog.set(
+      PDFName.of('PageLabels'),
+      doc.context.obj({ Nums: [0, { S: 'r' }, 1, { S: 'D' }] })
+    );
+    doc.catalog.set(
+      PDFName.of('StructTreeRoot'),
+      doc.context.register(doc.context.obj({ Type: 'StructTreeRoot' }))
+    );
+    doc.catalog.set(
+      PDFName.of('OutputIntents'),
+      doc.context.obj([{ Type: 'OutputIntent', S: 'GTS_PDFA1' }])
+    );
+    doc.catalog.set(PDFName.of('Lang'), PDFString.of('en-GB'));
+    return doc.save({ useObjectStreams: false });
+  }
+
+  it('carries structure, labels and output intents through an unchanged compose', async () => {
+    const source = await taggedPdf();
+    const out = await PDFDocument.load(await composePlain(pageRefs(3), { source }));
+    expect(out.catalog.get(PDFName.of('StructTreeRoot'))).toBeDefined();
+    expect(out.catalog.get(PDFName.of('PageLabels'))).toBeDefined();
+    expect(out.catalog.get(PDFName.of('OutputIntents'))).toBeDefined();
+    expect(out.catalog.get(PDFName.of('Lang'))).toBeDefined();
+  });
+
+  it('drops the page-indexed entries when the page set changed, and keeps the rest', async () => {
+    const source = await taggedPdf();
+    // Two of three pages: /PageLabels is indexed by page position, so carrying it
+    // would relabel the wrong pages.
+    const out = await PDFDocument.load(await composePlain(pageRefs(2), { source }));
+    expect(out.catalog.get(PDFName.of('PageLabels'))).toBeUndefined();
+    expect(out.catalog.get(PDFName.of('OutputIntents'))).toBeDefined();
+    expect(out.catalog.get(PDFName.of('Lang'))).toBeDefined();
+  });
+
+  it('carries nothing page-dependent from a multi-document merge', async () => {
+    const { textPdf } = await import('../e2e/fixtures');
+    const a = await taggedPdf();
+    const b = await textPdf(1);
+    const out = await PDFDocument.load(
+      await composePlain([...pageRefs(3, 'a'), ...pageRefs(1, 'b')], { a, b })
+    );
+    expect(out.catalog.get(PDFName.of('StructTreeRoot'))).toBeUndefined();
+    expect(out.catalog.get(PDFName.of('PageLabels'))).toBeUndefined();
+    expect(out.getPageCount()).toBe(4);
+  });
+});
+
+describe('watermark page ranges are document page numbers, not slice offsets', () => {
+  it('does not restamp every split slice as if it were pages 1-3', async () => {
+    const { textPdf } = await import('../e2e/fixtures');
+    const source = await textPdf(4);
+    const watermark = {
+      kind: 'text' as const,
+      text: 'CONFIDENTIAL',
+      imageScale: 0.35,
+      position: 'center',
+      opacity: 0.5,
+      rotation: 0,
+      fontSize: 18,
+      color: '#111111',
+      startAt: 1,
+      pageRange: '1-2'
+    };
+
+    const result = await processWorkerImpl.composeSplit(
+      pageRefs(4),
+      { source },
+      [2],
+      [],
+      watermark,
+      undefined,
+      null,
+      null,
+      'part',
+      undefined,
+      silentJob
+    );
+    expect(result.isZip).toBe(true);
+
+    const { unzipSync } = await import('fflate');
+    const files = unzipSync(result.bytes);
+    const names = Object.keys(files).sort();
+    expect(names).toHaveLength(2);
+
+    const first = await PDFDocument.load(files[names[0]]);
+    const second = await PDFDocument.load(files[names[1]]);
+    for (const index of [0, 1]) {
+      expect(await pageContentText(first, index)).toContain('CONFIDENTIAL');
+      // Pages 3 and 4 of the document are outside "1-2" — the second slice must
+      // come out clean, not stamped as though it started at page 1 again.
+      expect(await pageContentText(second, index)).not.toContain('CONFIDENTIAL');
+    }
+  });
+});
+
+describe('outlines survive duplication and named destinations (OPS-01)', () => {
+  /** A 3-page document whose single bookmark points at page 2 by `destKind`. */
+  async function bookmarkedPdf(destKind: 'direct' | 'legacy-name' | 'name-tree') {
+    const { textPdf } = await import('../e2e/fixtures');
+    const doc = await PDFDocument.load(await textPdf(3));
+    const targetRef = doc.getPage(1).ref;
+    const destArray = doc.context.obj([targetRef, PDFName.of('Fit')]);
+
+    const item: Record<string, unknown> = { Title: PDFString.of('Chapter 2') };
+    if (destKind === 'direct') {
+      item.Dest = destArray;
+    } else if (destKind === 'legacy-name') {
+      doc.catalog.set(PDFName.of('Dests'), doc.context.obj({ chap2: destArray }));
+      item.Dest = PDFName.of('chap2');
+    } else {
+      doc.catalog.set(
+        PDFName.of('Names'),
+        doc.context.obj({
+          Dests: { Names: [PDFString.of('chap2'), destArray] }
+        })
+      );
+      item.Dest = PDFString.of('chap2');
+    }
+
+    const itemRef = doc.context.register(doc.context.obj(item as never));
+    const outlines = doc.context.obj({
+      Type: 'Outlines',
+      First: itemRef,
+      Last: itemRef,
+      Count: 1
+    });
+    doc.catalog.set(PDFName.of('Outlines'), doc.context.register(outlines));
+    return doc.save({ useObjectStreams: false });
+  }
+
+  /** The page object the first bookmark of `bytes` points at. */
+  async function firstBookmarkTarget(bytes: Uint8Array) {
+    const doc = await PDFDocument.load(bytes);
+    const outlines = doc.catalog.lookupMaybe(PDFName.of('Outlines'), PDFDict);
+    const first = outlines?.lookupMaybe(PDFName.of('First'), PDFDict);
+    const dest = first?.lookup(PDFName.of('Dest'));
+    return { doc, target: dest instanceof PDFArray ? dest.get(0) : undefined };
+  }
+
+  it.each(['direct', 'legacy-name', 'name-tree'] as const)(
+    'resolves a %s destination instead of dropping the bookmark',
+    async destKind => {
+      const source = await bookmarkedPdf(destKind);
+      const out = await composePlain(pageRefs(3), { source });
+      const { doc, target } = await firstBookmarkTarget(out);
+      expect(target).toBe(doc.getPage(1).ref);
+    }
+  );
+
+  it('points a bookmark at the first copy of a duplicated page, not the last', async () => {
+    const source = await bookmarkedPdf('direct');
+    // Page 2 placed twice: once in its own position, once appended at the end.
+    const pages = [
+      ...pageRefs(3),
+      { key: 'dup', sourceDocId: 'source', sourceIndex: 1, rotation: 0 }
+    ];
+    const out = await composePlain(pages, { source });
+    const { doc, target } = await firstBookmarkTarget(out);
+    expect(doc.getPageCount()).toBe(4);
+    expect(target).toBe(doc.getPage(1).ref);
+    expect(target).not.toBe(doc.getPage(3).ref);
+  });
+});
+
+describe('XFA is refused by compose as well as by fill (SGN-03)', () => {
+  async function xfaFixture(): Promise<Uint8Array> {
+    const { readFile } = await import('node:fs/promises');
+    return new Uint8Array(await readFile(new URL('../fixtures/xfa.pdf', import.meta.url)));
+  }
+
+  it('refuses to merge, split or watermark an XFA form', async () => {
+    const bytes = await xfaFixture();
+    await expect(composePlain(pageRefs(1), { source: bytes })).rejects.toThrow(/XFA form/);
+  });
+
+  it('lets Sign and Annotate opt in, because flattening is what they offer', async () => {
+    const bytes = await xfaFixture();
+    const out = await processWorkerImpl.compose(
+      pageRefs(1),
+      { source: bytes },
+      [],
+      undefined,
+      undefined,
+      null,
+      null,
+      undefined,
+      silentJob,
+      { allowXfaLoss: true }
+    );
+    expect((await PDFDocument.load(out)).getPageCount()).toBe(1);
+  });
+});

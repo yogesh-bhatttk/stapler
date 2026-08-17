@@ -83,3 +83,18 @@ export const XFA_MESSAGE =
 export function isXfaDocument(bytes: Uint8Array, parserSaysXfa: boolean): boolean {
   return parserSaysXfa || hasXfaMarker(bytes);
 }
+
+/**
+ * The refusal for operations that rebuild a document page by page — merge,
+ * split, organise, watermark, n-up, normalise.
+ *
+ * None of them can carry an XFA form across: the fields live in an XML payload
+ * hanging off `/AcroForm`, and a `copyPages` rebuild takes the pages and leaves
+ * the payload behind. The output opens, looks right, and has a dead form — the
+ * exact shape of silent corruption this product refuses to ship.
+ */
+export const XFA_COMPOSE_MESSAGE =
+  'This is an XFA form. Its fields live in an XML payload that cannot survive being ' +
+  'rebuilt page by page, so merging, splitting, organising or watermarking it would ' +
+  'produce a document whose form no longer works. Nothing was changed. Sign and Annotate ' +
+  'can still stamp text and signatures on top, which flattens the form deliberately.';

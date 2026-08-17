@@ -193,8 +193,22 @@ export interface SavedState {
   textLineMatrix: Matrix;
   fontSize: number;
   textLeading: number;
+  charSpacing: number;
+  wordSpacing: number;
+  horizontalScale: number;
+  fontName: string;
 }
 
+/**
+ * The subset of the PDF graphics state this filter needs.
+ *
+ * `q` snapshots it and `Q` restores it. Both are O(1) — a fixed number of
+ * six-element matrices and scalars, allocated per `q` and never copied again.
+ * They are deliberately *not* implemented by cloning the saved-state stack:
+ * doing that made every `q` copy every entry below it, so filtering cost
+ * 2^depth and an Illustrator export nested 30 deep (routine) never returned.
+ * See `tests/unit/interpreter.test.ts` for the depth-40 guard.
+ */
 export class GraphicsState {
   ctm: Matrix = [1, 0, 0, 1, 0, 0];
   textMatrix: Matrix = [1, 0, 0, 1, 0, 0];
@@ -202,14 +216,18 @@ export class GraphicsState {
   fontSize: number = 0;
   /** Text leading, set by the TL operator. Used by T* (= `0 –TL Td`). */
   textLeading: number = 0;
+  /** Tc — extra space added after every glyph, in unscaled text units. */
+  charSpacing: number = 0;
+  /** Tw — extra space added after every single-byte code 32. */
+  wordSpacing: number = 0;
+  /** Tz as a factor (100% → 1). Scales every horizontal advance. */
+  horizontalScale: number = 1;
+  /** The resource name from the last `Tf`, so widths can be looked up. */
+  fontName: string = '';
 
   clone(): GraphicsState {
     const next = new GraphicsState();
-    next.ctm = [...this.ctm] as Matrix;
-    next.textMatrix = [...this.textMatrix] as Matrix;
-    next.textLineMatrix = [...this.textLineMatrix] as Matrix;
-    next.fontSize = this.fontSize;
-    next.textLeading = this.textLeading;
+    next.restoreSnapshot(this.saveSnapshot());
     return next;
   }
 
@@ -219,7 +237,11 @@ export class GraphicsState {
       textMatrix: [...this.textMatrix] as Matrix,
       textLineMatrix: [...this.textLineMatrix] as Matrix,
       fontSize: this.fontSize,
-      textLeading: this.textLeading
+      textLeading: this.textLeading,
+      charSpacing: this.charSpacing,
+      wordSpacing: this.wordSpacing,
+      horizontalScale: this.horizontalScale,
+      fontName: this.fontName
     };
   }
 
@@ -229,6 +251,10 @@ export class GraphicsState {
     this.textLineMatrix = [...s.textLineMatrix] as Matrix;
     this.fontSize = s.fontSize;
     this.textLeading = s.textLeading;
+    this.charSpacing = s.charSpacing;
+    this.wordSpacing = s.wordSpacing;
+    this.horizontalScale = s.horizontalScale;
+    this.fontName = s.fontName;
   }
 }
 
@@ -248,6 +274,19 @@ export function transformPoint(m: Matrix, x: number, y: number): { x: number; y:
     x: x * m[0] + y * m[2] + m[4],
     y: x * m[1] + y * m[3] + m[5]
   };
+}
+
+/**
+ * Inverse of a PDF affine matrix, or `null` when it is singular (a degenerate
+ * CTM — a zero scale — which maps the whole image to a line and cannot be
+ * inverted). Callers must treat `null` as "the placement cannot be measured",
+ * never as "nothing overlaps".
+ */
+export function invertMatrix(m: Matrix): Matrix | null {
+  const [a, b, c, d, e, f] = m;
+  const det = a * d - b * c;
+  if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return null;
+  return [d / det, -b / det, -c / det, a / det, (c * f - d * e) / det, (b * e - a * f) / det];
 }
 
 export function serializeStatements(statements: Statement[]): Uint8Array {
@@ -311,6 +350,61 @@ export interface FilterContentStreamResult {
    * saved file even though the painting operator is gone.
    */
   strippedXObjectNames: string[];
+  /**
+   * Image XObjects a redaction rectangle *overlaps without fully containing*.
+   *
+   * Dropping the `Do` here would erase content the user did not mark, and
+   * keeping it — which is what this module used to do, silently — leaves the
+   * full-resolution image, redacted content and all, embedded in the output and
+   * recoverable with `pdfimages`. The black rectangle painted on top is an
+   * overlay, not a redaction.
+   *
+   * So the overlap is *reported* instead: the caller must black out the covered
+   * pixels in the image itself, or refuse the operation. Never neither.
+   */
+  partialImageCoverage: PartialImageCoverage[];
+}
+
+/**
+ * One image XObject placement that a redaction rectangle partially covers.
+ *
+ * `rects` are in the image's own unit space — the unit square every PDF image is
+ * drawn into, x rightwards and y *upwards* from the bottom-left corner, clipped
+ * to [0,1]. Converting to pixels is `col = x * Width`, `row = (1 - y - height) *
+ * Height`. Reported per placement, so an image drawn twice on one page
+ * contributes two entries and the caller unions them.
+ */
+export interface PartialImageCoverage {
+  /** The `/XObject` resource name from the `Do` operand, without the slash. */
+  name: string;
+  rects: Rect[];
+}
+
+/**
+ * The axis-aligned area of `rect` (device space) inside the unit square that
+ * `ctm` maps onto the page, or `null` when they do not meet.
+ *
+ * A rotated or skewed CTM turns the redaction rectangle into a rotated rectangle
+ * in unit space; the bounding box of that is used, which over-covers rather than
+ * under-covers. Over-covering a redaction destroys slightly more of the image
+ * than asked for. Under-covering leaves the secret readable, so the bias is
+ * deliberate and one-directional.
+ */
+export function redactionRectInUnitSpace(ctm: Matrix, rect: Rect): Rect | null {
+  const inverse = invertMatrix(ctm);
+  if (!inverse) return null;
+  const corners = [
+    transformPoint(inverse, rect.x, rect.y),
+    transformPoint(inverse, rect.x + rect.width, rect.y),
+    transformPoint(inverse, rect.x + rect.width, rect.y + rect.height),
+    transformPoint(inverse, rect.x, rect.y + rect.height)
+  ];
+  const x0 = Math.max(0, Math.min(...corners.map(c => c.x)));
+  const y0 = Math.max(0, Math.min(...corners.map(c => c.y)));
+  const x1 = Math.min(1, Math.max(...corners.map(c => c.x)));
+  const y1 = Math.min(1, Math.max(...corners.map(c => c.y)));
+  if (!(x1 > x0) || !(y1 > y0)) return null;
+  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
 }
 
 /**
@@ -330,14 +424,154 @@ export interface XObjectInfo {
   matrix?: Matrix;
 }
 
+/**
+ * What a font resource has to tell us to measure a string.
+ *
+ * The old model was `bytes.length * fontSize * 0.6` for every font in every
+ * document. That is wrong twice over on a `/Type0` font: the codes are
+ * two bytes, so a ten-glyph CJK run was counted as twenty glyphs, and CJK
+ * glyphs are full-width, not 0.6em. The estimate is also fed back into the text
+ * matrix, so the error compounds across a BT/ET block until a run's measured box
+ * sits in a different part of the page from the glyphs it describes — and a
+ * redaction that misses its box leaves the text in the file.
+ *
+ * `widths` is in glyph space (1/1000 em), keyed by character code — which is
+ * exactly how both `/Widths` (simple fonts) and `/W` (CID fonts) are indexed.
+ */
+export interface FontInfo {
+  /**
+   * True for composite fonts whose CMap uses two-byte codes (`/Type0` with
+   * `/Identity-H` and friends). Decides whether a string's bytes are counted
+   * singly or in pairs.
+   */
+  twoByte: boolean;
+  /** Character code → width in 1/1000 em. */
+  widths?: Map<number, number>;
+  /** Width for any code not in `widths`, in 1/1000 em. */
+  defaultWidth?: number;
+}
+
+/** Fallback advance when the font resource says nothing, in 1/1000 em. */
+const FALLBACK_SIMPLE_WIDTH = 600;
+const FALLBACK_CID_WIDTH = 1000;
+
+/**
+ * The bytes a `(...)` or `<...>` operand actually denotes.
+ *
+ * The tokenizer keeps the raw source bytes including delimiters and escapes, so
+ * counting them directly counts backslashes and hex digits as glyphs.
+ */
+export function decodeStringToken(token: Token): Uint8Array {
+  const raw = token.bytes;
+  if (token.type === 'hexstring') {
+    const digits: number[] = [];
+    for (let i = 1; i < raw.length; i++) {
+      const ch = raw[i];
+      if (ch === 0x3e) break; // >
+      const v =
+        ch >= 0x30 && ch <= 0x39
+          ? ch - 0x30
+          : ch >= 0x41 && ch <= 0x46
+            ? ch - 0x37
+            : ch >= 0x61 && ch <= 0x66
+              ? ch - 0x57
+              : -1;
+      if (v >= 0) digits.push(v);
+    }
+    // An odd number of digits is padded with a trailing zero (PDF 32000 7.3.4.3).
+    if (digits.length % 2 === 1) digits.push(0);
+    const out = new Uint8Array(digits.length / 2);
+    for (let i = 0; i < out.length; i++) out[i] = (digits[2 * i] << 4) | digits[2 * i + 1];
+    return out;
+  }
+
+  const out: number[] = [];
+  // Skip the opening '(' and stop before the closing ')'.
+  const end = raw.length > 0 && raw[raw.length - 1] === 0x29 ? raw.length - 1 : raw.length;
+  for (let i = 1; i < end; i++) {
+    const ch = raw[i];
+    if (ch !== 0x5c) {
+      out.push(ch);
+      continue;
+    }
+    const next = raw[++i];
+    if (next === undefined) break;
+    switch (next) {
+      case 0x6e:
+        out.push(0x0a);
+        break; // \n
+      case 0x72:
+        out.push(0x0d);
+        break; // \r
+      case 0x74:
+        out.push(0x09);
+        break; // \t
+      case 0x62:
+        out.push(0x08);
+        break; // \b
+      case 0x66:
+        out.push(0x0c);
+        break; // \f
+      case 0x0a:
+        break; // line continuation
+      case 0x0d:
+        if (raw[i + 1] === 0x0a) i++;
+        break;
+      default:
+        if (next >= 0x30 && next <= 0x37) {
+          let value = next - 0x30;
+          for (let k = 0; k < 2; k++) {
+            const d = raw[i + 1];
+            if (d === undefined || d < 0x30 || d > 0x37) break;
+            value = value * 8 + (d - 0x30);
+            i++;
+          }
+          out.push(value & 0xff);
+        } else {
+          out.push(next);
+        }
+    }
+  }
+  return Uint8Array.from(out);
+}
+
+/**
+ * Horizontal advance of one show-string, in unscaled text-space units.
+ *
+ * Models what the spec actually says an advance is (PDF 32000 9.4.4): per glyph,
+ * `(w/1000 · Tfs + Tc + Tw·isSpace) · Th`. `Tw` applies only to single-byte code
+ * 32, never inside a two-byte CID code — applying it there is a classic
+ * off-by-a-lot on CJK text.
+ */
+function showStringWidth(bytes: Uint8Array, state: GraphicsState, font?: FontInfo): number {
+  const twoByte = font?.twoByte ?? false;
+  const fallback = twoByte ? FALLBACK_CID_WIDTH : FALLBACK_SIMPLE_WIDTH;
+  const step = twoByte ? 2 : 1;
+  let total = 0;
+  for (let i = 0; i + step <= bytes.length; i += step) {
+    const code = twoByte ? (bytes[i] << 8) | bytes[i + 1] : bytes[i];
+    const glyphWidth = font?.widths?.get(code) ?? font?.defaultWidth ?? fallback;
+    total += (glyphWidth / 1000) * state.fontSize + state.charSpacing;
+    if (!twoByte && code === 32) total += state.wordSpacing;
+  }
+  // A trailing odd byte in a two-byte string is malformed input; count it as one
+  // more glyph rather than losing the width of whatever the viewer draws there.
+  if (twoByte && bytes.length % 2 === 1) {
+    total += ((font?.defaultWidth ?? fallback) / 1000) * state.fontSize + state.charSpacing;
+  }
+  return total * state.horizontalScale;
+}
+
 export function filterContentStream(
   statements: Statement[],
   redactionBoxes: Rect[],
   initialState?: GraphicsState,
-  resolveXObject?: (name: string) => XObjectInfo | undefined
+  resolveXObject?: (name: string) => XObjectInfo | undefined,
+  resolveFont?: (name: string) => FontInfo | undefined
 ): FilterContentStreamResult {
   const filtered: Statement[] = [];
   const strippedXObjectNames: string[] = [];
+  const partialImageCoverage: PartialImageCoverage[] = [];
   const state = initialState ? initialState.clone() : new GraphicsState();
   const savedStates: SavedState[] = [];
 
@@ -476,7 +710,20 @@ export function filterContentStream(
       state.textMatrix = [...state.textLineMatrix];
     } else if (op === 'Tf') {
       if (stmt.operands.length === 2) {
+        state.fontName = String.fromCharCode(...stmt.operands[0].bytes).replace(/^\//, '');
         state.fontSize = parseFloat(String.fromCharCode(...stmt.operands[1].bytes));
+      }
+    } else if (op === 'Tc' || op === 'Tw' || op === 'Tz') {
+      // Text-state parameters that scale every advance below. Ignoring them was
+      // worth up to a whole line of drift on a justified paragraph (Tw is how
+      // most producers justify) and a factor of two on condensed type (Tz 50).
+      if (stmt.operands.length >= 1) {
+        const value = parseFloat(String.fromCharCode(...stmt.operands[0].bytes));
+        if (Number.isFinite(value)) {
+          if (op === 'Tc') state.charSpacing = value;
+          else if (op === 'Tw') state.wordSpacing = value;
+          else state.horizontalScale = value / 100;
+        }
       }
     } else if (op === 'Tj' || op === 'TJ' || op === "'" || op === '"') {
       if (op === "'" || op === '"') {
@@ -485,24 +732,46 @@ export function filterContentStream(
         state.textMatrix = [...state.textLineMatrix];
       }
 
-      let textStr = '';
+      // The `"` operator's string is its last operand; its first two are aw/ac,
+      // which set the word and character spacing for this show and stay set.
+      if (op === '"' && stmt.operands.length >= 3) {
+        const aw = parseFloat(String.fromCharCode(...stmt.operands[0].bytes));
+        const ac = parseFloat(String.fromCharCode(...stmt.operands[1].bytes));
+        if (Number.isFinite(aw)) state.wordSpacing = aw;
+        if (Number.isFinite(ac)) state.charSpacing = ac;
+      }
+
+      const font = state.fontName ? resolveFont?.(state.fontName) : undefined;
+
+      let estimatedWidth = 0;
       if (op === 'Tj' || op === "'" || op === '"') {
-        if (stmt.operands.length > 0) {
-          textStr = String.fromCharCode(...stmt.operands[stmt.operands.length - 1].bytes);
+        const token = stmt.operands[stmt.operands.length - 1];
+        if (token && (token.type === 'string' || token.type === 'hexstring')) {
+          estimatedWidth = showStringWidth(decodeStringToken(token), state, font);
         }
       } else if (op === 'TJ') {
         for (const token of stmt.operands) {
           if (token.type === 'string' || token.type === 'hexstring') {
-            textStr += String.fromCharCode(...token.bytes);
+            estimatedWidth += showStringWidth(decodeStringToken(token), state, font);
+          } else if (token.type === 'number') {
+            // TJ kerning: a positive number moves the *next* glyph left by
+            // n/1000 em. Dropping these made every kerned run measure wider
+            // than it draws, which for a right-aligned block pushed the box off
+            // the end of the text it was supposed to cover.
+            const adjust = parseFloat(String.fromCharCode(...token.bytes));
+            if (Number.isFinite(adjust)) {
+              estimatedWidth -= (adjust / 1000) * state.fontSize * state.horizontalScale;
+            }
           }
         }
       }
 
-      const estimatedWidth = Math.max(1, textStr.length) * state.fontSize * 0.6;
-
+      // A zero-width show (an empty string) still occupies its cursor position;
+      // give it a hairline box so a caret-position redaction still matches.
+      const boxWidth = estimatedWidth === 0 ? state.fontSize * 0.05 : estimatedWidth;
       const trm = multiplyMatrix(state.textMatrix, state.ctm);
       const p1 = transformPoint(trm, 0, 0);
-      const p2 = transformPoint(trm, estimatedWidth, state.fontSize);
+      const p2 = transformPoint(trm, boxWidth, state.fontSize);
 
       const box: Rect = {
         x: Math.min(p1.x, p2.x),
@@ -575,8 +844,13 @@ export function filterContentStream(
           }
         }
       } else {
-        // For Image XObjects, strip if the image box is fully contained within redactions,
-        // or if it intersects. (If partially covered, keeping Do paints image + black rect over it).
+        // An Image XObject is only safe to drop wholesale when a single
+        // redaction rectangle fully contains it — then nothing the user kept is
+        // lost with it. A *partial* overlap cannot be resolved here at all: the
+        // painting operator has to stay (the uncovered part of the image is
+        // still wanted) while the covered pixels must physically go, and this
+        // module does not decode images. It is reported to the caller instead of
+        // being quietly left as a black rectangle drawn over intact pixels.
         let covered = false;
         for (const r of redactionBoxes) {
           if (contains(r, box)) {
@@ -585,6 +859,22 @@ export function filterContentStream(
           }
         }
         shouldStrip = covered;
+
+        if (!covered && xObjectName) {
+          const unitRects: Rect[] = [];
+          for (const r of redactionBoxes) {
+            if (!intersects(box, r)) continue;
+            const unit = redactionRectInUnitSpace(state.ctm, r);
+            // A singular CTM cannot be inverted, so the covered area is
+            // unknowable. Cover the whole image rather than none of it: the
+            // placement is degenerate, and an image squashed to a line carries
+            // no detail worth preserving.
+            unitRects.push(unit ?? { x: 0, y: 0, width: 1, height: 1 });
+          }
+          if (unitRects.length > 0) {
+            partialImageCoverage.push({ name: xObjectName, rects: unitRects });
+          }
+        }
       }
 
       if (shouldStrip) {
@@ -600,7 +890,7 @@ export function filterContentStream(
     flushPath(null, false);
   }
 
-  return { filtered, finalState: state, strippedXObjectNames };
+  return { filtered, finalState: state, strippedXObjectNames, partialImageCoverage };
 }
 
 /**
