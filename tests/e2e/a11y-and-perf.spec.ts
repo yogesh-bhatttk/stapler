@@ -281,6 +281,16 @@ test.describe('performance budgets (PLAN §5.1)', () => {
     // The ceiling should be generous enough for Chrome in headless, but if the app leaks
     // offscreen canvases or PDF docs, memory will balloon to 500MB+. We assert < 200MB.
     // If performance.memory is not supported (Firefox/WebKit), mem will be 0.
+    //
+    // Known limitation, stated rather than glossed: `performance.memory` reports
+    // *this realm's* heap. The render and process workers have their own, and
+    // that is where re-encoded pages and decoded images actually accumulate, so
+    // this asserts the main thread does not balloon — not that the whole app
+    // stays under 300MB. The API that would cover workers,
+    // `performance.measureUserAgentSpecificMemory()`, requires cross-origin
+    // isolation (COOP/COEP), which neither the extension page nor the static web
+    // twin currently sets; adding those headers to satisfy a test would change
+    // what ships. Worker-heap budget therefore remains unverified here.
     if (mem1 > 0 && mem2 > 0) {
       expect(mem1).toBeLessThan(300 * 1024 * 1024); // 300MB
       expect(mem2).toBeLessThan(300 * 1024 * 1024); // 300MB
