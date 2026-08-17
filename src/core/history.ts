@@ -105,6 +105,30 @@ export function redo(): void {
   restore(next);
 }
 
+/**
+ * How many undo/redo snapshots still reference `sourceId`.
+ *
+ * The undo stack is the invisible second owner of every source's bytes. `commit()`
+ * pushes the *current* `documents` array before each mutation, so after any edit
+ * the pages that reference a source exist both in the live state and in at least
+ * one snapshot. `sources` is only pruned in `closeDocument`, precisely so undoing
+ * back into a snapshot finds its bytes still readable.
+ *
+ * `store.canTransferSourceBytes` consults this: bytes an undo can reach must not
+ * be detached, or Ctrl-Z restores a blank document.
+ */
+export function historySourceRefCount(sourceId: string): number {
+  let count = 0;
+  for (const stack of [undoStack, redoStack]) {
+    for (const state of stack) {
+      for (const doc of state.docs) {
+        if (doc.pages.some(page => page.sourceDocId === sourceId)) count += 1;
+      }
+    }
+  }
+  return count;
+}
+
 export const canUndo = (): boolean => undoStack.length > 0;
 export const canRedo = (): boolean => redoStack.length > 0;
 

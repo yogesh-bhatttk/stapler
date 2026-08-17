@@ -149,6 +149,19 @@ export function renderHandleFor(
   return promise;
 }
 
+/**
+ * Whether an open render handle is keyed on this exact byte array.
+ *
+ * Identity, not equality: `renderHandleFor` reuses a handle only while
+ * `entry.bytes === bytes`, so the cached entry is a live holder of that buffer.
+ * Detaching it would leave the entry looking valid while a reopen loaded zero
+ * bytes — which is why `store.canTransferSourceBytes` treats an on-screen
+ * thumbnail as a reason not to transfer.
+ */
+export function renderHandleHoldsSource(sourceId: string, bytes: Uint8Array): boolean {
+  return handles.get(sourceId)?.bytes === bytes;
+}
+
 export function closeRenderHandle(sourceId: string): void {
   const entry = handles.get(sourceId);
   if (!entry) return;

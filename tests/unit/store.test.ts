@@ -4,6 +4,7 @@ import {
   addDocument,
   appendPages,
   bytesForPages,
+  canTransferSourceBytes,
   closeDocument,
   deletePages,
   documents,
@@ -13,14 +14,18 @@ import {
   movePages,
   registerSource,
   repointPage,
+  replaceWithSource,
   rotatePages,
   selectPageRange,
   selectedPageKeys,
   setPageSelection,
+  sourceDocRefCount,
+  sourceRefCount,
   sources,
+  transferableSourceIds,
   type StaplerDoc
 } from '../../src/core/store';
-import { resetHistory } from '../../src/core/history';
+import { historySourceRefCount, resetHistory } from '../../src/core/history';
 
 function seed(pageCount = 5, sourceId = 'src-a'): StaplerDoc {
   registerSource({
@@ -319,5 +324,148 @@ describe('repointPage', () => {
     expect(page.sourceIndex).toBe(4);
     // No other page moved.
     expect(documents.value[0].pages.map(p => p.sourceIndex)).toEqual([0, 1, 2, 3, 4, 5]);
+  });
+});
+
+/**
+ * AUDIT-FINDINGS §4 — source byte ownership.
+ *
+ * These counts exist so a `postMessage` transfer list can never detach a buffer
+ * something else still reads. They are asserted here independently of any
+ * transfer logic, because the counting is the part that has to be right: an
+ * under-count is a blank document with no error message.
+ */
+describe('source reference counting', () => {
+  it('counts two pages of one document sharing a source as 2 pages, 1 document', () => {
+    const doc = seed(2, 'src-a');
+    expect(sourceRefCount('src-a')).toBe(2);
+    expect(sourceDocRefCount('src-a')).toBe(1);
+    expect(doc.pages).toHaveLength(2);
+  });
+
+  it('counts two documents sharing a source as 2 documents', () => {
+    seed(1, 'shared');
+    addDocument({
+      id: 'doc-2',
+      name: 'second.pdf',
+      pages: makePageRefs('shared', 1),
+      annotations: [],
+      dirty: false
+    });
+    expect(sourceRefCount('shared')).toBe(2);
+    expect(sourceDocRefCount('shared')).toBe(2);
+  });
+
+  it('drops to one document when one of the two is closed', () => {
+    const first = seed(1, 'shared');
+    addDocument({
+      id: 'doc-2',
+      name: 'second.pdf',
+      pages: makePageRefs('shared', 1),
+      annotations: [],
+      dirty: false
+    });
+    closeDocument(first.id);
+    expect(sourceDocRefCount('shared')).toBe(1);
+    expect(sourceRefCount('shared')).toBe(1);
+    // Still registered, because a document still needs it.
+    expect(sources.value['shared']).toBeDefined();
+  });
+
+  it('drops to zero when the last referencing page is deleted', () => {
+    const doc = seed(2, 'src-a');
+    deletePages(doc.id, [doc.pages[0].key]);
+    expect(sourceRefCount('src-a')).toBe(1);
+    deletePages(doc.id, [doc.pages[1].key]);
+    expect(sourceRefCount('src-a')).toBe(0);
+    expect(sourceDocRefCount('src-a')).toBe(0);
+  });
+
+  it('follows duplicate, insert, move and repoint without any bookkeeping of its own', () => {
+    const doc = seed(2, 'src-a');
+    duplicatePages(doc.id, [doc.pages[0].key]);
+    expect(sourceRefCount('src-a')).toBe(3);
+
+    registerSource({
+      id: 'src-b',
+      name: 'b.pdf',
+      bytes: new Uint8Array([9]),
+      pageCount: 2,
+      pageSizes: [
+        { width: 10, height: 10 },
+        { width: 10, height: 10 }
+      ]
+    });
+    insertPages(doc.id, makePageRefs('src-b', 2), 1);
+    expect(sourceRefCount('src-b')).toBe(2);
+    expect(sourceDocRefCount('src-b')).toBe(1);
+
+    // A move changes order, never ownership.
+    const keys = documents.value[0].pages.map(p => p.key);
+    movePages(doc.id, [keys[0]], 4);
+    expect(sourceRefCount('src-a')).toBe(3);
+
+    // Repointing the last page off a source is the same as deleting it, as far
+    // as that source's bytes are concerned.
+    for (const page of documents.value[0].pages.filter(p => p.sourceDocId === 'src-a')) {
+      repointPage(doc.id, page.key, 'src-b', 0);
+    }
+    expect(sourceRefCount('src-a')).toBe(0);
+    expect(sourceRefCount('src-b')).toBe(5);
+  });
+
+  it('counts a replaced source as gone and the replacement as owned', () => {
+    const doc = seed(3, 'src-a');
+    replaceWithSource(doc.id, {
+      id: 'redacted',
+      name: 'redacted.pdf',
+      bytes: new Uint8Array([4, 5, 6]),
+      pageCount: 3,
+      pageSizes: Array.from({ length: 3 }, () => ({ width: 595, height: 842 }))
+    });
+    expect(sourceRefCount('src-a')).toBe(0);
+    expect(sourceRefCount('redacted')).toBe(3);
+    expect(sourceDocRefCount('redacted')).toBe(1);
+  });
+});
+
+describe('canTransferSourceBytes', () => {
+  it('refuses while a second document shares the source', () => {
+    const first = seed(1, 'shared');
+    addDocument({
+      id: 'doc-2',
+      name: 'second.pdf',
+      pages: makePageRefs('shared', 1),
+      annotations: [],
+      dirty: false
+    });
+    expect(canTransferSourceBytes('shared', first.id)).toBe(false);
+    expect(canTransferSourceBytes('shared', 'doc-2')).toBe(false);
+  });
+
+  it('refuses while any undo snapshot can still reach the source', () => {
+    const doc = seed(2, 'src-a');
+    // No history yet: the only owner is the one document.
+    expect(historySourceRefCount('src-a')).toBe(0);
+    expect(canTransferSourceBytes('src-a', doc.id)).toBe(true);
+
+    // One edit — any edit — puts the pre-edit pages in the undo stack, and undo
+    // must find those bytes readable. This is why the gate almost never opens.
+    rotatePages(doc.id, [doc.pages[0].key], 90);
+    expect(historySourceRefCount('src-a')).toBeGreaterThan(0);
+    expect(canTransferSourceBytes('src-a', doc.id)).toBe(false);
+  });
+
+  it('refuses for a document that does not own the source', () => {
+    seed(1, 'src-a');
+    expect(canTransferSourceBytes('src-a', 'some-other-doc')).toBe(false);
+    expect(canTransferSourceBytes('missing-source', 'doc-1')).toBe(false);
+  });
+
+  it('reports nothing transferable once history exists, via transferableSourceIds', () => {
+    const doc = seed(2, 'src-a');
+    expect(transferableSourceIds(doc.pages, doc.id)).toEqual(['src-a']);
+    rotatePages(doc.id, [doc.pages[0].key], 90);
+    expect(transferableSourceIds(documents.value[0].pages, doc.id)).toEqual([]);
   });
 });

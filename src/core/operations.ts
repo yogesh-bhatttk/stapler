@@ -84,12 +84,28 @@ function toWatermarkData(settings: WatermarkSettings): WatermarkData {
  * only ever correct for bytes this module owns outright and will not read
  * again.
  *
- * That rules out the biggest callers, deliberately and permanently:
- * `compose`, `rebuildCompressed` and `applyRedactions` are all given the
- * *document store's* canonical bytes (`bytesForPages`, `currentDocumentBytes`),
- * which the grid, the thumbnails and the next export all still need. Detaching
- * those would empty the open document — precisely the silent corruption this
- * codebase refuses to ship. They keep the clone.
+ * That rules out the biggest callers — `compose`, `rebuildCompressed` and
+ * `applyRedactions` — which are all given the *document store's* canonical bytes
+ * (`bytesForPages`, `currentDocumentBytes`). Detaching those would empty the
+ * open document: precisely the silent corruption this codebase refuses to ship.
+ * They keep the clone.
+ *
+ * A second pass tried to narrow that to "transfer when it is provably the only
+ * holder", and built the instrument to decide it: `store.canTransferSourceBytes`
+ * counts owners across open documents, undo/redo snapshots and render-worker
+ * handles. The measurement says the answer is essentially always "no", for
+ * reasons that are features rather than oversights:
+ *
+ *  • all three operations end in `replaceWithSource`, which calls `commit()` —
+ *    they are *undoable*, so the pre-operation bytes must survive the call;
+ *  • `currentDocumentBytes`'s untouched fast path returns `source.bytes` by
+ *    identity, so the common "one whole file, unedited" case is exactly the case
+ *    where the buffer belongs to the store;
+ *  • any document with a thumbnail on screen has a render handle keyed on that
+ *    same array.
+ *
+ * So the gate stays, unused, as a guard rather than an optimisation. See
+ * `docs/AUDIT-FINDINGS.md` §4 for what would have to change to open it.
  *
  * Use this only on bytes that came out of a worker one line earlier and die at
  * this call.

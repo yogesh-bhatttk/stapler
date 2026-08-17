@@ -14,9 +14,9 @@
  * specifies.
  */
 import { computed, signal } from '@preact/signals';
-import { commit, resetHistory } from './history';
+import { commit, historySourceRefCount, resetHistory } from './history';
 import { normalizeRotation } from './rotation';
-import { pruneRenderHandles } from './render-cache';
+import { pruneRenderHandles, renderHandleHoldsSource } from './render-cache';
 
 export interface PageRef {
   /** Stable across reorders, so thumbnails and selection survive a move. */
@@ -106,6 +106,125 @@ export const activeSources = computed<SourceDocument[]>(() => {
 
 export function registerSource(source: SourceDocument): void {
   sources.value = { ...sources.value, [source.id]: source };
+}
+
+/* ---------------- source reference counting ---------------- */
+
+/**
+ * How many `PageRef`s, across **every** currently-open document, point at each
+ * source id.
+ *
+ * Derived from `documents` rather than maintained by hand at each mutation site.
+ * That is the whole point: a manual counter has to be incremented in
+ * `registerSource`, `repointPage`, `replaceWithSource`, `insertPages`,
+ * `appendPages`, `deletePages`, `duplicatePages`, `closeDocument` *and* every
+ * future one, and the failure mode of forgetting one is an over-count (a
+ * permanently un-transferable source, harmless) or an under-count (a detached
+ * buffer under a live document, catastrophic). A computed cannot drift.
+ */
+export const sourceRefCounts = computed<Record<string, number>>(() => {
+  const counts: Record<string, number> = {};
+  for (const doc of documents.value) {
+    for (const page of doc.pages) {
+      counts[page.sourceDocId] = (counts[page.sourceDocId] ?? 0) + 1;
+    }
+  }
+  return counts;
+});
+
+/**
+ * How many distinct open documents reference each source id.
+ *
+ * This, not {@link sourceRefCounts}, is the number that matters for buffer
+ * ownership: all N pages of one document resolve through the *same*
+ * `sources[id].bytes` object, so ten pages in one document are one owner, while
+ * one page each in two documents are two.
+ */
+export const sourceDocRefCounts = computed<Record<string, number>>(() => {
+  const counts: Record<string, number> = {};
+  for (const doc of documents.value) {
+    const seen = new Set<string>();
+    for (const page of doc.pages) {
+      if (seen.has(page.sourceDocId)) continue;
+      seen.add(page.sourceDocId);
+      counts[page.sourceDocId] = (counts[page.sourceDocId] ?? 0) + 1;
+    }
+  }
+  return counts;
+});
+
+export function sourceRefCount(sourceId: string): number {
+  return sourceRefCounts.value[sourceId] ?? 0;
+}
+
+export function sourceDocRefCount(sourceId: string): number {
+  return sourceDocRefCounts.value[sourceId] ?? 0;
+}
+
+/** Every place that can still read a source's bytes after the current call. */
+export interface SourceOwners {
+  /** `PageRef`s across all open documents. */
+  pages: number;
+  /** Distinct open documents. */
+  documents: number;
+  /** Occurrences in the undo/redo snapshots — see `historySourceRefCount`. */
+  history: number;
+  /** A pdf.js handle in the render worker keyed on this exact byte array. */
+  renderHandle: boolean;
+}
+
+export function sourceOwners(sourceId: string): SourceOwners {
+  const source = sources.value[sourceId];
+  return {
+    pages: sourceRefCount(sourceId),
+    documents: sourceDocRefCount(sourceId),
+    history: historySourceRefCount(sourceId),
+    renderHandle: source ? renderHandleHoldsSource(sourceId, source.bytes) : false
+  };
+}
+
+/**
+ * Whether `sources[sourceId].bytes` may be **transferred** (and therefore
+ * detached) on a worker call made on behalf of `owningDocId`.
+ *
+ * Transferring a buffer that any other holder can still read empties the open
+ * document with no error — the exact silent corruption CLAUDE.md forbids — so
+ * this answers "no" unless every one of the following holds:
+ *
+ *  • exactly one open document references the source, and it is the one the
+ *    operation is running on (which is about to have its pages repointed at the
+ *    operation's *result*, so its own reference dies with the call);
+ *  • no undo/redo snapshot references it. `replaceWithSource` calls `commit()`,
+ *    so redaction and scan cleanup are undoable *by design*, and undo must find
+ *    the pre-operation bytes still readable;
+ *  • no render-worker handle is keyed on this byte array. `renderHandleFor`
+ *    caches on object identity and would serve a detached buffer to the next
+ *    reopen, so a document with a thumbnail on screen is not transferable.
+ *
+ * **This predicate is not wired into any `postMessage` transfer list today**,
+ * and measuring it is why (see `transferableSourceIds`). It is the gate that any
+ * future transfer must pass, plus the instrument that shows whether passing it
+ * is possible.
+ */
+export function canTransferSourceBytes(sourceId: string, owningDocId: string): boolean {
+  const owners = sourceOwners(sourceId);
+  if (owners.documents !== 1) return false;
+  if (owners.history !== 0) return false;
+  if (owners.renderHandle) return false;
+  const owner = documents.value.find(d => d.pages.some(p => p.sourceDocId === sourceId));
+  return owner?.id === owningDocId;
+}
+
+/**
+ * The subset of `pages`' sources that {@link canTransferSourceBytes} clears.
+ *
+ * Reported rather than applied: see `handOver` in `operations.ts` and the §4
+ * entry in `docs/AUDIT-FINDINGS.md` for why the answer is, in the shipped app,
+ * essentially always the empty array.
+ */
+export function transferableSourceIds(pages: PageRef[], owningDocId: string): string[] {
+  const ids = new Set(pages.map(p => p.sourceDocId));
+  return [...ids].filter(id => canTransferSourceBytes(id, owningDocId));
 }
 
 /** Bytes for every source the given pages refer to, and nothing else. */
