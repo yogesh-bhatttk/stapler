@@ -169,26 +169,34 @@ export function AnnotatePanel() {
 
       <div className={panelStyles.section}>
         <label className={panelStyles.label}>{t('tool.annotate.color')}</label>
-        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '8px' }}>
-          {ANNOTATION_COLORS.map(color => (
-            <button
-              key={color}
-              type="button"
-              onClick={() => (annotationColor.value = color)}
-              style={{
-                width: '32px',
-                height: '32px',
-                borderRadius: '16px',
-                border:
-                  annotationColor.value === color
-                    ? '3px solid var(--primary)'
-                    : '1px solid var(--border-control)',
-                backgroundColor: color,
-                cursor: 'pointer'
-              }}
-              aria-label={`${t('tool.annotate.selectColor')} ${t(COLOR_NAME_KEYS[color])}`}
-            />
-          ))}
+        <div
+          style={{
+            display: 'flex',
+            gap: 'var(--space-xs)',
+            flexWrap: 'wrap',
+            marginTop: 'var(--space-xs)'
+          }}
+        >
+          {ANNOTATION_COLORS.map(color => {
+            const active = annotationColor.value === color;
+            return (
+              <button
+                key={color}
+                type="button"
+                onClick={() => (annotationColor.value = color)}
+                aria-pressed={active}
+                style={{
+                  width: 'var(--space-xl)',
+                  height: 'var(--space-xl)',
+                  borderRadius: 'var(--radius-pill)',
+                  border: active ? '3px solid var(--primary)' : '1px solid var(--border-control)',
+                  backgroundColor: color,
+                  cursor: 'pointer'
+                }}
+                aria-label={`${t('tool.annotate.selectColor')} ${t(COLOR_NAME_KEYS[color])}`}
+              />
+            );
+          })}
         </div>
       </div>
 
