@@ -8,8 +8,10 @@
  */
 import type { ComponentChildren } from 'preact';
 import { useEffect, useId, useRef } from 'preact/hooks';
+import { forwardRef } from 'preact/compat';
 import { X } from 'lucide-preact';
 import { IconButton } from './IconButton';
+import { mergeRefs } from './mergeRefs';
 import styles from './Modal.module.css';
 
 export interface ModalProps {
@@ -27,15 +29,10 @@ export interface ModalProps {
 const FOCUSABLE =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-export function Modal({
-  title,
-  onClose,
-  children,
-  footer,
-  size = 'md',
-  dismissible = true,
-  icon
-}: ModalProps) {
+export const Modal = forwardRef<HTMLDivElement, ModalProps>(function Modal(
+  { title, onClose, children, footer, size = 'md', dismissible = true, icon },
+  ref
+) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
 
@@ -86,7 +83,7 @@ export function Modal({
       }}
     >
       <div
-        ref={dialogRef}
+        ref={mergeRefs(dialogRef, ref)}
         className={`${styles.dialog} ${styles[`size-${size}`]}`}
         role="dialog"
         aria-modal="true"
@@ -105,4 +102,4 @@ export function Modal({
       </div>
     </div>
   );
-}
+});

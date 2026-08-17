@@ -6,6 +6,7 @@
  * than a request the page makes.
  */
 import { ShieldCheck } from 'lucide-preact';
+import { forwardRef } from 'preact/compat';
 import { Modal } from './Modal';
 import { platform } from '../../platform/current';
 import styles from './InfoModals.module.css';
@@ -13,10 +14,14 @@ import { useTranslation } from '../../core/i18n';
 
 export const REPOSITORY_URL = 'https://github.com/stapler-pdf/stapler';
 
-export function TrustModal({ onClose }: { onClose: () => void }) {
+export const TrustModal = forwardRef<HTMLDivElement, { onClose: () => void }>(function TrustModal(
+  { onClose },
+  ref
+) {
   const t = useTranslation();
   return (
     <Modal
+      ref={ref}
       title={t('Zero network. Zero tracking.')}
       icon={<ShieldCheck size={20} aria-hidden="true" />}
       onClose={onClose}
@@ -64,4 +69,4 @@ export function TrustModal({ onClose }: { onClose: () => void }) {
       </div>
     </Modal>
   );
-}
+});

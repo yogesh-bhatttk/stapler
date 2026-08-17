@@ -1,4 +1,6 @@
 import { useState, useRef } from 'preact/hooks';
+import { forwardRef } from 'preact/compat';
+import { mergeRefs } from './mergeRefs';
 import styles from './CompareSlider.module.css';
 
 interface CompareSliderProps {
@@ -8,11 +10,10 @@ interface CompareSliderProps {
   label?: string;
 }
 
-export function CompareSlider({
-  before,
-  after,
-  label = 'Compare before and after'
-}: CompareSliderProps) {
+export const CompareSlider = forwardRef<HTMLDivElement, CompareSliderProps>(function CompareSlider(
+  { before, after, label = 'Compare before and after' },
+  ref
+) {
   const [position, setPosition] = useState(50);
   const containerRef = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -55,7 +56,7 @@ export function CompareSlider({
 
   return (
     <div
-      ref={containerRef}
+      ref={mergeRefs(containerRef, ref)}
       className={styles.container}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
@@ -110,4 +111,4 @@ export function CompareSlider({
       </div>
     </div>
   );
-}
+});

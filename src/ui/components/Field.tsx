@@ -7,10 +7,12 @@
  * by `htmlFor`. These carry the label association, the 3:1 boundary, the focus ring,
  * and the 32px target height once.
  */
-import type { ComponentChildren, JSX } from 'preact';
+import type { ComponentChildren, JSX, Ref } from 'preact';
+import { forwardRef } from 'preact/compat';
 import { useEffect, useId, useRef, useState } from 'preact/hooks';
 import { Minus, Plus } from 'lucide-preact';
 import { IconButton } from './IconButton';
+import { mergeRefs } from './mergeRefs';
 import styles from './Field.module.css';
 
 export interface FieldProps {
@@ -22,10 +24,13 @@ export interface FieldProps {
 }
 
 /** Label + hint + control, with the `for`/`id` pairing done for you. */
-export function Field({ label, hint, value, children }: FieldProps) {
+export const Field = forwardRef<HTMLDivElement, FieldProps>(function Field(
+  { label, hint, value, children },
+  ref
+) {
   const id = useId();
   return (
-    <div className={styles.field}>
+    <div ref={ref} className={styles.field}>
       <div className={styles.row}>
         <label className={styles.label} htmlFor={id}>
           {label}
@@ -36,22 +41,34 @@ export function Field({ label, hint, value, children }: FieldProps) {
       {hint && <span className={styles.hint}>{hint}</span>}
     </div>
   );
-}
+});
 
-export function TextInput(props: JSX.IntrinsicElements['input']) {
-  const { className = '', ...rest } = props;
-  return <input type="text" className={`${styles.control} ${className}`} {...rest} />;
-}
+export const TextInput = forwardRef<HTMLInputElement, JSX.IntrinsicElements['input']>(
+  function TextInput(props, ref) {
+    const { className = '', ...rest } = props;
+    return <input ref={ref} type="text" className={`${styles.control} ${className}`} {...rest} />;
+  }
+);
 
-export function NumberInput(props: JSX.IntrinsicElements['input']) {
-  const { className = '', ...rest } = props;
-  return <input type="number" className={`${styles.control} ${className}`} {...rest} />;
-}
+export const NumberInput = forwardRef<HTMLInputElement, JSX.IntrinsicElements['input']>(
+  function NumberInput(props, ref) {
+    const { className = '', ...rest } = props;
+    return <input ref={ref} type="number" className={`${styles.control} ${className}`} {...rest} />;
+  }
+);
 
-export function TextArea(props: JSX.IntrinsicElements['textarea']) {
-  const { className = '', ...rest } = props;
-  return <textarea className={`${styles.control} ${styles.textarea} ${className}`} {...rest} />;
-}
+export const TextArea = forwardRef<HTMLTextAreaElement, JSX.IntrinsicElements['textarea']>(
+  function TextArea(props, ref) {
+    const { className = '', ...rest } = props;
+    return (
+      <textarea
+        ref={ref}
+        className={`${styles.control} ${styles.textarea} ${className}`}
+        {...rest}
+      />
+    );
+  }
+);
 
 export interface SelectOption<T extends string | number> {
   value: T;
@@ -68,16 +85,28 @@ export interface SelectProps<T extends string | number> {
   ariaLabel?: string;
 }
 
-export function Select<T extends string | number>({
-  id,
-  value,
-  options,
-  onChange,
-  disabled,
-  ariaLabel
-}: SelectProps<T>) {
+/**
+ * `forwardRef` erases a component's own generic type parameter — the inner
+ * render function stays generic, but `preact/compat`'s `forwardRef` signature
+ * only ever sees the erased, non-generic version of it. This re-asserts the
+ * generic signature on the outside, which is safe: the runtime behaviour is
+ * unchanged, only the type callers see is restored.
+ */
+function forwardRefGeneric<T, P>(
+  render: (props: P, ref: Ref<T>) => JSX.Element | null
+): (props: P & { ref?: Ref<T> }) => JSX.Element | null {
+  return forwardRef(render as (props: object, ref: Ref<T>) => JSX.Element | null) as unknown as (
+    props: P & { ref?: Ref<T> }
+  ) => JSX.Element | null;
+}
+
+export const Select = forwardRefGeneric(function Select<T extends string | number>(
+  { id, value, options, onChange, disabled, ariaLabel }: SelectProps<T>,
+  ref: Ref<HTMLSelectElement>
+) {
   return (
     <select
+      ref={ref}
       id={id}
       className={styles.control}
       value={String(value)}
@@ -98,7 +127,9 @@ export function Select<T extends string | number>({
       ))}
     </select>
   );
-}
+}) as <T extends string | number>(
+  props: SelectProps<T> & { ref?: Ref<HTMLSelectElement> }
+) => JSX.Element | null;
 
 export interface RadioOption<T extends string> {
   value: T;
@@ -118,15 +149,12 @@ export interface RadioGroupProps<T extends string> {
  * A real `fieldset`/`legend`, so a screen reader announces what the choice is for
  * rather than reading four unrelated radio labels.
  */
-export function RadioGroup<T extends string>({
-  legend,
-  name,
-  value,
-  options,
-  onChange
-}: RadioGroupProps<T>) {
+export const RadioGroup = forwardRefGeneric(function RadioGroup<T extends string>(
+  { legend, name, value, options, onChange }: RadioGroupProps<T>,
+  ref: Ref<HTMLFieldSetElement>
+) {
   return (
-    <fieldset className={styles.radioGroup}>
+    <fieldset ref={ref} className={styles.radioGroup}>
       <legend>{legend}</legend>
       {options.map(option => (
         <label className={styles.radio} key={option.value}>
@@ -144,7 +172,9 @@ export function RadioGroup<T extends string>({
       ))}
     </fieldset>
   );
-}
+}) as <T extends string>(
+  props: RadioGroupProps<T> & { ref?: Ref<HTMLFieldSetElement> }
+) => JSX.Element | null;
 
 export interface SliderProps {
   id?: string;
@@ -159,20 +189,14 @@ export interface SliderProps {
   ariaLabel?: string;
 }
 
-export function Slider({
-  id,
-  min,
-  max,
-  step = 1,
-  value,
-  onChange,
-  disabled,
-  scale,
-  ariaLabel
-}: SliderProps) {
+export const Slider = forwardRef<HTMLInputElement, SliderProps>(function Slider(
+  { id, min, max, step = 1, value, onChange, disabled, scale, ariaLabel },
+  ref
+) {
   return (
     <div>
       <input
+        ref={ref}
         id={id}
         className={styles.slider}
         type="range"
@@ -194,7 +218,7 @@ export function Slider({
       )}
     </div>
   );
-}
+});
 
 export interface CheckboxProps {
   label: string;
@@ -203,10 +227,14 @@ export interface CheckboxProps {
   disabled?: boolean;
 }
 
-export function Checkbox({ label, checked, onChange, disabled }: CheckboxProps) {
+export const Checkbox = forwardRef<HTMLInputElement, CheckboxProps>(function Checkbox(
+  { label, checked, onChange, disabled },
+  ref
+) {
   return (
     <label className={styles.checkbox}>
       <input
+        ref={ref}
         type="checkbox"
         checked={checked}
         disabled={disabled}
@@ -215,7 +243,7 @@ export function Checkbox({ label, checked, onChange, disabled }: CheckboxProps) 
       {label}
     </label>
   );
-}
+});
 
 export interface NumberStepperProps {
   id?: string;
@@ -232,83 +260,83 @@ function clampStep(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-/** A number input with +/- controls. Arrow keys step; typing edits directly. */
-export function NumberStepper({
-  id,
-  value,
-  onChange,
-  min = -Infinity,
-  max = Infinity,
-  step = 1,
-  disabled,
-  ariaLabel
-}: NumberStepperProps) {
-  // Text state is separate from the committed value so an in-progress edit like
-  // "1" while typing "12" is not clobbered by a re-clamp on every keystroke. Only
-  // resynced from an external value change while the input is not focused, so
-  // typing is never overwritten mid-edit.
-  const [text, setText] = useState(String(value));
-  const focused = useRef(false);
-  useEffect(() => {
-    if (!focused.current) setText(String(value));
-  }, [value]);
+/** A number input with +/- controls. Arrow keys step; typing edits directly. The
+ * forwarded ref lands on the text input at the centre — the part of this
+ * composite control a caller would actually want to focus or measure. */
+export const NumberStepper = forwardRef<HTMLInputElement, NumberStepperProps>(
+  function NumberStepper(
+    { id, value, onChange, min = -Infinity, max = Infinity, step = 1, disabled, ariaLabel },
+    ref
+  ) {
+    // Text state is separate from the committed value so an in-progress edit like
+    // "1" while typing "12" is not clobbered by a re-clamp on every keystroke. Only
+    // resynced from an external value change while the input is not focused, so
+    // typing is never overwritten mid-edit.
+    const [text, setText] = useState(String(value));
+    const focused = useRef(false);
+    const inputRef = useRef<HTMLInputElement>(null);
+    useEffect(() => {
+      if (!focused.current) setText(String(value));
+    }, [value]);
 
-  const commit = (next: number) => {
-    const clamped = clampStep(next, min, max);
-    onChange(clamped);
-    setText(String(clamped));
-  };
+    const commit = (next: number) => {
+      const clamped = clampStep(next, min, max);
+      onChange(clamped);
+      setText(String(clamped));
+    };
 
-  return (
-    <div className={styles.stepper}>
-      <IconButton
-        icon={Minus}
-        size="compact"
-        aria-label="Decrease"
-        disabled={disabled || value <= min}
-        onClick={() => commit(value - step)}
-      />
-      <input
-        id={id}
-        className={styles.stepperInput}
-        type="text"
-        inputMode="decimal"
-        role="spinbutton"
-        aria-label={ariaLabel}
-        aria-valuemin={min === -Infinity ? undefined : min}
-        aria-valuemax={max === -Infinity ? undefined : max}
-        aria-valuenow={value}
-        disabled={disabled}
-        value={text}
-        onFocus={() => {
-          focused.current = true;
-        }}
-        onInput={event => setText((event.target as HTMLInputElement).value)}
-        onBlur={() => {
-          focused.current = false;
-          commit(Number(text) || 0);
-        }}
-        onKeyDown={event => {
-          if (event.key === 'Enter') commit(Number(text) || 0);
-          else if (event.key === 'ArrowUp') {
-            event.preventDefault();
-            commit(value + step);
-          } else if (event.key === 'ArrowDown') {
-            event.preventDefault();
-            commit(value - step);
-          }
-        }}
-      />
-      <IconButton
-        icon={Plus}
-        size="compact"
-        aria-label="Increase"
-        disabled={disabled || value >= max}
-        onClick={() => commit(value + step)}
-      />
-    </div>
-  );
-}
+    return (
+      <div className={styles.stepper}>
+        <IconButton
+          icon={Minus}
+          size="compact"
+          aria-label="Decrease"
+          disabled={disabled || value <= min}
+          onClick={() => commit(value - step)}
+        />
+        <input
+          ref={mergeRefs(inputRef, ref)}
+          id={id}
+          className={styles.stepperInput}
+          type="text"
+          inputMode="decimal"
+          role="spinbutton"
+          aria-label={ariaLabel}
+          aria-valuemin={min === -Infinity ? undefined : min}
+          aria-valuemax={max === -Infinity ? undefined : max}
+          aria-valuenow={value}
+          disabled={disabled}
+          value={text}
+          onFocus={() => {
+            focused.current = true;
+          }}
+          onInput={event => setText((event.target as HTMLInputElement).value)}
+          onBlur={() => {
+            focused.current = false;
+            commit(Number(text) || 0);
+          }}
+          onKeyDown={event => {
+            if (event.key === 'Enter') commit(Number(text) || 0);
+            else if (event.key === 'ArrowUp') {
+              event.preventDefault();
+              commit(value + step);
+            } else if (event.key === 'ArrowDown') {
+              event.preventDefault();
+              commit(value - step);
+            }
+          }}
+        />
+        <IconButton
+          icon={Plus}
+          size="compact"
+          aria-label="Increase"
+          disabled={disabled || value >= max}
+          onClick={() => commit(value + step)}
+        />
+      </div>
+    );
+  }
+);
 
 export interface SegmentedOption<T extends string> {
   value: T;
@@ -329,16 +357,12 @@ export interface SegmentedControlProps<T extends string> {
  * from the browser rather than a hand-rolled roving-tabindex implementation —
  * the same reasoning as `RadioGroup`, laid out as connected pill segments instead.
  */
-export function SegmentedControl<T extends string>({
-  legend,
-  name,
-  value,
-  options,
-  onChange,
-  disabled
-}: SegmentedControlProps<T>) {
+export const SegmentedControl = forwardRefGeneric(function SegmentedControl<T extends string>(
+  { legend, name, value, options, onChange, disabled }: SegmentedControlProps<T>,
+  ref: Ref<HTMLFieldSetElement>
+) {
   return (
-    <fieldset className={styles.segmented} disabled={disabled}>
+    <fieldset ref={ref} className={styles.segmented} disabled={disabled}>
       <legend className={styles.srOnlyLegend}>{legend}</legend>
       {options.map(option => (
         <label
@@ -357,4 +381,6 @@ export function SegmentedControl<T extends string>({
       ))}
     </fieldset>
   );
-}
+}) as <T extends string>(
+  props: SegmentedControlProps<T> & { ref?: Ref<HTMLFieldSetElement> }
+) => JSX.Element | null;

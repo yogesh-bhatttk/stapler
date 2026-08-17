@@ -6,6 +6,7 @@
  * chrome — were invisible to the app's own accessibility tree.
  */
 import type { ComponentChildren } from 'preact';
+import { forwardRef } from 'preact/compat';
 import { AlertTriangle, CheckCircle2, Info, OctagonAlert } from 'lucide-preact';
 import { dismissToast, toasts, type Toast, type ToastTone } from '../../core/notify';
 import { Button } from './Button';
@@ -54,16 +55,24 @@ function ToastCard({ toast }: { toast: Toast }) {
  * `role="status"` with `aria-live="polite"` so a screen reader announces failures
  * that a sighted user sees in the corner — the whole point of not using `alert`.
  */
-export function ToastRegion() {
-  const items = toasts.value;
-  return (
-    <div className={styles.toastRegion} role="status" aria-live="polite" aria-atomic="false">
-      {items.map(toast => (
-        <ToastCard key={toast.id} toast={toast} />
-      ))}
-    </div>
-  );
-}
+export const ToastRegion = forwardRef<HTMLDivElement, Record<string, never>>(
+  function ToastRegion(_props, ref) {
+    const items = toasts.value;
+    return (
+      <div
+        ref={ref}
+        className={styles.toastRegion}
+        role="status"
+        aria-live="polite"
+        aria-atomic="false"
+      >
+        {items.map(toast => (
+          <ToastCard key={toast.id} toast={toast} />
+        ))}
+      </div>
+    );
+  }
+);
 
 export interface ProgressProps {
   label: string;
@@ -71,10 +80,13 @@ export interface ProgressProps {
   value: number | null;
 }
 
-export function ProgressBar({ label, value }: ProgressProps) {
+export const ProgressBar = forwardRef<HTMLDivElement, ProgressProps>(function ProgressBar(
+  { label, value },
+  ref
+) {
   const percent = value === null ? null : Math.round(Math.min(1, Math.max(0, value)) * 100);
   return (
-    <div className={styles.progress}>
+    <div ref={ref} className={styles.progress}>
       <span className={styles.progressLabel}>{label}</span>
       <div
         className={styles.track}
@@ -94,25 +106,26 @@ export function ProgressBar({ label, value }: ProgressProps) {
       {percent !== null && <span className={styles.progressLabel}>{percent}%</span>}
     </div>
   );
-}
+});
 
-export function EmptyState({
-  title,
-  body,
-  action
-}: {
+export interface EmptyStateProps {
   title: string;
   body?: string;
   action?: ComponentChildren;
-}) {
+}
+
+export const EmptyState = forwardRef<HTMLDivElement, EmptyStateProps>(function EmptyState(
+  { title, body, action },
+  ref
+) {
   return (
-    <div className={styles.empty}>
+    <div ref={ref} className={styles.empty}>
       <span className={styles.emptyTitle}>{title}</span>
       {body && <span className={styles.emptyBody}>{body}</span>}
       {action}
     </div>
   );
-}
+});
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -124,17 +137,19 @@ export function formatBytes(bytes: number): string {
  * `4.2MB → 1.1MB · −74%` (DESIGN-ADAPTATION §5). Shows "no reduction possible"
  * rather than a misleading −0% when there is nothing to gain (CMP-04).
  */
-export function SizeDelta({ before, after }: { before: number; after: number }) {
-  const fraction = before > 0 ? 1 - after / before : 0;
-  const meaningful = fraction >= 0.005;
-  return (
-    <span className={styles.sizeDelta}>
-      <span>{formatBytes(before)}</span>
-      <span aria-hidden="true">→</span>
-      <span>{formatBytes(after)}</span>
-      <span className={meaningful ? styles.deltaGain : styles.deltaNone}>
-        {meaningful ? `−${Math.round(fraction * 100)}%` : 'no reduction'}
+export const SizeDelta = forwardRef<HTMLSpanElement, { before: number; after: number }>(
+  function SizeDelta({ before, after }, ref) {
+    const fraction = before > 0 ? 1 - after / before : 0;
+    const meaningful = fraction >= 0.005;
+    return (
+      <span ref={ref} className={styles.sizeDelta}>
+        <span>{formatBytes(before)}</span>
+        <span aria-hidden="true">→</span>
+        <span>{formatBytes(after)}</span>
+        <span className={meaningful ? styles.deltaGain : styles.deltaNone}>
+          {meaningful ? `−${Math.round(fraction * 100)}%` : 'no reduction'}
+        </span>
       </span>
-    </span>
-  );
-}
+    );
+  }
+);

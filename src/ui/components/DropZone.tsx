@@ -2,6 +2,7 @@
  * DS-05 — the drop zone.
  */
 import { useRef, useState } from 'preact/hooks';
+import { forwardRef } from 'preact/compat';
 import { UploadCloud } from 'lucide-preact';
 import { platform } from '../../platform/current';
 import { PDF_AND_IMAGES, acceptToInputAccept, type OpenedFile } from '../../platform/index';
@@ -18,10 +19,14 @@ export interface DropZoneProps {
   onImported: () => void;
 }
 
-export function DropZone({ onImported }: DropZoneProps) {
+export const DropZone = forwardRef<HTMLLabelElement, DropZoneProps>(function DropZone(
+  { onImported },
+  ref
+) {
   const [state, setState] = useState<'idle' | 'active' | 'reject' | 'busy'>('idle');
   const [progress, setProgress] = useState<{ label: string; value: number | null } | null>(null);
   const depth = useRef(0);
+  const inputRef = useRef<HTMLInputElement>(null);
   const { requestOptions, node } = useImageImportOptions();
 
   const accepts = (transfer: DataTransfer | null) =>
@@ -107,11 +112,29 @@ export function DropZone({ onImported }: DropZoneProps) {
 
   return (
     <label
+      ref={ref}
       className={[styles.dropzone, state !== 'idle' ? styles[state] : ''].filter(Boolean).join(' ')}
+      tabIndex={0}
+      role="button"
+      aria-label="Choose PDFs or images to open"
       aria-busy={state === 'busy'}
       onClick={event => {
         if (!platform.supportsFileSystemAccess) return;
         event.preventDefault();
+        void browse();
+      }}
+      onKeyDown={event => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        // Same fork as the click handler: when the File System Access API isn't
+        // available, `browse()` has no handle to persist anyway, so activate the
+        // plain input directly (a real "click" event, unlike this keydown, so it
+        // opens the native picker) instead of leaving keyboard users stuck with
+        // no way to trigger it now that the input itself is out of the tab order.
+        if (!platform.supportsFileSystemAccess) {
+          inputRef.current?.click();
+          return;
+        }
         void browse();
       }}
       onDragEnter={event => {
@@ -142,9 +165,12 @@ export function DropZone({ onImported }: DropZoneProps) {
       }}
     >
       <input
+        ref={inputRef}
         className="srOnly"
         type="file"
         multiple
+        tabIndex={-1}
+        aria-hidden="true"
         accept={acceptToInputAccept(PDF_AND_IMAGES)}
         aria-label="Choose PDFs or images to open"
         onChange={event => {
@@ -172,4 +198,4 @@ export function DropZone({ onImported }: DropZoneProps) {
       )}
     </label>
   );
-}
+});

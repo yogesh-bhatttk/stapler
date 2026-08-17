@@ -22,6 +22,7 @@ import {
   SplitSquareHorizontal,
   type LucideIcon
 } from 'lucide-preact';
+import { forwardRef } from 'preact/compat';
 
 const ICONS: Record<string, LucideIcon> = {
   Eraser,
@@ -40,10 +41,12 @@ const ICONS: Record<string, LucideIcon> = {
   SplitSquareHorizontal
 };
 
-export function ToolIcon({ name, size = 16 }: { name: string; size?: number }) {
-  const Icon = ICONS[name] ?? FileText;
-  return <Icon size={size} aria-hidden="true" />;
-}
+export const ToolIcon = forwardRef<SVGSVGElement, { name: string; size?: number }>(
+  function ToolIcon({ name, size = 16 }, ref) {
+    const Icon = ICONS[name] ?? FileText;
+    return <Icon ref={ref} size={size} aria-hidden="true" />;
+  }
+);
 
 export function toolIconComponent(name: string): LucideIcon {
   return ICONS[name] ?? FileText;

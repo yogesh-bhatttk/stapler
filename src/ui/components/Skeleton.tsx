@@ -3,6 +3,7 @@
  * announced by whatever container renders a group of these (e.g. `aria-busy` or
  * an `aria-live` status message), not by the placeholder shapes themselves.
  */
+import { forwardRef } from 'preact/compat';
 import styles from './Skeleton.module.css';
 
 export interface SkeletonProps {
@@ -12,12 +13,16 @@ export interface SkeletonProps {
   className?: string;
 }
 
-export function Skeleton({ variant = 'block', width, height, className = '' }: SkeletonProps) {
+export const Skeleton = forwardRef<HTMLSpanElement, SkeletonProps>(function Skeleton(
+  { variant = 'block', width, height, className = '' },
+  ref
+) {
   return (
     <span
+      ref={ref}
       className={`${styles.skeleton} ${styles[variant]} ${className}`}
       aria-hidden="true"
       style={{ width, height }}
     />
   );
-}
+});

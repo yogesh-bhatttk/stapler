@@ -6,7 +6,9 @@
  */
 import type { LucideIcon } from 'lucide-preact';
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { forwardRef } from 'preact/compat';
 import { Icon } from './Icon';
+import { mergeRefs } from './mergeRefs';
 import styles from './ContextMenu.module.css';
 
 export interface ContextMenuItem {
@@ -25,7 +27,10 @@ export interface ContextMenuProps {
   onClose: () => void;
 }
 
-export function ContextMenu({ items, x, y, onClose }: ContextMenuProps) {
+export const ContextMenu = forwardRef<HTMLDivElement, ContextMenuProps>(function ContextMenu(
+  { items, x, y, onClose },
+  ref
+) {
   const menuRef = useRef<HTMLDivElement>(null);
   const [focusIndex, setFocusIndex] = useState(0);
   const [position, setPosition] = useState({ x, y });
@@ -74,7 +79,7 @@ export function ContextMenu({ items, x, y, onClose }: ContextMenuProps) {
 
   return (
     <div
-      ref={menuRef}
+      ref={mergeRefs(menuRef, ref)}
       role="menu"
       className={styles.menu}
       style={{ left: position.x, top: position.y }}
@@ -116,4 +121,4 @@ export function ContextMenu({ items, x, y, onClose }: ContextMenuProps) {
       ))}
     </div>
   );
-}
+});

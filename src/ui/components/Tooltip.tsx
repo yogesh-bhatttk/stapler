@@ -4,6 +4,7 @@
  * common way this primitive gets built wrong.
  */
 import { cloneElement, isValidElement, type VNode } from 'preact';
+import { forwardRef } from 'preact/compat';
 import { useId, useRef, useState } from 'preact/hooks';
 import styles from './Tooltip.module.css';
 
@@ -14,7 +15,10 @@ export interface TooltipProps {
   children: VNode<{ 'aria-describedby'?: string }>;
 }
 
-export function Tooltip({ content, placement = 'top', children }: TooltipProps) {
+export const Tooltip = forwardRef<HTMLSpanElement, TooltipProps>(function Tooltip(
+  { content, placement = 'top', children },
+  ref
+) {
   const [visible, setVisible] = useState(false);
   const id = useId();
   const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -43,7 +47,7 @@ export function Tooltip({ content, placement = 'top', children }: TooltipProps) 
   });
 
   return (
-    <span className={styles.wrapper}>
+    <span ref={ref} className={styles.wrapper}>
       {trigger}
       {visible && (
         <span role="tooltip" id={id} className={`${styles.bubble} ${styles[placement]}`}>
@@ -52,4 +56,4 @@ export function Tooltip({ content, placement = 'top', children }: TooltipProps) 
       )}
     </span>
   );
-}
+});

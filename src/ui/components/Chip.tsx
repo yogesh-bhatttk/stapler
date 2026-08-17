@@ -3,6 +3,7 @@
  * status label — a Chip is always either dismissible or selectable, never inert.
  */
 import type { ComponentChildren } from 'preact';
+import { forwardRef } from 'preact/compat';
 import { X } from 'lucide-preact';
 import { Icon } from './Icon';
 import styles from './Chip.module.css';
@@ -18,7 +19,12 @@ export interface ChipProps {
   disabled?: boolean;
 }
 
-export function Chip({ children, onRemove, removeLabel, selected, onClick, disabled }: ChipProps) {
+/** The root is a `<button>` when `onClick` is passed, a `<span>` otherwise — the
+ * forwarded ref's element type follows whichever one actually renders. */
+export const Chip = forwardRef<HTMLButtonElement | HTMLSpanElement, ChipProps>(function Chip(
+  { children, onRemove, removeLabel, selected, onClick, disabled },
+  ref
+) {
   const classes = [styles.chip, selected && styles.selected].filter(Boolean).join(' ');
 
   const label = <span className={styles.label}>{children}</span>;
@@ -26,6 +32,7 @@ export function Chip({ children, onRemove, removeLabel, selected, onClick, disab
   if (onClick) {
     return (
       <button
+        ref={ref as import('preact').Ref<HTMLButtonElement>}
         type="button"
         className={classes}
         aria-pressed={selected ?? false}
@@ -38,7 +45,7 @@ export function Chip({ children, onRemove, removeLabel, selected, onClick, disab
   }
 
   return (
-    <span className={classes}>
+    <span ref={ref as import('preact').Ref<HTMLSpanElement>} className={classes}>
       {label}
       {onRemove && (
         <button
@@ -53,4 +60,4 @@ export function Chip({ children, onRemove, removeLabel, selected, onClick, disab
       )}
     </span>
   );
-}
+});

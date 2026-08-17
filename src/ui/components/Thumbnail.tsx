@@ -13,12 +13,14 @@
  *    forever, with nothing to tell the user something had gone wrong.
  */
 import { useEffect, useRef, useState } from 'preact/hooks';
+import { forwardRef } from 'preact/compat';
 import { Check, RotateCw, Trash2 } from 'lucide-preact';
 import { deletePage, rotatePage, sources, type PageRef } from '../../core/store';
 import { bitmapKey, renderHandleFor, thumbnailCache } from '../../core/render-cache';
 import { isCancellation, logEvent } from '../../core/errors';
 import { normalizeRotation } from '../../core/rotation';
 import { IconButton } from './IconButton';
+import { mergeRefs } from './mergeRefs';
 import styles from './Thumbnail.module.css';
 
 export interface ThumbnailProps {
@@ -40,7 +42,10 @@ function renderScale(cssWidth: number, pageWidthPt: number): number {
   return Math.min(2, Math.max(0.2, (cssWidth * dpr) / pageWidthPt));
 }
 
-export function Thumbnail({ page, docId, width, aspect, isSelected, selectable }: ThumbnailProps) {
+export const Thumbnail = forwardRef<HTMLDivElement, ThumbnailProps>(function Thumbnail(
+  { page, docId, width, aspect, isSelected, selectable },
+  ref
+) {
   const frameRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [visible, setVisible] = useState(false);
@@ -133,7 +138,7 @@ export function Thumbnail({ page, docId, width, aspect, isSelected, selectable }
 
   return (
     <div
-      ref={frameRef}
+      ref={mergeRefs(frameRef, ref)}
       className={`${styles.frame} ${isSelected ? styles.selected : ''}`}
       style={{ aspectRatio: `${actualAspect}` }}
     >
@@ -175,4 +180,4 @@ export function Thumbnail({ page, docId, width, aspect, isSelected, selectable }
       </div>
     </div>
   );
-}
+});

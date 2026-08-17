@@ -10,6 +10,7 @@
  *  • `alert()` when nothing was armed.
  */
 import { useRef, useState } from 'preact/hooks';
+import { forwardRef } from 'preact/compat';
 import { X, Copy } from 'lucide-preact';
 import {
   addAnnotation,
@@ -23,6 +24,7 @@ import { beginTransaction } from '../../core/history';
 import { signaturePreviewUrl, signatures } from '../../core/signatures';
 import { notify } from '../../core/notify';
 import { activeStamp, signatureSuggestions } from '../tools/sign/state';
+import { mergeRefs } from './mergeRefs';
 import styles from './AnnotationOverlay.module.css';
 import { useTranslation, currentLocale } from '../../core/i18n';
 
@@ -48,111 +50,113 @@ const DEFAULT_SIZE: Record<Annotation['type'], { width: number; height: number }
 const NUDGE = 0.002;
 const NUDGE_COARSE = 0.02;
 
-export function AnnotationOverlay({ docId, pageKey, width, height }: AnnotationOverlayProps) {
-  const t = useTranslation();
-  const layerRef = useRef<HTMLDivElement>(null);
-  const doc = documents.value.find(d => d.id === docId);
-  const armed = activeStamp.value;
-  const stamps = (doc?.annotations ?? []).filter(a => a.pageKey === pageKey);
-  const pageIndex = doc?.pages.findIndex(p => p.key === pageKey) ?? -1;
-  const suggestions = signatureSuggestions.value.filter(s => s.pageIndex === pageIndex);
+export const AnnotationOverlay = forwardRef<HTMLDivElement, AnnotationOverlayProps>(
+  function AnnotationOverlay({ docId, pageKey, width, height }, ref) {
+    const t = useTranslation();
+    const layerRef = useRef<HTMLDivElement>(null);
+    const doc = documents.value.find(d => d.id === docId);
+    const armed = activeStamp.value;
+    const stamps = (doc?.annotations ?? []).filter(a => a.pageKey === pageKey);
+    const pageIndex = doc?.pages.findIndex(p => p.key === pageKey) ?? -1;
+    const suggestions = signatureSuggestions.value.filter(s => s.pageIndex === pageIndex);
 
-  const place = (x: number, y: number) => {
-    const currentStamp = activeStamp.value;
-    if (!currentStamp) return;
-    const size = DEFAULT_SIZE[currentStamp.type];
-    const existingCount =
-      (doc?.annotations ?? []).filter(a => a.type === currentStamp.type).length + 1;
+    const place = (x: number, y: number) => {
+      const currentStamp = activeStamp.value;
+      if (!currentStamp) return;
+      const size = DEFAULT_SIZE[currentStamp.type];
+      const existingCount =
+        (doc?.annotations ?? []).filter(a => a.type === currentStamp.type).length + 1;
 
-    addAnnotation(docId, {
-      id: crypto.randomUUID(),
-      pageKey,
-      type: currentStamp.type,
-      x: Math.max(0, Math.min(1 - size.width, x - size.width / 2)),
-      y: Math.max(0, Math.min(1 - size.height, y - size.height / 2)),
-      ...size,
-      data:
-        currentStamp.type === 'signature'
-          ? (currentStamp.signatureId ?? '')
-          : currentStamp.type === 'date'
-            ? new Date().toLocaleDateString(currentLocale.value ?? 'en-CA')
-            : currentStamp.type === 'check'
-              ? '✓'
-              : '',
-      fieldName:
-        currentStamp.type === 'form-text'
-          ? `text_${existingCount}`
-          : currentStamp.type === 'form-checkbox'
-            ? `check_${existingCount}`
-            : currentStamp.type === 'form-radio'
-              ? `radio_group`
-              : undefined,
-      exportValue: currentStamp.type === 'form-radio' ? `option_${existingCount}` : undefined
-    });
-    // Disarm so a second click does not place a duplicate by accident.
-    activeStamp.value = null;
-  };
+      addAnnotation(docId, {
+        id: crypto.randomUUID(),
+        pageKey,
+        type: currentStamp.type,
+        x: Math.max(0, Math.min(1 - size.width, x - size.width / 2)),
+        y: Math.max(0, Math.min(1 - size.height, y - size.height / 2)),
+        ...size,
+        data:
+          currentStamp.type === 'signature'
+            ? (currentStamp.signatureId ?? '')
+            : currentStamp.type === 'date'
+              ? new Date().toLocaleDateString(currentLocale.value ?? 'en-CA')
+              : currentStamp.type === 'check'
+                ? '✓'
+                : '',
+        fieldName:
+          currentStamp.type === 'form-text'
+            ? `text_${existingCount}`
+            : currentStamp.type === 'form-checkbox'
+              ? `check_${existingCount}`
+              : currentStamp.type === 'form-radio'
+                ? `radio_group`
+                : undefined,
+        exportValue: currentStamp.type === 'form-radio' ? `option_${existingCount}` : undefined
+      });
+      // Disarm so a second click does not place a duplicate by accident.
+      activeStamp.value = null;
+    };
 
-  const onLayerKeyDown = (event: KeyboardEvent) => {
-    // A real keyboard alternative to the pointer-only initial placement path.
-    // Suggestions are buttons already, but an empty page needs an equally usable
-    // route: focus the page, choose a stamp, then press Enter or Space to place it
-    // in the centre where it can be nudged or resized afterwards.
-    if (!activeStamp.value || event.target !== layerRef.current) return;
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    event.preventDefault();
-    place(0.5, 0.5);
-  };
+    const onLayerKeyDown = (event: KeyboardEvent) => {
+      // A real keyboard alternative to the pointer-only initial placement path.
+      // Suggestions are buttons already, but an empty page needs an equally usable
+      // route: focus the page, choose a stamp, then press Enter or Space to place it
+      // in the centre where it can be nudged or resized afterwards.
+      if (!activeStamp.value || event.target !== layerRef.current) return;
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      place(0.5, 0.5);
+    };
 
-  return (
-    <div
-      ref={layerRef}
-      className={`${styles.layer} ${armed ? styles.armed : ''}`}
-      style={{ width: `${width}px`, height: `${height}px` }}
-      tabIndex={armed ? 0 : -1}
-      role={armed ? 'group' : undefined}
-      aria-label={armed ? 'Stamp placement area. Press Enter to place in the centre.' : undefined}
-      onKeyDown={onLayerKeyDown}
-      onClick={event => {
-        const layer = layerRef.current;
-        if (!layer || event.target !== layer || !armed) return;
-        const rect = layer.getBoundingClientRect();
-        place((event.clientX - rect.left) / rect.width, (event.clientY - rect.top) / rect.height);
-      }}
-    >
-      {stamps.map(stamp => (
-        <Stamp key={stamp.id} docId={docId} stamp={stamp} layerRef={layerRef} />
-      ))}
+    return (
+      <div
+        ref={mergeRefs(layerRef, ref)}
+        className={`${styles.layer} ${armed ? styles.armed : ''}`}
+        style={{ width: `${width}px`, height: `${height}px` }}
+        tabIndex={armed ? 0 : -1}
+        role={armed ? 'group' : undefined}
+        aria-label={armed ? 'Stamp placement area. Press Enter to place in the centre.' : undefined}
+        onKeyDown={onLayerKeyDown}
+        onClick={event => {
+          const layer = layerRef.current;
+          if (!layer || event.target !== layer || !armed) return;
+          const rect = layer.getBoundingClientRect();
+          place((event.clientX - rect.left) / rect.width, (event.clientY - rect.top) / rect.height);
+        }}
+      >
+        {stamps.map(stamp => (
+          <Stamp key={stamp.id} docId={docId} stamp={stamp} layerRef={layerRef} />
+        ))}
 
-      {suggestions.map((suggestion, index) => (
-        <button
-          type="button"
-          key={`suggestion-${index}`}
-          className={styles.suggestion}
-          style={{
-            left: `${suggestion.x * 100}%`,
-            top: `${suggestion.y * 100}%`,
-            width: `${suggestion.width * 100}%`,
-            height: `${suggestion.height * 100}%`
-          }}
-          onClick={event => {
-            event.stopPropagation();
-            if (!armed) {
-              notify('info', 'Pick a signature or stamp first.', {
-                detail: 'Choose one in the panel, then click here to place it.'
-              });
-              return;
-            }
-            place(suggestion.x + suggestion.width / 2, suggestion.y + suggestion.height / 2);
-            signatureSuggestions.value = signatureSuggestions.value.filter(s => s !== suggestion);
-          }}
-        >
-          {t('Sign here')}
-        </button>
-      ))}
-    </div>
-  );
-}
+        {suggestions.map((suggestion, index) => (
+          <button
+            type="button"
+            key={`suggestion-${index}`}
+            className={styles.suggestion}
+            style={{
+              left: `${suggestion.x * 100}%`,
+              top: `${suggestion.y * 100}%`,
+              width: `${suggestion.width * 100}%`,
+              height: `${suggestion.height * 100}%`
+            }}
+            onClick={event => {
+              event.stopPropagation();
+              if (!armed) {
+                notify('info', 'Pick a signature or stamp first.', {
+                  detail: 'Choose one in the panel, then click here to place it.'
+                });
+                return;
+              }
+              place(suggestion.x + suggestion.width / 2, suggestion.y + suggestion.height / 2);
+              signatureSuggestions.value = signatureSuggestions.value.filter(s => s !== suggestion);
+            }}
+          >
+            {t('Sign here')}
+          </button>
+        ))}
+      </div>
+    );
+  }
+);
 
 function Stamp({
   docId,

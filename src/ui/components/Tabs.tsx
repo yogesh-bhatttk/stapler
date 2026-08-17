@@ -2,6 +2,7 @@
  * A tab list only — the panels are the caller's concern. Follows the WAI-ARIA
  * tabs pattern: roving tabindex, arrow keys move focus and activate immediately.
  */
+import { forwardRef } from 'preact/compat';
 import styles from './Tabs.module.css';
 
 export interface TabItem {
@@ -16,7 +17,10 @@ export interface TabsProps {
   ariaLabel: string;
 }
 
-export function Tabs({ items, activeId, onChange, ariaLabel }: TabsProps) {
+export const Tabs = forwardRef<HTMLDivElement, TabsProps>(function Tabs(
+  { items, activeId, onChange, ariaLabel },
+  ref
+) {
   const move = (from: number, delta: number) => {
     const next = (from + delta + items.length) % items.length;
     onChange(items[next].id);
@@ -28,7 +32,7 @@ export function Tabs({ items, activeId, onChange, ariaLabel }: TabsProps) {
   };
 
   return (
-    <div role="tablist" aria-label={ariaLabel} className={styles.tablist}>
+    <div ref={ref} role="tablist" aria-label={ariaLabel} className={styles.tablist}>
       {items.map((item, index) => {
         const active = item.id === activeId;
         return (
@@ -63,4 +67,4 @@ export function Tabs({ items, activeId, onChange, ariaLabel }: TabsProps) {
       })}
     </div>
   );
-}
+});
