@@ -11,7 +11,9 @@ import {
   Recipe
 } from './state';
 import { compressSettings } from '../compress/state';
+import type { CompressSettings } from '../compress/state';
 import { watermarkSettings, headerFooterSettings } from '../watermark/state';
+import type { WatermarkSettings, HeaderFooterSettings } from '../watermark/state';
 import { nupSettings } from '../nup/state';
 import type { NUpSettings } from '../nup/state';
 import { normalizeSettings } from '../normalize/state';
@@ -60,6 +62,23 @@ export function BatchPanel() {
     }
   };
 
+  /**
+   * A recipe is a *snapshot*, not a pointer at whatever some other tool's panel
+   * happens to hold later. Two things were wrong before:
+   *
+   *  • untouched settings were stored as `null`, and the runner's `?? live.value`
+   *    fell straight through them to the signal's current value — so replaying a
+   *    recipe applied whatever the N-up or Normalize panel had open at run time;
+   *  • the stored objects were shallow copies sharing nested references with the
+   *    live signals, so editing a nested field afterwards edited the saved recipe.
+   *
+   * `structuredClone` fixes the second; recording `undefined` for a setting that
+   * genuinely has no value fixes the first — the runner then knows the recipe says
+   * "not configured" rather than "ask the signal".
+   */
+  const snapshot = <T,>(value: T | null | undefined): T | undefined =>
+    value == null ? undefined : (structuredClone(value) as T);
+
   const handleSaveRecipe = () => {
     const name = window.prompt('Recipe name:');
     if (!name) return;
@@ -68,11 +87,11 @@ export function BatchPanel() {
       name,
       tools: ['watermark', 'normalize', 'nup', 'compress'],
       settings: {
-        compress: { ...compressSettings.value },
-        watermark: { ...watermarkSettings.value },
-        headerFooter: { ...headerFooterSettings.value },
-        nup: nupSettings.value as NUpSettings,
-        normalize: normalizeSettings.value as NormalizeSettings
+        compress: snapshot<CompressSettings>(compressSettings.value),
+        watermark: snapshot<WatermarkSettings>(watermarkSettings.value),
+        headerFooter: snapshot<HeaderFooterSettings>(headerFooterSettings.value),
+        nup: snapshot<NUpSettings>(nupSettings.value),
+        normalize: snapshot<NormalizeSettings>(normalizeSettings.value)
       }
     };
     savedRecipes.value = [...savedRecipes.value, newRecipe];
@@ -149,6 +168,21 @@ export function BatchPanel() {
           <p>
             {batchProgress.value.failed} {t('failed')}
           </p>
+        </div>
+      )}
+
+      {batchProgress.value.notes.length > 0 && (
+        <div className={panelStyles.section}>
+          <p>
+            {batchProgress.value.notes.length} {t('written unchanged')}
+          </p>
+          <ul style={{ margin: 0, paddingInlineStart: '20px', fontSize: '0.85em' }}>
+            {batchProgress.value.notes.map(note => (
+              <li key={`${note.file}-${note.detail}`}>
+                {note.file} — {note.detail}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 

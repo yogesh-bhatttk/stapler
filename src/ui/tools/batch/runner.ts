@@ -4,7 +4,8 @@ import {
   outputDirHandle,
   activeRecipeId,
   savedRecipes,
-  outputPattern
+  outputPattern,
+  type BatchNote
 } from './state';
 import { compressSettings } from '../compress/state';
 import { watermarkSettings, headerFooterSettings } from '../watermark/state';
@@ -18,6 +19,14 @@ import {
   stripPdfExtension,
   deduplicateNames
 } from '../../../core/batch-filename';
+
+/** Appends a per-file outcome to the run summary. */
+function addNote(note: BatchNote): void {
+  batchProgress.value = {
+    ...batchProgress.value,
+    notes: [...batchProgress.value.notes, note]
+  };
+}
 
 export async function runBatch(signal?: AbortSignal) {
   const inDir = inputDirHandle.value;
@@ -49,18 +58,44 @@ export async function runBatch(signal?: AbortSignal) {
   // Fall back to sensible defaults when no recipe is active.
   const activeTools: string[] = recipe?.tools ?? ['watermark', 'compress'];
 
+  // A recipe replays *its own* snapshot. It must never reach for a live signal:
+  // that is how a saved recipe silently picked up whatever the N-up or Normalize
+  // panel happened to have open at run time. A setting the recipe does not carry
+  // means "this recipe does not configure that tool", not "ask the current UI".
   const compress = recipe ? recipe.settings.compress : compressSettings.value;
   const watermark = recipe ? recipe.settings.watermark : watermarkSettings.value;
   const headerFooter = recipe ? recipe.settings.headerFooter : headerFooterSettings.value;
   const nup = recipe ? recipe.settings.nup : nupSettings.value;
   const normalize = recipe ? recipe.settings.normalize : normalizeSettings.value;
 
+  if (recipe) {
+    // Recipes saved by older builds can list a tool whose settings were never
+    // recorded. Skipping it silently looks exactly like the tool running and
+    // doing nothing, so say which ones are inert.
+    const configured: Record<string, unknown> = {
+      compress,
+      watermark,
+      headerFooter,
+      nup,
+      normalize
+    };
+    const missing = activeTools.filter(
+      tool => tool in configured && configured[tool] === undefined
+    );
+    if (missing.length > 0) {
+      notify('warning', 'Recipe is missing settings', {
+        detail: `"${recipe.name}" lists ${missing.join(', ')} but has no saved settings for ${missing.length === 1 ? 'it' : 'them'}, so ${missing.length === 1 ? 'it' : 'they'} will be skipped. Re-save the recipe to capture the current settings.`
+      });
+    }
+  }
+
   batchProgress.value = {
     total: 0,
     completed: 0,
     failed: 0,
     currentFile: '',
-    isProcessing: true
+    isProcessing: true,
+    notes: []
   };
 
   try {
@@ -164,9 +199,25 @@ export async function runBatch(signal?: AbortSignal) {
             }
           } else if (toolId === 'compress' && compress) {
             const report = await planCompression(currentBytes, compress);
-            if (!report.alreadyOptimized) {
+            // CMP-04: a compress that cannot beat the input keeps the input. The
+            // file is still written (later tools in the recipe may change it),
+            // but the run has to say so — a batch that quietly emitted identical
+            // copies looked exactly like a batch that had compressed them.
+            if (report.alreadyOptimized) {
+              addNote({
+                file: fileHandle.name,
+                kind: 'kept-original',
+                detail: 'Already optimised — there was nothing left to compress.'
+              });
+            } else {
               const res = await compressDocument(currentBytes, compress, report);
-              if (!res.keptOriginal) {
+              if (res.keptOriginal) {
+                addNote({
+                  file: fileHandle.name,
+                  kind: 'kept-original',
+                  detail: 'Compressing would have made this file larger, so it was left unchanged.'
+                });
+              } else {
                 currentBytes = res.bytes;
               }
             }
@@ -199,8 +250,17 @@ export async function runBatch(signal?: AbortSignal) {
       }
     }
 
-    notify('success', 'Batch Processing Complete', {
-      detail: `Successfully processed ${batchProgress.value.completed} files. ${batchProgress.value.failed} failed.`
+    const kept = batchProgress.value.notes.filter(n => n.kind === 'kept-original');
+    notify(kept.length > 0 ? 'info' : 'success', 'Batch Processing Complete', {
+      detail:
+        `Successfully processed ${batchProgress.value.completed} files. ` +
+        `${batchProgress.value.failed} failed.` +
+        (kept.length > 0
+          ? ` ${kept.length} ${kept.length === 1 ? 'file was' : 'files were'} written unchanged ` +
+            `because compressing would not have made ${kept.length === 1 ? 'it' : 'them'} smaller: ` +
+            `${kept.map(n => n.file).join(', ')}.`
+          : ''),
+      timeout: kept.length > 0 ? 0 : undefined
     });
   } catch (err) {
     console.error(err);

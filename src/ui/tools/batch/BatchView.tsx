@@ -73,6 +73,19 @@ export function BatchView() {
           )}
         </div>
       )}
+
+      {batchProgress.value.notes.length > 0 && (
+        <div className={panelStyles.section}>
+          <h3>{t('Files written unchanged')}</h3>
+          <ul style={{ margin: 0, paddingInlineStart: '20px' }}>
+            {batchProgress.value.notes.map(note => (
+              <li key={`${note.file}-${note.detail}`}>
+                <strong>{note.file}</strong> — {note.detail}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

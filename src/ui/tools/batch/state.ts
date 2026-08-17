@@ -33,12 +33,28 @@ import type { FsaDirectoryHandle } from '../../../platform/fsa';
 export const inputDirHandle = signal<FsaDirectoryHandle | FileSystemDirectoryHandle | null>(null);
 export const outputDirHandle = signal<FsaDirectoryHandle | FileSystemDirectoryHandle | null>(null);
 
+/**
+ * One thing that happened to one file that the run summary has to mention.
+ *
+ * `kept-original` is the compress fallback (CMP-04): the compressed result came
+ * out no smaller than the input, so the original was written through unchanged.
+ * That is the correct outcome, but silently emitting a byte-identical copy left
+ * the user believing a folder of files had been compressed when it had not.
+ */
+export interface BatchNote {
+  file: string;
+  kind: 'kept-original';
+  detail: string;
+}
+
 export interface BatchProgress {
   total: number;
   completed: number;
   failed: number;
   currentFile: string;
   isProcessing: boolean;
+  /** Per-file outcomes worth telling the user about, in the order they happened. */
+  notes: BatchNote[];
 }
 
 export const batchProgress = signal<BatchProgress>({
@@ -46,7 +62,8 @@ export const batchProgress = signal<BatchProgress>({
   completed: 0,
   failed: 0,
   currentFile: '',
-  isProcessing: false
+  isProcessing: false,
+  notes: []
 });
 
 /**
