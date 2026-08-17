@@ -1038,8 +1038,8 @@ instructions are in `RELEASE_CHECKLIST.md` §5 and §5b.
     (`firefoxManifest()` in `vite.config.ts`) — the same pattern `copyPdfJsAssets`
     already used. Permissions, CSP, and icons are untouched, so Chrome/Edge and Firefox
     cannot drift apart from hand-maintaining two manifest files.
-  - `gecko.id` is a placeholder (`stapler-offline-pdf@stapler.app`, marked `TODO(DIST-04)`
-    in the source) — AMO issues or the submitter chooses the real one at submission time.
+  - `gecko.id` is fixed in the Firefox manifest transform as
+    `stapler-offline-pdf@stapler.app` — AMO submission still uses that same add-on ID.
   - The File System Access fallback the AC asks to see "exercised on Firefox" already
     existed before this ticket: `src/platform/file-system.ts`'s `openFilesViaInput`
     (`<input type=file>`) and `saveViaDownload` (anchor download), wired in through
