@@ -104,14 +104,27 @@ export function CompressPanel() {
 
   const exportReport = async () => {
     if (!report) return;
+    // `lastCompressionResult` is set by the commit path, and only by it, so its
+    // presence is what distinguishes a finished run from a pre-flight analysis.
+    // Without one there is no compressed file, and the report must not print a
+    // projection under "Compressed Size:" / "Saved:" as though there were.
     const lastResult = lastCompressionResult.value;
     const plan = lastResult?.plan ?? report.plan;
-    const stats: CompressionResultStats = {
-      originalBytes: lastResult?.originalBytes ?? report.originalBytes,
-      compressedBytes:
-        lastResult?.compressedBytes ?? (projection ? projection.bytes : report.estimatedBytes),
-      keptOriginal: lastResult?.keptOriginal ?? report.alreadyOptimized
-    };
+    const stats: CompressionResultStats = lastResult
+      ? {
+          originalBytes: lastResult.originalBytes,
+          compressedBytes: lastResult.compressedBytes,
+          keptOriginal: lastResult.keptOriginal,
+          imageStats: lastResult.imageStats
+        }
+      : {
+          originalBytes: report.originalBytes,
+          compressedBytes: projection ? projection.bytes : report.estimatedBytes,
+          // Not `alreadyOptimized`: that is a judgement about whether compressing
+          // is worth it, not a statement that an output was discarded.
+          keptOriginal: false,
+          estimated: true
+        };
     const text = generateCompressionReportText(plan, stats);
     const stem = doc.name.replace(/\.[^.]+$/, '');
     await platform.saveFileAs(new TextEncoder().encode(text), `${stem}-compression-report.txt`);

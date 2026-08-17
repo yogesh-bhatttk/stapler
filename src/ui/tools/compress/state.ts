@@ -1,6 +1,7 @@
 import { signal } from '@preact/signals';
 import type { CompressionReport } from '../../../core/operations';
 import type { CompressionPlan } from '../../../core/compress-plan';
+import type { ImageResultStat } from '../../../core/compress-report';
 import { refineEstimate, type PreviewMeasurement } from '../../../core/compress-plan';
 
 export interface CompressSettings {
@@ -111,6 +112,8 @@ export interface LastCompressionResult {
   originalBytes: number;
   compressedBytes: number;
   keptOriginal?: boolean;
+  /** CMP-06 — measured per-image before/after sizes from the run that produced this. */
+  imageStats?: ImageResultStat[];
 }
 
 export const lastCompressionResult = signal<LastCompressionResult | null>(null);

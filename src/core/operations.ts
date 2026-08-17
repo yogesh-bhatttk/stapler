@@ -21,6 +21,7 @@ import type {
 } from './workers/process.worker';
 import type { ProtectionSettings } from './pdf/encrypt';
 import type { PatternSuggestion, RegionPixelResidue, TextRegion } from './workers/render.worker';
+import type { ImageResultStat } from './compress-report';
 import {
   MEANINGFUL_SAVING,
   classifyPages,
@@ -470,9 +471,15 @@ export async function planCompression(
 export interface CompressionResult {
   bytes: Uint8Array;
   originalBytes: number;
-  /** True when the rebuilt file was not smaller and the original was kept. */
+  /**
+   * True when the original bytes were returned unchanged — either because the
+   * rebuild was not smaller, or because no image was actually re-encoded and no
+   * page rasterised, so there was no compression work to report savings for.
+   */
   keptOriginal: boolean;
   plan: CompressionPlan;
+  /** CMP-06 — measured per-image before/after sizes, straight from the rebuild. */
+  imageStats: ImageResultStat[];
 }
 
 export async function compressDocument(
@@ -573,7 +580,8 @@ export async function compressDocument(
     bytes: result.bytes,
     originalBytes: bytes.byteLength,
     keptOriginal: result.keptOriginal,
-    plan: report.plan
+    plan: report.plan,
+    imageStats: result.imageStats ?? []
   };
 }
 
@@ -599,6 +607,8 @@ export interface TargetCompressionResult {
   trials: TargetTrial[];
   /** Plan of the run that produced `bytes`; null when no work was needed. */
   plan: CompressionPlan | null;
+  /** CMP-06 — measured per-image sizes of the trial that produced `bytes`. */
+  imageStats: ImageResultStat[];
 }
 
 /**
@@ -632,7 +642,8 @@ export async function compressToTargetSize(
       settings: null,
       keptOriginal: true,
       trials: [],
-      plan: null
+      plan: null,
+      imageStats: []
     };
   }
 
@@ -678,7 +689,8 @@ export async function compressToTargetSize(
     settings: chosen.settings,
     keptOriginal: chosen.keptOriginal,
     trials: outcome.trials,
-    plan: chosen.output.plan
+    plan: chosen.output.plan,
+    imageStats: chosen.output.imageStats
   };
 }
 

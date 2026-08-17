@@ -23,6 +23,16 @@ export interface CompressionResultStats {
   compressedBytes: number;
   keptOriginal?: boolean;
   imageStats?: ImageResultStat[];
+  /**
+   * True when `compressedBytes` is a pre-flight *projection* rather than the byte
+   * length of a file that exists.
+   *
+   * The panel can export a report before any compression has run, and it used to
+   * print the estimate under the same "Compressed Size:" / "Saved:" labels a
+   * finished run gets — an estimate presented as a measurement. Defaults to
+   * false, because every other caller passes the length of bytes it holds.
+   */
+  estimated?: boolean;
 }
 
 export interface CompressionReportData {
@@ -33,6 +43,8 @@ export interface CompressionReportData {
     savingsPercent: number;
     keptOriginal: boolean;
     skippedConstructs: string[];
+    /** True when the sizes above are a projection, not a measured output. */
+    estimated: boolean;
   };
   pages: Array<{
     pageIndex: number;
@@ -140,7 +152,8 @@ export function buildCompressionReportData(
       savingsBytes,
       savingsPercent,
       keptOriginal,
-      skippedConstructs: plan.skipped
+      skippedConstructs: plan.skipped,
+      estimated: Boolean(resultStats.estimated)
     },
     pages
   };
@@ -164,13 +177,26 @@ export function generateCompressionReportText(
   lines.push('SUMMARY');
   lines.push('--------------------------------------------------------------------------------');
   lines.push(`Original Size:   ${data.summary.originalBytes.toLocaleString()} bytes`);
-  lines.push(`Compressed Size: ${data.summary.compressedBytes.toLocaleString()} bytes`);
-  lines.push(
-    `Saved:           ${data.summary.savingsBytes.toLocaleString()} bytes (${data.summary.savingsPercent}%)`
-  );
-  lines.push(
-    `Status:          ${data.summary.keptOriginal ? 'Kept Original File (Output was not smaller)' : 'Compressed'}`
-  );
+  if (data.summary.estimated) {
+    // Nothing has been compressed yet, so there is no compressed size to state.
+    // Naming these as estimates is the whole point: the numbers come from the
+    // pre-flight model, and the model is deliberately cautious rather than right.
+    lines.push(`Estimated Size:  ${data.summary.compressedBytes.toLocaleString()} bytes`);
+    lines.push(
+      `Estimated Saved: ${data.summary.savingsBytes.toLocaleString()} bytes (${data.summary.savingsPercent}%)`
+    );
+    lines.push(
+      'Status:          Estimate only — no compression has been run on this document yet.'
+    );
+  } else {
+    lines.push(`Compressed Size: ${data.summary.compressedBytes.toLocaleString()} bytes`);
+    lines.push(
+      `Saved:           ${data.summary.savingsBytes.toLocaleString()} bytes (${data.summary.savingsPercent}%)`
+    );
+    lines.push(
+      `Status:          ${data.summary.keptOriginal ? 'Kept Original File (Output was not smaller)' : 'Compressed'}`
+    );
+  }
   lines.push('');
 
   if (data.summary.skippedConstructs.length > 0) {
@@ -184,6 +210,11 @@ export function generateCompressionReportText(
 
   lines.push('PAGE & IMAGE BREAKDOWN');
   lines.push('--------------------------------------------------------------------------------');
+  if (data.summary.estimated) {
+    // Without a run there are no per-image measurements, so every entry below is
+    // the route the analysis *would* take, not something that happened.
+    lines.push('(Planned routes — nothing has been re-encoded yet, so no sizes are listed.)');
+  }
 
   for (const p of data.pages) {
     lines.push(`Page ${p.pageIndex + 1}:`);

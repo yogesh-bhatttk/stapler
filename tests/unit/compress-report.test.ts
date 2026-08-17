@@ -169,4 +169,86 @@ describe('CMP-06 — Compression report export', () => {
     const text = generateCompressionReportText(samplePlan, statsKept);
     expect(text).toContain('Status:          Kept Original File (Output was not smaller)');
   });
+
+  /*
+   * The panel can export a report before anything has been compressed. It used to
+   * print the pre-flight projection under the same "Compressed Size:" / "Saved:"
+   * labels a finished run gets, which reads as a measurement of work that never
+   * happened.
+   */
+  describe('an estimate is never printed as a measurement', () => {
+    const estimate: CompressionResultStats = {
+      originalBytes: 1_000_000,
+      compressedBytes: 700_000,
+      estimated: true
+    };
+
+    it('labels projected sizes as estimates and says no run has happened', () => {
+      const text = generateCompressionReportText(samplePlan, estimate);
+      expect(text).toContain('Estimated Size:  700,000 bytes');
+      expect(text).toContain('Estimated Saved: 300,000 bytes (30%)');
+      expect(text).toContain('Status:          Estimate only');
+      // The measured labels must not appear anywhere in the summary.
+      expect(text).not.toContain('Compressed Size: 700,000');
+      expect(text).not.toContain('Saved:           300,000');
+      expect(text).toContain('nothing has been re-encoded yet');
+    });
+
+    it('flags the estimate in the JSON sidecar too', () => {
+      const parsed = JSON.parse(generateCompressionReportJson(samplePlan, estimate));
+      expect(parsed.summary.estimated).toBe(true);
+      const measured = JSON.parse(
+        generateCompressionReportJson(samplePlan, { ...estimate, estimated: false })
+      );
+      expect(measured.summary.estimated).toBe(false);
+    });
+
+    it('uses the measured labels once a run has produced bytes', () => {
+      const text = generateCompressionReportText(samplePlan, {
+        originalBytes: 1_000_000,
+        compressedBytes: 700_000,
+        keptOriginal: false
+      });
+      expect(text).toContain('Compressed Size: 700,000 bytes');
+      expect(text).toContain('Saved:           300,000 bytes (30%)');
+      expect(text).not.toContain('Estimated Size:');
+    });
+  });
+
+  /*
+   * CMP-06's per-image breakdown, as `rebuildCompressed` now measures it: real
+   * before/after byte lengths per image, including the ones it refused.
+   */
+  it('prints measured per-image sizes when the rebuild supplied them', () => {
+    const text = generateCompressionReportText(samplePlan, {
+      originalBytes: 1_000_000,
+      compressedBytes: 620_000,
+      keptOriginal: false,
+      imageStats: [
+        {
+          pageIndex: 0,
+          imageId: 'Im1',
+          objectNumber: 12,
+          originalBytes: 400_000,
+          compressedBytes: 40_000,
+          status: 're-encoded'
+        },
+        {
+          pageIndex: 0,
+          imageId: 'Im2',
+          objectNumber: 15,
+          originalBytes: 8_000,
+          compressedBytes: 12_000,
+          status: 'skipped',
+          skipReason: 'Re-encoding produced 12000 bytes against the original 8000.'
+        }
+      ]
+    });
+
+    expect(text).toContain('Image ID: Im1 (Object #12)');
+    expect(text).toContain('Original Size:   400,000 bytes');
+    expect(text).toContain('Compressed Size: 40,000 bytes');
+    expect(text).toContain('Image ID: Im2 (Object #15)');
+    expect(text).toContain('Skip Reason:     Re-encoding produced 12000 bytes');
+  });
 });

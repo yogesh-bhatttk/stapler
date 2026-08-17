@@ -20,6 +20,8 @@ import {
   fillFormFields,
   flattenDocument,
   pagesToImageArchive,
+  protectDocument,
+  scrubDocumentMetadata,
   planCompression,
   sanitizeFileStem,
   splitBoundaries,
@@ -37,7 +39,7 @@ import {
 import { formatBytes } from '../components/Feedback';
 import type { JobOptions } from '../../core/workers/protocol';
 import { createJobHandle } from '../../core/workers/protocol';
-import type { ToolId } from '../../core/tools';
+import { findTool, type ToolId } from '../../core/tools';
 import {
   compressMode,
   compressSettings,
@@ -46,7 +48,13 @@ import {
   lastCompressionResult,
   targetSizeBytes
 } from './compress/state';
-import { flattenOnExport, pdfToImageSettings, removeBlanksThreshold, splitSettings } from './state';
+import {
+  flattenOnExport,
+  markdownToPdfSource,
+  pdfToImageSettings,
+  removeBlanksThreshold,
+  splitSettings
+} from './state';
 import { extractSettings } from './extract/state';
 import { extractImagesReport, summarize } from './extract-images/state';
 import { formFields, formValues } from './sign/state';
@@ -74,7 +82,11 @@ function stem(name: string): string {
  * Applied here rather than in each handler so every tool's export is covered by
  * one rule, and so nothing forks a second save path.
  */
-async function applyProtection(bytes: Uint8Array, name: string): Promise<Uint8Array | null> {
+async function applyProtection(
+  bytes: Uint8Array,
+  name: string,
+  job?: JobOptions
+): Promise<Uint8Array | null> {
   const issue = protectionIssue();
   if (issue) {
     notify('danger', 'Nothing was saved.', {
@@ -106,7 +118,10 @@ async function applyProtection(bytes: Uint8Array, name: string): Promise<Uint8Ar
     allowModifying: state.allowModifying
   };
   try {
-    return await processWorker.lease(api => api.protectDocument(bytes, settings));
+    // RED-06 encryption re-writes every object in the file. Passing the job
+    // through is what gives it a progress bar and a working Cancel; without it
+    // the UI sat at 100% through the slowest part of the export.
+    return await protectDocument(bytes, settings, job ?? {});
   } catch (err) {
     notify('danger', 'Could not password-protect the file — nothing was saved.', {
       detail: `${err instanceof Error ? err.message : String(err)} Your document is unchanged.`,
@@ -126,8 +141,13 @@ async function applyProtection(bytes: Uint8Array, name: string): Promise<Uint8Ar
  * button that used to always mean "save a new file" is exactly the kind of
  * surprise this product's error-handling philosophy exists to avoid.
  */
-async function save(doc: StaplerDoc, bytes: Uint8Array, name: string): Promise<boolean> {
-  const protectedBytes = await applyProtection(bytes, name);
+async function save(
+  doc: StaplerDoc,
+  bytes: Uint8Array,
+  name: string,
+  job?: JobOptions
+): Promise<boolean> {
+  const protectedBytes = await applyProtection(bytes, name, job);
   if (!protectedBytes) return false;
   const wasProtected = protectedBytes !== bytes;
   bytes = protectedBytes;
@@ -264,9 +284,9 @@ const exportComposed: CommitHandler = async ({ doc, job }) => {
  * link its clickability, and saying so is the difference between a finalize and
  * a silent loss.
  */
-async function finalize(bytes: Uint8Array): Promise<Uint8Array> {
+async function finalize(bytes: Uint8Array, job?: JobOptions): Promise<Uint8Array> {
   if (!flattenOnExport.value) return bytes;
-  const result = await flattenDocument(bytes);
+  const result = await flattenDocument(bytes, job ?? {});
   const parts: string[] = [];
   if (result.fields > 0) parts.push(`${result.fields} form field${result.fields === 1 ? '' : 's'}`);
   if (result.annotationsBaked > 0)
@@ -327,11 +347,13 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         nup: nupSettings.value,
         layerAnnotations: getLayerAnnotations(),
         outline: getOutline(doc),
-        bates: getBates()
+        bates: getBates(),
+        // Same as Sign: Annotate deliberately produces a static page.
+        allowXfaLoss: true
       },
       job
     );
-    await save(doc, await finalize(bytes), `${stem(doc.name)}-stapler.pdf`);
+    await save(doc, await finalize(bytes, job), `${stem(doc.name)}-stapler.pdf`, job);
   },
 
   split: async ({ doc, job }) => {
@@ -495,7 +517,8 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
           plan: outcome.plan,
           originalBytes: outcome.originalBytes,
           compressedBytes: outcome.achievedBytes,
-          keptOriginal: outcome.keptOriginal
+          keptOriginal: outcome.keptOriginal,
+          imageStats: outcome.imageStats
         };
       }
       compressTargetOutcome.value = {
@@ -566,7 +589,8 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       plan: result.plan,
       originalBytes: result.originalBytes,
       compressedBytes: result.bytes.byteLength,
-      keptOriginal: result.keptOriginal
+      keptOriginal: result.keptOriginal,
+      imageStats: result.imageStats
     };
     if (result.keptOriginal) {
       notify('warning', 'Kept the original file.', {
@@ -625,15 +649,23 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // fields are there to write to. `fillFormFields` now throws if a name is
     // missing, so a regression here fails loudly instead of saving a blank form.
     let bytes = await composeDocument(
-      { pages: doc.pages, annotations: doc.annotations, layerAnnotations: getLayerAnnotations() },
+      {
+        pages: doc.pages,
+        annotations: doc.annotations,
+        layerAnnotations: getLayerAnnotations(),
+        // Stamping on top of an XFA form is the workaround the product offers
+        // for one, so this path accepts the loss of the dynamic payload that
+        // merge and split refuse.
+        allowXfaLoss: true
+      },
       job
     );
     if (hasValues) {
       // SGN-05 — the fill path's own flatten is left to `finalize`, so the two
       // are one decision. With the toggle off the values stay interactive.
-      bytes = await fillFormFields(bytes, formValues.value, false);
+      bytes = await fillFormFields(bytes, formValues.value, false, job);
     }
-    await save(doc, await finalize(bytes), `${stem(doc.name)}-signed.pdf`);
+    await save(doc, await finalize(bytes, job), `${stem(doc.name)}-signed.pdf`, job);
   },
 
   normalize: async ({ doc, job }) => {
@@ -688,18 +720,19 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     registerSource(source);
     replaceWithSource(doc.id, source);
     pendingRedactions.value = [];
+    const regionCount = outcome.verdicts.length;
     notify('success', 'Redaction verified and applied.', {
-      detail: `Pages ${outcome.rasterizedPages.map(p => p + 1).join(', ')} are now images, so their text is no longer selectable. Export to save.`,
+      detail:
+        `${regionCount} region${regionCount === 1 ? '' : 's'} removed from the page content and ` +
+        're-checked in the saved bytes. Export to save.',
       timeout: 0
     });
   },
 
   metadata: async ({ doc, job }) => {
     const original = await currentDocumentBytes(job);
-    const scrubbed = await processWorker.lease(api =>
-      api.scrubMetadata(original, scrubSettings.value)
-    );
-    await save(doc, scrubbed, `${stem(doc.name)}-scrubbed.pdf`);
+    const scrubbed = await scrubDocumentMetadata(original, scrubSettings.value, job);
+    await save(doc, scrubbed, `${stem(doc.name)}-scrubbed.pdf`, job);
   },
   ocr: async ({ doc, job }) => {
     const settings = ocrSettings.value;
@@ -746,36 +779,110 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       return;
     }
 
-    await save(doc, await finalize(result.bytes), `${stem(doc.name)}-ocr.pdf`);
+    // Deliberately *not* `finalize`. `flattenOnExport` belongs to Sign and
+    // Annotate, whose panels show the toggle; OCR has no such control, so
+    // routing its export through the shared signal meant a checkbox the user set
+    // in another tool silently flattened this document's forms and annotations.
+    // OCR adds an invisible text layer and changes nothing else.
+    await save(doc, result.bytes, `${stem(doc.name)}-ocr.pdf`);
   },
 
+  // OCR-03. The action bar's primary CTA and the panel's per-format buttons are
+  // two routes to one export, so both read the same signals: the page the user
+  // selected, the grid they edited, and the format they last chose. Re-extracting
+  // page 0 here would have quietly exported a different table from the one on
+  // screen.
   'table-extract': async ({ doc, job }) => {
     const { extractPageTextItems } = await import('../../core/operations');
-    const { extractTableFromPage, exportTableToCsv } = await import('../../core/ocr/table-extract');
-    const bytes = await currentDocumentBytes(job);
-    const items = await extractPageTextItems(bytes, 0);
-    const extracted = extractTableFromPage(items);
-    const csv = exportTableToCsv(extracted);
-    await save(doc, new TextEncoder().encode(csv), `${stem(doc.name)}-table.csv`);
+    const { extractTableFromPage, exportTableToCsv, exportTableToTsv, exportTableToXlsx } =
+      await import('../../core/ocr/table-extract');
+    const { tableExtractPageIndex, tableExtractRows, tableExtractFormat } =
+      await import('./ocr/table-extract-state');
+
+    const pageIndex = Math.min(Math.max(0, tableExtractPageIndex.value), doc.pages.length - 1);
+
+    let rows = tableExtractRows.value;
+    if (!rows || rows.length === 0) {
+      // Nothing previewed yet: extract now rather than exporting an empty file.
+      const bytes = await currentDocumentBytes(job);
+      const items = await extractPageTextItems(bytes, pageIndex);
+      rows = extractTableFromPage(items).rows;
+      tableExtractRows.value = rows;
+    }
+
+    if (rows.length === 0) {
+      notify('warning', `No structured table data found on page ${pageIndex + 1}.`, {
+        detail:
+          'Nothing was exported. Table extraction reads text positions, so a scanned page ' +
+          'needs OCR first, and a page with no tabular text has nothing to infer.'
+      });
+      return;
+    }
+
+    const grid = {
+      rows,
+      headers: rows[0],
+      rowCount: rows.length,
+      columnCount: rows[0].length
+    };
+    const base = `${stem(doc.name)}-page${pageIndex + 1}-table`;
+    const format = tableExtractFormat.value;
+
+    // Deliberately `platform.saveFileAs`, not the shared `save`: that helper runs
+    // the export through `applyProtection`, which encrypts a *PDF*. Running a CSV
+    // or XLSX through it would produce an unopenable file.
+    const out =
+      format === 'xlsx'
+        ? { bytes: exportTableToXlsx(grid), name: `${base}.xlsx` }
+        : format === 'tsv'
+          ? { bytes: new TextEncoder().encode(exportTableToTsv(grid)), name: `${base}.tsv` }
+          : { bytes: new TextEncoder().encode(exportTableToCsv(grid)), name: `${base}.csv` };
+
+    const saved = await platform.saveFileAs(out.bytes, out.name);
+    if (saved) {
+      notify('success', `Saved ${out.name}`, {
+        detail: `${grid.rowCount} rows x ${grid.columnCount} columns from page ${pageIndex + 1}`
+      });
+    }
   },
   'contact-sheet': async ({ doc, job }) => {
     const { exportContactSheet } = await import('../../core/operations');
+    const { contactSheetColumns } = await import('./contact-sheet/state');
     const bytes = await currentDocumentBytes(job);
-    const sheet = await exportContactSheet(bytes, 4, job);
+    // The panel's column setting, not a hardcoded 4: the action bar's primary CTA
+    // and the panel's own button are two routes to one export and must agree.
+    const sheet = await exportContactSheet(bytes, contactSheetColumns.value, job);
     await save(doc, sheet, `${stem(doc.name)}-contact-sheet.pdf`);
   },
   compare: async () => {},
   batch: async () => {},
-  'md-to-pdf': async () => {},
+  // CNV-06 — panel only configures the Markdown source (`tools/state.ts`); this is
+  // the actual commit, reached the same way every other tool's is: the action
+  // bar's single primary CTA (DESIGN-ADAPTATION §4.2). `worksWithoutDocument` on
+  // the tool definition means `context.doc` may not correspond to a real open
+  // document here — the handler never reads it.
+  'md-to-pdf': async () => {
+    const markdown = markdownToPdfSource.value;
+    if (!markdown.trim()) {
+      notify('warning', 'Nothing to export.', { detail: 'Type or paste some Markdown first.' });
+      return;
+    }
+    const bytes = await processWorker.lease(api => api.markdownToPdf(markdown));
+    const saved = await platform.saveFileAs(bytes, 'document.pdf');
+    if (saved) notify('success', 'PDF saved successfully.');
+  },
   shortcuts: async () => {}
 };
 
 export async function commitTool(toolId: ToolId, job: JobOptions): Promise<void> {
   const doc = activeDoc.value;
-  if (!doc) throw internal('No document is open.');
+  const tool = findTool(toolId);
+  if (!doc && !tool?.worksWithoutDocument) throw internal('No document is open.');
   const handler = HANDLERS[toolId];
   if (!handler) throw internal(`No commit action is defined for the ${toolId} tool.`);
-  await handler({ doc, job });
+  // `worksWithoutDocument` tools (md-to-pdf, batch) never read `context.doc`; the
+  // cast keeps `CommitContext` simple for the many handlers that do require one.
+  await handler({ doc: doc as StaplerDoc, job });
 }
 
 /** Re-exported so the extract panel can share the text pipeline. */

@@ -88,22 +88,30 @@ import type { JobHandle } from './protocol';
 import { checkpoint } from './protocol';
 import { corrupt, encrypted, internal, unsupported } from '../errors';
 import type { ImagesToPdfOptions } from '../operations';
+import type { ImageResultStat } from '../compress-report';
 import { DOC_HAIRLINE_RGB, DOC_INK_RGB, DOC_REDACT_RGB } from '../doc-colors';
 import { markdownToPdfBytes } from '../markdown-to-pdf';
 import { batesLabel } from '../bates';
 import { encodePng } from '../png';
 import { addOcrTextLayerToDocument } from '../ocr/textLayer';
 import type { OcrLayerReport, OcrPageLayer } from '../ocr/types';
-import { normalizeRotation } from '../rotation';
+import {
+  normalizeRotation,
+  displayFrame,
+  displayPointToPage,
+  placeDisplayBox,
+  type DisplayFrame
+} from '../rotation';
 import {
   tokenizeContentStream,
   parseContentStream,
   filterContentStream,
   serializeStatements,
-  decodeStream
+  decodeStream,
+  intersects
 } from '../pdf/interpreter';
 import type { Rect, GraphicsState, Matrix } from '../pdf/interpreter';
-import { hasXfaMarker, XFA_MESSAGE } from '../pdf/xfa';
+import { hasXfaMarker, XFA_COMPOSE_MESSAGE, XFA_MESSAGE } from '../pdf/xfa';
 import { encryptPdf, type ProtectionSettings } from '../pdf/encrypt';
 import { applyAltTextToDoc } from '../pdf/accessibility';
 
@@ -283,6 +291,35 @@ export interface RedactionRegion {
   text?: string;
 }
 
+/**
+ * One image XObject that a redaction mark partly covers, and the part of it that
+ * has to be destroyed.
+ *
+ * `name` addresses it from the page (stable across the copy into the output
+ * document); `objectNumber` addresses the same image in the *source* bytes,
+ * which is the only identifier pdf.js and pdf-lib agree on. Both are needed
+ * because the pixel work happens in the pdf.js worker and the substitution in
+ * this one.
+ */
+export interface ImageRedactionRequest {
+  pageIndex: number;
+  name: string;
+  objectNumber: number;
+  /** Covered areas in the image's own unit square, y upwards from bottom-left. */
+  rects: Rect[];
+}
+
+/** A re-encoded image with the covered pixels painted opaque black. */
+export interface RedactedImage {
+  bytes: Uint8Array;
+  format: 'png' | 'jpeg';
+  width: number;
+  height: number;
+}
+
+/** `pageIndex → /XObject resource name → replacement`. */
+export type RedactedImageReplacements = Record<number, Record<string, RedactedImage>>;
+
 export interface TextLayerParams {
   scale: number;
   width: number;
@@ -358,16 +395,27 @@ export interface ComposeExtras {
    */
   fileNames?: string[];
   formFieldsToCreate?: import('../operations').NewFormField[];
+  /**
+   * Composes an XFA document anyway, accepting that its dynamic-form payload is
+   * lost and the export becomes a static page. Set only by the tools that offer
+   * exactly that as the workaround (sign and annotate); every other path refuses
+   * rather than hand back a form whose fields have quietly stopped working.
+   */
+  allowXfaLoss?: boolean;
 }
 
 export interface ProcessJob {
   inspect(bytes: Uint8Array): Promise<DocumentFacts>;
   imageInventory(bytes: Uint8Array, job?: JobHandle): Promise<PageImageInventory[]>;
-  getFormFields(bytes: Uint8Array): Promise<{ isXfa: boolean; fields: FormFieldData[] }>;
+  getFormFields(
+    bytes: Uint8Array,
+    job?: JobHandle
+  ): Promise<{ isXfa: boolean; fields: FormFieldData[] }>;
   fillFormFields(
     bytes: Uint8Array,
     values: Record<string, string | boolean | string[]>,
-    flatten: boolean
+    flatten: boolean,
+    job?: JobHandle
   ): Promise<Uint8Array>;
   /**
    * SGN-05 — bakes interactive content into the page and removes it.
@@ -377,7 +425,10 @@ export interface ProcessJob {
    * carried. Returns the report alongside the bytes so the caller states what
    * was lost (a link's clickability) instead of asserting success.
    */
-  flattenDocument(bytes: Uint8Array): Promise<{ bytes: Uint8Array } & FlattenReport>;
+  flattenDocument(
+    bytes: Uint8Array,
+    job?: JobHandle
+  ): Promise<{ bytes: Uint8Array } & FlattenReport>;
   flattenBackground(
     bytes: Uint8Array,
     pageIndex: number | 'all',
@@ -415,7 +466,14 @@ export interface ProcessJob {
   /**
    * Rebuilds `bytes` with the given pages replaced by rasters and the given image
    * XObjects re-encoded. Returns the original bytes untouched if the result is
-   * not smaller (CMP-04).
+   * not smaller (CMP-04), or if no image was actually re-encoded and no page
+   * rasterised — a rebuild with no compression work in it changes the byte length
+   * through re-serialisation alone, and reporting that as a saving would credit
+   * compression for something it did not do.
+   *
+   * `imageStats` is the measured per-image breakdown CMP-06's sidecar prints:
+   * every image the caller asked about, with the original stream's stored byte
+   * length, the replacement's, and why anything skipped was skipped.
    */
   rebuildCompressed(
     bytes: Uint8Array,
@@ -425,7 +483,7 @@ export interface ProcessJob {
       Record<number, { jpeg: Uint8Array; width: number; height: number; maskBytes?: Uint8Array }>
     >,
     job?: JobHandle
-  ): Promise<{ bytes: Uint8Array; keptOriginal: boolean }>;
+  ): Promise<{ bytes: Uint8Array; keptOriginal: boolean; imageStats: ImageResultStat[] }>;
   imagesToPdf(
     images: Uint8Array[],
     options?: ImagesToPdfOptions,
@@ -452,12 +510,16 @@ export interface ProcessJob {
 
   markdownToPdf(markdown: string): Promise<Uint8Array>;
   readMetadata(bytes: Uint8Array): Promise<MetadataFindings>;
-  scrubMetadata(bytes: Uint8Array, settings?: ScrubSettings): Promise<Uint8Array>;
+  scrubMetadata(bytes: Uint8Array, settings?: ScrubSettings, job?: JobHandle): Promise<Uint8Array>;
   /**
    * RED-06 — encrypts the *exported* bytes. The document in the workspace is
    * never touched; this runs on the copy that is about to be written to disk.
    */
-  protectDocument(bytes: Uint8Array, settings: ProtectionSettings): Promise<Uint8Array>;
+  protectDocument(
+    bytes: Uint8Array,
+    settings: ProtectionSettings,
+    job?: JobHandle
+  ): Promise<Uint8Array>;
   /**
    * Applies redactions through operator-level content removal, removing intersecting text
    * and image objects from the content stream while keeping the rest of the page selectable.
@@ -465,8 +527,24 @@ export interface ProcessJob {
   applyRedactions(
     bytes: Uint8Array,
     regions: RedactionRegion[],
+    imageReplacements?: RedactedImageReplacements,
     job?: JobHandle
   ): Promise<Uint8Array>;
+  /**
+   * Every image XObject a redaction mark only *partly* covers, with the covered
+   * area in the image's own unit space.
+   *
+   * Run before {@link ProcessJob.applyRedactions}: the caller decodes each one
+   * with pdf.js, paints those rectangles opaque black into the pixels, and hands
+   * the result back as `imageReplacements`. Without that round trip a partly
+   * covered image keeps its original pixels — the black rectangle drawn on the
+   * page is an overlay, and the "redacted" content comes straight back out of
+   * `pdfimages`.
+   */
+  planImageRedactions(
+    bytes: Uint8Array,
+    regions: RedactionRegion[]
+  ): Promise<ImageRedactionRequest[]>;
   /**
    * RED-03's string-level check re-extracts pdf.js *page text* only, which never
    * sees annotation `/Contents` (sticky notes, comments) or AcroForm field `/V`
@@ -610,87 +688,42 @@ function toWinAnsiOrThrow(text: string, context: string): string {
   return out;
 }
 
-/**
- * Given a box's center and its (unrotated) width/height, returns the bottom-left
- * origin such that rotating the box by `angleDegrees` about that origin — as
- * pdf-lib's `rotate` draw option does — leaves the box's center fixed at
- * `(cx, cy)`. Shared by `drawStamps` (stamp rotation) and the image watermark,
- * which both need a box to spin in place rather than around its bottom-left
- * corner.
- */
-function centerPreservingOrigin(
-  cx: number,
-  cy: number,
-  w: number,
-  h: number,
-  angleDegrees: number
-): { x: number; y: number } {
-  const rad = (angleDegrees * Math.PI) / 180;
-  const dx = (w / 2) * Math.cos(rad) - (h / 2) * Math.sin(rad);
-  const dy = (w / 2) * Math.sin(rad) + (h / 2) * Math.cos(rad);
-  return { x: cx - dx, y: cy - dy };
-}
-
 async function drawStamps(
   outDoc: PDFDocument,
   page: ReturnType<PDFDocument['addPage']>,
   stamps: StampSource[],
   fontCache: { font?: Awaited<ReturnType<PDFDocument['embedFont']>> },
-  imageCache: Map<string, PDFImage>
+  imageCache: Map<string, PDFImage>,
+  frame: DisplayFrame
 ) {
   if (stamps.length === 0) return;
   // `page.getSize()` is always the raw, unrotated MediaBox — pdf-lib never factors
   // in `/Rotate` there. Stamp coordinates come from the sign UI, which places them
-  // against the page as pdf.js *displays* it, i.e. already rotated. On a page whose
-  // total rotation (source + the rotate tool) is 90 or 270, treating those two
-  // frames as the same one put every stamp at a transposed, wrong-sized position.
-  const { width, height } = page.getSize();
-  const pageRotation = normalizeRotation(page.getRotation().angle);
-  const swapped = pageRotation === 90 || pageRotation === 270;
-  const displayWidth = swapped ? height : width;
-  const displayHeight = swapped ? width : height;
+  // against the page as pdf.js *displays* it, i.e. already rotated. Treating those
+  // two frames as the same one put every stamp at a transposed, wrong-sized
+  // position; `frame` is the shared inverse mapping between them.
+  const { displayWidth, displayHeight } = frame;
 
   for (const stamp of stamps) {
-    // PDF space is bottom-left origin; stamp coordinates are top-left, both in the
-    // *displayed* (post-rotation) frame.
+    // Stamp coordinates are top-left origin in display space; `placeDisplayBox`
+    // takes a bottom-left origin, so flip y once here.
     const w = stamp.width * displayWidth;
     const h = stamp.height * displayHeight;
-    const displayCenterX = stamp.x * displayWidth + w / 2;
-    const displayCenterY = stamp.y * displayHeight + h / 2;
-
-    // Map that display-space center back into the page's own unrotated content
-    // space — the inverse of the four `/Rotate` cases pdf.js's PageViewport
-    // applies (viewBox width/height, not the swapped display ones).
-    let cx: number, cy: number;
-    switch (pageRotation) {
-      case 90:
-        cx = displayCenterY;
-        cy = displayCenterX;
-        break;
-      case 180:
-        cx = width - displayCenterX;
-        cy = displayCenterY;
-        break;
-      case 270:
-        cx = width - displayCenterY;
-        cy = height - displayCenterX;
-        break;
-      default:
-        cx = displayCenterX;
-        cy = height - displayCenterY;
-    }
+    const left = stamp.x * displayWidth;
+    const bottom = displayHeight - (stamp.y * displayHeight + h);
 
     const rot = stamp.rotation ?? 0;
 
     // The user's clockwise on-screen rotation `rot` must survive the page's own
-    // display rotation too: content drawn at angle (pageRotation - rot) here comes
-    // out as a clockwise `rot` once the viewer applies /Rotate on top of it. This
-    // reduces to the original `-rot` when pageRotation is 0.
-    const rad = ((pageRotation - rot) * Math.PI) / 180;
-
-    // The new bottom-left origin in page space such that the center of the
-    // rotated box remains at (cx, cy).
-    const { x: drawX, y: drawY } = centerPreservingOrigin(cx, cy, w, h, pageRotation - rot);
+    // display rotation too: content drawn at angle (frame.rotation - rot) here
+    // comes out as a clockwise `rot` once the viewer applies /Rotate on top of it.
+    // This reduces to the original `-rot` when the page is unrotated.
+    const {
+      x: drawX,
+      y: drawY,
+      rotate: drawAngle
+    } = placeDisplayBox(frame, left, bottom, w, h, -rot);
+    const rad = (drawAngle * Math.PI) / 180;
 
     if (stamp.type === 'signature') {
       if (!stamp.imagePng) continue;
@@ -706,7 +739,7 @@ async function drawStamps(
         y: drawY,
         width: w,
         height: h,
-        rotate: degrees(pageRotation - rot)
+        rotate: degrees(drawAngle)
       });
       continue;
     }
@@ -758,7 +791,7 @@ async function drawStamps(
       size,
       font,
       color: DOC_INK,
-      rotate: degrees(pageRotation - rot)
+      rotate: degrees(drawAngle)
     });
   }
 }
@@ -1138,7 +1171,65 @@ function pageRefIndex(doc: PDFDocument): Map<number, number> {
 }
 
 /** Resolves an outline item's destination to a source page index, if it can. */
-function resolveDestPageIndex(item: PDFDict, refIndex: Map<number, number>): number | undefined {
+/**
+ * Every named destination in a document, as name → destination array.
+ *
+ * Both spellings are read: the pre-1.2 `/Dests` dictionary in the catalog, and
+ * the `/Names /Dests` name tree (which is what every modern producer writes, and
+ * which nests through `/Kids`). Without this, `resolveDestPageIndex` saw a name
+ * rather than a page reference and gave up — so every bookmark in a document
+ * whose outline uses named destinations, which is most of them, was dropped from
+ * merged, split and organised output without a word.
+ */
+function namedDestinations(doc: PDFDocument): Map<string, PDFArray> {
+  const found = new Map<string, PDFArray>();
+
+  const record = (key: string, value: unknown) => {
+    const resolved = value instanceof PDFRef ? doc.context.lookup(value) : value;
+    // A destination is either the array itself or a dict with a /D entry.
+    const array =
+      resolved instanceof PDFArray
+        ? resolved
+        : resolved instanceof PDFDict
+          ? resolved.lookupMaybe(PDFName.of('D'), PDFArray)
+          : undefined;
+    if (array && !found.has(key)) found.set(key, array);
+  };
+
+  const legacy = doc.catalog.lookupMaybe(PDFName.of('Dests'), PDFDict);
+  for (const [key, value] of legacy?.entries() ?? []) {
+    record(key.asString().replace(/^\//, ''), value);
+  }
+
+  const walkTree = (node: PDFDict | undefined, depth: number) => {
+    if (!node || depth > 32) return;
+    const names = node.lookupMaybe(PDFName.of('Names'), PDFArray);
+    for (let i = 0; names && i + 1 < names.size(); i += 2) {
+      const key = names.lookup(i);
+      if (key instanceof PDFString || key instanceof PDFHexString) {
+        record(key.decodeText(), names.get(i + 1));
+      }
+    }
+    const kids = node.lookupMaybe(PDFName.of('Kids'), PDFArray);
+    for (let i = 0; kids && i < kids.size(); i++) {
+      walkTree(kids.lookupMaybe(i, PDFDict), depth + 1);
+    }
+  };
+  walkTree(
+    doc.catalog
+      .lookupMaybe(PDFName.of('Names'), PDFDict)
+      ?.lookupMaybe(PDFName.of('Dests'), PDFDict),
+    0
+  );
+
+  return found;
+}
+
+function resolveDestPageIndex(
+  item: PDFDict,
+  refIndex: Map<number, number>,
+  named?: Map<string, PDFArray>
+): number | undefined {
   let dest = item.lookup(PDFName.of('Dest'));
   if (dest === undefined) {
     const action = item.lookupMaybe(PDFName.of('A'), PDFDict);
@@ -1146,9 +1237,19 @@ function resolveDestPageIndex(item: PDFDict, refIndex: Map<number, number>): num
       dest = action.lookup(PDFName.of('D'));
     }
   }
+
+  // A named destination: `/Dest /chapter1` or `/Dest (chapter1)`, resolved
+  // through the document's own name table.
+  if (dest instanceof PDFName || dest instanceof PDFString || dest instanceof PDFHexString) {
+    const key = dest instanceof PDFName ? dest.asString().replace(/^\//, '') : dest.decodeText();
+    dest = named?.get(key);
+  }
+
   if (!(dest instanceof PDFArray) || dest.size() === 0) return undefined;
   const target = dest.get(0);
-  if (!(target instanceof PDFRef)) return undefined; // named destination — not resolved here
+  // A page *index* is legal in a remote destination, but here the first element
+  // is a reference to a page in this document.
+  if (!(target instanceof PDFRef)) return undefined;
   return refIndex.get(target.objectNumber);
 }
 
@@ -1158,7 +1259,8 @@ function walkSourceOutline(
   refIndex: Map<number, number>,
   pageRefMap: Map<string, PDFRef>,
   sourceDocId: string,
-  visited: Set<PDFDict>
+  visited: Set<PDFDict>,
+  named?: Map<string, PDFArray>
 ): RetainedOutlineItem[] {
   const result: RetainedOutlineItem[] = [];
   let cur = parent.lookupMaybe(PDFName.of('First'), PDFDict);
@@ -1169,10 +1271,10 @@ function walkSourceOutline(
       titleValue instanceof PDFString || titleValue instanceof PDFHexString
         ? titleValue.decodeText()
         : 'Untitled';
-    const sourceIndex = resolveDestPageIndex(cur, refIndex);
+    const sourceIndex = resolveDestPageIndex(cur, refIndex, named);
     const destPageRef =
       sourceIndex !== undefined ? pageRefMap.get(`${sourceDocId}:${sourceIndex}`) : undefined;
-    const children = walkSourceOutline(cur, refIndex, pageRefMap, sourceDocId, visited);
+    const children = walkSourceOutline(cur, refIndex, pageRefMap, sourceDocId, visited, named);
     if (destPageRef || children.length > 0) {
       result.push({ title, destPageRef, children });
     }
@@ -1191,7 +1293,8 @@ function walkSourceOutline(
 function readOutlineNodes(
   parent: PDFDict,
   refIndex: Map<number, number>,
-  visited: Set<PDFDict>
+  visited: Set<PDFDict>,
+  named?: Map<string, PDFArray>
 ): OutlineNode[] {
   const result: OutlineNode[] = [];
   let cur = parent.lookupMaybe(PDFName.of('First'), PDFDict);
@@ -1204,8 +1307,8 @@ function readOutlineNodes(
         : 'Untitled';
     result.push({
       title,
-      pageIndex: resolveDestPageIndex(cur, refIndex) ?? -1,
-      children: readOutlineNodes(cur, refIndex, visited)
+      pageIndex: resolveDestPageIndex(cur, refIndex, named) ?? -1,
+      children: readOutlineNodes(cur, refIndex, visited, named)
     });
     cur = cur.lookupMaybe(PDFName.of('Next'), PDFDict);
   }
@@ -1282,7 +1385,8 @@ function copyOutlines(
       refIndex,
       pageRefMap,
       docId,
-      new Set<PDFDict>()
+      new Set<PDFDict>(),
+      namedDestinations(srcDoc)
     );
     allRetained.push(...retained);
   }
@@ -1383,6 +1487,51 @@ function reattachAcroForm(outDoc: PDFDocument, contributors: PDFDocument[]): voi
   }
 
   outDoc.catalog.set(PDFName.of('AcroForm'), outDoc.context.register(form));
+}
+
+/**
+ * Gives an `/AcroForm` the default resources its fields' `/DA` strings assume.
+ *
+ * pdf-lib's `form.createTextField()` writes each field a `/DA` of
+ * `0 0 0 rg /Helvetica 15 Tf` and builds an `/AcroForm` containing nothing but
+ * `/Fields`. `/Helvetica` is a *resource name*, looked up in the form's `/DR`
+ * — which does not exist — so the only reason a freshly created field renders
+ * at all is the appearance stream pdf-lib happens to bake at `addToPage` time.
+ * The moment anything regenerates appearances (a viewer honouring
+ * `/NeedAppearances`, a fill, our own flatten in `flattenDocument`) the font
+ * resolves nowhere and the field draws blank or throws.
+ *
+ * So: one Helvetica, registered under both the name pdf-lib emits
+ * (`/Helvetica`) and the name every other producer emits (`/Helv`), plus a
+ * document-level `/DA` for fields that carry none of their own.
+ *
+ * Idempotent, and never overwrites a `/DR` or `/DA` carried in from a source
+ * document — an inherited form's own defaults are more correct than ours.
+ */
+function ensureAcroFormDefaults(doc: PDFDocument): void {
+  const form = doc.catalog.lookupMaybe(PDFName.of('AcroForm'), PDFDict);
+  if (!form) return;
+
+  let dr = form.lookupMaybe(PDFName.of('DR'), PDFDict);
+  if (!dr) {
+    dr = doc.context.obj({}) as PDFDict;
+    form.set(PDFName.of('DR'), dr);
+  }
+  let fonts = dr.lookupMaybe(PDFName.of('Font'), PDFDict);
+  if (!fonts) {
+    fonts = doc.context.obj({}) as PDFDict;
+    dr.set(PDFName.of('Font'), fonts);
+  }
+
+  const missing = ['Helvetica', 'Helv'].filter(n => fonts!.get(PDFName.of(n)) === undefined);
+  if (missing.length > 0) {
+    const helvetica = doc.embedStandardFont(StandardFonts.Helvetica);
+    for (const name of missing) fonts.set(PDFName.of(name), helvetica.ref);
+  }
+
+  if (form.get(PDFName.of('DA')) === undefined) {
+    form.set(PDFName.of('DA'), PDFString.of('/Helv 0 Tf 0 g'));
+  }
 }
 
 /** True when a watermark is actually configured — not merely "the signal exists". */
@@ -1584,28 +1733,45 @@ function wrapTextForPdf(
   return lines;
 }
 
+/**
+ * Catalog entries that mean the same thing however the pages were rearranged:
+ * none of them is indexed by page number or points at a page object.
+ */
+const PAGE_INDEPENDENT_CATALOG_KEYS = [
+  'ViewerPreferences',
+  'MarkInfo',
+  'Lang',
+  'SpiderInfo',
+  'PieceInfo',
+  'OutputIntents',
+  'Perms',
+  'Legal'
+];
+
+/**
+ * Everything worth carrying when the output holds the same pages, in the same
+ * order, as the input — a watermark, a crop, a rotate. `/Outlines` is absent
+ * deliberately: the outline is rebuilt page-ref by page-ref afterwards, and
+ * copying the source's dictionary as well would leave a second, stale one in the
+ * file.
+ */
+const FULL_CATALOG_KEYS = [
+  ...PAGE_INDEPENDENT_CATALOG_KEYS,
+  'StructTreeRoot',
+  'OCProperties',
+  'PageLabels',
+  'Names',
+  'Dests'
+];
+
 function preserveDocumentCatalog(
   source: PDFDocument,
   out: PDFDocument,
-  copier?: PDFObjectCopier
+  copier?: PDFObjectCopier,
+  keys: string[] = ['Outlines', ...FULL_CATALOG_KEYS]
 ): void {
   const c = copier ?? PDFObjectCopier.for(source.context, out.context);
-  const keysToCopy = [
-    'Outlines',
-    'StructTreeRoot',
-    'OCProperties',
-    'PageLabels',
-    'Names',
-    'Dests',
-    'ViewerPreferences',
-    'MarkInfo',
-    'Lang',
-    'SpiderInfo',
-    'PieceInfo',
-    'OutputIntents',
-    'Perms',
-    'Legal'
-  ];
+  const keysToCopy = keys;
   for (const key of keysToCopy) {
     const val = source.catalog.get(PDFName.of(key));
     if (val !== undefined && out.catalog.get(PDFName.of(key)) === undefined) {
@@ -1624,9 +1790,13 @@ function drawHeaderFooter(
   font: import('pdf-lib').PDFFont,
   settings: HeaderFooterData,
   pageIndex: number,
-  totalPages: number
+  totalPages: number,
+  frame: DisplayFrame
 ): void {
-  const { width, height } = page.getSize();
+  // The top of the page is the top the *viewer* shows, not `getSize().height`:
+  // laid out in display space, then mapped back through /Rotate. On a /Rotate 90
+  // page the old raw-MediaBox layout put the "header" down the left-hand edge.
+  const { displayWidth, displayHeight } = frame;
   const margin = 24; // ~1/3 inch band from the page edge
   const size = settings.fontSize;
 
@@ -1639,14 +1809,24 @@ function drawHeaderFooter(
     const textWidth = font.widthOfTextAtSize(text, size);
     const x =
       align === 'center'
-        ? (width - textWidth) / 2
+        ? (displayWidth - textWidth) / 2
         : align === 'right'
-          ? width - textWidth - margin
+          ? displayWidth - textWidth - margin
           : margin;
-    page.drawText(text, { x, y, size, font, color: DOC_INK });
+    // A zero-size box: `drawText` rotates about its own anchor, so the baseline
+    // start is the only point that needs mapping.
+    const placed = placeDisplayBox(frame, x, y, 0, 0);
+    page.drawText(text, {
+      x: placed.x,
+      y: placed.y,
+      size,
+      font,
+      color: DOC_INK,
+      rotate: degrees(placed.rotate)
+    });
   };
 
-  draw(settings.headerText, settings.headerAlign, height - margin - size * 0.8, 'header');
+  draw(settings.headerText, settings.headerAlign, displayHeight - margin - size * 0.8, 'header');
   draw(settings.footerText, settings.footerAlign, margin, 'footer');
 }
 
@@ -1665,6 +1845,18 @@ async function composePages(
   globalTotal: number = pages.length,
   extras: ComposeExtras = {}
 ): Promise<PDFDocument> {
+  // An XFA form's fields live in an XML payload hanging off /AcroForm, which no
+  // page-copying rebuild carries: composing one produced a document whose
+  // dynamic form was gone, with every field blank, and said nothing. The tools
+  // that *deliberately* flatten an XFA form to a static page — sign and
+  // annotate, which is what XFA_MESSAGE tells the user to do — opt in.
+  if (!extras.allowXfaLoss) {
+    for (const docId of new Set(pages.map(p => p.sourceDocId))) {
+      const raw = sources[docId];
+      if (raw && hasXfaMarker(raw)) throw unsupported(XFA_COMPOSE_MESSAGE);
+    }
+  }
+
   const outDoc = await PDFDocument.create();
   const getSource = sourceCache(sources);
   const fontCache: { font?: Awaited<ReturnType<PDFDocument['embedFont']>> } = {};
@@ -1691,12 +1883,14 @@ async function composePages(
   const bates = extras.bates;
   const batesFont = bates ? await outDoc.embedStandardFont(StandardFonts.HelveticaBold) : undefined;
 
+  // Page ranges are the user's *document* page numbers, so they are parsed and
+  // matched against the whole export (`pageOffset + i`), never against a slice's
+  // own indexes. Matching on the slice-local index meant "pages 1-3" watermarked
+  // the first three pages of *every* file a split produced.
   const watermarkPages =
-    watermarkActive && watermark ? parsePageRange(watermark.pageRange, pages.length) : null;
+    watermarkActive && watermark ? parsePageRange(watermark.pageRange, globalTotal) : null;
   const headerFooterPages =
-    headerFooterActive && headerFooter
-      ? parsePageRange(headerFooter.pageRange, pages.length)
-      : null;
+    headerFooterActive && headerFooter ? parsePageRange(headerFooter.pageRange, globalTotal) : null;
 
   const stampsByPage = new Map<string, StampSource[]>();
   for (const stamp of stamps) {
@@ -1824,42 +2018,72 @@ async function composePages(
     }
 
     outDoc.addPage(copied);
-    pageRefMap.set(`${ref.sourceDocId}:${ref.sourceIndex}`, copied.ref);
+    // First instance wins. A page placed twice used to overwrite its own entry,
+    // so every bookmark pointing at it resolved to the *last* copy — the reader
+    // jumped to the duplicate at the end of the document instead of the page the
+    // outline names.
+    if (!pageRefMap.has(srcPageKey)) pageRefMap.set(srcPageKey, copied.ref);
+
+    // Every placement below — crop, watermark, header/footer, Bates, stamps —
+    // works in this one frame, because that is the frame the UI overlay the user
+    // drew against was rendered in.
+    //
+    // It deliberately carries the *source* /Rotate only, not `ref.rotation` from
+    // the workspace rotate tool: `SinglePageView` nests its overlay layer inside
+    // the element it applies the tool rotation to, so overlay coordinates are
+    // relative to page content and stay there. Including the tool rotation here
+    // (as stamp placement used to) made a page rotated after signing move and
+    // spin its signature.
+    const { width: rawW, height: rawH } = copied.getSize();
+    const sourceRotation = normalizeRotation(copied.getRotation().angle - ref.rotation);
+    const frame = displayFrame(rawW, rawH, sourceRotation);
 
     if (ref.cropBox) {
-      // PDF-lib coordinates are bottom-left. The incoming cropBox is top-left normalized [0,1] in display space.
-      const { width, height } = copied.getSize();
-      const pageRotation = normalizeRotation(copied.getRotation().angle);
-
-      let unrotatedX = ref.cropBox.x;
-      let unrotatedY = ref.cropBox.y;
-      let unrotatedW = ref.cropBox.width;
-      let unrotatedH = ref.cropBox.height;
-
-      if (pageRotation === 90) {
-        unrotatedX = ref.cropBox.y;
-        unrotatedY = 1 - ref.cropBox.x - ref.cropBox.width;
-        unrotatedW = ref.cropBox.height;
-        unrotatedH = ref.cropBox.width;
-      } else if (pageRotation === 180) {
-        unrotatedX = 1 - ref.cropBox.x - ref.cropBox.width;
-        unrotatedY = 1 - ref.cropBox.y - ref.cropBox.height;
-      } else if (pageRotation === 270) {
-        unrotatedX = 1 - ref.cropBox.y - ref.cropBox.height;
-        unrotatedY = ref.cropBox.x;
-        unrotatedW = ref.cropBox.height;
-        unrotatedH = ref.cropBox.width;
-      }
-
-      const cropX = unrotatedX * width;
-      const cropY = (1 - (unrotatedY + unrotatedH)) * height;
-      const cropW = unrotatedW * width;
-      const cropH = unrotatedH * height;
-      copied.setCropBox(cropX, cropY, cropW, cropH);
+      // The incoming cropBox is top-left normalised [0,1] in display space.
+      // Mapping two opposite corners and taking the extents is rotation-agnostic:
+      // whichever corner ends up bottom-left in page space, min/max finds it.
+      const c0 = displayPointToPage(
+        frame,
+        ref.cropBox.x * frame.displayWidth,
+        ref.cropBox.y * frame.displayHeight
+      );
+      const c1 = displayPointToPage(
+        frame,
+        (ref.cropBox.x + ref.cropBox.width) * frame.displayWidth,
+        (ref.cropBox.y + ref.cropBox.height) * frame.displayHeight
+      );
+      const cropX = Math.min(c0.x, c1.x);
+      const cropY = Math.min(c0.y, c1.y);
+      copied.setCropBox(cropX, cropY, Math.abs(c1.x - c0.x), Math.abs(c1.y - c0.y));
     }
 
-    if (watermarkActive && watermark && (watermarkPages === null || watermarkPages.has(i))) {
-      const { width, height } = copied.getSize();
+    // Edge-anchored furniture — the 9-point watermark grid, the header/footer
+    // band, the Bates number — is positioned against the page the reader will
+    // actually see, i.e. the crop box. Laying it out against the MediaBox is how
+    // a Bates number ended up outside the crop the same export had just applied,
+    // clipped away with no warning. With no crop these are the same box, so an
+    // uncropped page is unaffected.
+    const visible = copied.getCropBox();
+    const marginFrame = displayFrame(
+      visible.width,
+      visible.height,
+      sourceRotation,
+      visible.x,
+      visible.y
+    );
+
+    const documentPageIndex = pageOffset + i;
+
+    if (
+      watermarkActive &&
+      watermark &&
+      (watermarkPages === null || watermarkPages.has(documentPageIndex))
+    ) {
+      // Display space, not the raw MediaBox: "bottom-right" has to mean the
+      // bottom-right corner the reader sees. On a /Rotate 90 page the two are a
+      // quarter turn apart, which is how a watermark ended up sideways in the
+      // wrong corner.
+      const { displayWidth: width, displayHeight: height } = marginFrame;
       const padding = 36; // 0.5 inch
 
       if (watermark.kind === 'image' && watermark.image) {
@@ -1876,20 +2100,15 @@ async function composePages(
         const boxW = width * watermark.imageScale;
         const boxH = boxW * (watermark.image.height / watermark.image.width);
         const { x, y } = positionOrigin(watermark.position, width, height, boxW, boxH, padding);
-        const cx = x + boxW / 2;
-        const cy = y + boxH / 2;
-        const { x: drawX, y: drawY } =
-          watermark.rotation === 0
-            ? { x, y }
-            : centerPreservingOrigin(cx, cy, boxW, boxH, watermark.rotation);
+        const placed = placeDisplayBox(marginFrame, x, y, boxW, boxH, watermark.rotation);
 
         copied.drawImage(image, {
-          x: drawX,
-          y: drawY,
+          x: placed.x,
+          y: placed.y,
           width: boxW,
           height: boxH,
           opacity: watermark.opacity,
-          rotate: degrees(watermark.rotation)
+          rotate: degrees(placed.rotate)
         });
       } else if (watermarkFont && watermark.text) {
         const requestedText = watermark.text
@@ -1913,14 +2132,18 @@ async function composePages(
         const g = parseInt(hex.substring(2, 4), 16) / 255;
         const b = parseInt(hex.substring(4, 6), 16) / 255;
 
+        // `drawText` rotates about its own anchor, so only the baseline start
+        // point needs mapping — hence the 0x0 box.
+        const placed = placeDisplayBox(marginFrame, x, y, 0, 0, watermark.rotation);
+
         copied.drawText(displayText, {
-          x,
-          y,
+          x: placed.x,
+          y: placed.y,
           size: watermark.fontSize,
           font: watermarkFont,
           color: rgb(r, g, b),
           opacity: watermark.opacity,
-          rotate: degrees(watermark.rotation)
+          rotate: degrees(placed.rotate)
         });
       }
     }
@@ -1929,23 +2152,38 @@ async function composePages(
       headerFooterActive &&
       headerFooter &&
       headerFooterFont &&
-      (headerFooterPages === null || headerFooterPages.has(i))
+      (headerFooterPages === null || headerFooterPages.has(documentPageIndex))
     ) {
-      drawHeaderFooter(copied, headerFooterFont, headerFooter, pageOffset + i, globalTotal);
+      drawHeaderFooter(
+        copied,
+        headerFooterFont,
+        headerFooter,
+        pageOffset + i,
+        globalTotal,
+        marginFrame
+      );
     }
 
     if (bates && batesFont) {
       // `pageOffset` is what keeps a split run sequential across its output files:
       // the numbering follows the whole production set, not each file's own pages.
       const label = toWinAnsiOrThrow(batesLabel(bates, pageOffset + i), 'Bates number');
-      const { width, height } = copied.getSize();
+      const { displayWidth: width, displayHeight: height } = marginFrame;
       const textWidth = batesFont.widthOfTextAtSize(label, bates.fontSize);
       const textHeight = batesFont.heightAtSize(bates.fontSize);
       const { x, y } = positionOrigin(bates.position, width, height, textWidth, textHeight, 24);
-      copied.drawText(label, { x, y, size: bates.fontSize, font: batesFont, color: DOC_INK });
+      const placed = placeDisplayBox(marginFrame, x, y, 0, 0);
+      copied.drawText(label, {
+        x: placed.x,
+        y: placed.y,
+        size: bates.fontSize,
+        font: batesFont,
+        color: DOC_INK,
+        rotate: degrees(placed.rotate)
+      });
     }
 
-    await drawStamps(outDoc, copied, stampsByPage.get(ref.key) ?? [], fontCache, imageCache);
+    await drawStamps(outDoc, copied, stampsByPage.get(ref.key) ?? [], fontCache, imageCache, frame);
     await drawAnnotations(outDoc, copied, annotationsByPage.get(ref.key) ?? [], fontCache);
   }
 
@@ -2007,6 +2245,36 @@ async function composePages(
       }
     }
   }
+
+  // Whether the form was carried in from a source document or built here, its
+  // fields name a font that has to resolve somewhere. Runs after both paths.
+  ensureAcroFormDefaults(outDoc);
+
+  // The document catalog, which `copyPages` does not carry: without this,
+  // merging, splitting, organising or watermarking silently dropped the tagged
+  // structure tree (/StructTreeRoot), the page-label scheme, optional-content
+  // layers, named destinations and PDF/A output intents.
+  //
+  // Only from a single contributor: one input's structure tree or page-label
+  // scheme describes that input, and stapling it onto a document assembled from
+  // several would be a confident lie. And only in full when the pages came
+  // through unchanged in number and order — /PageLabels is indexed by page
+  // position, and a structure tree that references pages this export left behind
+  // would drag them back into the file as orphans.
+  if (contributors.length === 1) {
+    const only = contributors[0];
+    const docId = contributorDocIds.get(only);
+    const unchanged =
+      pages.length === only.getPageCount() &&
+      pages.every((p, index) => p.sourceDocId === docId && p.sourceIndex === index);
+    preserveDocumentCatalog(
+      only,
+      outDoc,
+      copiers.get(only),
+      unchanged ? FULL_CATALOG_KEYS : PAGE_INDEPENDENT_CATALOG_KEYS
+    );
+  }
+
   // An explicit outline (even an empty one, meaning "the user deleted them all")
   // replaces the carried-through source outlines rather than adding to them.
   if (extras.outline) writeOutline(outDoc, extras.outline);
@@ -2042,6 +2310,27 @@ function parsePageRange(value: string | undefined, pageCount: number): Set<numbe
 /* ------------------------------------------------------------------ *
  * Image inventory (CMP-01)
  * ------------------------------------------------------------------ */
+
+/** A resource-dictionary key as it reads in a report: `Im0`, not `/Im0`. */
+function nameKey(key: PDFName): string {
+  return key.asString().replace(/^\//, '');
+}
+
+/**
+ * What an image stream costs in the file: its *stored* bytes, after its own
+ * filters, which is the number a replacement has to beat.
+ *
+ * `getContents()` on a stream loaded from a file returns exactly those bytes. A
+ * stream pdf-lib built in memory can throw instead, in which case the size is
+ * unknown and reported as 0 — callers treat 0 as "do not judge on size".
+ */
+function storedStreamBytes(stream: PDFStream): number {
+  try {
+    return stream.getContents().byteLength;
+  } catch {
+    return 0;
+  }
+}
 
 function nameOf(value: unknown): string {
   if (value instanceof PDFName) return value.asString().replace(/^\//, '');
@@ -2996,9 +3285,10 @@ const api: ProcessJob = {
     return out;
   },
 
-  async getFormFields(bytes) {
+  async getFormFields(bytes, job) {
     // Checked before the parse, and before any field is reported: enumerating an
     // XFA form's shadow fields is what led the UI to offer them as fillable.
+    await checkpoint(job, 0, 'Reading the form');
     if (hasXfaMarker(bytes)) return { isXfa: true, fields: [] };
 
     const doc = await load(bytes, true);
@@ -3008,7 +3298,18 @@ const api: ProcessJob = {
     const pages = doc.getPages();
     const fields: FormFieldData[] = [];
 
-    for (const field of form.getFields()) {
+    // A 2000-widget government form walks every widget and searches the page
+    // list for each; on a 300-page document that is genuinely slow, and it used
+    // to be uninterruptible with no progress at all.
+    const allFields = form.getFields();
+    let fieldIndex = 0;
+    for (const field of allFields) {
+      await checkpoint(
+        job,
+        allFields.length === 0 ? 1 : fieldIndex / allFields.length,
+        `Reading field ${fieldIndex + 1} of ${allFields.length}`
+      );
+      fieldIndex++;
       let type: FormFieldData['type'] = 'Unknown';
       let value: string | string[] | boolean = '';
       let options: string[] | undefined;
@@ -3059,12 +3360,14 @@ const api: ProcessJob = {
       });
     }
 
+    await checkpoint(job, 1, 'Form read');
     return { isXfa: false, fields };
   },
 
-  async fillFormFields(bytes, values, flatten) {
+  async fillFormFields(bytes, values, flatten, job) {
     // XFA is checked on the raw bytes *first*: a hybrid form answers `false` to
     // every parsed check while its real fields live in XML we cannot write.
+    await checkpoint(job, 0, 'Reading the form');
     if (hasXfaMarker(bytes)) throw unsupported(XFA_MESSAGE);
 
     const doc = await load(bytes);
@@ -3110,6 +3413,11 @@ const api: ProcessJob = {
     }
 
     if (flatten) {
+      await checkpoint(job, 0.6, 'Drawing values into the page');
+      // A field's /DA names a font that has to resolve in the form's /DR, which
+      // a form Stapler built itself does not have. Supply it before the
+      // appearance pass rather than letting the pass fail and refuse.
+      ensureAcroFormDefaults(doc);
       try {
         try {
           form.updateFieldAppearances();
@@ -3128,6 +3436,7 @@ const api: ProcessJob = {
         );
       }
     }
+    await checkpoint(job, 0.9, 'Writing file');
     return transfer(await pseudoLinearize(doc).save({ useObjectStreams: true }));
   },
 
@@ -3341,9 +3650,10 @@ Q
 
     return await doc.save();
   },
-  async flattenDocument(bytes) {
+  async flattenDocument(bytes, job) {
     // Same order of refusals as `fillFormFields`: XFA on the raw bytes first,
     // because a hybrid form answers `false` to every parsed check.
+    await checkpoint(job, 0, 'Reading the document');
     if (hasXfaMarker(bytes)) throw unsupported(XFA_MESSAGE);
 
     const doc = await load(bytes);
@@ -3352,6 +3662,10 @@ Q
 
     const fields = form.getFields().length;
     if (fields > 0) {
+      await checkpoint(job, 0.25, `Drawing ${fields} form field${fields === 1 ? '' : 's'}`);
+      // Same reason as the fill path: a form Stapler built has no /DR, so the
+      // appearance pass below cannot resolve the /Helvetica its fields name.
+      ensureAcroFormDefaults(doc);
       try {
         try {
           form.updateFieldAppearances();
@@ -3373,7 +3687,9 @@ Q
       doc.catalog.delete(PDFName.of('AcroForm'));
     }
 
+    await checkpoint(job, 0.5, 'Drawing annotations');
     const { baked, dropped } = flattenAnnotations(doc);
+    await checkpoint(job, 0.8, 'Writing file');
     return {
       bytes: transfer(await pseudoLinearize(doc).save({ useObjectStreams: true })),
       fields,
@@ -3418,7 +3734,12 @@ Q
     const doc = await load(bytes);
     const outlines = doc.catalog.lookupMaybe(PDFName.of('Outlines'), PDFDict);
     if (!outlines) return [];
-    return readOutlineNodes(outlines, pageRefIndex(doc), new Set<PDFDict>());
+    return readOutlineNodes(
+      outlines,
+      pageRefIndex(doc),
+      new Set<PDFDict>(),
+      namedDestinations(doc)
+    );
   },
 
   async composeSplit(
@@ -3531,6 +3852,18 @@ Q
     // page would write ten copies of the same JPEG — a shared image has to stay
     // shared or the "compressed" file grows a tenfold image table.
     const embedded = new Map<number, PDFRef>();
+
+    // CMP-06 — the per-image breakdown, measured here because this is the only
+    // place both numbers exist: the original stream's stored byte length and the
+    // replacement's. Nothing downstream can reconstruct them, which is why the
+    // JSON sidecar used to be permanently empty.
+    const imageStats: ImageResultStat[] = [];
+    const note = (stat: ImageResultStat) => {
+      imageStats.push(stat);
+    };
+    /** Sizes of each object's one encode, so a second page can report them too. */
+    const measured = new Map<number, { originalBytes: number; compressedBytes: number }>();
+
     for (const [pageIndexKey, byObjectNumber] of Object.entries(replacedImages)) {
       const pageIndex = Number(pageIndexKey);
       const page = pages[pageIndex];
@@ -3548,17 +3881,74 @@ Q
         // All entries pointing at this object number share the same underlying
         // stream, so they are replaced together with one embedded JPEG.
         const matches = refs.filter(r => r.ref.objectNumber === objectNumber);
-        if (matches.length === 0) continue;
+        const imageId = matches.length > 0 ? nameKey(matches[0].key) : `object-${objectNumber}`;
+        if (matches.length === 0) {
+          note({
+            pageIndex,
+            imageId,
+            objectNumber,
+            status: 'skipped',
+            skipReason:
+              'This image is not reachable from the page in the document being rebuilt, so nothing was replaced.'
+          });
+          continue;
+        }
         const oldRef = matches[0].ref;
 
         const reused = embedded.get(oldRef.objectNumber);
         if (reused) {
           for (const { dict, key } of matches) dict.set(key, reused);
+          // The same shared object, displayed on a second page: one embedded
+          // stream, but this page is genuinely showing the re-encoded image, so
+          // it is reported with the sizes measured the first time round.
+          const sizes = measured.get(oldRef.objectNumber);
+          note({
+            pageIndex,
+            imageId,
+            objectNumber,
+            originalBytes: sizes?.originalBytes,
+            compressedBytes: sizes?.compressedBytes,
+            status: 're-encoded'
+          });
           continue;
         }
 
         const oldStream = source.context.lookupMaybe(oldRef, PDFStream);
-        if (!oldStream) continue;
+        if (!oldStream) {
+          note({
+            pageIndex,
+            imageId,
+            objectNumber,
+            status: 'skipped',
+            skipReason: 'The original image stream could not be read, so it was left untouched.'
+          });
+          continue;
+        }
+
+        // The stored (already-filtered) length is what the image costs in the
+        // file, which is the only number worth comparing a replacement against.
+        const originalBytes = storedStreamBytes(oldStream);
+        const compressedBytes = encoded.jpeg.byteLength;
+
+        // CMP-04, per image: "compression" that makes an image bigger is not
+        // compression. The whole-file gate at the end of this function would
+        // catch a net growth, but not an image that grew inside a run that shrank
+        // overall — the file gets smaller and one image silently gets worse. A
+        // replacement is only taken when it is actually smaller.
+        if (originalBytes > 0 && compressedBytes >= originalBytes) {
+          note({
+            pageIndex,
+            imageId,
+            objectNumber,
+            originalBytes,
+            compressedBytes,
+            status: 'skipped',
+            skipReason:
+              `Re-encoding produced ${compressedBytes} bytes against the original ${originalBytes}, ` +
+              'so the original stream was kept.'
+          });
+          continue;
+        }
 
         const smaskRef = oldStream.dict.get(PDFName.of('SMask'));
         const maskRef = oldStream.dict.get(PDFName.of('Mask'));
@@ -3579,7 +3969,19 @@ Q
           if (!(value instanceof PDFRef)) return false;
           return !(source.context.lookup(value) instanceof PDFArray);
         };
-        if (!carriable(smaskRef) || !carriable(maskRef)) continue;
+        if (!carriable(smaskRef) || !carriable(maskRef)) {
+          note({
+            pageIndex,
+            imageId,
+            objectNumber,
+            originalBytes,
+            status: 'skipped',
+            skipReason:
+              'Its transparency (a colour-key /Mask or a soft mask that cannot be carried onto a JPEG) ' +
+              'would not survive re-encoding, so the original was kept.'
+          });
+          continue;
+        }
 
         // A `/Matte` soft mask is pre-blended against a matte colour, and pdf.js
         // un-blends it while decoding: re-attaching the original mask would tell
@@ -3594,8 +3996,29 @@ Q
             : smaskRef instanceof PDFStream
               ? smaskRef
               : undefined;
-        if (smaskStreamNow?.dict.get(PDFName.of('Matte')) !== undefined) continue;
-        if (oldStream.dict.lookup(PDFName.of('ImageMask')) === PDFBool.True) continue;
+        if (smaskStreamNow?.dict.get(PDFName.of('Matte')) !== undefined) {
+          note({
+            pageIndex,
+            imageId,
+            objectNumber,
+            originalBytes,
+            status: 'skipped',
+            skipReason:
+              'Its soft mask is pre-blended against a /Matte colour, which a re-encode would invalidate.'
+          });
+          continue;
+        }
+        if (oldStream.dict.lookup(PDFName.of('ImageMask')) === PDFBool.True) {
+          note({
+            pageIndex,
+            imageId,
+            objectNumber,
+            originalBytes,
+            status: 'skipped',
+            skipReason: 'It is a 1-bit stencil mask, which a JPEG cannot represent.'
+          });
+          continue;
+        }
 
         const image = await source.embedJpg(encoded.jpeg);
         // `embedJpg` only reserves a reference; the stream itself is written on
@@ -3604,7 +4027,17 @@ Q
         // quietly dropped.
         await image.embed();
         const newStream = source.context.lookup(image.ref);
-        if (!(newStream instanceof PDFStream)) continue;
+        if (!(newStream instanceof PDFStream)) {
+          note({
+            pageIndex,
+            imageId,
+            objectNumber,
+            originalBytes,
+            status: 'skipped',
+            skipReason: 'The re-encoded image could not be embedded, so the original was kept.'
+          });
+          continue;
+        }
 
         let finalSmaskRef = smaskRef;
         if (smaskRef instanceof PDFRef && encoded.maskBytes) {
@@ -3668,6 +4101,15 @@ Q
         }
 
         embedded.set(oldRef.objectNumber, image.ref);
+        measured.set(oldRef.objectNumber, { originalBytes, compressedBytes });
+        note({
+          pageIndex,
+          imageId,
+          objectNumber,
+          originalBytes,
+          compressedBytes,
+          status: 're-encoded'
+        });
         for (const { dict, key } of matches) dict.set(key, image.ref);
       }
     }
@@ -3679,8 +4121,19 @@ Q
     const hasRaster =
       Object.keys(rasterPages).length > 0 && Object.values(rasterPages).some(Boolean);
     const hasReencoded = embedded.size > 0;
+    // No raster page and no image actually swapped means no compression work
+    // happened at all. Rebuilding anyway would still change the byte length —
+    // pdf-lib re-serialises, drops unreferenced objects and rewrites the xref —
+    // and the panel would report that difference as "saved", crediting
+    // compression for savings no image re-encode produced. `keptOriginal` is the
+    // honest answer: the original bytes go back untouched.
     if (!hasRaster && !hasReencoded) {
-      return { bytes: transfer(new Uint8Array(bytes)), keptOriginal: true, rasterizedPages: [] };
+      return {
+        bytes: transfer(new Uint8Array(bytes)),
+        keptOriginal: true,
+        rasterizedPages: [],
+        imageStats
+      };
     }
 
     // Every kept page is copied in one call. pdf-lib builds a fresh object
@@ -3718,9 +4171,14 @@ Q
     // CMP-04: a "compressed" file that is not smaller is not saved. Returning the
     // original bytes is the only honest outcome.
     if (rebuilt.byteLength >= bytes.byteLength) {
-      return { bytes: transfer(new Uint8Array(bytes)), keptOriginal: true, rasterizedPages: [] };
+      return {
+        bytes: transfer(new Uint8Array(bytes)),
+        keptOriginal: true,
+        rasterizedPages: [],
+        imageStats
+      };
     }
-    return { bytes: transfer(rebuilt), keptOriginal: false, rasterizedPages: [] };
+    return { bytes: transfer(rebuilt), keptOriginal: false, rasterizedPages: [], imageStats };
   },
 
   async applyAltText(bytes, altTexts, job) {
@@ -4056,11 +4514,23 @@ Q
     };
   },
 
-  async protectDocument(bytes, settings) {
-    return encryptPdf(bytes, settings);
+  async protectDocument(bytes, settings, job) {
+    // Encryption re-writes every string and stream in the document, which on a
+    // large file is seconds of work that used to report nothing and could not
+    // be cancelled at all.
+    //
+    // The AES pass itself lives in `core/pdf/encrypt.ts` and is still one
+    // uninterruptible loop over every indirect object: cancellation here is
+    // honoured before it starts and after it finishes, not during.
+    await checkpoint(job, 0, 'Reading the document');
+    await checkpoint(job, 0.1, 'Encrypting');
+    const out = await encryptPdf(bytes, settings);
+    await checkpoint(job, 1, 'Encrypted');
+    return out;
   },
 
-  async scrubMetadata(bytes, settings) {
+  async scrubMetadata(bytes, settings, job) {
+    await checkpoint(job, 0, 'Reading the document');
     const doc = await load(bytes);
 
     const s = settings || {
@@ -4114,7 +4584,14 @@ Q
       if (s.hasEmbeddedFiles) names.delete(PDFName.of('EmbeddedFiles'));
     }
 
-    for (const page of doc.getPages()) {
+    const scrubPages = doc.getPages();
+    for (let i = 0; i < scrubPages.length; i++) {
+      await checkpoint(
+        job,
+        0.1 + (i / Math.max(1, scrubPages.length)) * 0.3,
+        `Scrubbing page ${i + 1} of ${scrubPages.length}`
+      );
+      const page = scrubPages[i];
       if (s.hasPageThumbnails) page.node.delete(PDFName.of('Thumb'));
       page.node.delete(PDFName.of('PieceInfo'));
       if (s.hasAdditionalActions) page.node.delete(PDFName.of('AA'));
@@ -4137,8 +4614,14 @@ Q
      * marks left in the page content.
      */
     const copier = PDFObjectCopier.for(doc.context, out.context);
-    for (const page of doc.getPages()) {
-      const leaf = copier.copy(page.node);
+    const rebuildPages = doc.getPages();
+    for (let i = 0; i < rebuildPages.length; i++) {
+      await checkpoint(
+        job,
+        0.4 + (i / Math.max(1, rebuildPages.length)) * 0.5,
+        `Rebuilding page ${i + 1} of ${rebuildPages.length}`
+      );
+      const leaf = copier.copy(rebuildPages[i].node);
       const ref = out.context.register(leaf);
       out.addPage(PDFPage.of(leaf, ref, out));
     }
@@ -4183,18 +4666,46 @@ Q
     }
 
     reattachAcroForm(out, [doc]);
+    await checkpoint(job, 0.95, 'Writing file');
     return transfer(await pseudoLinearize(out).save({ useObjectStreams: true }));
   },
 
-  async applyRedactions(bytes, regions, job) {
+  async planImageRedactions(bytes, regions) {
+    const source = await load(bytes);
+    const pages = source.getPages();
+    const regionsByPage = groupRegionsByPage(regions);
+    const requests: ImageRedactionRequest[] = [];
+
+    for (const [pageIndex, pageRegions] of regionsByPage) {
+      const page = pages[pageIndex];
+      if (!page) continue;
+      const rects = redactionRectsForPage(page, pageRegions);
+      const { partialImages } = await filterPageForRedaction(page, source.context, rects);
+      if (partialImages.size === 0) continue;
+      const xObjects = pageXObjectDictOf(page, source.context);
+      for (const [name, unitRects] of partialImages) {
+        const entry = xObjects?.get(PDFName.of(name));
+        if (!(entry instanceof PDFRef)) {
+          // A direct (non-indirect) image XObject cannot be addressed by object
+          // number, which is the only identifier pdf.js and pdf-lib share. Rather
+          // than guess, say so: the caller refuses the redaction.
+          throw unsupported(
+            `An image on page ${pageIndex + 1} is partly covered by a redaction mark but is ` +
+              'stored in a form Stapler cannot address for pixel-level removal. Nothing was ' +
+              'changed — your original document is untouched.'
+          );
+        }
+        requests.push({ pageIndex, name, objectNumber: entry.objectNumber, rects: unitRects });
+      }
+    }
+
+    return requests;
+  },
+
+  async applyRedactions(bytes, regions, imageReplacements, job) {
     const source = await load(bytes);
     const sourcePages = source.getPages();
-    const regionsByPage = new Map<number, RedactionRegion[]>();
-    for (const region of regions) {
-      const list = regionsByPage.get(region.pageIndex);
-      if (list) list.push(region);
-      else regionsByPage.set(region.pageIndex, [region]);
-    }
+    const regionsByPage = groupRegionsByPage(regions);
 
     const out = await PDFDocument.create();
     preserveDocumentCatalog(source, out);
@@ -4203,353 +4714,82 @@ Q
     for (let i = 0; i < total; i++) {
       await checkpoint(job, i / total, `Redacting page ${i + 1} of ${total}`);
 
-      if (!regionsByPage.has(i)) {
-        const [copied] = await out.copyPages(source, [i]);
-        out.addPage(copied);
-        continue;
-      }
-
-      // 1. Copy the page
       const [copied] = await out.copyPages(source, [i]);
       out.addPage(copied);
 
-      const cropBox = copied.getCropBox();
+      const pageRegions = regionsByPage.get(i);
+      if (!pageRegions) continue;
 
-      // pdf.js applies /Rotate when building the viewport, so the normalized
-      // coordinates the UI produced are in the *rotated* frame. We must apply
-      // the inverse rotation to map them back to unrotated PDF content-space
-      // before passing them to filterContentStream or drawRectangle.
-      const rotateDeg = normalizeRotation(copied.getRotation().angle);
+      const rects = redactionRectsForPage(copied, pageRegions);
 
-      function normalizedToContentSpace(r: RedactionRegion): Rect {
-        // Start in the rotated frame: (r.x, r.y) are top-left fractions.
-        // Convert to cropBox-relative unrotated coordinates.
-        let rx: number, ry: number, rw: number, rh: number;
-        if (rotateDeg === 0) {
-          rx = r.x;
-          ry = r.y;
-          rw = r.width;
-          rh = r.height;
-        } else if (rotateDeg === 90) {
-          // pdf.js rotates 90° CW: its x-axis = page y-axis, y-axis = inverted page x-axis
-          rx = r.y;
-          ry = 1 - r.x - r.width;
-          rw = r.height;
-          rh = r.width;
-        } else if (rotateDeg === 180) {
-          rx = 1 - r.x - r.width;
-          ry = 1 - r.y - r.height;
-          rw = r.width;
-          rh = r.height;
-        } else {
-          // 270
-          rx = 1 - r.y - r.height;
-          ry = r.x;
-          rw = r.height;
-          rh = r.width;
-        }
-        // Convert normalized fractions (top-left origin) to PDF user-space (bottom-left origin).
-        return {
-          x: cropBox.x + rx * cropBox.width,
-          y: cropBox.y + cropBox.height * (1 - ry - rh),
-          width: rw * cropBox.width,
-          height: rh * cropBox.height
-        };
+      // 1. Operator-level content removal.
+      const { content, strippedXObjectNames, partialImages } = await filterPageForRedaction(
+        copied,
+        out.context,
+        rects
+      );
+      if (content) {
+        const newStream = out.context.flateStream(content);
+        copied.node.set(PDFName.of('Contents'), out.context.register(newStream));
       }
 
-      // 2. Perform operator-level content removal
-      if (regionsByPage.has(i)) {
-        const pageRegions = regionsByPage.get(i)!;
+      const xObjects = pageXObjectDictOf(copied, out.context);
 
-        // Convert regions from normalized (fraction of the CropBox, y from top)
-        // to PDF content-space coordinates (bottom-left origin, offset by the
-        // CropBox's own origin within the page's default user space).
-        const rects: Rect[] = pageRegions.map(normalizedToContentSpace);
-
-        const rawContents = copied.node.Contents();
-        const streamRefs: unknown[] = [];
-        if (rawContents) {
-          if (rawContents instanceof PDFArray) {
-            for (let k = 0; k < rawContents.size(); k++) {
-              streamRefs.push(rawContents.get(k));
-            }
-          } else {
-            streamRefs.push(rawContents);
-          }
-        }
-
-        // Collect all XObject names stripped across all content stream chunks so
-        // we can remove them from /Resources/XObject after processing.
-        const allStrippedXObjectNames: string[] = [];
-
-        // A Form XObject's true extent is its own /BBox (through its own
-        // /Matrix) — nothing like an image's implicit unit square. Without this,
-        // every Form invocation was measured as a bogus tiny box and could never
-        // be detected as overlapping a redaction region, however large it
-        // actually painted on the page, leaving whatever text it drew untouched.
-        const pageResourcesRaw = copied.node.get(PDFName.of('Resources'));
-        const pageResourceDict =
-          pageResourcesRaw instanceof PDFDict
-            ? pageResourcesRaw
-            : pageResourcesRaw instanceof PDFRef
-              ? (out.context.lookup(pageResourcesRaw) as PDFDict | undefined)
-              : undefined;
-        const pageXObjectDictRaw = pageResourceDict?.get(PDFName.of('XObject'));
-        const pageXObjectDict =
-          pageXObjectDictRaw instanceof PDFDict
-            ? pageXObjectDictRaw
-            : pageXObjectDictRaw instanceof PDFRef
-              ? (out.context.lookup(pageXObjectDictRaw) as PDFDict | undefined)
-              : undefined;
-
-        const resolveXObject = (name: string) => {
-          const entry = pageXObjectDict?.get(PDFName.of(name));
-          const resolved = entry instanceof PDFRef ? out.context.lookup(entry) : entry;
-          const dict =
-            resolved instanceof PDFDict
-              ? resolved
-              : resolved instanceof PDFStream || resolved instanceof PDFRawStream
-                ? resolved.dict
-                : undefined;
-          if (!dict) return undefined;
-          const subtypeName = dict.get(PDFName.of('Subtype'));
-          const subtype =
-            subtypeName === PDFName.of('Form')
-              ? ('Form' as const)
-              : subtypeName === PDFName.of('Image')
-                ? ('Image' as const)
-                : ('Unknown' as const);
-          if (subtype !== 'Form') return { subtype };
-
-          const bboxArr = dict.get(PDFName.of('BBox'));
-          const bbox =
-            bboxArr instanceof PDFArray && bboxArr.size() === 4
-              ? ([
-                  (bboxArr.get(0) as PDFNumber).asNumber(),
-                  (bboxArr.get(1) as PDFNumber).asNumber(),
-                  (bboxArr.get(2) as PDFNumber).asNumber(),
-                  (bboxArr.get(3) as PDFNumber).asNumber()
-                ] as [number, number, number, number])
-              : undefined;
-
-          const matrixArr = dict.get(PDFName.of('Matrix'));
-          const matrix =
-            matrixArr instanceof PDFArray && matrixArr.size() === 6
-              ? (Array.from({ length: 6 }, (_, k) =>
-                  (matrixArr.get(k) as PDFNumber).asNumber()
-                ) as Matrix)
-              : undefined;
-
-          return { subtype, bbox, matrix };
-        };
-
-        if (streamRefs.length > 0) {
-          const filteredChunks: Uint8Array[] = [];
-          let carryState: GraphicsState | undefined;
-
-          for (const ref of streamRefs) {
-            const stream = out.context.lookup(ref as never);
-            if (!(stream instanceof PDFStream)) continue;
-
-            let rawBytes: Uint8Array = stream.getContents();
-
-            const filter = stream.dict.get(PDFName.of('Filter'));
-            const isFlate =
-              filter === PDFName.of('FlateDecode') ||
-              (filter instanceof PDFArray && filter.get(0) === PDFName.of('FlateDecode'));
-            if (isFlate) {
-              rawBytes = await decodeStream(rawBytes);
-            }
-
-            const tokens = tokenizeContentStream(rawBytes);
-            const statements = parseContentStream(tokens);
-            const { filtered, finalState, strippedXObjectNames } = filterContentStream(
-              statements,
-              rects,
-              carryState,
-              resolveXObject
-            );
-            carryState = finalState;
-            allStrippedXObjectNames.push(...strippedXObjectNames);
-            filteredChunks.push(serializeStatements(filtered));
-          }
-
-          if (filteredChunks.length > 0) {
-            let totalLen = 0;
-            for (const c of filteredChunks) totalLen += c.length + 1;
-            const merged = new Uint8Array(totalLen);
-            let pos = 0;
-            for (const c of filteredChunks) {
-              merged.set(c, pos);
-              pos += c.length;
-              merged[pos++] = 0x0a;
-            }
-            const newStream = out.context.flateStream(merged.slice(0, pos));
-            copied.node.set(PDFName.of('Contents'), out.context.register(newStream));
-          }
-        }
-
-        // 2b. Strip image XObject streams from /Resources/XObject whose `Do`
-        // operators were removed. Two layers of removal are required:
-        //
-        //   1. Remove the name from the dict — this kills the named reference.
-        //   2. Delete the underlying indirect object from out.context — pdf-lib's
-        //      save() serialises every object in the context, regardless of whether
-        //      anything still points to it. Without this step the image bytes remain
-        //      recoverable via pdfimages/qpdf even though no live reference exists.
-        //
-        // Shared images (same PDFRef referenced from multiple pages' /Resources)
-        // must NOT be deleted from the context — only the per-page dict entry is
-        // removed; the remaining pages' references keep the stream alive correctly.
-        if (allStrippedXObjectNames.length > 0) {
-          const resources = copied.node.get(PDFName.of('Resources'));
-          const resourceDict =
-            resources instanceof PDFDict
-              ? resources
-              : resources instanceof PDFRef
-                ? (out.context.lookup(resources) as PDFDict | undefined)
-                : undefined;
-          if (resourceDict) {
-            const xObjectDict = resourceDict.get(PDFName.of('XObject'));
-            const xObjects =
-              xObjectDict instanceof PDFDict
-                ? xObjectDict
-                : xObjectDict instanceof PDFRef
-                  ? (out.context.lookup(xObjectDict) as PDFDict | undefined)
-                  : undefined;
-            if (xObjects) {
-              for (const name of allStrippedXObjectNames) {
-                const pdfName = PDFName.of(name);
-                // Capture the ref (if indirect) before deleting, so we can
-                // remove it from the context object table below.
-                const entry = xObjects.get(pdfName);
-                xObjects.delete(pdfName);
-
-                // Only purge the object from the context if it is an indirect
-                // ref (i.e. it has an object number we can look up) and it is
-                // not still referenced by any other page's XObject dictionary.
-                if (entry instanceof PDFRef) {
-                  let stillReferenced = false;
-                  for (const page of out.getPages()) {
-                    const pgResources = page.node.get(PDFName.of('Resources'));
-                    const pgResourceDict =
-                      pgResources instanceof PDFDict
-                        ? pgResources
-                        : pgResources instanceof PDFRef
-                          ? (out.context.lookup(pgResources) as PDFDict | undefined)
-                          : undefined;
-                    if (!pgResourceDict) continue;
-                    const pgXObjectRaw = pgResourceDict.get(PDFName.of('XObject'));
-                    const pgXObjects =
-                      pgXObjectRaw instanceof PDFDict
-                        ? pgXObjectRaw
-                        : pgXObjectRaw instanceof PDFRef
-                          ? (out.context.lookup(pgXObjectRaw) as PDFDict | undefined)
-                          : undefined;
-                    if (!pgXObjects) continue;
-                    for (let xi = 0; xi < pgXObjects.keys().length; xi++) {
-                      if (pgXObjects.get(pgXObjects.keys()[xi]) === entry) {
-                        stillReferenced = true;
-                        break;
-                      }
-                    }
-                    if (stillReferenced) break;
-                  }
-                  if (!stillReferenced) {
-                    // Remove the object from the context's indirect-object table
-                    // so pdf-lib's serialiser does not write orphaned image bytes.
-                    // `indirectObjects` is private on PDFContext, but the underlying
-                    // Map is the only way to surgically remove one object without
-                    // rebuilding the whole context. The cast is intentional.
-                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                    (out.context as any).indirectObjects.delete(entry);
-                  }
-                }
-              }
-            }
-          }
-        }
-
-        // 2c. Strip PDF annotations that overlap a redacted region.
-        const annotsRaw = copied.node.get(PDFName.of('Annots'));
-        const annotsRef = annotsRaw instanceof PDFRef ? annotsRaw : null;
-        const annotsArray =
-          annotsRaw instanceof PDFArray
-            ? annotsRaw
-            : annotsRef
-              ? (out.context.lookup(annotsRef) as PDFArray | undefined)
-              : undefined;
-
-        if (annotsArray) {
-          const keptAnnotRefs: unknown[] = [];
-          for (let a = 0; a < annotsArray.size(); a++) {
-            const annotRef = annotsArray.get(a);
-            const annotDict =
-              annotRef instanceof PDFDict
-                ? annotRef
-                : annotRef instanceof PDFRef
-                  ? (out.context.lookup(annotRef) as PDFDict | undefined)
-                  : undefined;
-
-            if (!annotDict) {
-              keptAnnotRefs.push(annotRef);
-              continue;
-            }
-
-            const rectArr = annotDict.get(PDFName.of('Rect'));
-            if (!(rectArr instanceof PDFArray) || rectArr.size() < 4) {
-              keptAnnotRefs.push(annotRef);
-              continue;
-            }
-
-            const llx = (rectArr.get(0) as PDFNumber).asNumber();
-            const lly = (rectArr.get(1) as PDFNumber).asNumber();
-            const urx = (rectArr.get(2) as PDFNumber).asNumber();
-            const ury = (rectArr.get(3) as PDFNumber).asNumber();
-            const annotBox: Rect = {
-              x: Math.min(llx, urx),
-              y: Math.min(lly, ury),
-              width: Math.abs(urx - llx),
-              height: Math.abs(ury - lly)
-            };
-
-            let annotOverlaps = false;
-            for (const r of rects) {
-              if (!(
-                annotBox.x >= r.x + r.width ||
-                annotBox.x + annotBox.width <= r.x ||
-                annotBox.y >= r.y + r.height ||
-                annotBox.y + annotBox.height <= r.y
-              )) {
-                annotOverlaps = true;
-                break;
-              }
-            }
-
-            if (!annotOverlaps) {
-              keptAnnotRefs.push(annotRef);
-            }
-          }
-
-          // Rebuild the Annots array with only the surviving refs.
-          // Use a PDFArray directly rather than context.obj() to avoid the
-          // LiteralArray overload mismatch (keptAnnotRefs is unknown[]).
-          const newAnnots = PDFArray.withContext(out.context);
-          for (const ref of keptAnnotRefs) {
-            newAnnots.push(ref as PDFRef);
-          }
-          copied.node.set(PDFName.of('Annots'), newAnnots);
+      // 2. Image XObjects whose `Do` was removed outright: unhook the name, then
+      // drop the stream itself. pdf-lib serialises every object in its context
+      // whether or not anything references it, so unhooking alone leaves the
+      // image bytes recoverable with `pdfimages`.
+      if (strippedXObjectNames.length > 0 && xObjects) {
+        for (const name of strippedXObjectNames) {
+          const pdfName = PDFName.of(name);
+          const entry = xObjects.get(pdfName);
+          xObjects.delete(pdfName);
+          if (entry instanceof PDFRef) purgeXObjectIfUnreferenced(out, entry);
         }
       }
 
-      // 3. Draw the opaque marks on top as well
-      for (const region of regionsByPage.get(i) ?? []) {
-        const cs = normalizedToContentSpace(region);
+      // 3. Image XObjects a mark only *partly* covers. The `Do` has to stay (the
+      // uncovered part of the image is content the user kept), so the only real
+      // removal is in the pixels — supplied by the caller, which decodes the
+      // image with pdf.js and paints the covered area opaque black. Without one
+      // the operation is refused: painting a black rectangle over an intact
+      // full-resolution image is an overlay, not a redaction, and reporting it
+      // as verified would be the worst outcome available.
+      for (const name of partialImages.keys()) {
+        const entry = xObjects?.get(PDFName.of(name));
+        const replacement = entry instanceof PDFRef ? imageReplacements?.[i]?.[name] : undefined;
+        if (!replacement) {
+          throw unsupported(
+            `An image on page ${i + 1} is only partly covered by a redaction mark, and its ` +
+              'pixels could not be decoded and blacked out (JBIG2 and JPEG 2000 images cannot ' +
+              'be decoded here). Drawing a black box over it would leave the original image ' +
+              'inside the file. Nothing was changed — your original document is untouched. ' +
+              'Cover the whole image with the mark, or rasterise the page first.'
+          );
+        }
+        const image =
+          replacement.format === 'png'
+            ? await out.embedPng(replacement.bytes)
+            : await out.embedJpg(replacement.bytes);
+        // `embedPng`/`embedJpg` only reserve a reference; the stream is written
+        // on save. Forcing it now is what makes the object exist to point at.
+        await image.embed();
+        xObjects!.set(PDFName.of(name), image.ref);
+        if (entry instanceof PDFRef) purgeXObjectIfUnreferenced(out, entry);
+      }
+
+      // 4. Annotations overlapping a mark. Their /Contents, field values and
+      // appearance streams are text a viewer never shows on the page but every
+      // extraction tool reads, so they are removed from /Annots *and* deleted.
+      stripOverlappingAnnotations(out, copied, rects);
+
+      // 5. The opaque mark itself, drawn on top of what is left.
+      for (const rect of rects) {
         copied.drawRectangle({
-          x: cs.x,
-          y: cs.y,
-          width: cs.width,
-          height: cs.height,
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
           color: DOC_REDACT,
           borderWidth: 0
         });
@@ -4557,6 +4797,12 @@ Q
     }
 
     reattachAcroForm(out, [source]);
+    // The last line of defence, and the one that does not depend on every
+    // removal path above having remembered to clean up after itself: anything no
+    // longer reachable from the catalog is deleted outright, so pdf-lib cannot
+    // serialise an orphaned annotation, form field, or appearance stream whose
+    // text was supposed to be gone.
+    sweepUnreachableObjects(out);
     await checkpoint(job, 0.95, 'Writing file');
     return transfer(await pseudoLinearize(out).save({ useObjectStreams: true }));
   },
@@ -4676,6 +4922,537 @@ Q
     return transfer(await pseudoLinearize(out).save({ useObjectStreams: false }));
   }
 };
+
+/* ------------------------------------------------------------------ *
+ * Redaction internals (RED-02, RED-03)
+ * ------------------------------------------------------------------ */
+
+/**
+ * A content stream's operators, whatever filter chain it was stored under.
+ *
+ * The old test — "is `/Filter` the name `FlateDecode`, or an array whose *first*
+ * entry is" — got two common cases wrong and got them wrong silently. A chain
+ * like `[/ASCII85Decode /FlateDecode]` failed the check, so the still-ASCII85'd
+ * (and still deflated) bytes were tokenised as if they were operators, producing
+ * a page of garbage tokens that was then re-serialised over the real content. An
+ * `/LZWDecode` stream did the same. Both destroyed the page and reported
+ * success.
+ *
+ * pdf-lib's own `decodePDFRawStream` walks the whole chain and refuses what it
+ * cannot decode, which is exactly the behaviour needed: decode it properly, or
+ * say so and let the caller return the original bytes.
+ */
+async function decodeContentStreamBytes(
+  stream: PDFStream,
+  context: PDFContext
+): Promise<Uint8Array> {
+  const filters = filterNamesOf(stream.dict.get(PDFName.of('Filter')), context);
+  const raw = stream.getContents();
+  if (filters.length === 0) return raw;
+
+  if (stream instanceof PDFRawStream) {
+    try {
+      return decodePDFRawStream(stream).decode();
+    } catch (err) {
+      throw unsupported(
+        `A page's content stream uses a filter chain Stapler cannot decode (${filters.join(
+          ' → '
+        )}): ${err instanceof Error ? err.message : String(err)}. Nothing was changed — your ` +
+          'original document is untouched. Re-save the file from a PDF viewer and try again.'
+      );
+    }
+  }
+
+  // A stream this process built itself, rather than one read from the file.
+  if (filters.length === 1 && filters[0] === 'FlateDecode') return decodeStream(raw);
+  throw unsupported(
+    `A page's content stream uses a filter chain Stapler cannot decode (${filters.join(' → ')}). ` +
+      'Nothing was changed — your original document is untouched.'
+  );
+}
+
+/**
+ * The redaction regions for one page, in that page's unrotated content space.
+ *
+ * pdf.js applies `/Rotate` when building the viewport, so the normalised
+ * coordinates the UI produced are in the *rotated* frame. The inverse rotation
+ * maps them back to the space `filterContentStream` and `drawRectangle` work in.
+ */
+function redactionRectsForPage(page: PDFPage, regions: RedactionRegion[]): Rect[] {
+  const cropBox = page.getCropBox();
+  const rotateDeg = normalizeRotation(page.getRotation().angle);
+
+  return regions.map(r => {
+    let rx: number, ry: number, rw: number, rh: number;
+    if (rotateDeg === 0) {
+      rx = r.x;
+      ry = r.y;
+      rw = r.width;
+      rh = r.height;
+    } else if (rotateDeg === 90) {
+      // pdf.js rotates 90° CW: its x-axis = page y-axis, y-axis = inverted page x-axis
+      rx = r.y;
+      ry = 1 - r.x - r.width;
+      rw = r.height;
+      rh = r.width;
+    } else if (rotateDeg === 180) {
+      rx = 1 - r.x - r.width;
+      ry = 1 - r.y - r.height;
+      rw = r.width;
+      rh = r.height;
+    } else {
+      // 270
+      rx = 1 - r.y - r.height;
+      ry = r.x;
+      rw = r.height;
+      rh = r.width;
+    }
+    // Normalised fractions (top-left origin) → PDF user space (bottom-left origin).
+    return {
+      x: cropBox.x + rx * cropBox.width,
+      y: cropBox.y + cropBox.height * (1 - ry - rh),
+      width: rw * cropBox.width,
+      height: rh * cropBox.height
+    };
+  });
+}
+
+function groupRegionsByPage(regions: RedactionRegion[]): Map<number, RedactionRegion[]> {
+  const byPage = new Map<number, RedactionRegion[]>();
+  for (const region of regions) {
+    const list = byPage.get(region.pageIndex);
+    if (list) list.push(region);
+    else byPage.set(region.pageIndex, [region]);
+  }
+  return byPage;
+}
+
+/** The page's `/Resources/XObject` dictionary, through however many refs. */
+function pageXObjectDictOf(page: PDFPage, context: PDFContext): PDFDict | undefined {
+  const resourcesRaw = page.node.get(PDFName.of('Resources'));
+  const resources =
+    resourcesRaw instanceof PDFDict
+      ? resourcesRaw
+      : resourcesRaw instanceof PDFRef
+        ? (context.lookup(resourcesRaw) as PDFDict | undefined)
+        : undefined;
+  const xObjectRaw = resources?.get(PDFName.of('XObject'));
+  return xObjectRaw instanceof PDFDict
+    ? xObjectRaw
+    : xObjectRaw instanceof PDFRef
+      ? (context.lookup(xObjectRaw) as PDFDict | undefined)
+      : undefined;
+}
+
+/** The page's `/Resources/Font` dictionary, if it has one. */
+function pageFontDictOf(page: PDFPage, context: PDFContext): PDFDict | undefined {
+  const resourcesRaw = page.node.get(PDFName.of('Resources'));
+  const resources =
+    resourcesRaw instanceof PDFDict
+      ? resourcesRaw
+      : resourcesRaw instanceof PDFRef
+        ? (context.lookup(resourcesRaw) as PDFDict | undefined)
+        : undefined;
+  const fontRaw = resources?.get(PDFName.of('Font'));
+  return fontRaw instanceof PDFDict
+    ? fontRaw
+    : fontRaw instanceof PDFRef
+      ? (context.lookup(fontRaw) as PDFDict | undefined)
+      : undefined;
+}
+
+function asDict(value: unknown, context: PDFContext): PDFDict | undefined {
+  const resolved = value instanceof PDFRef ? context.lookup(value) : value;
+  return resolved instanceof PDFDict ? resolved : undefined;
+}
+
+function asArray(value: unknown, context: PDFContext): PDFArray | undefined {
+  const resolved = value instanceof PDFRef ? context.lookup(value) : value;
+  return resolved instanceof PDFArray ? resolved : undefined;
+}
+
+function numberAt(array: PDFArray, index: number, context: PDFContext): number | undefined {
+  const raw = array.get(index);
+  const resolved = raw instanceof PDFRef ? context.lookup(raw) : raw;
+  return resolved instanceof PDFNumber ? resolved.asNumber() : undefined;
+}
+
+/**
+ * Real glyph widths for one font resource, so the redaction filter measures a
+ * text run instead of guessing 0.6em per byte.
+ *
+ * Simple fonts index `/Widths` from `/FirstChar`. Composite (`/Type0`) fonts put
+ * their widths in the descendant's `/W`, a run-length form keyed by CID, with
+ * `/DW` (default 1000) for everything absent. `/Type0` also means two-byte
+ * codes for every CMap Stapler will meet here (Identity-H and the predefined
+ * CJK CMaps are all two-byte), which is the half of this that mattered most:
+ * counting a CJK run's bytes counted every glyph twice.
+ */
+function fontInfoFor(name: string, fonts: PDFDict | undefined, context: PDFContext) {
+  const dict = fonts ? asDict(fonts.get(PDFName.of(name)), context) : undefined;
+  if (!dict) return undefined;
+
+  const subtype = dict.get(PDFName.of('Subtype'));
+  if (subtype === PDFName.of('Type0')) {
+    const descendants = asArray(dict.get(PDFName.of('DescendantFonts')), context);
+    const descendant = descendants ? asDict(descendants.get(0), context) : undefined;
+    const dwRaw = descendant?.get(PDFName.of('DW'));
+    const dw = dwRaw instanceof PDFNumber ? dwRaw.asNumber() : 1000;
+    const widths = new Map<number, number>();
+    const w = descendant ? asArray(descendant.get(PDFName.of('W')), context) : undefined;
+    if (w) {
+      let i = 0;
+      while (i < w.size()) {
+        const first = numberAt(w, i, context);
+        if (first === undefined) break;
+        const second = w.get(i + 1);
+        const secondResolved = second instanceof PDFRef ? context.lookup(second) : second;
+        if (secondResolved instanceof PDFArray) {
+          for (let k = 0; k < secondResolved.size(); k++) {
+            const width = numberAt(secondResolved, k, context);
+            if (width !== undefined) widths.set(first + k, width);
+          }
+          i += 2;
+        } else {
+          const last = numberAt(w, i + 1, context);
+          const width = numberAt(w, i + 2, context);
+          if (last === undefined || width === undefined) break;
+          // A malformed range could otherwise ask for millions of entries.
+          const span = Math.min(last - first, 65535);
+          for (let c = 0; c <= span; c++) widths.set(first + c, width);
+          i += 3;
+        }
+      }
+    }
+    return { twoByte: true, widths, defaultWidth: dw };
+  }
+
+  const firstCharRaw = dict.get(PDFName.of('FirstChar'));
+  const firstChar = firstCharRaw instanceof PDFNumber ? firstCharRaw.asNumber() : undefined;
+  const widthsArray = asArray(dict.get(PDFName.of('Widths')), context);
+  if (firstChar === undefined || !widthsArray) return { twoByte: false };
+
+  const widths = new Map<number, number>();
+  for (let k = 0; k < widthsArray.size(); k++) {
+    const width = numberAt(widthsArray, k, context);
+    if (width !== undefined) widths.set(firstChar + k, width);
+  }
+  const descriptor = asDict(dict.get(PDFName.of('FontDescriptor')), context);
+  const missingRaw = descriptor?.get(PDFName.of('MissingWidth'));
+  const defaultWidth = missingRaw instanceof PDFNumber ? missingRaw.asNumber() : undefined;
+  return { twoByte: false, widths, defaultWidth };
+}
+
+interface PageRedactionFilter {
+  /** The rebuilt content stream, or null when the page had no content streams. */
+  content: Uint8Array | null;
+  strippedXObjectNames: string[];
+  /** Name → the union of every unit-space rect that covers part of that image. */
+  partialImages: Map<string, Rect[]>;
+}
+
+/**
+ * Runs the operator-level filter over every chunk of one page's `/Contents`.
+ *
+ * Shared by `planImageRedactions` (which only wants the image overlaps) and
+ * `applyRedactions` (which wants the rebuilt stream too), so the two can never
+ * disagree about what a redaction rectangle touches.
+ */
+async function filterPageForRedaction(
+  page: PDFPage,
+  context: PDFContext,
+  rects: Rect[]
+): Promise<PageRedactionFilter> {
+  const rawContents = page.node.Contents();
+  const streamRefs: unknown[] = [];
+  if (rawContents) {
+    if (rawContents instanceof PDFArray) {
+      for (let k = 0; k < rawContents.size(); k++) streamRefs.push(rawContents.get(k));
+    } else {
+      streamRefs.push(rawContents);
+    }
+  }
+
+  const strippedXObjectNames: string[] = [];
+  const partialImages = new Map<string, Rect[]>();
+  if (streamRefs.length === 0) return { content: null, strippedXObjectNames, partialImages };
+
+  const xObjects = pageXObjectDictOf(page, context);
+
+  // A Form XObject's true extent is its own /BBox (through its own /Matrix) —
+  // nothing like an image's implicit unit square. Without this, every Form
+  // invocation was measured as a bogus tiny box and could never be detected as
+  // overlapping a redaction region, however large it actually painted.
+  const resolveXObject = (name: string) => {
+    const entry = xObjects?.get(PDFName.of(name));
+    const resolved = entry instanceof PDFRef ? context.lookup(entry) : entry;
+    const dict =
+      resolved instanceof PDFDict
+        ? resolved
+        : resolved instanceof PDFStream || resolved instanceof PDFRawStream
+          ? resolved.dict
+          : undefined;
+    if (!dict) return undefined;
+    const subtypeName = dict.get(PDFName.of('Subtype'));
+    const subtype =
+      subtypeName === PDFName.of('Form')
+        ? ('Form' as const)
+        : subtypeName === PDFName.of('Image')
+          ? ('Image' as const)
+          : ('Unknown' as const);
+    if (subtype !== 'Form') return { subtype };
+
+    const bboxArr = dict.get(PDFName.of('BBox'));
+    const bbox =
+      bboxArr instanceof PDFArray && bboxArr.size() === 4
+        ? ([
+            (bboxArr.get(0) as PDFNumber).asNumber(),
+            (bboxArr.get(1) as PDFNumber).asNumber(),
+            (bboxArr.get(2) as PDFNumber).asNumber(),
+            (bboxArr.get(3) as PDFNumber).asNumber()
+          ] as [number, number, number, number])
+        : undefined;
+
+    const matrixArr = dict.get(PDFName.of('Matrix'));
+    const matrix =
+      matrixArr instanceof PDFArray && matrixArr.size() === 6
+        ? (Array.from({ length: 6 }, (_, k) =>
+            (matrixArr.get(k) as PDFNumber).asNumber()
+          ) as Matrix)
+        : undefined;
+
+    return { subtype, bbox, matrix };
+  };
+
+  // Text widths come from the page's own font resources, not a 0.6em guess.
+  const fonts = pageFontDictOf(page, context);
+  const fontCache = new Map<string, ReturnType<typeof fontInfoFor>>();
+  const resolveFont = (name: string) => {
+    if (!fontCache.has(name)) fontCache.set(name, fontInfoFor(name, fonts, context));
+    return fontCache.get(name);
+  };
+
+  const filteredChunks: Uint8Array[] = [];
+  let carryState: GraphicsState | undefined;
+
+  for (const ref of streamRefs) {
+    const resolved = ref instanceof PDFStream ? ref : context.lookup(ref as never);
+    if (!(resolved instanceof PDFStream)) {
+      // A missing object is what a dangling /Contents entry resolves to, and
+      // every viewer ignores it — there is nothing to drop. Anything else that
+      // is present but is not a stream is a shape this filter cannot read, and
+      // skipping it would silently delete that slice of the page.
+      if (resolved === undefined || resolved === null) continue;
+      throw unsupported(
+        "A page's /Contents array holds an entry that is not a content stream, so the page " +
+          'cannot be filtered without losing part of it. Nothing was changed — your original ' +
+          'document is untouched.'
+      );
+    }
+
+    const decoded = await decodeContentStreamBytes(resolved, context);
+    const statements = parseContentStream(tokenizeContentStream(decoded));
+    const result = filterContentStream(statements, rects, carryState, resolveXObject, resolveFont);
+    carryState = result.finalState;
+    strippedXObjectNames.push(...result.strippedXObjectNames);
+    for (const partial of result.partialImageCoverage) {
+      const existing = partialImages.get(partial.name);
+      if (existing) existing.push(...partial.rects);
+      else partialImages.set(partial.name, [...partial.rects]);
+    }
+    filteredChunks.push(serializeStatements(result.filtered));
+  }
+
+  let totalLen = 0;
+  for (const c of filteredChunks) totalLen += c.length + 1;
+  const merged = new Uint8Array(totalLen);
+  let pos = 0;
+  for (const c of filteredChunks) {
+    merged.set(c, pos);
+    pos += c.length;
+    merged[pos++] = 0x0a;
+  }
+
+  return { content: merged.slice(0, pos), strippedXObjectNames, partialImages };
+}
+
+/**
+ * Drops an indirect object from the context when nothing on any page still
+ * points at it.
+ *
+ * pdf-lib's `save()` serialises every object registered in the context whether
+ * or not it is reachable, so unhooking a reference is only half of a removal:
+ * the bytes stay in the file and come back out of `pdfimages`, `qpdf`, or a text
+ * dump. Shared objects (still named by another page) are deliberately left
+ * alone — the remaining references keep them alive correctly.
+ */
+function purgeXObjectIfUnreferenced(doc: PDFDocument, ref: PDFRef): void {
+  for (const page of doc.getPages()) {
+    const xObjects = pageXObjectDictOf(page, doc.context);
+    if (!xObjects) continue;
+    for (const key of xObjects.keys()) {
+      if (xObjects.get(key) === ref) return;
+    }
+  }
+  // `indirectObjects` is private on PDFContext, but the underlying Map is the
+  // only way to surgically remove one object without rebuilding the context.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (doc.context as any).indirectObjects.delete(ref);
+}
+
+/**
+ * Removes every annotation whose `/Rect` overlaps a redaction mark — from the
+ * page's `/Annots` array *and* from the document.
+ *
+ * Unhooking alone was the bug: pdf-lib serialises every object registered in its
+ * context regardless of whether anything still points at it, so a sticky note's
+ * `/Contents` or a form field's `/V` — the redacted string, in text, verbatim —
+ * stayed in the output bytes while the verifier, which reads the page tree, saw
+ * a clean document and reported `verified: true`.
+ *
+ * A widget's value is cleared on its parent field chain as well. The parent may
+ * be shared with widgets on other pages, and clearing it there too is
+ * deliberate: a redacted value is secret everywhere, and over-removal is the
+ * only safe direction to be wrong in.
+ */
+function stripOverlappingAnnotations(doc: PDFDocument, page: PDFPage, rects: Rect[]): void {
+  const annotsRaw = page.node.get(PDFName.of('Annots'));
+  const annots =
+    annotsRaw instanceof PDFArray
+      ? annotsRaw
+      : annotsRaw instanceof PDFRef
+        ? (doc.context.lookup(annotsRaw) as PDFArray | undefined)
+        : undefined;
+  if (!annots) return;
+
+  const kept: unknown[] = [];
+  let removedAny = false;
+
+  for (let a = 0; a < annots.size(); a++) {
+    const annotRef = annots.get(a);
+    const annotDict =
+      annotRef instanceof PDFDict
+        ? annotRef
+        : annotRef instanceof PDFRef
+          ? (doc.context.lookup(annotRef) as PDFDict | undefined)
+          : undefined;
+    if (!annotDict) {
+      kept.push(annotRef);
+      continue;
+    }
+
+    const rectArr = annotDict.get(PDFName.of('Rect'));
+    if (!(rectArr instanceof PDFArray) || rectArr.size() < 4) {
+      kept.push(annotRef);
+      continue;
+    }
+
+    const llx = (rectArr.get(0) as PDFNumber).asNumber();
+    const lly = (rectArr.get(1) as PDFNumber).asNumber();
+    const urx = (rectArr.get(2) as PDFNumber).asNumber();
+    const ury = (rectArr.get(3) as PDFNumber).asNumber();
+    const annotBox: Rect = {
+      x: Math.min(llx, urx),
+      y: Math.min(lly, ury),
+      width: Math.abs(urx - llx),
+      height: Math.abs(ury - lly)
+    };
+
+    if (!rects.some(r => intersects(annotBox, r))) {
+      kept.push(annotRef);
+      continue;
+    }
+
+    removedAny = true;
+    // The value lives on the widget, on its field ancestors, or on both. Clear
+    // it everywhere along the chain before the annotation itself goes, so a
+    // field shared with a surviving widget cannot carry the string out.
+    let node: PDFDict | undefined = annotDict;
+    const seen = new Set<PDFDict>();
+    while (node && !seen.has(node)) {
+      seen.add(node);
+      node.delete(PDFName.of('V'));
+      node.delete(PDFName.of('DV'));
+      node.delete(PDFName.of('Contents'));
+      node.delete(PDFName.of('RC'));
+      const parent: unknown = node.get(PDFName.of('Parent'));
+      const parentDict =
+        parent instanceof PDFDict
+          ? parent
+          : parent instanceof PDFRef
+            ? (doc.context.lookup(parent) as PDFDict | undefined)
+            : undefined;
+      node = parentDict;
+    }
+    // Appearance streams are separate objects holding the drawn text; the
+    // sweep below collects them once nothing points at them any more.
+    annotDict.delete(PDFName.of('AP'));
+    if (annotRef instanceof PDFRef) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (doc.context as any).indirectObjects.delete(annotRef);
+    }
+  }
+
+  if (!removedAny) return;
+
+  const newAnnots = PDFArray.withContext(doc.context);
+  for (const ref of kept) newAnnots.push(ref as PDFRef);
+  page.node.set(PDFName.of('Annots'), newAnnots);
+}
+
+/**
+ * Deletes every indirect object no longer reachable from the trailer.
+ *
+ * pdf-lib's `save()` writes the whole object table, not the live reference
+ * graph, so "removed" content survives in the bytes of any document this worker
+ * mutates rather than rebuilds. On the redaction path that is not untidiness,
+ * it is a failed redaction: the string is still in the file. Reachability is
+ * walked from the catalog and the trailer's own entries, so nothing a viewer
+ * could ever reach is collected.
+ */
+function sweepUnreachableObjects(doc: PDFDocument): number {
+  const context = doc.context;
+  const reachable = new Set<string>();
+  const queue: unknown[] = [doc.catalog];
+
+  const trailer = context.trailerInfo as unknown as Record<string, unknown>;
+  for (const key of ['Root', 'Info', 'Encrypt', 'ID']) {
+    if (trailer[key] !== undefined) queue.push(trailer[key]);
+  }
+
+  while (queue.length > 0) {
+    const item = queue.pop();
+    if (item instanceof PDFRef) {
+      const key = item.toString();
+      if (reachable.has(key)) continue;
+      reachable.add(key);
+      const target = context.lookup(item);
+      if (target !== undefined) queue.push(target);
+      continue;
+    }
+    if (item instanceof PDFStream) {
+      queue.push(item.dict);
+      continue;
+    }
+    if (item instanceof PDFDict) {
+      for (const [, value] of item.entries()) queue.push(value);
+      continue;
+    }
+    if (item instanceof PDFArray) {
+      for (let i = 0; i < item.size(); i++) queue.push(item.get(i));
+    }
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const objects = (context as any).indirectObjects as Map<PDFRef, unknown>;
+  let removed = 0;
+  for (const ref of [...objects.keys()]) {
+    if (reachable.has(ref.toString())) continue;
+    objects.delete(ref);
+    removed += 1;
+  }
+  return removed;
+}
 
 function isJavaScriptAction(dict: PDFDict): boolean {
   const type = dict.get(PDFName.of('Type'));
