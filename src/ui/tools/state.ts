@@ -45,4 +45,13 @@ export const removeBlanksThreshold = signal(50);
  * every tool's export was OPS-09 — merge and crop silently inherited a setting
  * the user set somewhere else and never saw again.
  */
-export const flattenOnExport = signal(false);
+export const flattenOnExport = signal(true);
+
+/**
+ * CNV-06 — Markdown → PDF source text.
+ *
+ * Lives here rather than in the panel's own `useState` so the action bar's commit
+ * button (the single primary CTA, DESIGN-ADAPTATION §4.2) can read it: the panel
+ * configures, the action bar commits, same split as every other tool.
+ */
+export const markdownToPdfSource = signal('');
