@@ -9,12 +9,14 @@ import { X } from 'lucide-preact';
 import type { PageRef } from '../../../core/store';
 import { pendingRedactions } from './state';
 import styles from './RedactOverlay.module.css';
+import { displayFrame, displayPointToNormalizedPage } from '../../../core/rotation';
 
 export interface RedactOverlayProps {
   page: PageRef;
   pageIndex: number;
   width: number;
   height: number;
+  rotation: number;
 }
 
 interface Draft {
@@ -33,11 +35,12 @@ const NUDGE = 0.005;
 const NUDGE_COARSE = 0.03;
 const clamp = (min: number, max: number, value: number) => Math.max(min, Math.min(max, value));
 
-export function RedactOverlay({ pageIndex, width, height }: RedactOverlayProps) {
+export function RedactOverlay({ pageIndex, width, height, rotation }: RedactOverlayProps) {
   const layerRef = useRef<HTMLDivElement>(null);
   const pendingFocusIndex = useRef<number | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const marks = pendingRedactions.value;
+  const frame = displayFrame(width, height, rotation);
 
   const updateMark = (
     index: number,
@@ -109,9 +112,12 @@ export function RedactOverlay({ pageIndex, width, height }: RedactOverlayProps) 
   const pointFrom = (event: PointerEvent) => {
     const rect = layerRef.current?.getBoundingClientRect();
     if (!rect) return { x: 0, y: 0 };
+    const displayX = ((event.clientX - rect.left) / rect.width) * frame.displayWidth;
+    const displayY = ((event.clientY - rect.top) / rect.height) * frame.displayHeight;
+    const point = displayPointToNormalizedPage(frame, displayX, displayY);
     return {
-      x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
-      y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height))
+      x: Math.max(0, Math.min(1, point.x)),
+      y: Math.max(0, Math.min(1, point.y))
     };
   };
 

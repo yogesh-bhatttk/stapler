@@ -34,7 +34,12 @@ import { importFiles } from '../../core/import';
 import { platform } from '../../platform/current';
 import { notify } from '../../core/notify';
 import { readSetting, writeSetting } from '../../core/db';
-import { eventMatchesShortcut, getEffectiveBinding, customShortcuts } from '../../core/shortcuts';
+import {
+  eventMatchesRedoShortcut,
+  eventMatchesShortcut,
+  getEffectiveBinding,
+  customShortcuts
+} from '../../core/shortcuts';
 import { useUnsavedGuard } from '../useUnsavedGuard';
 import styles from './AppShell.module.css';
 
@@ -89,7 +94,7 @@ export function AppShell({ children }: { children: ComponentChildren }) {
         if (canUndo()) undo();
         return;
       }
-      if (eventMatchesShortcut(event, getEffectiveBinding('redo'))) {
+      if (eventMatchesRedoShortcut(event)) {
         event.preventDefault();
         if (canRedo()) redo();
         return;

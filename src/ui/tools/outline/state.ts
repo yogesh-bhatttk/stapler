@@ -25,6 +25,10 @@ export interface OutlineEntry {
 export const outlineTree = signal<OutlineEntry[]>([]);
 export const outlineDocId = signal<string | null>(null);
 export const outlineLoading = signal(false);
+/** Signature of the page list that is currently being loaded. */
+export const outlineLoadingSignature = signal<string | null>(null);
+/** Signature of the page list the visible tree was loaded for. */
+export const outlineLoadedSignature = signal<string | null>(null);
 /**
  * Whether the user has actually changed anything.
  *

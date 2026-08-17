@@ -17,20 +17,34 @@ import {
   outlineDocId,
   outlineEdited,
   outlineLoading,
+  outlineLoadedSignature,
+  outlineLoadingSignature,
   outlineTree,
   outlineUnresolved
 } from './state';
+
+function outlineSignature(doc: {
+  pages: { sourceDocId: string; sourceIndex: number; key: string }[];
+}) {
+  return doc.pages
+    .map(page => `${page.sourceDocId}:${page.sourceIndex}:${page.key}`)
+    .join('\u0000');
+}
 
 export function useDocumentOutline(): void {
   const doc = activeDoc.value;
   const docId = doc?.id ?? null;
 
   useEffect(() => {
-    if (!doc || outlineDocId.peek() === docId) return;
+    if (!doc) return;
+    const signature = `${docId}\u0000${outlineSignature(doc)}`;
+    if (outlineLoadedSignature.peek() === signature) return;
+    if (outlineLoading.peek() && outlineLoadingSignature.peek() === signature) return;
 
     // Claimed before the async read starts, so a re-render mid-read does not queue
     // a second one against the same document.
     outlineDocId.value = docId;
+    outlineLoadingSignature.value = signature;
     outlineTree.value = [];
     outlineUnresolved.value = 0;
     outlineEdited.value = false;
@@ -55,17 +69,23 @@ export function useDocumentOutline(): void {
         }
         outlineTree.value = entriesFromNodes(nodes, keyBySourceIndex);
         outlineUnresolved.value = countUnresolved(nodes);
+        outlineLoadedSignature.value = signature;
       } catch (err) {
         if (!stale) notifyError('outline.read', err);
       } finally {
-        if (!stale) outlineLoading.value = false;
+        if (!stale) {
+          outlineLoading.value = false;
+          outlineLoadingSignature.value = null;
+        }
       }
     })();
 
     return () => {
       stale = true;
+      outlineLoading.value = false;
+      outlineLoadingSignature.value = null;
     };
-    // Keyed on the document id alone: `doc` is a fresh object after every page edit,
-    // and re-reading the outline on each of those would discard the user's edits.
+    // Keyed on the current page layout, not the raw object identity: a page edit
+    // produces a fresh `doc`, but unrelated rerenders of the same layout do not.
   }, [docId, doc]);
 }

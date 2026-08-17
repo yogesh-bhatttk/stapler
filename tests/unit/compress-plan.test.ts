@@ -78,6 +78,13 @@ describe('classifyPages', () => {
     expect(plan.actionableBytes).toBe(0);
   });
 
+  it('keeps a sparse text-only page out of the raster path', () => {
+    const plan = classifyPages([page([])], [text(21)], OPTIONS);
+    expect(plan.pages[0].route).toBe('already-optimized');
+    expect(plan.pages[0].reason).toBe('Text-only page');
+    expect(plan.actionableBytes).toBe(0);
+  });
+
   it('reports a genuinely empty page as already optimized', () => {
     const plan = classifyPages([page([])], [text(0)], OPTIONS);
     expect(plan.pages[0].route).toBe('already-optimized');

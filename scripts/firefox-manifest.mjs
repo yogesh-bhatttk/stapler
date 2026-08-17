@@ -13,7 +13,7 @@
  *    `type: "module"`). The compiled file is identical either way (`background.js`);
  *    only the manifest key pointing at it differs.
  *
- * Every other field — permissions, host_permissions, CSP, icons — is untouched, so
+ * Every other field — host_permissions, CSP, icons — is untouched, so
  * Chrome/Edge and Firefox cannot silently drift apart from hand-maintaining two
  * manifests.
  */
@@ -26,7 +26,6 @@ export function transformManifestForFirefox(manifest) {
     background: { scripts: ['background.js'], type: 'module' },
     browser_specific_settings: {
       gecko: {
-        // TODO(DIST-04): replace with the real ID assigned/chosen at AMO submission.
         id: 'stapler-offline-pdf@stapler.app',
         strict_min_version: '109.0'
       }

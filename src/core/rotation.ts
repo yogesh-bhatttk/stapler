@@ -126,6 +126,33 @@ export function displayPointToPage(
 }
 
 /**
+ * A point the user picked in displayed page space, expressed as normalised
+ * top-left fractions in the raw page frame.
+ *
+ * This is the inverse of the overlay coordinate system the UI uses: the page is
+ * rendered with `/Rotate` applied, but the mark is stored in the raw page's
+ * own top-left-normalised frame so the export path can stay rotation-agnostic.
+ */
+export function displayPointToNormalizedPage(
+  frame: DisplayFrame,
+  displayX: number,
+  displayY: number
+): { x: number; y: number } {
+  const x = displayX / frame.displayWidth;
+  const y = displayY / frame.displayHeight;
+  switch (frame.rotation) {
+    case 90:
+      return { x: y, y: 1 - x };
+    case 180:
+      return { x: 1 - x, y: 1 - y };
+    case 270:
+      return { x: 1 - y, y: x };
+    default:
+      return { x, y };
+  }
+}
+
+/**
  * Places a box that was laid out in display space so that it lands, upright and
  * the right way round, once a viewer applies `/Rotate` on top of the result.
  *

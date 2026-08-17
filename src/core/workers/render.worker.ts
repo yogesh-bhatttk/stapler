@@ -455,6 +455,38 @@ export interface RuleTextRun {
   transform: number[];
 }
 
+function textRunViewportBox(
+  run: { str: string; width: number; height: number; transform: number[] },
+  viewport: RuleViewport,
+  from = 0,
+  to = run.str.length
+): { x: number; y: number; width: number; height: number } {
+  const perChar = run.width / Math.max(1, run.str.length);
+  const height = run.height || run.transform[3] || 12;
+  const x0 = run.transform[4] + from * perChar;
+  const x1 = run.transform[4] + to * perChar;
+  const y0 = run.transform[5];
+  const y1 = run.transform[5] + height;
+  const corners = [
+    viewport.convertToViewportPoint(x0, y0),
+    viewport.convertToViewportPoint(x1, y0),
+    viewport.convertToViewportPoint(x1, y1),
+    viewport.convertToViewportPoint(x0, y1)
+  ];
+  const xs = corners.map(([x]) => x / viewport.width);
+  const ys = corners.map(([, y]) => y / viewport.height);
+  const left = Math.min(...xs);
+  const top = Math.min(...ys);
+  const right = Math.max(...xs);
+  const bottom = Math.max(...ys);
+  return {
+    x: left,
+    y: top,
+    width: Math.max(0, right - left),
+    height: Math.max(0, bottom - top)
+  };
+}
+
 /**
  * Pairs each drawn rule with a nearby caption and turns the survivors into
  * signature-field suggestions sitting *on* the rule.
@@ -473,9 +505,15 @@ export function signatureRulesToRegions(
   const labels = runs
     .filter(run => run.str.trim() && RULE_LABEL.test(run.str))
     .map(run => {
-      const height = Math.abs(run.transform[3]) || run.height || 10;
-      const [vx, vy] = viewport.convertToViewportPoint(run.transform[4], run.transform[5]);
-      return { text: run.str.trim(), x: vx, baselineY: vy, width: run.width, height };
+      const box = textRunViewportBox(run, viewport, 0, run.str.length);
+      const [, vy] = viewport.convertToViewportPoint(run.transform[4], run.transform[5]);
+      return {
+        text: run.str.trim(),
+        x: box.x * viewport.width,
+        baselineY: vy,
+        width: box.width * viewport.width,
+        height: box.height * viewport.height
+      };
     });
 
   for (const rule of rules) {
@@ -898,14 +936,10 @@ const api: RenderJob = {
           // consistently conservative.
           for (const slice of match.slices) {
             const run = runs[slice.runIndex];
-            const perChar = run.width / Math.max(1, run.str.length);
-            const height = run.height || run.transform[3] || 12;
+            const box = textRunViewportBox(run, viewport, slice.start, slice.end);
             regions.push({
               pageIndex: i - 1,
-              x: (run.transform[4] + slice.start * perChar) / viewport.width,
-              y: 1 - (run.transform[5] + height) / viewport.height,
-              width: ((slice.end - slice.start) * perChar) / viewport.width,
-              height: height / viewport.height,
+              ...box,
               // The *whole* match, on every slice: verification uses this to
               // check the string is gone from the document, and half a string
               // would let a partial removal pass.
@@ -963,7 +997,7 @@ const api: RenderJob = {
       const page = await doc.getPage(i);
       try {
         const viewport = page.getViewport({ scale: 1 });
-        for (const found of locatePatterns(await textRuns(page), viewport.width, viewport.height)) {
+        for (const found of locatePatterns(await textRuns(page), viewport)) {
           suggestions.push({
             id: `${i - 1}:${suggestions.length}:${found.category}`,
             category: found.category,
@@ -995,11 +1029,14 @@ const api: RenderJob = {
           const height = run.height || run.transform[3] || 12;
           // Suggest a box sitting just above the label's baseline.
           const boxHeight = height * 2.5;
+          const box = textRunViewportBox(run, viewport);
+          const [, baselineYPx] = viewport.convertToViewportPoint(run.transform[4], run.transform[5]);
+          const baselineY = baselineYPx / viewport.height;
           found.push({
             pageIndex: i - 1,
-            x: run.transform[4] / viewport.width,
-            y: Math.max(0, 1 - (run.transform[5] + height + boxHeight) / viewport.height),
-            width: Math.min(1, Math.max(run.width, height * 8) / viewport.width),
+            x: box.x,
+            y: Math.max(0, baselineY - boxHeight / viewport.height),
+            width: Math.min(1, Math.max(box.width, (height * 8) / viewport.width)),
             height: boxHeight / viewport.height,
             text: run.str.trim()
           });
@@ -1299,19 +1336,12 @@ const api: RenderJob = {
         for (const run of runs) {
           if (!run.str.trim()) continue;
 
-          // Same monospace approximation as findText: pdf.js does not provide
-          // per-glyph advance widths, so run.width is divided evenly across
-          // characters. Characters at the exact boundary of a redaction region
-          // may be slightly mis-classified, which is acceptable given that
-          // the redaction itself uses the same coordinate system.
-          const perChar = run.width / Math.max(1, run.str.length);
-          const height = run.height || run.transform[3] || 12;
-
           for (let i = 0; i < run.str.length; i++) {
-            const charX = (run.transform[4] + i * perChar) / viewport.width;
-            const charY = 1 - (run.transform[5] + height) / viewport.height;
-            const charW = perChar / viewport.width;
-            const charH = height / viewport.height;
+            const charBox = textRunViewportBox(run, viewport, i, i + 1);
+            const charX = charBox.x;
+            const charY = charBox.y;
+            const charW = charBox.width;
+            const charH = charBox.height;
 
             const intersects = !(
               charX >= region.x + region.width ||

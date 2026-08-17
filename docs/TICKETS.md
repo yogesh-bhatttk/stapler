@@ -864,7 +864,7 @@ README describing what each one is for and what must not regress.
 
 ### QA-02 · Unit and golden-file suites — `M` `P0`
 
-**Status: Done** — 196 unit tests across 13 files, including `tests/unit/golden.test.ts`: one
+**Status: Done** — 610 unit tests across 56 files, including `tests/unit/golden.test.ts`: one
 golden-file test per pdf-lib-based P0 operation (merge, organize, split, extract, insert,
 images→PDF, plus crop and normalize), each driving the real code path and re-parsing the output
 for page count, order, and text content. PDF→images, PDF→text/Markdown, and both compress routes

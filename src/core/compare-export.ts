@@ -16,5 +16,5 @@ export async function exportComparePdf(
     return exportTextDiff(docA, docB);
   }
 
-  return exportVisualDiff(docA, docB, [], options);
+  return exportVisualDiff(docA, docB, undefined, options);
 }

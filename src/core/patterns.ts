@@ -149,6 +149,13 @@ export interface PatternBox {
   text: string;
 }
 
+/** Minimal view of a pdf.js viewport, so rotated pages can be mapped correctly. */
+export interface PatternViewport {
+  width: number;
+  height: number;
+  convertToViewportPoint(x: number, y: number): number[];
+}
+
 export interface LocatedPattern {
   category: PatternCategory;
   /** The whole matched string, even when it is split across several runs. */
@@ -171,11 +178,52 @@ export interface LocatedPattern {
  * conservative — very slightly over-inclusive — as a searched one, and the RED-03
  * geometric verifier judges both with the same arithmetic.
  */
+function boxFromRun(
+  run: PatternRun,
+  viewport: PatternViewport,
+  from: number,
+  to: number
+): PatternBox {
+  const perChar = run.width / Math.max(1, run.str.length);
+  const height = run.height || run.transform[3] || 12;
+  const x0 = run.transform[4] + from * perChar;
+  const x1 = run.transform[4] + to * perChar;
+  const y0 = run.transform[5];
+  const y1 = run.transform[5] + height;
+  const corners = [
+    viewport.convertToViewportPoint(x0, y0),
+    viewport.convertToViewportPoint(x1, y0),
+    viewport.convertToViewportPoint(x1, y1),
+    viewport.convertToViewportPoint(x0, y1)
+  ];
+  const xs = corners.map(([x]) => x);
+  const ys = corners.map(([, y]) => y);
+  const left = Math.min(...xs) / viewport.width;
+  const top = Math.min(...ys) / viewport.height;
+  const right = Math.max(...xs) / viewport.width;
+  const bottom = Math.max(...ys) / viewport.height;
+  return {
+    x: left,
+    y: top,
+    width: Math.max(0, right - left),
+    height: Math.max(0, bottom - top),
+    text: run.str.slice(from, to)
+  };
+}
+
 export function locatePatterns(
   runs: PatternRun[],
-  pageWidth: number,
-  pageHeight: number
+  viewportOrWidth: PatternViewport | number,
+  pageHeight?: number
 ): LocatedPattern[] {
+  const viewport: PatternViewport =
+    typeof viewportOrWidth === 'number'
+      ? {
+          width: viewportOrWidth,
+          height: pageHeight ?? viewportOrWidth,
+          convertToViewportPoint: (x, y) => [x, (pageHeight ?? viewportOrWidth) - y]
+        }
+      : viewportOrWidth;
   const spans: { run: PatternRun; start: number }[] = [];
   let text = '';
   for (const run of runs) {
@@ -194,16 +242,7 @@ export function locatePatterns(
       const from = Math.max(0, hit.start - start);
       const to = Math.min(run.str.length, hit.end - start);
       if (to <= from) continue;
-
-      const perChar = run.width / Math.max(1, run.str.length);
-      const height = run.height || run.transform[3] || 12;
-      boxes.push({
-        x: (run.transform[4] + from * perChar) / pageWidth,
-        y: 1 - (run.transform[5] + height) / pageHeight,
-        width: ((to - from) * perChar) / pageWidth,
-        height: height / pageHeight,
-        text: run.str.slice(from, to)
-      });
+      boxes.push(boxFromRun(run, viewport, from, to));
     }
     if (boxes.length > 0) located.push({ category: hit.category, text: hit.text, boxes });
   }

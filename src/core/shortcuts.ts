@@ -116,6 +116,17 @@ export function eventMatchesShortcut(event: KeyboardEvent, binding: ShortcutBind
   return true;
 }
 
+/** macOS convention for redo, unless the user explicitly remapped it. */
+export function eventMatchesRedoShortcut(event: KeyboardEvent): boolean {
+  if (customShortcuts.value.redo) {
+    return eventMatchesShortcut(event, customShortcuts.value.redo);
+  }
+  return (
+    eventMatchesShortcut(event, getEffectiveBinding('redo')) ||
+    eventMatchesShortcut(event, { key: 'z', mod: true, shift: true })
+  );
+}
+
 export function bindingsEqual(a: ShortcutBinding, b: ShortcutBinding): boolean {
   return (
     normalizedShortcutKey(a.key) === normalizedShortcutKey(b.key) &&

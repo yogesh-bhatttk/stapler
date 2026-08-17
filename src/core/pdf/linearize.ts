@@ -13,14 +13,14 @@
  *
  * Two further caveats, both real:
  *
- *  • Most save sites pass `useObjectStreams: true`. pdf-lib's `PDFStreamWriter` then
+ *  • Some save sites pass `useObjectStreams: true`. pdf-lib's `PDFStreamWriter` then
  *    diverts every non-stream object — page dictionaries, the page tree, the catalog —
  *    into compressed object streams that it appends *after* the content streams,
  *    regardless of the order handed to it. On that path the reordering below buys
  *    nothing beyond ordering the page content streams themselves. It is left applied
- *    because it is free and because it does hold on the `useObjectStreams: false`
- *    save sites; `tests/unit/linearize.test.ts` asserts both halves of that sentence
- *    rather than letting the claim rot.
+ *    because it is free and because it does help the save sites that write plain
+ *    indirect objects; `tests/unit/linearize.test.ts` asserts both halves of that
+ *    sentence rather than letting the claim rot.
  *  • The reordering is a pure permutation. No object is added, removed or rewritten, so
  *    output always re-parses to the same pages in the same order.
  *

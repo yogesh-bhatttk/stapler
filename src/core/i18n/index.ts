@@ -18,6 +18,7 @@ export type Locale = (typeof locales)[number];
 const dictionaries: Record<string, Record<string, string>> = {};
 
 export const currentLocale = signal<Locale>('en');
+const LOCALE_STORAGE_KEY = 'stapler.locale';
 /**
  * Bumped every time a dictionary import resolves, independent of whether
  * `currentLocale.value` actually changed. `initLocale`'s default target is
@@ -43,6 +44,7 @@ export async function setLocale(locale: Locale) {
 
   currentLocale.value = locale;
   dictionaryVersion.value++;
+  localStorage.setItem(LOCALE_STORAGE_KEY, locale);
 
   if (locale === 'ar') {
     document.documentElement.dir = 'rtl';
@@ -52,17 +54,23 @@ export async function setLocale(locale: Locale) {
 }
 
 export function initLocale(savedLocale?: string) {
+  const persisted = savedLocale ?? localStorage.getItem(LOCALE_STORAGE_KEY) ?? undefined;
   let target = 'en';
-  if (savedLocale && locales.includes(savedLocale as Locale)) {
-    target = savedLocale;
+  if (persisted && locales.includes(persisted as Locale)) {
+    target = persisted;
   } else if (navigator.language) {
+    const exactBrowserLocale = locales.find(
+      locale => locale.toLowerCase() === navigator.language.toLowerCase()
+    );
     const browserLang = navigator.language.split('-')[0];
-    if (locales.includes(browserLang as Locale)) {
+    if (exactBrowserLocale) {
+      target = exactBrowserLocale;
+    } else if (locales.includes(browserLang as Locale)) {
       target = browserLang;
     }
   }
 
-  setLocale(target as Locale);
+  return setLocale(target as Locale);
 }
 
 export function useTranslation() {

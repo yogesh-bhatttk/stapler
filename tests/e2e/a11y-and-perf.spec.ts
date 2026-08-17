@@ -315,15 +315,24 @@ test.describe('performance budgets (PLAN §5.1)', () => {
     const file = await ensureFixture('heavy.pdf', () =>
       import('./fixtures').then(m => m.heavyPdf())
     );
-    // Duplicate the file to get 10 files
+    // Open one file first so the merge panel has a document to add into, then
+    // add the remaining nine through the real merge flow.
     const files = Array(10).fill(file);
     await openApp(page);
-    await page.locator('input[type="file"]').setInputFiles(files);
+    await page.locator('input[type="file"]').setInputFiles(files[0]);
     await gotoTool(page, 'merge');
+    await expect(page.getByRole('heading', { name: 'Source files' })).toBeVisible({
+      timeout: 30_000
+    });
 
     const started = Date.now();
+    await page.getByRole('button', { name: 'Add PDFs or images' }).click();
+    const picker = page.locator('input[type="file"]').last();
+    await picker.setInputFiles(files.slice(1));
 
-    // Set up a download listener
+    await expect(page.locator('ol').first().locator('li')).toHaveCount(10, { timeout: 30_000 });
+
+    // Set up a download listener.
     const downloadPromise = page.waitForEvent('download');
 
     // Start main-thread blocking monitor during the merge

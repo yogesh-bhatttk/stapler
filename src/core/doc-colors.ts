@@ -19,6 +19,7 @@
 
 /** Background painted before rasterising a page — PDFs assume white paper. */
 export const DOC_PAGE_WHITE = '#ffffff';
+export const DOC_PAGE_RGB: readonly [number, number, number] = [1, 1, 1];
 
 /** Signature strokes, drawn near-black so they read on white paper. */
 export const DOC_SIGNATURE_STROKE = '#08090a';

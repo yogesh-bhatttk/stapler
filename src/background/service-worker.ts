@@ -15,22 +15,22 @@ let pending: Promise<void> | null = null;
 
 async function openEditor(): Promise<void> {
   const editorUrl = chrome.runtime.getURL('editor.html');
-  const tabs = await chrome.tabs.query({ url: `${editorUrl}*` });
-  const existing = tabs.find(t => t.id !== undefined);
+  // `tabs.query({ url })` needs the broad `tabs` permission. Extension contexts
+  // expose their own tab IDs without that permission, so prefer this MV3 API.
+  const contexts = await chrome.runtime.getContexts({
+    contextTypes: ['TAB'],
+    documentUrls: [`${editorUrl}*`]
+  });
+  const existing = contexts.find(context => context.tabId !== undefined);
 
-  if (existing?.id !== undefined) {
-    await chrome.tabs.update(existing.id, { active: true });
+  if (existing?.tabId !== undefined) {
+    await chrome.tabs.update(existing.tabId, { active: true });
     if (existing.windowId !== undefined) {
       await chrome.windows.update(existing.windowId, { focused: true });
     }
     return;
   }
 
-  if (tabs.length > 0) {
-    console.warn(
-      '[stapler] an editor tab exists but has no tab id; opening a new one rather than no-op'
-    );
-  }
   await chrome.tabs.create({ url: editorUrl });
 }
 

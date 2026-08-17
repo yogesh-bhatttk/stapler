@@ -1764,6 +1764,8 @@ const FULL_CATALOG_KEYS = [
   'Dests'
 ];
 
+const REDACTION_CATALOG_KEYS = [...PAGE_INDEPENDENT_CATALOG_KEYS, 'PageLabels'];
+
 function preserveDocumentCatalog(
   source: PDFDocument,
   out: PDFDocument,
@@ -3344,7 +3346,6 @@ const api: ProcessJob = {
       } else if (field instanceof PDFRadioGroup) {
         type = 'RadioGroup';
         value = field.getSelected() ?? '';
-        options = field.getOptions();
       } else if (field instanceof PDFDropdown) {
         type = 'Dropdown';
         value = field.getSelected() ?? [];
@@ -3356,12 +3357,23 @@ const api: ProcessJob = {
       }
 
       const rects: FormFieldData['rects'] = [];
-      for (const widget of field.acroField.getWidgets()) {
+      const radioExportValues =
+        field instanceof PDFRadioGroup ? field.acroField.getExportValues() : undefined;
+      for (const [widgetIndex, widget] of field.acroField.getWidgets().entries()) {
         const pageRef = widget.P();
         const pageIndex = pageRef ? pages.findIndex(p => p.ref === pageRef) : -1;
         if (pageIndex < 0) continue;
         const rect = widget.getRectangle();
         const { width, height } = pages[pageIndex].getSize();
+        if (field instanceof PDFRadioGroup) {
+          const onValue = widget.getOnValue();
+          if (!onValue) continue;
+          const exportValue =
+            radioExportValues?.[widgetIndex]?.decodeText() ?? onValue.decodeText();
+          if (!exportValue) continue;
+          options ??= [];
+          options.push(exportValue);
+        }
         rects.push({
           pageIndex,
           x: rect.x / width,
@@ -3652,13 +3664,12 @@ Q
     }
 
     // Avoid a needless round-trip (and a misleading "cleaned" outcome) when
-    // detection found no vector background. The size guard is the same promise
-    // made by compression-adjacent operations: flattening must not grow a file.
+    // detection found no vector background. Unlike compression, flattening is a
+    // content operation: pdf-lib may retain orphaned streams, so output size is
+    // not evidence that no change occurred.
     if (!changed) return { bytes, changed: false };
     const output = await pseudoLinearize(doc).save({ useObjectStreams: false });
-    return output.byteLength < bytes.byteLength
-      ? { bytes: output, changed: true }
-      : { bytes, changed: false };
+    return { bytes: output, changed: true };
   },
   async flattenDocument(bytes, job) {
     // Same order of refusals as `fillFormFields`: XFA on the raw bytes first,
@@ -4719,7 +4730,7 @@ Q
     const regionsByPage = groupRegionsByPage(regions);
 
     const out = await PDFDocument.create();
-    preserveDocumentCatalog(source, out);
+    preserveDocumentCatalog(source, out, undefined, REDACTION_CATALOG_KEYS);
     const total = sourcePages.length;
 
     for (let i = 0; i < total; i++) {
@@ -4744,7 +4755,7 @@ Q
         copied.node.set(PDFName.of('Contents'), out.context.register(newStream));
       }
 
-      const xObjects = pageXObjectDictOf(copied, out.context);
+      const xObjects = localizePageResources(copied, out.context);
 
       // 2. Image XObjects whose `Do` was removed outright: unhook the name, then
       // drop the stream itself. pdf-lib serialises every object in its context
@@ -5053,6 +5064,33 @@ function pageXObjectDictOf(page: PDFPage, context: PDFContext): PDFDict | undefi
     : xObjectRaw instanceof PDFRef
       ? (context.lookup(xObjectRaw) as PDFDict | undefined)
       : undefined;
+}
+
+/**
+ * Materialises a page-local `/Resources` dictionary so mutating `/XObject`
+ * cannot accidentally mutate a shared inherited dictionary from another page.
+ */
+function localizePageResources(page: PDFPage, context: PDFContext): PDFDict | undefined {
+  const resources = page.node.Resources();
+  if (!resources) return undefined;
+
+  const localResources = context.obj({}) as PDFDict;
+  for (const [key, value] of resources.entries()) {
+    localResources.set(key, value);
+  }
+
+  const xObjects = pageXObjectDictOf(page, context);
+  if (xObjects) {
+    const localXObjects = context.obj({}) as PDFDict;
+    for (const [key, value] of xObjects.entries()) {
+      localXObjects.set(key, value);
+    }
+    localResources.set(PDFName.of('XObject'), localXObjects);
+  }
+
+  page.node.set(PDFName.of('Resources'), localResources);
+  const localized = localResources.lookupMaybe(PDFName.of('XObject'), PDFDict);
+  return localized ?? undefined;
 }
 
 /** The page's `/Resources/Font` dictionary, if it has one. */

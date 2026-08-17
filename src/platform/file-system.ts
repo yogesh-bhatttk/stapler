@@ -24,7 +24,7 @@ import { deleteHandle, listHandles, readHandle, writeHandle } from '../core/db';
 
 export async function readClipboardImage(): Promise<File | null> {
   const win = window as unknown as { __mockClipboardImage?: File };
-  if (typeof window !== 'undefined' && win.__mockClipboardImage) {
+  if (import.meta.env.MODE === 'test' && win.__mockClipboardImage) {
     return win.__mockClipboardImage;
   }
   try {
@@ -207,8 +207,17 @@ export function openFilesViaInput(options?: OpenOptions): Promise<OpenedFile[]> 
           writable: false
         }))
       );
+      input.remove();
     };
 
+    input.style.position = 'fixed';
+    input.style.left = '-9999px';
+    input.style.top = '0';
+    input.style.width = '1px';
+    input.style.height = '1px';
+    input.style.opacity = '0';
+    input.style.pointerEvents = 'none';
+    document.body.append(input);
     input.addEventListener('change', () => settle(input.files), { once: true });
     input.addEventListener('cancel', () => settle(null), { once: true });
     input.click();

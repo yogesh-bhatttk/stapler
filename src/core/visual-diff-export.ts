@@ -57,7 +57,10 @@ export async function exportVisualDiff(
     let baseImg = pageDiff?.baseImage;
     let compareImg = pageDiff?.compareImage;
 
-    if (!diffImg || (!baseImg && !compareImg)) {
+    // A caller may already have rendered just the overlay. That is sufficient
+    // to make an honest diff page; do not invoke the worker merely to obtain a
+    // background we do not need.
+    if (!diffImg) {
       try {
         const bytesA =
           sourceA?.bytes ??
@@ -114,8 +117,12 @@ export async function exportVisualDiff(
             if (handleB) await api.closeDocument(handleB).catch(() => {});
           }
         });
-      } catch {
-        // Fallback for non-browser / headless test environments without renderWorker canvas
+      } catch (error) {
+        throw internal(
+          `Could not render page ${i + 1} for visual-diff export: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
       }
     }
 

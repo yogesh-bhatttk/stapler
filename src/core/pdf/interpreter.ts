@@ -838,9 +838,17 @@ export function filterContentStream(
       let shouldStrip = false;
       if (info?.subtype === 'Form') {
         for (const r of redactionBoxes) {
-          if (intersects(box, r)) {
+          if (contains(r, box)) {
             shouldStrip = true;
             break;
+          }
+          if (intersects(box, r)) {
+            throw unsupported(
+              'A redaction mark only partly covers a Form XObject. Removing the entire form ' +
+                'would delete content outside the marked region, and Stapler does not yet ' +
+                'safely redact inside nested form content. Nothing was changed — your original ' +
+                'document is untouched.'
+            );
           }
         }
       } else {

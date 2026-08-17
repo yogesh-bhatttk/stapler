@@ -117,7 +117,10 @@ const firefoxManifestPath = path.join(root, 'dist', 'firefox', 'manifest.json');
 if (statSync(firefoxManifestPath, { throwIfNoEntry: false })) {
   try {
     const firefoxManifest = JSON.parse(readFileSync(firefoxManifestPath, 'utf8'));
-    if (!Array.isArray(firefoxManifest.permissions) || !firefoxManifest.permissions.includes('tabs')) {
+    if (
+      !Array.isArray(firefoxManifest.permissions) ||
+      !firefoxManifest.permissions.includes('tabs')
+    ) {
       console.error('❌ dist/firefox/manifest.json is missing the Firefox tabs permission.');
       process.exit(1);
     }

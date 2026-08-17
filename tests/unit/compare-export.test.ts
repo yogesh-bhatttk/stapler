@@ -41,7 +41,7 @@ describe('exportComparePdf', () => {
   it('routes visual mode to the visual diff exporter', async () => {
     const out = await exportComparePdf(docA, docB, { diffMode: 'visual', sensitivity: 42 });
     expect(out).toEqual(new Uint8Array([4, 5, 6]));
-    expect(exportVisualDiff).toHaveBeenCalledWith(docA, docB, [], {
+    expect(exportVisualDiff).toHaveBeenCalledWith(docA, docB, undefined, {
       diffMode: 'visual',
       sensitivity: 42
     });

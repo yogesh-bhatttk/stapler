@@ -272,6 +272,18 @@ export function classifyPages(
 
     if (!hasText) {
       // No text to preserve, so the whole page can become one image — provided it has no unsafe images.
+      if (page.images.length === 0 && (census?.runCount ?? 0) > 0) {
+        pages.push({
+          pageIndex: page.pageIndex,
+          route: 'already-optimized',
+          reason: 'Text-only page',
+          reencode: [],
+          actionableBytes: 0,
+          targetPixels: 0,
+          imagePixels
+        });
+        continue;
+      }
       if (page.images.length === 0 && (census?.runCount ?? 0) === 0) {
         pages.push({
           pageIndex: page.pageIndex,

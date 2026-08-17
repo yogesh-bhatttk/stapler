@@ -113,11 +113,20 @@ describe('pixelDiff', () => {
       255 // fail -> red
     ]);
 
-    // sensitivity 0% => threshold 0
-    // Only pixel 0 matches exactly.
+    // sensitivity 0% => threshold 765, so this intentionally hides all
+    // differences; raising sensitivity makes the comparison stricter.
     const diff0 = pixelDiff(img1, img2, 0);
-    expect(Array.from(diff0.data)).toEqual([
+    expect(Array.from(diff0.data)).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+    const diff100 = pixelDiff(img1, img2, 100);
+    expect(Array.from(diff100.data)).toEqual([
       0, 0, 0, 0, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255
     ]);
+  });
+
+  it('rejects images with different dimensions', () => {
+    expect(() => pixelDiff(new ImageData(2, 2), new ImageData(1, 4), 50)).toThrow(
+      'different dimensions'
+    );
   });
 });

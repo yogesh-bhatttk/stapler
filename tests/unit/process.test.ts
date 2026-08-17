@@ -271,6 +271,9 @@ describe('applyRedactions', () => {
     // Generate a simple PDF with text
     const { textPdf } = await import('../e2e/fixtures');
     const bytes = await textPdf(1);
+    const sourceDoc = await PDFDocument.load(bytes);
+    const sourceText = await pageContentText(sourceDoc, 0);
+    expect(sourceText).toContain('Line 1 of body text on page 1.');
 
     // Redact the top half of the page
     const regions = [
@@ -285,15 +288,64 @@ describe('applyRedactions', () => {
 
     const redactedBytes = await processWorkerImpl.applyRedactions(bytes, regions);
 
-    // Load back and extract text manually (the pdf-lib extraction would need renderWorker,
-    // but we can just check the raw content stream for the redacted size).
-    const doc = await PDFDocument.load(redactedBytes);
-    // Verify the page is accessible (structure is intact)
-    void doc.getPage(0);
-    // The contents stream has been modified and appended to.
-    // Just verify the bytes are different from the source bytes, showing it rebuilt.
-    expect(redactedBytes).not.toEqual(bytes);
-    expect(redactedBytes.length).toBeGreaterThan(0);
+    const redactedDoc = await PDFDocument.load(redactedBytes);
+    const redactedText = await pageContentText(redactedDoc, 0);
+    expect(redactedText).not.toContain('Line 1 of body text on page 1.');
+    expect(redactedText).toContain('Line 24 of body text on page 1.');
+  });
+
+  it('drops source outlines from redacted output', async () => {
+    const { textPdf } = await import('../e2e/fixtures');
+    const doc = await PDFDocument.load(await textPdf(1));
+    const ctx = doc.context;
+    const page = doc.getPage(0);
+    const outlines = ctx.obj({ Type: 'Outlines' });
+    const outlinesRef = ctx.register(outlines);
+    const item = ctx.obj({
+      Title: PDFString.of('Secret bookmark'),
+      Parent: outlinesRef,
+      Dest: [page.ref, PDFName.of('Fit')]
+    });
+    const itemRef = ctx.register(item);
+    outlines.set(PDFName.of('First'), itemRef);
+    outlines.set(PDFName.of('Last'), itemRef);
+    doc.catalog.set(PDFName.of('Outlines'), outlinesRef);
+
+    const redacted = await processWorkerImpl.applyRedactions(
+      await doc.save({ useObjectStreams: false }),
+      [{ pageIndex: 0, x: 0, y: 0, width: 1, height: 0.5 }]
+    );
+
+    expect(await processWorkerImpl.readOutline(redacted)).toEqual([]);
+  });
+
+  it('does not delete a shared XObject dictionary from sibling pages', async () => {
+    const doc = await PDFDocument.create();
+    const image = await doc.embedPng(ONE_PIXEL_PNG);
+    const sharedResources = doc.context.obj({ XObject: { Im0: image.ref } }) as PDFDict;
+
+    const page0 = doc.addPage([600, 800]);
+    page0.node.set(PDFName.of('Resources'), sharedResources);
+    page0.node.set(
+      PDFName.of('Contents'),
+      doc.context.register(doc.context.flateStream('q 600 0 0 800 0 0 cm /Im0 Do Q'))
+    );
+
+    const page1 = doc.addPage([600, 800]);
+    page1.node.set(PDFName.of('Resources'), sharedResources);
+    page1.drawText('Sibling page keeps its image dictionary', { x: 50, y: 750 });
+
+    const redacted = await processWorkerImpl.applyRedactions(
+      await doc.save({ useObjectStreams: false }),
+      [{ pageIndex: 0, x: 0, y: 0, width: 1, height: 1 }]
+    );
+
+    const outDoc = await PDFDocument.load(redacted);
+    const siblingResources = outDoc
+      .getPage(1)
+      .node.Resources()
+      ?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+    expect(siblingResources?.has(PDFName.of('Im0'))).toBe(true);
   });
 });
 
@@ -341,12 +393,12 @@ describe('collectOffPageText (RED-03 blind spot)', () => {
 });
 
 describe('applyRedactions: Form XObject text (RED-02 gap)', () => {
-  it('strips text drawn inside a Form XObject that overlaps the region', async () => {
+  it('rejects a partial Form XObject overlap rather than deleting the whole form', async () => {
     // A Form XObject invocation is not a unit square like an image — its extent
     // is its own /BBox through its own /Matrix. Before this was handled, every
     // Form Do call was measured with the image-style unit-square approximation,
-    // so it could never be detected as overlapping a redaction region and its
-    // content — including any text drawn inside it — was never touched.
+    // so it could silently delete a whole form even when the mark only touched
+    // part of its visible content.
     const { StandardFonts } = await import('pdf-lib');
     const doc = await PDFDocument.create();
     const font = await doc.embedFont(StandardFonts.Helvetica);
@@ -371,14 +423,15 @@ describe('applyRedactions: Form XObject text (RED-02 gap)', () => {
       doc.context.register(doc.context.flateStream('q /Fm0 Do Q'))
     );
     const bytes = await doc.save({ useObjectStreams: false });
+    const before = Uint8Array.from(bytes);
 
     // A small region inside the form's footprint (top band of the page).
-    const out = await processWorkerImpl.applyRedactions(bytes, [
-      { pageIndex: 0, x: 0.1, y: 0.1, width: 0.3, height: 0.1 }
-    ]);
-
-    const hasText = Buffer.from(out).toString('latin1').includes('FORM SECRET TEXT');
-    expect(hasText).toBe(false);
+    await expect(
+      processWorkerImpl.applyRedactions(bytes, [
+        { pageIndex: 0, x: 0.1, y: 0.1, width: 0.3, height: 0.1 }
+      ])
+    ).rejects.toThrow(/Form XObject/);
+    expect(bytes).toEqual(before);
   });
 });
 

@@ -45,12 +45,34 @@ const mainChunkPath =
   allJsFiles.find(f => path.basename(f).startsWith('index-')) ||
   allJsFiles[0];
 
-const content = fs.readFileSync(mainChunkPath);
+// Vite's HTML entry is often a tiny import stub. Measure the complete static
+// import graph instead: every one of these files is needed before the editor
+// can become interactive. Dynamic imports and worker bundles remain separate
+// budgets because they are not part of initial load.
+const staticImports = /\b(?:import|export)(?:[^'";]*?\bfrom)?\s*["']([^"']+)["']/g;
+const initialChunks = new Set();
+const collectInitialChunk = file => {
+  const resolved = path.resolve(file);
+  if (initialChunks.has(resolved)) return;
+  initialChunks.add(resolved);
+
+  const source = fs.readFileSync(resolved, 'utf8');
+  for (const match of source.matchAll(staticImports)) {
+    const specifier = match[1];
+    if (!specifier.startsWith('.')) continue;
+    const dependency = path.resolve(path.dirname(resolved), specifier);
+    if (fs.existsSync(dependency) && dependency.endsWith('.js')) collectInitialChunk(dependency);
+  }
+};
+
+collectInitialChunk(mainChunkPath);
+const content = Buffer.concat([...initialChunks].map(file => fs.readFileSync(file)));
 const gzipped = zlib.gzipSync(content);
 const sizeBytes = gzipped.length;
 const sizeKB = (sizeBytes / 1024).toFixed(2);
 
-console.log(`Main chunk: ${path.relative(DIST_ROOT, mainChunkPath)}`);
+console.log(`Entry chunk: ${path.relative(DIST_ROOT, mainChunkPath)}`);
+console.log(`Initial JS chunks: ${initialChunks.size}`);
 console.log(`Raw size: ${(content.length / 1024).toFixed(2)} KB`);
 console.log(`Gzipped size: ${sizeKB} KB`);
 

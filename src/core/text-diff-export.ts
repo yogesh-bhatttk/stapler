@@ -3,6 +3,13 @@ import { diffText, type DiffChunk } from './diff';
 import { internal } from './errors';
 import { renderWorker } from './workers';
 import { sources, type StaplerDoc } from './store';
+import {
+  DOC_PAGE_RGB,
+  DOC_REDACT_RGB,
+  SUMMARY_ACCENT_RGB,
+  SUMMARY_CARD_BG_RGB,
+  SUMMARY_TEXT_RGB
+} from './doc-colors';
 
 interface RenderToken {
   text: string;
@@ -18,14 +25,14 @@ const BODY_SIZE = 11;
 const LINE_HEIGHT = 15;
 
 const COLORS = {
-  equal: rgb(0.12, 0.12, 0.12),
-  insert: rgb(0.06, 0.45, 0.18),
-  delete: rgb(0.72, 0.12, 0.12)
+  equal: rgb(...SUMMARY_TEXT_RGB),
+  insert: rgb(...SUMMARY_ACCENT_RGB),
+  delete: rgb(...DOC_REDACT_RGB)
 } as const;
 
 const BACKGROUNDS = {
-  insert: rgb(0.88, 0.97, 0.9),
-  delete: rgb(1, 0.9, 0.9)
+  insert: rgb(...SUMMARY_CARD_BG_RGB),
+  delete: rgb(...DOC_PAGE_RGB)
 } as const;
 
 function tokenize(
@@ -54,13 +61,18 @@ function splitLongToken(
   for (const char of token.text) {
     const candidate = current + char;
     if (current && font.widthOfTextAtSize(candidate, BODY_SIZE) > maxWidth) {
-      parts.push({ text: current, op: token.op, width: font.widthOfTextAtSize(current, BODY_SIZE) });
+      parts.push({
+        text: current,
+        op: token.op,
+        width: font.widthOfTextAtSize(current, BODY_SIZE)
+      });
       current = char;
       continue;
     }
     current = candidate;
   }
-  if (current) parts.push({ text: current, op: token.op, width: font.widthOfTextAtSize(current, BODY_SIZE) });
+  if (current)
+    parts.push({ text: current, op: token.op, width: font.widthOfTextAtSize(current, BODY_SIZE) });
   return parts;
 }
 

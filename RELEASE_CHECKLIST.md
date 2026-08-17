@@ -20,7 +20,7 @@ so it gets its own explicit step below rather than being buried inside "run veri
       a broader suite passing does not tell you *this specific* test ran and
       passed). This is the test that would catch an accidentally-added CDN
       import, Google Fonts link, or analytics snippet before it ships.
- - [x] **QA-05 — automated structural validation:** run `pnpm run qa05` before each
+- [ ] **QA-05 — automated structural validation:** run `pnpm run qa05` before each
        release. Validates that every P0 tool's PDF output round-trips through pdf-lib
        without XRef corruption or parse error. All 8 checks pass (Merge, Rotate,
        Split, Export/Compose, Compress, Sign/AcroForm, Annotate, Table Extract CSV).

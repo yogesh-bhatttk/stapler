@@ -250,8 +250,11 @@ async function drawnText(bytes: Uint8Array): Promise<string> {
     let text: string;
     try {
       text = (isFlate ? inflateSync(raw) : raw).toString('latin1');
-    } catch {
-      return '';
+    } catch (err) {
+      const message = `Failed to decode a content stream while reading page text: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      throw new Error(message, { cause: err });
     }
     // Append both decodings of every hex literal alongside the raw operators.
     let decoded = text;

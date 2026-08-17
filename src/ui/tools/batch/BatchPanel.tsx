@@ -30,6 +30,19 @@ export function BatchPanel() {
   const t = useTranslation();
   const abortControllerRef = useRef<AbortController | null>(null);
 
+  const reportPickerFailure = (scope: string, error: unknown) => {
+    if (isAbort(error)) return;
+
+    const detail =
+      error instanceof DOMException
+        ? `${error.name}${error.message ? `: ${error.message}` : ''}`
+        : error instanceof Error
+          ? error.message
+          : 'Please try selecting the folder again.';
+
+    notify('warning', scope, { detail });
+  };
+
   const handleSelectInput = async () => {
     if (!hasDirectoryPicker()) {
       notify('warning', 'Directory selection unavailable', {
@@ -42,7 +55,7 @@ export function BatchPanel() {
       const dir = await showDirectoryPicker({ mode: 'read' });
       inputDirHandle.value = dir;
     } catch (e) {
-      if (!isAbort(e)) console.error(e);
+      reportPickerFailure('Input folder selection failed', e);
     }
   };
 
@@ -58,7 +71,7 @@ export function BatchPanel() {
       const dir = await showDirectoryPicker({ mode: 'readwrite' });
       outputDirHandle.value = dir;
     } catch (e) {
-      if (!isAbort(e)) console.error(e);
+      reportPickerFailure('Output folder selection failed', e);
     }
   };
 

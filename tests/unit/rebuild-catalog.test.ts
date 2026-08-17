@@ -20,7 +20,7 @@ const catalogKeys = (doc: PDFDocument) =>
   new Set(Array.from(doc.catalog.keys()).map(k => k.asString()));
 
 describe('§0 — catalog survives the redact rebuild', () => {
-  it('keeps /Outlines through applyRedactions', async () => {
+  it('drops page-linked catalog entries during applyRedactions', async () => {
     const bytes = new Uint8Array(await fixture('bookmarked-9.pdf'));
     const source = await load(bytes);
     expect(catalogKeys(source)).toContain('/Outlines');
@@ -30,7 +30,7 @@ describe('§0 — catalog survives the redact rebuild', () => {
     ]);
 
     const rebuilt = await load(out);
-    expect(catalogKeys(rebuilt)).toContain('/Outlines');
+    expect(catalogKeys(rebuilt)).not.toContain('/Outlines');
     expect(rebuilt.getPageCount()).toBe(source.getPageCount());
   });
 });
@@ -52,8 +52,8 @@ describe('§0 — catalog survives the compression rebuild', () => {
   });
 });
 
-describe('§0 — /StructTreeRoot, /PageLabels, /OCProperties survive a redaction', () => {
-  it('carries every page-independent catalog entry across', async () => {
+describe('§0 — page-independent catalog survives a redaction', () => {
+  it('keeps page-independent entries like /PageLabels but not page-linked trees', async () => {
     const doc = await PDFDocument.create();
     doc.addPage([200, 200]).drawText('hello');
     const context = doc.context;
@@ -77,8 +77,8 @@ describe('§0 — /StructTreeRoot, /PageLabels, /OCProperties survive a redactio
 
     const keys = catalogKeys(await load(out));
     expect(keys).toContain('/PageLabels');
-    expect(keys).toContain('/OCProperties');
-    expect(keys).toContain('/StructTreeRoot');
+    expect(keys).not.toContain('/OCProperties');
+    expect(keys).not.toContain('/StructTreeRoot');
   });
 });
 

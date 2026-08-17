@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 
 const { bitmapToJpeg, renderApi, processApi, thumbnailCache } = vi.hoisted(() => {
-  const bitmapToJpeg = vi.fn(async (bitmap: { tag: string }) =>
-    new Uint8Array([bitmap.tag === 'cached' ? 11 : 22])
+  const bitmapToJpeg = vi.fn(
+    async (bitmap: { tag: string }) => new Uint8Array([bitmap.tag === 'cached' ? 11 : 22])
   );
 
   const renderApi = {
@@ -65,8 +65,9 @@ describe('DOC-09: contact sheet export cache reuse', () => {
     thumbnailCache.get.mockImplementation((key: string) =>
       key === cachedKey ? cachedBitmap : undefined
     );
-    processApi.contactSheetExport.mockImplementation(async (jpegs: Uint8Array[], cols: number) =>
-      new Uint8Array([cols, ...jpegs.map(bytes => bytes[0])])
+    processApi.contactSheetExport.mockImplementation(
+      async (jpegs: Uint8Array[], cols: number) =>
+        new Uint8Array([cols, ...jpegs.map(bytes => bytes[0])])
     );
 
     const out = await exportContactSheet(sourceId, new Uint8Array([1, 2, 3]), 4);

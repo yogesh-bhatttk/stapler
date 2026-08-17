@@ -22,7 +22,12 @@ import type {
   StampSource,
   WatermarkData
 } from '../../src/core/workers/process.worker';
-import { displayFrame, displayPointToPage, placeDisplayBox } from '../../src/core/rotation';
+import {
+  displayFrame,
+  displayPointToNormalizedPage,
+  displayPointToPage,
+  placeDisplayBox
+} from '../../src/core/rotation';
 import { silentJob } from '../../src/core/workers/protocol';
 
 /* ------------------------------------------------------------------ *
@@ -194,6 +199,13 @@ describe('displayPointToPage is the exact inverse of pdf.js PageViewport', () =>
       expect(frame.displayHeight).toBe(swapped ? RAW_W : RAW_H);
     });
   }
+
+  it('maps a displayed click back into the raw page frame', () => {
+    const frame = displayFrame(RAW_W, RAW_H, 90);
+    const point = displayPointToNormalizedPage(frame, frame.displayWidth * 0.25, frame.displayHeight * 0.75);
+    expect(point.x).toBeCloseTo(0.75, 6);
+    expect(point.y).toBeCloseTo(0.75, 6);
+  });
 
   it('is a no-op on an unrotated page, so existing output is unchanged', () => {
     const frame = displayFrame(RAW_W, RAW_H, 0);

@@ -78,15 +78,22 @@ describe('ANN-03 search staleness guard', () => {
   });
 
   it('drops results when the active document changes mid-search', async () => {
-    const gate = deferred<Array<{ pageIndex: number; x: number; y: number; width: number; height: number; text: string }>>();
+    const gate = deferred<
+      Array<{
+        pageIndex: number;
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+        text: string;
+      }>
+    >();
     findTextRegions.mockReturnValue(gate.promise);
 
     const run = searchAndHighlightMatches('invoice', false, {} as any);
 
     activeDocId.value = docB.id;
-    gate.resolve([
-      { pageIndex: 0, x: 0.1, y: 0.2, width: 0.3, height: 0.05, text: 'invoice' }
-    ]);
+    gate.resolve([{ pageIndex: 0, x: 0.1, y: 0.2, width: 0.3, height: 0.05, text: 'invoice' }]);
 
     const result = await run;
 

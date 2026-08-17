@@ -114,27 +114,11 @@ export const DropZone = forwardRef<HTMLLabelElement, DropZoneProps>(function Dro
     <label
       ref={ref}
       className={[styles.dropzone, state !== 'idle' ? styles[state] : ''].filter(Boolean).join(' ')}
-      tabIndex={0}
-      role="button"
       aria-label="Choose PDFs or images to open"
       aria-busy={state === 'busy'}
       onClick={event => {
         if (!platform.supportsFileSystemAccess) return;
         event.preventDefault();
-        void browse();
-      }}
-      onKeyDown={event => {
-        if (event.key !== 'Enter' && event.key !== ' ') return;
-        event.preventDefault();
-        // Same fork as the click handler: when the File System Access API isn't
-        // available, `browse()` has no handle to persist anyway, so activate the
-        // plain input directly (a real "click" event, unlike this keydown, so it
-        // opens the native picker) instead of leaving keyboard users stuck with
-        // no way to trigger it now that the input itself is out of the tab order.
-        if (!platform.supportsFileSystemAccess) {
-          inputRef.current?.click();
-          return;
-        }
         void browse();
       }}
       onDragEnter={event => {
@@ -169,8 +153,6 @@ export const DropZone = forwardRef<HTMLLabelElement, DropZoneProps>(function Dro
         className="srOnly"
         type="file"
         multiple
-        tabIndex={-1}
-        aria-hidden="true"
         accept={acceptToInputAccept(PDF_AND_IMAGES)}
         aria-label="Choose PDFs or images to open"
         onChange={event => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { degrees, PDFDocument } from 'pdf-lib';
+import { degrees, PDFDocument, PDFName } from 'pdf-lib';
 import { processWorkerImpl, type NewFormField } from '../../src/core/workers/process.worker';
 import { extractFormFieldsToCreate } from '../../src/core/operations';
 import type { Annotation } from '../../src/core/store';
@@ -123,6 +123,59 @@ describe('SGN-06: Create Form Fields', () => {
 
     const filledRadioGroup = filledFormInfo.fields.find(f => f.name === 'membership_type');
     expect(filledRadioGroup?.value).toBe('premium');
+  });
+
+  it('keeps radio options aligned with the widgets that still have appearances', async () => {
+    const inputBytes = await makeBlankPdf();
+    const pages = [{ key: 'p1', sourceDocId: 'doc1', sourceIndex: 0, rotation: 0 }];
+    const sources = { doc1: inputBytes };
+    const composedBytes = await processWorkerImpl.compose(
+      pages,
+      sources,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        formFieldsToCreate: [
+          {
+            pageKey: 'p1',
+            type: 'radio',
+            name: 'membership_type',
+            exportValue: 'standard',
+            x: 0.1,
+            y: 0.3,
+            width: 0.05,
+            height: 0.05
+          },
+          {
+            pageKey: 'p1',
+            type: 'radio',
+            name: 'membership_type',
+            exportValue: 'premium',
+            x: 0.2,
+            y: 0.3,
+            width: 0.05,
+            height: 0.05
+          }
+        ]
+      }
+    );
+
+    const doc = await PDFDocument.load(composedBytes);
+    const radioGroup = doc.getForm().getRadioGroup('membership_type');
+    const widgets = radioGroup.acroField.getWidgets();
+    (widgets[1] as any).dict.delete(PDFName.of('AP'));
+    const brokenBytes = await doc.save({ useObjectStreams: false });
+
+    const formInfo = await processWorkerImpl.getFormFields(brokenBytes);
+    const radioField = formInfo.fields.find(f => f.name === 'membership_type');
+    expect(radioField?.type).toBe('RadioGroup');
+    expect(radioField?.rects).toHaveLength(1);
+    expect(radioField?.options).toEqual(['standard']);
   });
 
   it('extracts form field creation specifications from annotations array', () => {

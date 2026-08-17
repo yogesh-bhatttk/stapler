@@ -59,8 +59,20 @@ function decodeHexLiterals(content: string): string {
 describe('exportTextDiff', () => {
   beforeEach(() => {
     sources.value = {
-      base: { id: 'base', bytes: new Uint8Array([1]), name: 'base.pdf', pageCount: 1, pageSizes: [{ width: 612, height: 792 }] },
-      compare: { id: 'compare', bytes: new Uint8Array([2]), name: 'compare.pdf', pageCount: 1, pageSizes: [{ width: 612, height: 792 }] }
+      base: {
+        id: 'base',
+        bytes: new Uint8Array([1]),
+        name: 'base.pdf',
+        pageCount: 1,
+        pageSizes: [{ width: 612, height: 792 }]
+      },
+      compare: {
+        id: 'compare',
+        bytes: new Uint8Array([2]),
+        name: 'compare.pdf',
+        pageCount: 1,
+        pageSizes: [{ width: 612, height: 792 }]
+      }
     };
   });
 

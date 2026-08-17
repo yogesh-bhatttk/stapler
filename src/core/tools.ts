@@ -308,7 +308,8 @@ export const TOOLS: readonly ToolDefinition[] = [
     canvasMode: 'grid',
     needsOptionsPanel: true,
     commitLabel: 'Done',
-    selectable: false
+    selectable: false,
+    worksWithoutDocument: true
   },
   {
     id: 'compare',

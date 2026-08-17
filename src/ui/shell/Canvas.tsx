@@ -98,7 +98,13 @@ export function Canvas() {
         onPageIndexChange={setPageIndex}
         overlay={({ width, height, page }) =>
           tool.id === 'redact' ? (
-            <RedactOverlay page={page} pageIndex={pageIndex} width={width} height={height} />
+            <RedactOverlay
+              page={page}
+              pageIndex={pageIndex}
+              width={width}
+              height={height}
+              rotation={page.rotation}
+            />
           ) : tool.id === 'crop' ? (
             <CropOverlay page={page} width={width} height={height} />
           ) : tool.id === 'annotate' ? (
