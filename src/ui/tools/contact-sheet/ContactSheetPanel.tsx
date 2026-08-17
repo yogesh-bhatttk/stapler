@@ -4,7 +4,6 @@
  * Tiles page thumbnails into a grid on A4 and lets the user download
  * the result as a PDF.
  */
-import { useState } from 'preact/hooks';
 import { LayoutGrid } from 'lucide-preact';
 import { activeDoc } from '../../../core/store';
 import { currentDocumentBytes, exportContactSheet } from '../../../core/operations';
@@ -14,14 +13,13 @@ import { Field } from '../../components/Field';
 import { panelStyles } from '../../shell/OptionsPanel';
 import { useJob } from '../../useJob';
 import { useTranslation } from '../../../core/i18n';
-
-const COL_OPTIONS = [2, 3, 4, 5, 6] as const;
+import { CONTACT_SHEET_COL_OPTIONS, contactSheetColumns } from './state';
 
 export function ContactSheetPanel() {
   const t = useTranslation();
   const doc = activeDoc.value;
   const { run, isRunning } = useJob();
-  const [cols, setCols] = useState<number>(4);
+  const cols = contactSheetColumns.value;
 
   if (!doc) return null;
 
@@ -45,9 +43,11 @@ export function ContactSheetPanel() {
             <select
               id={id}
               value={cols}
-              onChange={e => setCols(Number((e.target as HTMLSelectElement).value))}
+              onChange={e =>
+                (contactSheetColumns.value = Number((e.target as HTMLSelectElement).value))
+              }
             >
-              {COL_OPTIONS.map(n => (
+              {CONTACT_SHEET_COL_OPTIONS.map(n => (
                 <option key={n} value={n}>
                   {n}
                 </option>

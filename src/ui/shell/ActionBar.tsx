@@ -55,7 +55,7 @@ export function ActionBar() {
         )}
         <Button
           variant="primary"
-          disabled={!doc || busy}
+          disabled={(!doc && !tool.worksWithoutDocument) || busy}
           onClick={() =>
             run({ label: tool.commitLabel, scope: `commit.${tool.id}` }, jobOptions =>
               commitTool(tool.id, jobOptions)

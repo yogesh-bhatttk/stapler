@@ -17,15 +17,26 @@ import {
   exportTableToXlsx,
   TableGridData
 } from '../../../core/ocr/table-extract';
+import {
+  tableExtractPageIndex,
+  tableExtractRows,
+  tableExtractFormat,
+  resetTableExtract
+} from './table-extract-state';
 
 export function TableExtractPanel() {
   const t = useTranslation();
   const doc = activeDoc.value;
   const { run } = useJob();
 
-  const [pageIndex, setPageIndex] = useState<number>(0);
+  // Page number and the edited grid live in signals, not component state, so the
+  // action bar's primary CTA exports the table the user is actually looking at.
+  const pageIndex = tableExtractPageIndex.value;
   const [grid, setGrid] = useState<TableGridData | null>(null);
-  const [editedRows, setEditedRows] = useState<string[][]>([]);
+  const editedRows = tableExtractRows.value ?? [];
+  const setEditedRows = (rows: string[][]) => {
+    tableExtractRows.value = rows;
+  };
 
   if (!doc) return null;
 
@@ -68,6 +79,7 @@ export function TableExtractPanel() {
 
   const handleExportCsv = async () => {
     if (!grid || editedRows.length === 0) return;
+    tableExtractFormat.value = 'csv';
     const csv = exportTableToCsv(getExportGrid());
     const stem = doc.name.replace(/\.[^.]+$/, '');
     await platform.saveFileAs(
@@ -79,6 +91,7 @@ export function TableExtractPanel() {
 
   const handleExportTsv = async () => {
     if (!grid || editedRows.length === 0) return;
+    tableExtractFormat.value = 'tsv';
     const tsv = exportTableToTsv(getExportGrid());
     const stem = doc.name.replace(/\.[^.]+$/, '');
     await platform.saveFileAs(
@@ -90,6 +103,7 @@ export function TableExtractPanel() {
 
   const handleExportXlsx = async () => {
     if (!grid || editedRows.length === 0) return;
+    tableExtractFormat.value = 'xlsx';
     const xlsx = exportTableToXlsx(getExportGrid());
     const stem = doc.name.replace(/\.[^.]+$/, '');
     await platform.saveFileAs(xlsx, `${stem}-page${pageIndex + 1}-table.xlsx`);
@@ -121,9 +135,9 @@ export function TableExtractPanel() {
             value={String(pageIndex)}
             options={pageOptions}
             onChange={val => {
-              setPageIndex(Number(val));
+              tableExtractPageIndex.value = Number(val);
               setGrid(null);
-              setEditedRows([]);
+              resetTableExtract();
             }}
           />
         )}
