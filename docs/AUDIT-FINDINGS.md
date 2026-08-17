@@ -212,7 +212,7 @@ Severity: **Critical** (silent data loss / security-relevant / core promise brok
 
 ## 4 — Workers, cancellation & progress
 
-- [ ] **[High] Buffers only transferred outbound; every inbound call clones the whole
+- [x] **[High] Buffers only transferred outbound; every inbound call clones the whole
   document.** ~~Partially fixed 2026-08-17~~ — new `handOver()` helper (`operations.ts`)
   applies a `Transferable` to `flattenDocument` and the redaction-internal `scrubMetadata`,
   both provably single-use worker output. Deliberately **not** applied to `compose`,
@@ -221,17 +221,70 @@ Severity: **Critical** (silent data loss / security-relevant / core promise brok
   open document in the UI — the silent corruption the invariants forbid. Fixing those needs
   an ownership change in the store, not a transfer list; documented in `handOver`'s docblock.
   `src/core/ocr/runOcr.ts:144`
+  **Closed 2026-08-17 as "measured, and the answer is no."** The ownership question is now
+  answered by instrument rather than by argument: `sourceRefCounts` / `sourceDocRefCounts`
+  (`src/core/store.ts`) count how many `PageRef`s and how many distinct open documents
+  reference each source, `historySourceRefCount` (`src/core/history.ts`) counts undo/redo
+  snapshots that can still reach it, and `renderHandleHoldsSource`
+  (`src/core/render-cache.ts`) reports whether a pdf.js handle is keyed on that exact byte
+  array. `canTransferSourceBytes(sourceId, owningDocId)` gates on all three, and
+  `transferableSourceIds(pages, docId)` reports the cleared subset. The counts are a
+  `computed` over `documents`, not hand-maintained increments, deliberately: a mutation site
+  that forgets to decrement produces a detached buffer under a live document, and there is
+  no acceptable version of that bug.
+  **No transfer was enabled, because the gate is essentially never open in the shipped app**,
+  for three reasons that are all features:
+  (1) all three operations end in `replaceWithSource`, which calls `commit()` — redaction and
+  cleanup are *undoable by design*, so the pre-operation bytes must stay readable, and
+  `sources` is only pruned in `closeDocument` precisely to keep them so;
+  (2) `currentDocumentBytes`'s untouched fast path returns `source.bytes` **by identity**, so
+  the common "one whole file, unedited" case is exactly the case where the buffer belongs to
+  the store — and `applyRedactions` reads its `bytes` three times (plan, image pixels,
+  rebuild), so no read of it can be the last one;
+  (3) any document with a thumbnail on screen has a render-worker handle keyed on that array.
+  Enabling a transfer would require: making these operations non-undoable (or teaching
+  history to hold its own copy of the bytes it can reach), having `currentDocumentBytes` never
+  return store-owned bytes, and closing the render handle before the call. Each of those costs
+  more than the clone it saves. Regression coverage in
+  `tests/unit/source-transfer-hazard.test.ts` runs compose / applyRedactions /
+  rebuildCompressed on one of two documents sharing a source and asserts the other still
+  exports; it also performs the naive transfer by hand
+  (`structuredClone(buf, { transfer: [buf] })`, which is what `postMessage` does) to prove the
+  test has teeth — the shared source goes to 0 bytes and the other document stops exporting —
+  and guards structurally that `handOver` has not been applied to those three call sites.
+  Refcount coverage in `tests/unit/store.test.ts` ("source reference counting",
+  "canTransferSourceBytes").
+  `src/core/store.ts` (`sourceRefCounts`, `sourceDocRefCounts`, `sourceOwners`,
+  `canTransferSourceBytes`, `transferableSourceIds`), `src/core/history.ts`
+  (`historySourceRefCount`), `src/core/render-cache.ts` (`renderHandleHoldsSource`),
+  `src/core/operations.ts` (`handOver` docblock)
 
-- [ ] **[High] Cancellation is cooperative polling with no enforcement; several long ops
+- [x] **[High] Cancellation is cooperative polling with no enforcement; several long ops
   have no job handle at all.** ~~Mostly fixed 2026-08-17~~ — `getFormFields`,
   `fillFormFields`, `flattenDocument`, `scrubMetadata`, `protectDocument` now all take an
-  optional `JobHandle` with per-field/per-page checkpoints instead of one at 95%. **Still
-  open:** the AES pass itself (`src/core/pdf/encrypt.ts`) is one uninterruptible loop over
-  every indirect object — `protectDocument` can only be cancelled before it starts or after
-  it ends. Nothing terminates a worker on abort; `protocol.ts` documents cooperative
+  optional `JobHandle` with per-field/per-page checkpoints instead of one at 95%.
+  ~~Still open: the AES pass~~ **Closed 2026-08-17** — `encryptPdf` now takes an optional
+  `JobHandle` and checkpoints *inside* its per-object loop, on two gates whichever trips
+  first: 50ms elapsed (the gate that actually bounds cancellation latency, since one object
+  ranges from a 12-byte name to a 5MB image stream) or 64 objects (the floor, ~13ms of work
+  measured at ~0.2ms/object on `tests/fixtures/text-300.pdf`: 604 objects, ~116ms end to
+  end). Aborting is safe by construction — the half-encrypted `PDFDocument` is local to the
+  call and discarded, and the input `bytes` are only ever read — so the caller keeps the
+  original, per the never-corrupt rule. The 0..1 span is mapped into `protectDocument`'s
+  0.1–0.95 band by a new `subJob` helper in `protocol.ts`, so `core/pdf` does not have to
+  know where its work sits in someone else's progress bar. Five tests in
+  `tests/unit/encrypt.test.ts` ("cancellation inside the object loop") measure *how far the
+  loop got* from its own progress labels rather than asserting on wall-clock time: a
+  cancelled run stops inside the first ~3 gates of 604 objects, an already-aborted signal
+  stops at the first, an uncancelled run is shown to check ≥ floor(total/64) times with
+  monotonic in-range progress, and both the direct and worker entry points leave the input
+  byte-identical.
+  **Still open (by design):** nothing terminates a worker on abort; `protocol.ts` documents
+  cooperative
   cancellation as deliberate (it preserves the warm pdf.js instance, and forcing termination
   would kill unrelated work sharing the pooled worker).
-  `src/core/workers/protocol.ts:68-76`, `src/ui/useJob.ts:52-65`,
+  `src/core/pdf/encrypt.ts` (`ENCRYPT_CHECKPOINT_MS`, the object loop),
+  `src/core/workers/protocol.ts` (`checkpoint`, `subJob`), `src/ui/useJob.ts:52-65`,
   `src/core/workers/process.worker.ts:3334, 3628, 3972, 3976, 4474, 4540`
 
 - [x] **[Medium] Three unmapped `console.error` sites; no double-click guard on the
