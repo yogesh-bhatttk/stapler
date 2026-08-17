@@ -26,7 +26,6 @@ export function VerificationReport() {
       `Stapler redaction verification`,
       `regions: ${report.verdicts.length}`,
       `failed: ${failed}`,
-      `rasterised pages: ${report.rasterizedPages.map(p => p + 1).join(', ') || 'none'}`,
       '',
       ...report.verdicts.map(
         (verdict, index) =>
