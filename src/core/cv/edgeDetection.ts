@@ -216,22 +216,20 @@ function mooreNeighbor(edges: Uint8Array, width: number, height: number): Point[
     for (let x = 1; x < width - 1; x++) {
       const i = y * width + x;
       if (edges[i] === 255 && !visited[i]) {
-        let startDir = -1;
-        for (let k = 0; k < 8; k++) {
-          if (edges[(y + dy[k]) * width + (x + dx[k])] === 255) {
-            startDir = k;
-            break;
-          }
-        }
-        if (startDir === -1) {
-          visited[i] = 1;
-          continue;
-        }
-
         const contour: Point[] = [];
         let currX = x;
         let currY = y;
-        let backtrackDir = (startDir + 4) % 8;
+        // Moore tracing walks the neighbourhood starting from the pixel it
+        // *entered* from, which must be outside the blob — otherwise the walk
+        // starts inside and can set off along an interior run, tracing a path
+        // that is not the boundary.
+        //
+        // Seeding from the first foreground neighbour (the old code) put the
+        // start inside the blob by construction. The raster scan reaches this
+        // pixel from the west and only ever starts a contour at a pixel whose
+        // west neighbour is not an untraced edge, so west — index 4 in the
+        // neighbour table above — is the correct entry direction.
+        let backtrackDir = 4;
         const firstX = x;
         const firstY = y;
 

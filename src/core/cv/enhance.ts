@@ -175,26 +175,37 @@ export function applyContrastBrightness(
  * by hand — the previous code did, got the sign wrong, and doubled the skew instead of
  * removing it. Use {@link deskew}.
  */
-export function rotateImageData(imageData: ImageData, angleDeg: number): ImageData {
+export function rotateImageData(imageData: ImageData, angleDeg: number, fit = false): ImageData {
   if (angleDeg === 0) return imageData;
 
   const rad = (angleDeg * Math.PI) / 180;
   const cos = Math.cos(rad);
   const sin = Math.sin(rad);
   const { width: w, height: h, data: src } = imageData;
-  const out = new ImageData(w, h);
+
+  // With `fit`, the canvas grows to the rotated bounding box. Without it the
+  // canvas keeps its size and the corners that rotate outside it are lost —
+  // which is what deskewing a full-bleed scan did: at the ±15° limit a straight
+  // rotation shears roughly 13% off each corner, taking the page's own corners
+  // (and any content near them) with it.
+  const outWidth = fit ? Math.ceil(Math.abs(w * cos) + Math.abs(h * sin)) : w;
+  const outHeight = fit ? Math.ceil(Math.abs(w * sin) + Math.abs(h * cos)) : h;
+
+  const out = new ImageData(outWidth, outHeight);
   const dst = out.data;
   const cx = w / 2;
   const cy = h / 2;
+  const outCx = outWidth / 2;
+  const outCy = outHeight / 2;
 
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const dx = x - cx;
-      const dy = y - cy;
+  for (let y = 0; y < outHeight; y++) {
+    for (let x = 0; x < outWidth; x++) {
+      const dx = x - outCx;
+      const dy = y - outCy;
       // Inverse map: which source pixel does this destination pixel come from?
       const sx = cos * dx + sin * dy + cx;
       const sy = -sin * dx + cos * dy + cy;
-      const di = (y * w + x) * 4;
+      const di = (y * outWidth + x) * 4;
 
       if (sx < 0 || sy < 0 || sx >= w - 1 || sy >= h - 1) {
         dst[di] = 255;
@@ -241,7 +252,9 @@ export function deskew(
   const angle = detectSkew(imageData, maxDegrees);
   // Below half a degree the resample costs sharpness and buys nothing visible.
   if (Math.abs(angle) < minCorrection) return { angle: 0, image: imageData };
-  return { angle, image: rotateImageData(imageData, -angle) };
+  // `fit` grows the canvas to the rotated bounding box: straightening a page
+  // must not cost it its own corners.
+  return { angle, image: rotateImageData(imageData, -angle, true) };
 }
 
 /**

@@ -73,12 +73,16 @@ const api: CVJob = {
     }
 
     if (maxX >= minX && maxY >= minY) {
-      // Add 1% padding so we don't clip exact edges tightly
+      // Add 1% padding so we don't clip exact edges tightly.
+      //
+      // maxX/maxY are *inclusive* pixel indices, so the right and bottom edges of
+      // the content are at (maxX + 1) / width — using maxX / width cropped the
+      // last column and row of ink away, one pixel short on every scan.
       const padding = 0.01;
       const normMinX = Math.max(0, minX / width - padding);
       const normMinY = Math.max(0, minY / height - padding);
-      const normMaxX = Math.min(1, maxX / width + padding);
-      const normMaxY = Math.min(1, maxY / height + padding);
+      const normMaxX = Math.min(1, (maxX + 1) / width + padding);
+      const normMaxY = Math.min(1, (maxY + 1) / height + padding);
 
       return {
         x: normMinX,

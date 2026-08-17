@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { detectCorners, quadArea, type Quad } from '../../src/core/cv/imageUtils';
+import {
+  detectCorners,
+  isFrameQuad,
+  quadArea,
+  quadEdgeSupport,
+  type Quad
+} from '../../src/core/cv/imageUtils';
 
 /**
  * SCN-01 — measures the "8 of 10" detection-rate acceptance criterion.
@@ -171,7 +177,71 @@ describe('SCN-01 — detectCorners against synthetic phone photos', () => {
     // confidently reporting a crop that (if the gate's margin were even one
     // pixel narrower) would clip real content off the page.
     expect(results[9].confident).toBe(false);
+
+    // Scene 8 is the page that is barely distinguishable from the desk. The
+    // contour stage does find a quad in the grain — it used to be returned as
+    // confident with corners 25% of the image diagonal from the real page, which
+    // is a crop straight through the user's content.
+    expect(results[8].confident).toBe(false);
   }, 15000);
+
+  it('a detection it does not believe returns the whole frame, never an inset crop', () => {
+    // The old fallback was `frameQuad(w, h, 0.02)` — a blind 2% crop applied to
+    // exactly the pages detection had just admitted it could not read.
+    const lowContrast: Scene = {
+      width: WIDTH,
+      height: HEIGHT,
+      quad: perturbedQuad(mulberry32(2000), 18),
+      contrast: 8
+    };
+    const image = paintScene(mulberry32(2000), lowContrast);
+    const detection = detectCorners(image);
+
+    expect(detection.confident).toBe(false);
+    expect(isFrameQuad(detection.quad, WIDTH, HEIGHT)).toBe(true);
+    // Belt and braces: the quad covers the entire frame, so applying it crops nothing.
+    expect(quadArea(detection.quad)).toBe(WIDTH * HEIGHT);
+  });
+
+  it('quadEdgeSupport measures the border, not the edge map', () => {
+    const scene: Scene = {
+      width: WIDTH,
+      height: HEIGHT,
+      quad: perturbedQuad(mulberry32(1000), 18),
+      contrast: 150
+    };
+    const image = paintScene(mulberry32(1000), scene);
+
+    // The true page boundary: a large luma step, far above the grain.
+    const real = quadEdgeSupport(image, scene.quad);
+    expect(real.contrast).toBeGreaterThan(100);
+    expect(real.contrast).toBeGreaterThan(real.noise * 2);
+
+    // A quad drawn entirely inside the page crosses no boundary at all.
+    const bogus: Quad = {
+      tl: { x: WIDTH * 0.3, y: HEIGHT * 0.3 },
+      tr: { x: WIDTH * 0.6, y: HEIGHT * 0.3 },
+      br: { x: WIDTH * 0.6, y: HEIGHT * 0.6 },
+      bl: { x: WIDTH * 0.3, y: HEIGHT * 0.6 }
+    };
+    expect(quadEdgeSupport(image, bogus).contrast).toBeLessThan(12);
+  });
+
+  it('still trusts a moderate-contrast page — the gate is not simply "reject everything"', () => {
+    const scene: Scene = {
+      width: WIDTH,
+      height: HEIGHT,
+      quad: perturbedQuad(mulberry32(1003), 12),
+      // A grey page on a slightly darker desk: well short of the 150 the easy
+      // scenes use, well clear of the grain.
+      contrast: 45
+    };
+    const image = paintScene(mulberry32(1003), scene);
+    const detection = detectCorners(image);
+
+    expect(detection.confident).toBe(true);
+    expect(cornerError(detection.quad, scene.quad, DIAGONAL)).toBeLessThan(0.05);
+  });
 
   it('falls back to a non-confident result rather than throwing on a near-blank frame', () => {
     const image = new ImageData(WIDTH, HEIGHT);

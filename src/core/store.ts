@@ -277,13 +277,23 @@ export function replaceWithSource(docId: string, source: SourceDocument): void {
  *
  * Used by scan cleanup, which rewrites a single page's pixels: the page must keep its
  * identity so selection, stamps, and undo continue to refer to the same thing.
+ *
+ * `sourceIndex` is which page of the new source this ref should point at. It used to
+ * be hardcoded to 0, which is right only when the new source is a single-page
+ * document: repointing page 5 at a rebuilt *whole* document made page 5 display, and
+ * export, the rebuilt document's page 1.
  */
-export function repointPage(docId: string, pageKey: string, sourceId: string): void {
+export function repointPage(
+  docId: string,
+  pageKey: string,
+  sourceId: string,
+  sourceIndex = 0
+): void {
   commit();
   mutateDoc(docId, doc => ({
     ...doc,
     pages: doc.pages.map(p =>
-      p.key === pageKey ? { ...p, sourceDocId: sourceId, sourceIndex: 0, rotation: 0 } : p
+      p.key === pageKey ? { ...p, sourceDocId: sourceId, sourceIndex, rotation: 0 } : p
     )
   }));
 }

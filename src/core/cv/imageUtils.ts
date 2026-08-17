@@ -93,17 +93,130 @@ export function frameQuad(width: number, height: number, insetRatio = 0.02): Qua
   };
 }
 
+/**
+ * True when `quad` is (within `tolerance` pixels) the whole frame — the shape that
+ * means "do not de-warp this page". Callers use it to skip the warp entirely rather
+ * than resampling every pixel through an identity homography.
+ */
+export function isFrameQuad(quad: Quad, width: number, height: number, tolerance = 1): boolean {
+  const corners: [Point, Point][] = [
+    [quad.tl, { x: 0, y: 0 }],
+    [quad.tr, { x: width, y: 0 }],
+    [quad.br, { x: width, y: height }],
+    [quad.bl, { x: 0, y: height }]
+  ];
+  return corners.every(
+    ([a, b]) => Math.abs(a.x - b.x) <= tolerance && Math.abs(a.y - b.y) <= tolerance
+  );
+}
+
+function lumaAt(image: ImageData, x: number, y: number): number | null {
+  const px = Math.round(x);
+  const py = Math.round(y);
+  if (px < 0 || py < 0 || px >= image.width || py >= image.height) return null;
+  const i = (py * image.width + px) * 4;
+  return luma(image.data[i], image.data[i + 1], image.data[i + 2]);
+}
+
+/**
+ * How strongly the image actually supports `quad` being a page boundary: the
+ * difference in mean luminance just inside versus just outside the quad's four
+ * edges, alongside the sample noise that difference has to beat.
+ *
+ * Exported because it is the measurement {@link detectCorners}'s confidence rests
+ * on, and a measurement worth trusting is worth testing directly.
+ */
+export function quadEdgeSupport(
+  image: ImageData,
+  quad: Quad,
+  samplesPerEdge = 24
+): { contrast: number; noise: number } {
+  const edges: [Point, Point][] = [
+    [quad.tl, quad.tr],
+    [quad.tr, quad.br],
+    [quad.br, quad.bl],
+    [quad.bl, quad.tl]
+  ];
+  // Far enough out to clear the 5x5 blur and any soft focus at the paper edge,
+  // near enough to still be measuring the border rather than the scene.
+  const offset = Math.max(3, Math.round(Math.min(image.width, image.height) * 0.01));
+
+  const inside: number[] = [];
+  const outside: number[] = [];
+
+  for (const [a, b] of edges) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const length = Math.hypot(dx, dy);
+    if (length < 1) continue;
+    // Inward normal for the tl→tr→br→bl winding used throughout this module.
+    const nx = -dy / length;
+    const ny = dx / length;
+
+    for (let s = 0; s < samplesPerEdge; s++) {
+      // Skip the last 10% at each end: corners are where both edges' blur meets,
+      // and sampling there measures the corner rather than the edge.
+      const t = 0.1 + (0.8 * s) / Math.max(1, samplesPerEdge - 1);
+      const px = a.x + dx * t;
+      const py = a.y + dy * t;
+      const vin = lumaAt(image, px + nx * offset, py + ny * offset);
+      const vout = lumaAt(image, px - nx * offset, py - ny * offset);
+      if (vin === null || vout === null) continue;
+      inside.push(vin);
+      outside.push(vout);
+    }
+  }
+
+  if (inside.length === 0) return { contrast: 0, noise: 0 };
+
+  const mean = (xs: number[]) => xs.reduce((s, v) => s + v, 0) / xs.length;
+  const variance = (xs: number[], m: number) =>
+    xs.reduce((s, v) => s + (v - m) ** 2, 0) / Math.max(1, xs.length - 1);
+
+  const mIn = mean(inside);
+  const mOut = mean(outside);
+  // Pooled standard deviation of the two sample sets: the scene's own grain and
+  // lighting variation, which a real page boundary has to stand out from.
+  const noise = Math.sqrt((variance(inside, mIn) + variance(outside, mOut)) / 2);
+  // Absolute so a dark page on a light desk counts the same as the reverse.
+  return { contrast: Math.abs(mIn - mOut), noise };
+}
+
+/**
+ * Minimum border contrast, in luma, before a detected quad is believed. Below this
+ * the "page edge" is indistinguishable from print, a shadow, or sensor grain.
+ */
+const MIN_EDGE_CONTRAST = 12;
+/**
+ * …and it must also stand this many standard deviations clear of the scene's own
+ * noise. Contrast alone passes a noisy frame whose grain happens to average out.
+ */
+const MIN_CONTRAST_TO_NOISE = 1.5;
+
 import { extractDocumentQuad } from './edgeDetection';
 
 /**
  * Finds the paper using an edge detection pipeline (Grayscale -> Blur -> Sobel -> Contours -> Largest Quad).
+ *
+ * The contour stage answers "is there a large convex quadrilateral in the edge map",
+ * which a low-contrast photo can satisfy with a quad traced out of grain — it was
+ * returning `confident: true` on a scene whose corners were 25% of the image diagonal
+ * away from the real page. Confidence is therefore a second, independent question,
+ * asked of the original pixels rather than the edge map: does the image actually get
+ * brighter or darker as you cross this boundary?
+ *
+ * When the answer is no, the returned quad is the **whole frame**, not an inset of it.
+ * A detection we do not believe must not remove 2% of the user's page on its way out.
  */
 export function detectCorners(imageData: ImageData): CornerDetection {
   const result = extractDocumentQuad(imageData);
   if (result.confident && result.quad) {
-    return { quad: result.quad, confident: true };
+    const { contrast, noise } = quadEdgeSupport(imageData, result.quad);
+    if (contrast >= MIN_EDGE_CONTRAST && contrast >= MIN_CONTRAST_TO_NOISE * noise) {
+      return { quad: result.quad, confident: true };
+    }
   }
-  return { quad: frameQuad(imageData.width, imageData.height), confident: false };
+  return { quad: frameQuad(imageData.width, imageData.height, 0), confident: false };
 }
 
 /** Solves A·x = B by Gaussian elimination with partial pivoting. */

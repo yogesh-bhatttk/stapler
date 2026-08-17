@@ -298,4 +298,26 @@ describe('repointPage', () => {
     expect(page.sourceDocId).toBe('cleaned');
     expect(page.sourceIndex).toBe(0);
   });
+
+  it('points at the page of the new source it is told to, not always page 1', () => {
+    // Scan cleanup's flatten path hands back a rebuilt *whole* document. Repointing
+    // page 5 at it with the old hardcoded index made page 5 render, and export, the
+    // rebuilt document's page 1.
+    const doc = seed(6);
+    const key = doc.pages[4].key;
+    registerSource({
+      id: 'rebuilt',
+      name: 'rebuilt.pdf',
+      bytes: new Uint8Array([9]),
+      pageCount: 6,
+      pageSizes: Array.from({ length: 6 }, () => ({ width: 595, height: 842 }))
+    });
+    repointPage(doc.id, key, 'rebuilt', 4);
+    const page = documents.value[0].pages[4];
+    expect(page.key).toBe(key);
+    expect(page.sourceDocId).toBe('rebuilt');
+    expect(page.sourceIndex).toBe(4);
+    // No other page moved.
+    expect(documents.value[0].pages.map(p => p.sourceIndex)).toEqual([0, 1, 2, 3, 4, 5]);
+  });
 });

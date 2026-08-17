@@ -21,7 +21,7 @@ import {
 import { renderHandleFor } from '../../../core/render-cache';
 import { cvWorker, processWorker, renderWorker } from '../../../core/workers';
 import { createJobHandle } from '../../../core/workers/protocol';
-import { frameQuad, type Quad } from '../../../core/cv/imageUtils';
+import { frameQuad, isFrameQuad, type Quad } from '../../../core/cv/imageUtils';
 import { normalizeRotation } from '../../../core/rotation';
 import { notify } from '../../../core/notify';
 import { cancelled, logEvent } from '../../../core/errors';
@@ -41,6 +41,26 @@ export interface CleanupEditorProps {
 const WORK_DPI = 150;
 
 const CORNERS: (keyof Quad)[] = ['tl', 'tr', 'br', 'bl'];
+
+/**
+ * The corners to hand `processScan`, or `null` to skip de-warping entirely.
+ *
+ * A quad covering the whole frame is what "detection was not confident" and the
+ * "Use the whole page" button both produce. Warping through it is an identity
+ * homography that still resamples every pixel, so it is skipped: a page we could
+ * not read the edges of is left exactly as it came in.
+ */
+function cornersFor(quad: Quad, image: ImageData): Quad | null {
+  return isFrameQuad(quad, image.width, image.height) ? null : quad;
+}
+
+/** One page's cleaned pixels, encoded as JPEG for `imagesToPdf`. */
+async function encodeJpeg(image: ImageData): Promise<Uint8Array> {
+  const canvas = new OffscreenCanvas(image.width, image.height);
+  canvas.getContext('2d')?.putImageData(image, 0, 0);
+  const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
+  return new Uint8Array(await blob.arrayBuffer());
+}
 
 export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: CleanupEditorProps) {
   const beforeRef = useRef<ImageData | null>(null);
@@ -122,7 +142,14 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
     };
   }, [page, source]);
 
-  /** Re-processes whenever the settings or the corners change. */
+  /**
+   * Re-processes whenever the settings or the corners change.
+   *
+   * Every setting `processScan` reads is listed in the dependency array. `despeckle`
+   * was missing, so toggling it changed the signal, changed nothing on screen, and
+   * the user concluded (correctly, as far as they could see) that despeckle did
+   * nothing. If you add a field to `ScanSettings`, add it here.
+   */
   useEffect(() => {
     if (!ready || !beforeRef.current || !quad) return;
     let cancelled = false;
@@ -130,7 +157,11 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
 
     void (async () => {
       const processed = await cvWorker.lease(api =>
-        api.processScan(beforeRef.current!, { ...settings, corners: quad }, createJobHandle())
+        api.processScan(
+          beforeRef.current!,
+          { ...settings, corners: cornersFor(quad, beforeRef.current!) },
+          createJobHandle()
+        )
       );
       if (cancelled) return;
       afterRef.current = processed;
@@ -141,7 +172,15 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
     return () => {
       cancelled = true;
     };
-  }, [ready, quad, settings.preset, settings.contrast, settings.brightness, settings.deskew]);
+  }, [
+    ready,
+    quad,
+    settings.preset,
+    settings.contrast,
+    settings.brightness,
+    settings.deskew,
+    settings.despeckle
+  ]);
 
   const paint = () => {
     const canvas = canvasRef.current;
@@ -177,12 +216,15 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
       const after = afterRef.current;
       if (!after || !page || !source) return;
 
-      const canvas = new OffscreenCanvas(after.width, after.height);
-      canvas.getContext('2d')?.putImageData(after, 0, 0);
-      const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
-      const jpeg = new Uint8Array(await blob.arrayBuffer());
-
+      // OPS-13 requires flatten to touch only the background layer and leave
+      // foreground text/vector content untouched — which only exists on the
+      // *original* page. Routing flatten through the rasterized cleanup preview
+      // (a single all-image page) would give it nothing but background to find,
+      // so it would erase everything, cleaned pixels included. The two exports
+      // are therefore built from different sources, and repointed at different
+      // page indices in the result they each produce.
       let bytes: Uint8Array;
+      let resultPageIndex: number;
       if (settings.flattenBackground) {
         bytes = await processWorker.lease(api =>
           api.flattenBackground(
@@ -192,8 +234,10 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
             createJobHandle(job)
           )
         );
+        resultPageIndex = page.sourceIndex;
       } else {
-        const originalSize = source?.pageSizes[page.sourceIndex];
+        const jpeg = await encodeJpeg(after);
+        const originalSize = source.pageSizes[page.sourceIndex];
         bytes = await processWorker.lease(api =>
           api.imagesToPdf(
             [jpeg],
@@ -208,6 +252,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
             createJobHandle(job)
           )
         );
+        resultPageIndex = 0;
       }
       // pin() keeps load and close on the same pool instance — two independent
       // lease() calls could land on different instances and leave the close a
@@ -229,26 +274,39 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
       }
 
       registerSource(newSource);
-      // A single-page document is replaced outright; in a longer document only this
-      // page's ref is repointed at the cleaned source.
-      if (pages.length === 1) {
+      // A single-page result (the non-flatten path) is replaced outright; flatten's
+      // whole-document result repoints just this page, leaving its siblings alone.
+      if (pages.length === 1 && resultPageIndex === 0) {
         replaceWithSource(docId, newSource);
       } else {
         notify('info', 'Applied to this page.', {
           detail: 'Move to the next page to clean it, then export when you are done.'
         });
-        repointPage(docId, page.key, newSource.id);
+        repointPage(docId, page.key, newSource.id, resultPageIndex);
       }
       notify('success', 'Page cleaned.');
     });
 
   const applyToAll = () =>
     run({ label: 'Cleaning all pages', scope: 'cleanup.applyToAll' }, async job => {
+      // Flatten (OPS-13) has to run against the original vector pages — it keeps
+      // foreground text/vector content and only replaces the background layer,
+      // which does not exist any more once a page has been rasterized to a single
+      // cleaned JPEG. So the two modes stay on separate paths: flatten touches
+      // every page of the *source* document directly and never rasterizes anything;
+      // everything else runs the de-warp/despeckle/contrast pipeline per page (this
+      // used to silently stop after page 1) and rebuilds the pages as images.
       let bytes: Uint8Array;
       if (settings.flattenBackground) {
-        // Find the first source document (assume single document for batch flatten for simplicity, as other batch tools do)
-        const firstSource = sources.value[pages[0].sourceDocId];
+        const firstSourceId = pages[0].sourceDocId;
+        if (pages.some(p => p.sourceDocId !== firstSourceId)) {
+          throw new Error(
+            'Flatten background does not yet support a selection spanning more than one source document.'
+          );
+        }
+        const firstSource = sources.value[firstSourceId];
         if (!firstSource) throw new Error('Source not found');
+        job.onProgress?.(0.05, 'Flattening the background');
         bytes = await processWorker.lease(api =>
           api.flattenBackground(
             firstSource.bytes,
@@ -295,15 +353,15 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
           let pageQuad = cornerOverrides.value[p.key];
           if (!pageQuad) {
             const detection = await cvWorker.lease(api => api.detectCorners(before));
-            if (!detection.confident) {
-              pageQuad = frameQuad(before.width, before.height);
-            } else {
-              pageQuad = detection.quad;
-            }
+            // A detection we do not believe means "leave this page's geometry
+            // alone" — not "crop 2% off it and hope". `detectCorners` already
+            // returns the whole frame in that case; `cornersFor` turns that into
+            // "skip the warp".
+            pageQuad = detection.quad;
           }
 
           const after = await cvWorker.lease(api =>
-            api.processScan(before, { ...settings, corners: pageQuad })
+            api.processScan(before, { ...settings, corners: cornersFor(pageQuad, before) })
           );
 
           const afterCanvas = new OffscreenCanvas(after.width, after.height);
@@ -333,6 +391,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
           )
         );
       }
+
       const firstSource = sources.value[pages[0].sourceDocId];
 
       // pin() keeps load and close on the same pool instance — two independent
@@ -457,11 +516,11 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         >
           Next
         </Button>
-        <Button variant="primary" icon={Check} onClick={apply} disabled={!ready || !previewReady}>
+        <Button variant="secondary" icon={Check} onClick={apply} disabled={!ready || !previewReady}>
           Apply to this page
         </Button>
         <Button
-          variant="primary"
+          variant="secondary"
           icon={Check}
           onClick={applyToAll}
           disabled={!ready || !previewReady}
