@@ -75,6 +75,7 @@ test.describe('zero network', () => {
         'compress',
         'crop',
         'watermark',
+        'outline',
         'sign',
         'redact',
         'metadata',
@@ -83,7 +84,18 @@ test.describe('zero network', () => {
         'compare',
         'annotate',
         'batch',
-        'md-to-pdf'
+        'md-to-pdf',
+        // OCR is the one route allowed to touch the network — on the model's
+        // one-time download consent, and only after the user explicitly agrees.
+        // Visiting the panel without agreeing must stay silent; this is the only
+        // test that exercises the route at all, so its absence used to mean the
+        // one deliberate exception to the zero-network guarantee was the one path
+        // this suite never actually watched.
+        'ocr',
+        'table-extract',
+        'acc',
+        'contact-sheet',
+        'shortcuts'
       ]) {
         await page.goto(`/#/tool/${tool}`);
         await expect(page.locator('header')).toBeVisible();
