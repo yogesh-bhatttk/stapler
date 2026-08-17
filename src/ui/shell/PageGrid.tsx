@@ -45,13 +45,21 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
   void customShortcuts.value;
   const scrollerRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
-  const [metrics, setMetrics] = useState({ columns: 1, width: MIN_TILE, height: 0 });
+  const [metrics, setMetrics] = useState({ columns: 1, width: MIN_TILE, height: 0, offsetTop: 0 });
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(0);
   const [dragKey, setDragKey] = useState<string | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const [focusIndex, setFocusIndex] = useState(0);
   const lastClickedRef = useRef<string | null>(null);
+  /**
+   * Index whose tile still needs to receive DOM focus. Keyboard navigation targets an
+   * index, not an element: on a virtualised grid the target row usually does not exist
+   * in the DOM yet (this is why Home/End used to be dead keys — `querySelector` found
+   * nothing and the handler gave up). We scroll the window to the target first, then
+   * this effect focuses the tile on the render where it finally exists.
+   */
+  const pendingFocusRef = useRef<number | null>(null);
 
   /**
    * The aspect ratio of the tallest page in the document, used to size the grid rows
@@ -80,7 +88,13 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
       const columns = Math.max(1, Math.floor((available + GAP) / (MIN_TILE + GAP)));
       const width = (available - GAP * (columns - 1)) / columns;
       // Tile height is the thumbnail plus the page-number row beneath it.
-      setMetrics({ columns, width, height: width / gridAspect + 28 });
+      setMetrics({
+        columns,
+        width,
+        height: width / gridAspect + 28,
+        // The scroller also holds the header, so row offsets are relative to this.
+        offsetTop: element.offsetTop
+      });
       setViewportHeight(scroller.clientHeight);
     };
 
@@ -93,10 +107,11 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
 
   const rowHeight = metrics.height + GAP;
   const rowCount = Math.ceil(doc.pages.length / metrics.columns);
-  const firstRow = Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN_ROWS);
+  const scrolled = scrollTop - metrics.offsetTop;
+  const firstRow = Math.max(0, Math.floor(scrolled / rowHeight) - OVERSCAN_ROWS);
   const lastRow = Math.min(
     rowCount,
-    Math.ceil((scrollTop + viewportHeight) / rowHeight) + OVERSCAN_ROWS
+    Math.max(0, Math.ceil((scrolled + viewportHeight) / rowHeight) + OVERSCAN_ROWS)
   );
   const firstIndex = firstRow * metrics.columns;
   const visible = doc.pages.slice(firstIndex, lastRow * metrics.columns);
@@ -122,24 +137,40 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
     lastClickedRef.current = page.key;
   };
 
+  /**
+   * Scrolls the *scroller* (not the absolutely-sized viewport, which never scrolls)
+   * so the row holding `index` is inside the window, and updates `scrollTop` state
+   * synchronously so the very next render already mounts that row.
+   */
+  const revealIndex = useCallback(
+    (index: number) => {
+      const scroller = scrollerRef.current;
+      if (!scroller) return;
+      const row = Math.floor(index / metrics.columns);
+      const top = metrics.offsetTop + row * rowHeight;
+      const bottom = top + metrics.height;
+      const viewTop = scroller.scrollTop;
+      const viewBottom = viewTop + scroller.clientHeight;
+      let next = viewTop;
+      if (top < viewTop) next = top;
+      else if (bottom > viewBottom) next = bottom - scroller.clientHeight;
+      if (next !== viewTop) {
+        scroller.scrollTop = Math.max(0, next);
+        setScrollTop(scroller.scrollTop);
+      }
+    },
+    [metrics.columns, metrics.offsetTop, metrics.height, rowHeight]
+  );
+
   /** Keyboard equivalents for every mouse action (DOC-04, NFR-01). */
   const onKeyDown = (event: KeyboardEvent, index: number, page: PageRef) => {
     const columns = metrics.columns;
     const move = (to: number) => {
       const clamped = Math.max(0, Math.min(doc.pages.length - 1, to));
       setFocusIndex(clamped);
-      const target = viewportRef.current?.querySelector<HTMLElement>(`[data-index="${clamped}"]`);
-      if (target) {
-        target.focus();
-        target.scrollIntoView({ block: 'nearest' });
-      } else if (viewportRef.current) {
-        const row = Math.floor(clamped / columns);
-        viewportRef.current.scrollTop = row * metrics.height;
-        requestAnimationFrame(() => {
-          const el = viewportRef.current?.querySelector<HTMLElement>(`[data-index="${clamped}"]`);
-          el?.focus();
-        });
-      }
+      // Focus by index, resolved once the row is rendered — see `pendingFocusRef`.
+      pendingFocusRef.current = clamped;
+      revealIndex(clamped);
     };
 
     // Alt+arrow reorders — the accessible alternative to dragging.
@@ -223,6 +254,24 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
     // Keep the roving tabindex in range when pages are removed.
     if (focusIndex > doc.pages.length - 1) setFocusIndex(Math.max(0, doc.pages.length - 1));
   }, [doc.pages.length, focusIndex]);
+
+  // Runs after every render: the first render where the requested row exists in the
+  // virtualisation window is the one that gets to focus it. No dependency array on
+  // purpose — the row can appear on any subsequent render.
+  useLayoutEffect(() => {
+    const want = pendingFocusRef.current;
+    if (want === null) return;
+    if (want > doc.pages.length - 1) {
+      pendingFocusRef.current = null;
+      return;
+    }
+    const el = viewportRef.current?.querySelector<HTMLElement>(`[data-index="${want}"]`);
+    if (el) {
+      pendingFocusRef.current = null;
+      // The scroll was already done by `revealIndex`; don't let focus fight it.
+      el.focus({ preventScroll: true });
+    }
+  });
 
   return (
     <div

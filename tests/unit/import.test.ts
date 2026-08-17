@@ -221,3 +221,76 @@ describe('DOC-02: the >100MB warning', () => {
     );
   });
 });
+
+describe('DOC-02: import progress and cancellation', () => {
+  it('reports incremental progress during a single file, not one 0 → 100 jump', async () => {
+    loadDocument = async () => okDocument(2);
+    const seen: number[] = [];
+    await importFiles([pdfFile('cjk.pdf', fixtureBytes('cjk.pdf'))], {
+      onProgress: fraction => {
+        if (fraction !== null) seen.push(fraction);
+      }
+    });
+
+    // The old behaviour: exactly one callback, at the very end.
+    expect(seen.length).toBeGreaterThan(2);
+    // Monotonic, bounded, and it actually starts near zero.
+    expect(seen[0]).toBeLessThan(0.2);
+    expect(seen[seen.length - 1]).toBe(1);
+    for (let i = 1; i < seen.length; i++) expect(seen[i]).toBeGreaterThanOrEqual(seen[i - 1]);
+  });
+
+  it('honours an abort signal mid-file and does not leak the pdf.js handle', async () => {
+    const controller = new AbortController();
+    // Abort while pdf.js is "parsing" — the checkpoint after it must throw.
+    loadDocument = async () => {
+      controller.abort();
+      return okDocument(1);
+    };
+
+    const outcome = await importFiles([pdfFile('cjk.pdf', fixtureBytes('cjk.pdf'))], {
+      signal: controller.signal
+    });
+
+    expect(outcome.imported).toEqual([]);
+    // Cancellation is the user's own request, not a per-file failure to report.
+    expect(outcome.failures).toEqual([]);
+    // The document opened before the abort is still closed.
+    expect(closed).toEqual(['stub-handle']);
+  });
+
+  it('an abort before the first file leaves the batch untouched', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const outcome = await importFiles([pdfFile('cjk.pdf', fixtureBytes('cjk.pdf'))], {
+      signal: controller.signal
+    });
+    expect(outcome.imported).toEqual([]);
+    expect(outcome.failures).toEqual([]);
+    expect(closed).toEqual([]);
+  });
+
+  it('stops at the aborted file instead of failing every remaining one', async () => {
+    const controller = new AbortController();
+    let loads = 0;
+    loadDocument = async () => {
+      loads += 1;
+      if (loads === 2) controller.abort();
+      return okDocument(1);
+    };
+
+    const outcome = await importFiles(
+      [
+        pdfFile('a.pdf', fixtureBytes('cjk.pdf')),
+        pdfFile('b.pdf', fixtureBytes('cjk.pdf')),
+        pdfFile('c.pdf', fixtureBytes('cjk.pdf'))
+      ],
+      { signal: controller.signal }
+    );
+
+    expect(outcome.imported.map(i => i.originalFile.name)).toEqual(['a.pdf']);
+    expect(outcome.failures).toEqual([]);
+    // c.pdf was never opened.
+    expect(loads).toBe(2);
+  });
+});

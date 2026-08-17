@@ -10,7 +10,7 @@
  */
 import { processWorker, renderWorker } from './workers';
 import { createJobHandle, type JobOptions } from './workers/protocol';
-import { corrupt, fromUnknown, unsupported } from './errors';
+import { cancelled, corrupt, fromUnknown, isCancellation, unsupported } from './errors';
 import { makePageRefs, registerSource, type PageRef, type SourceDocument } from './store';
 import { imageFileToJpeg, isSupportedImage } from './image';
 import { hasXfaMarker, XFA_MESSAGE } from './pdf/xfa';
@@ -67,7 +67,20 @@ export function isPdfFile(file: File): boolean {
  * can report per-file rather than failing the batch.
  */
 async function importPdf(file: File, options: JobOptions): Promise<ImportedFile> {
+  /**
+   * Cancellation point. Import is a handful of awaits, not a loop, so the honest
+   * granularity is "between stages": reading the file, parsing it with pdf.js,
+   * inspecting it with pdf-lib. Each stage also reports where it actually is, which
+   * is why this reports a fraction rather than jumping 0 → 100 at the end.
+   */
+  const stage = (fraction: number, label: string) => {
+    if (options.signal?.aborted) throw cancelled();
+    options.onProgress?.(fraction, label);
+  };
+
+  stage(0, `Reading ${file.name}`);
   const bytes = new Uint8Array(await file.arrayBuffer());
+  stage(0.15, `Checking ${file.name}`);
   if (bytes.length === 0) throw corrupt('The file is empty.');
   if (!looksLikePdf(bytes)) {
     throw corrupt('The file does not start with a PDF header, so it is not a PDF.');
@@ -92,13 +105,16 @@ async function importPdf(file: File, options: JobOptions): Promise<ImportedFile>
   // instances and leave the close a silent no-op on the wrong one.
   const client = renderWorker.pin();
   try {
+    stage(0.25, `Parsing ${file.name}`);
     const info = await client.lease(api => api.loadDocument(bytes));
     try {
       if (info.pageCount === 0) throw corrupt('The document contains no pages.');
       const isXfa = rawXfa || info.isXfa;
       if (isXfa) warnings.push(XFA_MESSAGE);
 
+      stage(0.7, `Inspecting ${file.name}`);
       const facts = await processWorker.lease(api => api.inspect(bytes));
+      stage(0.9, `Registering ${file.name}`);
       // An XFA document's AcroForm shadow fields are not fillable, so they are never
       // advertised as such — offering them is how the fill path got entered at all.
       if (facts.hasAcroForm && !isXfa) {
@@ -114,14 +130,15 @@ async function importPdf(file: File, options: JobOptions): Promise<ImportedFile>
         pageSizes: info.pageSizes
       };
       registerSource(source);
+      options.onProgress?.(1, `Imported ${file.name}`);
       // `makePageRefs` takes the same id the source was registered under; that
       // coupling is the whole point of doing this in one function.
       return { originalFile: file, source, pages: makePageRefs(id, info.pageCount), warnings };
     } finally {
       // Release the pdf.js parse; the workspace re-opens documents on demand through
-      // the render cache, which knows how to evict them.
+      // the render cache, which knows how to evict them. Runs on the cancellation
+      // path too — an aborted import must not leak a pdf.js document handle.
       await client.lease(api => api.closeDocument(info.handle));
-      void options;
     }
   } finally {
     client.release();
@@ -143,6 +160,9 @@ async function importImages(
   const jpegs: Uint8Array[] = [];
   const warnings: string[] = [];
   for (let i = 0; i < files.length; i++) {
+    // Per-image cancellation point: decoding a 120MB TIFF is the slow part, and the
+    // user must not have to wait for the whole set to finish before cancel takes.
+    if (options.signal?.aborted) throw cancelled();
     options.onProgress?.(i / files.length, `Decoding image ${i + 1} of ${files.length}`);
     // The size warning is about the source bytes, so it is raised per image: a
     // 120MB TIFF is as slow to decode as a 120MB PDF is to parse.
@@ -218,6 +238,9 @@ export async function importFiles(
         })
       );
     } catch (err) {
+      // A cancelled import is not a per-file failure: the user asked for it, and
+      // listing "Operation cancelled" against every remaining file is noise.
+      if (isCancellation(err)) break;
       failures.push({ name: file.name, message: fromUnknown(err).message });
     }
     done += 1;
@@ -238,7 +261,9 @@ export async function importFiles(
         )
       );
     } catch (err) {
-      failures.push({ name: `${images.length} image(s)`, message: fromUnknown(err).message });
+      if (!isCancellation(err)) {
+        failures.push({ name: `${images.length} image(s)`, message: fromUnknown(err).message });
+      }
     }
   }
 
