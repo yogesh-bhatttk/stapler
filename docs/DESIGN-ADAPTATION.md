@@ -15,7 +15,7 @@ canvas, and a parameters panel:
    panel + command palette + minimal chrome maps 1:1 onto tool rail → page canvas → tool
    options. Nothing needs translating.
 2. **Near-monochrome, single accent.** In a document editor the PDF page must be the only
-   thing carrying color. Linear confines its lavender `#5e6ad2` to focus rings and
+   thing carrying color. Linear confines its lavender `#5460c8` to focus rings and
    intentional CTAs — the exact discipline required. (Figma's multi-color language, by
    contrast, would compete with document content.)
 3. **It reads as expensive.** A free tool must beat the "free means janky" assumption in
@@ -72,7 +72,7 @@ full surface ramp.
 | `--ink-muted`         | `#3c4149` | `#d0d6e0`       |
 | `--ink-subtle`        | `#6f7076` | `#8a8f98`       |
 | `--ink-tertiary`      | `#8a8f98` | `#62666d`       |
-| `--primary`           | `#5e6ad2` | `#5e6ad2`       |
+| `--primary`           | `#5460c8` | `#5460c8`       |
 | `--primary-hover`     | `#4c56c0` | `#828fff`       |
 | `--primary-focus`     | `#5e69d1` | `#5e69d1`       |
 | `--on-primary`        | `#ffffff` | `#ffffff`       |

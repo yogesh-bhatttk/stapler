@@ -17,9 +17,11 @@ These are the product, not preferences. A `PostToolUse` hook
 1. **Zero network at runtime.** No `fetch`, no XHR, no WebSocket, no CDN import, no webfont,
    no telemetry, ever. The only exception is the OCR language model in `src/core/ocr/`,
    downloaded once on explicit user confirmation.
-2. **Zero permissions.** `manifest.json` ships with empty `permissions` and no
-   `host_permissions` or content scripts, so Chrome's install dialog shows no warning. Use
-   the File System Access API instead of the `downloads` permission.
+2. **Zero permissions in the Chrome/Edge manifest.** `manifest.json` ships with empty
+   `permissions` and no `host_permissions` or content scripts, so Chrome's install dialog
+   shows no warning. The Firefox build is the explicit exception: it adds `tabs` so the
+   extension can query tabs there. Use the File System Access API instead of the
+   `downloads` permission.
 3. **No raw colours.** Every colour comes from `var(--token)` defined in
    `src/ui/styles/tokens.css`. No hex, `rgb()`, or `hsl()` literals anywhere else.
 4. **Layer boundary.** Only `src/platform/` and `src/service-worker.ts` may reference `chrome.*`. 

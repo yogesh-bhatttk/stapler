@@ -112,6 +112,17 @@ describe('BAT-03: output names are indexed by input position', () => {
     expect(state.batchProgress.value.completed).toBe(2);
     expect(state.batchProgress.value.failed).toBe(1);
   });
+
+  it('does not append a second .pdf when the pattern already ends in .pdf', async () => {
+    const { inDir, outDir, written } = dirs([fileHandle('a.pdf')]);
+    state.inputDirHandle.value = inDir as never;
+    state.outputDirHandle.value = outDir as never;
+    state.outputPattern.value = 'doc-{basename}.pdf';
+
+    await runBatch();
+
+    expect(written.map(w => w.name)).toEqual(['doc-a.pdf']);
+  });
 });
 
 describe('BAT-01: a recipe replays its own snapshot', () => {

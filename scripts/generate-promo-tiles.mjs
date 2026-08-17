@@ -23,7 +23,7 @@ mkdirSync(outDir, { recursive: true });
 // Matches --primary / --canvas / --ink in src/ui/styles/tokens.css, duplicated
 // here deliberately — same precedent as generate-icons.mjs, which runs outside
 // the app's own token pipeline.
-const PRIMARY = '#5e6ad2';
+const PRIMARY = '#5460c8';
 const CANVAS_DARK = '#14151a';
 const INK = '#f7f8f8';
 const INK_MUTED = '#b4b7c5';

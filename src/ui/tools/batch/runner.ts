@@ -226,7 +226,7 @@ export async function runBatch(signal?: AbortSignal) {
 
         // Save output — safe because we verified inDir !== outDir above.
         // BAT-03: use the pre-resolved output name for this file.
-        const outName = resolvedNames[fileIndex] + '.pdf';
+        const outName = `${stripPdfExtension(resolvedNames[fileIndex])}.pdf`;
         const outHandle = await outDir.getFileHandle(outName, { create: true });
         const writable = await outHandle.createWritable();
         try {

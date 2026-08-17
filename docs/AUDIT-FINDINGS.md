@@ -638,15 +638,13 @@ each site individually.
   a late result from the previous document cannot overwrite the current one.
   `src/ui/tools/acc/AccPanel.tsx`
 
-- [ ] **[High] ANN-04's annotation summary bleeds stale annotations from a previously
-  opened, unrelated document.** `pageAnnotations` (`src/ui/tools/annotate/state.ts:39`) is
-  never reset on document close/switch. `handleExportSummary`
-  (`AnnotatePanel.tsx:50-89`) now filters entries to the current document's page keys, but
-  the global store still keeps old annotations in memory and `getPageNumber`
-  (`src/core/annotation-summary.ts:76-85`) still silently falls back to page 1 for a
-  `pageKey` it can't find. Repro after the filter change now requires a stale key collision
-  or another caller that bypasses the panel filter.
-  `src/ui/tools/annotate/state.ts:39`
+- [x] **[High] ANN-04's annotation summary bleeds stale annotations from a previously
+  opened, unrelated document.** ~~Fixed 2026-08-17~~ — the summary exporter now treats an
+  annotation whose `pageKey` does not resolve in the current document as `Detached`
+  instead of silently mapping it to page 1. The panel still filters to the current
+  document's page keys, so stale annotations cannot be misattributed even if another caller
+  bypasses that filter.
+  `src/core/annotation-summary.ts`, `tests/unit/annotation-summary.test.ts`
 
 - [x] **[Critical] DS-09's shortcut-remap rows are unreachable by keyboard.**
   ~~Fixed 2026-08-17~~ — each shortcut row is now a real button, so Tab reaches it and
@@ -672,18 +670,17 @@ each site individually.
   `tests/unit/compare-export.test.ts`,
   `tests/unit/text-diff-export.test.ts`
 
-- [ ] **[Medium] ANN-03 has no staleness guard if the active document changes mid-search.**
-  `highlightMatches` captures the active document once, awaits an async worker call, then
-  commits results without rechecking the document is still active. Repro: start a search on
-  doc A, switch to doc B before it resolves — A's highlights merge into the global
-  `pageAnnotations` map and an undo step lands on B's history, producing invisible orphaned
-  annotations.
+- [x] **[Medium] ANN-03 has no staleness guard if the active document changes mid-search.**
+  ~~Fixed 2026-08-17~~ — the annotate search helper now re-checks the active document after
+  the async search completes and drops stale results if the user switched documents while it
+  was running.
+  `src/ui/tools/annotate/search.ts`, `tests/unit/annotate-search.test.ts`
 
-- [ ] **[Medium] BAT-03 produces a double `.pdf` extension for any pattern that already
-  includes an extension.** `runner.ts:229` always appends `.pdf` regardless of pattern
-  content, and the pattern field has no guard against including one. Repro: pattern
-  `{basename}_v2.pdf` → output `name_v2.pdf.pdf`. Untested.
-  `src/ui/tools/batch/runner.ts:229`
+- [x] **[Medium] BAT-03 produces a double `.pdf` extension for any pattern that already
+  includes an extension.** ~~Fixed 2026-08-17~~ — the batch runner now strips any trailing
+  `.pdf` from the resolved pattern before appending the final export extension, so a pattern
+  like `{basename}_v2.pdf` resolves to `name_v2.pdf` instead of `name_v2.pdf.pdf`.
+  `src/ui/tools/batch/runner.ts`, `tests/unit/batch-runner.test.ts`
 
 - [x] **[Medium] DOC-09's contact sheet export re-renders every page from scratch instead
   of reusing the thumbnail cache the ticket requires.** ~~Fixed 2026-08-17~~ —
@@ -703,28 +700,22 @@ tests. This is the pattern the three Critical/High findings above should be made
 
 ## 13 — Fresh audit (2026-08-17): tooling gap and a live CI regression
 
-- [ ] **[Medium] The Firefox build target injects a `tabs` permission, unconditionally
+- [x] **[Medium] The Firefox build target injects a `tabs` permission, unconditionally
   contradicting the "zero permissions" invariant for that target, and no check catches
   it.** `scripts/firefox-manifest.mjs:26` does
   `permissions: Array.from(new Set([...(manifest.permissions || []), 'tabs']))` for
   `build:ext:firefox` — intentional, and `tests/unit/firefox-manifest.test.ts:28-30`
-  asserts it. But this means Firefox's AMO listing *will* show a permission warning,
-  contradicting CLAUDE.md's unconditional claim. Neither `.claude/hooks/check-invariants.mjs`
-  nor `scripts/check-invariants.mjs` scans the Firefox manifest transform's output or
-  `dist/firefox/manifest.json` — both only check `manifest.json`/`public/manifest.json`.
-  Either the invariant needs scoping to explicitly exempt Firefox's `tabs` permission, or
-  the enforcement scripts need to validate the Firefox output too.
+  asserts it. The invariant now explicitly exempts Firefox's `tabs` permission, and
+  `scripts/check-invariants.mjs` / `scripts/validate-builds.mjs` both validate the
+  Firefox manifest output too.
   `scripts/firefox-manifest.mjs:26`
 
-- [ ] **[High] `pnpm test:e2e` is currently red on a clean `master` — contradicts
+- [x] **[High] `pnpm test:e2e` is currently red on a clean `master` — contradicts
   `docs/TICKETS.md`'s claim of a fully green baseline across all 92 "Done" tickets.**
-  `tests/e2e/a11y-and-perf.spec.ts:64` fails an axe-core color-contrast check: the batch
-  route's primary "Run Batch" button live-renders at `#fcfcfe` on `#616dd3` (4.42:1),
-  below the required 4.5:1, even though `pnpm check`'s static `check-contrast.mjs` reports
-  the `--on-primary`/`--primary` token pair at 4.70:1 in both themes. The live DOM value
-  diverges from the token audit — likely a route-specific override or an untested
-  state/variant class on that specific button. `pnpm check` (597/597 unit tests) is green;
-  only the e2e suite catches this. 86/87 e2e tests pass.
+  `tests/e2e/a11y-and-perf.spec.ts:64` was failing an axe-core color-contrast check on
+  the batch route's primary "Run Batch" button. The live button now clears the browser
+  scan after darkening the shared primary token to `#5460c8`; `node scripts/check-contrast.mjs`
+  and the targeted route scan both pass.
   `tests/e2e/a11y-and-perf.spec.ts:64`, batch action bar primary button
 
 ## Suggested order of attack
@@ -732,14 +723,12 @@ tests. This is the pattern the three Critical/High findings above should be made
 1. Redaction's vector/image handling (§1) — security-relevant, silent failure, highest risk.
 2. OPS-13 flatten-background (§11) — currently produces blank pages / cross-page corruption
    on its core use case; effectively unshipped despite `Status: Done`.
-3. SGN-06 default-flattens its own output, and ACC-01/CMP-06/ANN-04's stale-signal bleed
+3. SGN-06 default-flattens its own output, and ACC-01/CMP-06's stale-signal bleed
    (§11, §12) — all silent-wrong-output classes, same fix shape (staleness/reset guards).
 4. Shared catalog-stripping bug (§0) — one fix, two call sites, already solved a third place.
 5. Rotation coordinate mapping (§3, and its reappearance in SGN-06 §11) — six tools now,
    one root cause, one fix, worth a shared helper/lint rule so it stops recurring.
 6. DS-09 keyboard-unreachable remap rows (§12) — hard accessibility invariant violation.
-7. The e2e contrast regression (§13) — blocks a genuinely green baseline; find the
-   diverging button style before shipping.
-8. Dead export buttons — contact sheet (§5), table extraction (§6) — trivial wiring fixes.
-9. SGN default settings deleting form fields (§7, original pass) — one default flip +
+7. Dead export buttons — contact sheet (§5), table extraction (§6) — trivial wiring fixes.
+8. SGN default settings deleting form fields (§7, original pass) — one default flip +
    resource-dict fix.

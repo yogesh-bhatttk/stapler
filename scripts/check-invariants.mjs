@@ -113,6 +113,20 @@ for (const file of files) {
   }
 }
 
+const firefoxManifestPath = path.join(root, 'dist', 'firefox', 'manifest.json');
+if (statSync(firefoxManifestPath, { throwIfNoEntry: false })) {
+  try {
+    const firefoxManifest = JSON.parse(readFileSync(firefoxManifestPath, 'utf8'));
+    if (!Array.isArray(firefoxManifest.permissions) || !firefoxManifest.permissions.includes('tabs')) {
+      console.error('❌ dist/firefox/manifest.json is missing the Firefox tabs permission.');
+      process.exit(1);
+    }
+  } catch {
+    console.error('❌ dist/firefox/manifest.json is not valid JSON.');
+    process.exit(1);
+  }
+}
+
 if (findings.length > 0) {
   console.error(`❌ Invariant check failed with ${findings.length} findings:\n`);
   findings.forEach(f => console.error(`  • ${f}`));

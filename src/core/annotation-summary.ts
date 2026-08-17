@@ -73,7 +73,7 @@ function getTypeLabel(type?: string): string {
   }
 }
 
-function getPageNumber(ann: SummaryAnnotation, docPages?: { key: string }[]): number {
+function getPageNumber(ann: SummaryAnnotation, docPages?: { key: string }[]): number | null {
   if (ann.pageIndex !== undefined) {
     return ann.pageIndex + 1;
   }
@@ -81,7 +81,16 @@ function getPageNumber(ann: SummaryAnnotation, docPages?: { key: string }[]): nu
     const idx = docPages.findIndex(p => p.key === ann.pageKey);
     if (idx >= 0) return idx + 1;
   }
-  return 1;
+  return null;
+}
+
+function sortPageNumber(ann: SummaryAnnotation, docPages?: { key: string }[]): number {
+  return getPageNumber(ann, docPages) ?? Number.POSITIVE_INFINITY;
+}
+
+function formatPageNumber(ann: SummaryAnnotation, docPages?: { key: string }[]): string {
+  const pageNum = getPageNumber(ann, docPages);
+  return pageNum === null ? 'Detached' : String(pageNum);
 }
 
 function getPositionString(ann: SummaryAnnotation): string {
@@ -121,8 +130,8 @@ export function exportAnnotationSummaryText(
   ];
 
   const sorted = [...annotations].sort((a, b) => {
-    const pA = getPageNumber(a, pages);
-    const pB = getPageNumber(b, pages);
+    const pA = sortPageNumber(a, pages);
+    const pB = sortPageNumber(b, pages);
     if (pA !== pB) return pA - pB;
     const yA = a.rect?.y ?? a.y ?? a.points?.[0]?.y ?? 0;
     const yB = b.rect?.y ?? b.y ?? b.points?.[0]?.y ?? 0;
@@ -130,7 +139,7 @@ export function exportAnnotationSummaryText(
   });
 
   sorted.forEach((ann, i) => {
-    const pageNum = getPageNumber(ann, pages);
+    const pageNum = formatPageNumber(ann, pages);
     const typeLabel = getTypeLabel(ann.type);
     const posStr = getPositionString(ann);
     const author = ann.author || 'Anonymous';
@@ -171,8 +180,8 @@ export async function exportAnnotationSummary(
   const pages = doc.pages || [];
 
   const sorted = [...annotations].sort((a, b) => {
-    const pA = getPageNumber(a, pages);
-    const pB = getPageNumber(b, pages);
+    const pA = sortPageNumber(a, pages);
+    const pB = sortPageNumber(b, pages);
     if (pA !== pB) return pA - pB;
     const yA = a.rect?.y ?? a.y ?? a.points?.[0]?.y ?? 0;
     const yB = b.rect?.y ?? b.y ?? b.points?.[0]?.y ?? 0;
@@ -221,7 +230,7 @@ export async function exportAnnotationSummary(
   } else {
     for (let i = 0; i < sorted.length; i++) {
       const ann = sorted[i];
-      const pageNum = getPageNumber(ann, pages);
+      const pageNum = formatPageNumber(ann, pages);
       const typeLabel = getTypeLabel(ann.type);
       const posStr = getPositionString(ann);
       const author = ann.author || 'Anonymous';

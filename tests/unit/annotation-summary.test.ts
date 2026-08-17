@@ -128,4 +128,19 @@ describe('ANN-04: Export annotation summary', () => {
     expect(textSummary).toContain('Page: 4');
     expect(textSummary).toContain('Note on page 4');
   });
+
+  it('does not silently map an unknown page key to page 1', async () => {
+    const annotations: SummaryAnnotation[] = [
+      {
+        type: 'sticky',
+        text: 'Detached note',
+        pageKey: 'stale-key',
+        rect: { x: 0.1, y: 0.1, width: 0.2, height: 0.2 }
+      }
+    ];
+
+    const textSummary = exportAnnotationSummaryText(dummyDoc, annotations);
+    expect(textSummary).toContain('Page: Detached');
+    expect(textSummary).not.toContain('Page: 1');
+  });
 });
