@@ -48,6 +48,12 @@ describe('shortcuts module (DS-09)', () => {
     expect(result.conflict?.id).toBe('palette');
   });
 
+  it('treats Delete and Backspace as the same shortcut for conflict detection', () => {
+    const result = setShortcutOverride('rotatePage', { key: 'backspace' });
+    expect(result.success).toBe(false);
+    expect(result.conflict?.id).toBe('deletePage');
+  });
+
   it('rebinds shortcut successfully when no conflict exists', () => {
     // Rebind 'shortcuts' to 'h'
     const result = setShortcutOverride('shortcuts', { key: 'h' });

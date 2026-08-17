@@ -108,7 +108,11 @@ export function CompressPanel() {
     // presence is what distinguishes a finished run from a pre-flight analysis.
     // Without one there is no compressed file, and the report must not print a
     // projection under "Compressed Size:" / "Saved:" as though there were.
-    const lastResult = lastCompressionResult.value;
+    const remembered = lastCompressionResult.value;
+    // Compression results are measurements of one particular byte sequence;
+    // never attach them to a different document merely because its panel is now
+    // open. In that case fall back to this document's clearly-labelled estimate.
+    const lastResult = remembered?.documentId === doc.id ? remembered : null;
     const plan = lastResult?.plan ?? report.plan;
     const stats: CompressionResultStats = lastResult
       ? {

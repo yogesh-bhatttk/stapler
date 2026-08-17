@@ -26,7 +26,7 @@ export function ContactSheetPanel() {
   const handleExport = () =>
     run({ label: 'Exporting contact sheet', scope: 'contact-sheet' }, async job => {
       const bytes = await currentDocumentBytes(job);
-      const outBytes = await exportContactSheet(bytes, cols, job);
+      const outBytes = await exportContactSheet(doc.id, bytes, cols, job);
       const stem = doc.name.replace(/\.[^.]+$/, '');
       await platform.saveFileAs(outBytes, `${stem}-contact-sheet.pdf`);
     });

@@ -9,11 +9,16 @@
 import { useTranslation } from '../../core/i18n';
 import { Checkbox } from '../components/Field';
 import { panelStyles } from '../shell/OptionsPanel';
-import { flattenOnExport } from './state';
+import { annotateFlattenOnExport, signFlattenOnExport } from './state';
 
-export function FlattenOption() {
+export interface FlattenOptionProps {
+  mode: 'sign' | 'annotate';
+}
+
+export function FlattenOption({ mode }: FlattenOptionProps) {
   const t = useTranslation();
-  const on = flattenOnExport.value;
+  const setting = mode === 'sign' ? signFlattenOnExport : annotateFlattenOnExport;
+  const on = setting.value;
 
   return (
     <div className={panelStyles.section}>
@@ -21,7 +26,7 @@ export function FlattenOption() {
       <Checkbox
         label={t('Flatten form fields and annotations on export')}
         checked={on}
-        onChange={value => (flattenOnExport.value = value)}
+        onChange={value => (setting.value = value)}
       />
       <p className={panelStyles.description}>
         {on

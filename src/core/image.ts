@@ -34,6 +34,19 @@ export function isSupportedImage(file: File): boolean {
  * white matte is composited first — a transparent PNG placed on a PDF page would
  * otherwise show black where the page shows through.
  */
+export async function bitmapToJpeg(bitmap: ImageBitmap, quality = 0.9): Promise<Uint8Array> {
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw corrupt('A 2D canvas context was unavailable for image conversion.');
+
+  ctx.fillStyle = DOC_PAGE_WHITE;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(bitmap, 0, 0);
+
+  const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality });
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
 export async function imageFileToJpeg(file: File, quality = 0.9): Promise<Uint8Array> {
   let sourceBlob: Blob = file;
 
@@ -86,16 +99,7 @@ export async function imageFileToJpeg(file: File, quality = 0.9): Promise<Uint8A
   }
 
   try {
-    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw corrupt('A 2D canvas context was unavailable for image conversion.');
-
-    ctx.fillStyle = DOC_PAGE_WHITE;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(bitmap, 0, 0);
-
-    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality });
-    return new Uint8Array(await blob.arrayBuffer());
+    return await bitmapToJpeg(bitmap, quality);
   } finally {
     bitmap.close();
   }

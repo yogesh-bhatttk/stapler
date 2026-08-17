@@ -42,6 +42,8 @@ import {
   type Annotation,
   type PageRef
 } from './store';
+import { bitmapToJpeg } from './image';
+import { bitmapKey, thumbnailCache } from './render-cache';
 import { getSignature } from './signatures';
 import {
   watermarkSettings,
@@ -1323,11 +1325,12 @@ export interface ImagesToPdfOptions {
  * DOC-09 — contact sheet export.
  *
  * Renders every page in `bytes` at thumbnail scale (150 dpi) and tiles them
- * into a grid of `cols` columns on A4 portrait pages.  Reuses the render
- * worker's existing `pageToImageBytes` path so the bitmaps go through
- * exactly the same pipeline as the thumbnail cache.
+ * into a grid of `cols` columns on A4 portrait pages.  Reuses any thumbnail
+ * bitmaps already in memory, then falls back to the shared render worker and
+ * seeds the same cache the thumbnail UI uses.
  */
 export async function exportContactSheet(
+  sourceId: string,
   bytes: Uint8Array,
   cols: number,
   options?: JobOptions
@@ -1339,10 +1342,30 @@ export async function exportContactSheet(
   await renderWorker.lease(async api => {
     const { handle, pageCount } = await api.loadDocument(bytes);
     try {
+      const scale = 150 / 72;
       for (let i = 0; i < pageCount; i++) {
         options?.onProgress?.(i / pageCount, `Rendering page ${i + 1} of ${pageCount}`);
-        const jpeg = await api.pageToImageBytes(handle, i, 'jpeg', 150, 0.8);
-        jpegPages.push(jpeg);
+        const key = bitmapKey(sourceId, i, scale);
+        const cached = thumbnailCache.get(key);
+        if (cached) {
+          thumbnailCache.retain(key);
+          try {
+            jpegPages.push(await bitmapToJpeg(cached, 0.8));
+          } finally {
+            thumbnailCache.release(key);
+          }
+          continue;
+        }
+
+        const bitmap = await api.renderPage(handle, i, scale);
+        try {
+          const jpeg = await bitmapToJpeg(bitmap, 0.8);
+          thumbnailCache.set(key, bitmap);
+          jpegPages.push(jpeg);
+        } catch (err) {
+          bitmap.close();
+          throw err;
+        }
       }
     } finally {
       await api.closeDocument(handle).catch(() => {});

@@ -1,7 +1,7 @@
 import { activeDoc } from '../../../core/store';
 import { panelStyles } from '../../shell/OptionsPanel';
 import { useTranslation } from '../../../core/i18n';
-import { altTextMap, setAltText } from './state';
+import { altTextMap, clearAltText, setAltText } from './state';
 import { useJob } from '../../useJob';
 import { useEffect, useState } from 'preact/hooks';
 import { findImagesForAltText, currentDocumentBytes } from '../../../core/operations';
@@ -16,7 +16,10 @@ export function AccPanel() {
   const { run } = useJob();
 
   useEffect(() => {
+    clearAltText();
+    setImages([]);
     if (!doc) return;
+    let cancelled = false;
     let activeUrls: string[] = [];
     run({ label: 'Scanning for images...', scope: 'acc' }, async (job: JobOptions) => {
       const bytes = await currentDocumentBytes({ ...job, signal: job.signal }, true);
@@ -24,21 +27,28 @@ export function AccPanel() {
         findImagesForAltText(bytes, { ...job, signal: job.signal }),
         // Alt-text already tagged in the document (by us, on a prior export, or by
         // another tool) — read it back so re-opening a tagged file doesn't show
-        // every box blank. Keyed identically to `img.pageIndex:img.objectNumber`
-        // below, so no translation is needed.
+        // every box blank. Re-key the recovered values by page + image name, the
+        // stable label that survives a compose/rebuild cycle.
         readAltText(bytes)
       ]);
-      if (job.signal?.aborted) return;
-      altTextMap.value = new Map(Object.entries(existingAltText));
+      if (job.signal?.aborted || cancelled) return;
+      const nextAltText = new Map<string, string>();
+      for (const img of result) {
+        const existing = existingAltText[`${img.pageIndex}:${img.objectNumber}`];
+        if (existing) nextAltText.set(`${img.pageIndex}:${img.name}`, existing);
+      }
+      altTextMap.value = nextAltText;
       const withUrls = result.map(img => {
         const url = URL.createObjectURL(new Blob([img.bytes], { type: `image/${img.ext}` }));
         activeUrls.push(url);
         return { ...img, url };
       });
+      if (cancelled) return;
       setImages(withUrls);
     });
 
     return () => {
+      cancelled = true;
       // Clean up object URLs when unmounting or doc changes
       activeUrls.forEach(url => URL.revokeObjectURL(url));
       activeUrls = [];
@@ -60,7 +70,7 @@ export function AccPanel() {
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
             {images.map(img => {
-              const key = `${img.pageIndex}:${img.objectNumber}`;
+              const key = `${img.pageIndex}:${img.name}`;
               return (
                 <div key={key} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                   <img

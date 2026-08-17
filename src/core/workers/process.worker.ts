@@ -434,7 +434,7 @@ export interface ProcessJob {
     pageIndex: number | 'all',
     hexColor: string,
     job?: JobHandle
-  ): Promise<Uint8Array>;
+  ): Promise<{ bytes: Uint8Array; changed: boolean }>;
   compose(
     pages: PageSource[],
     sources: Record<string, Uint8Array>,
@@ -2202,39 +2202,60 @@ async function composePages(
       const pageIndex = pages.findIndex(p => p.key === fieldSpec.pageKey);
       if (pageIndex < 0 || pageIndex >= outDoc.getPageCount()) continue;
       const page = outDoc.getPage(pageIndex);
-      const { width: pWidth, height: pHeight } = page.getSize();
-
-      const pdfX = fieldSpec.x * pWidth;
-      const pdfY = (1 - (fieldSpec.y + fieldSpec.height)) * pHeight;
-      const pdfW = fieldSpec.width * pWidth;
-      const pdfH = fieldSpec.height * pHeight;
+      const ref = pages[pageIndex];
+      const crop = page.getCropBox();
+      // Field annotations come from the same top-left, displayed overlay as
+      // stamps. Widget rectangles themselves stay axis-aligned in raw PDF
+      // space, so map both display corners and take their extents.
+      const fieldFrame = displayFrame(
+        crop.width,
+        crop.height,
+        normalizeRotation(page.getRotation().angle - ref.rotation),
+        crop.x,
+        crop.y
+      );
+      const topLeft = displayPointToPage(
+        fieldFrame,
+        fieldSpec.x * fieldFrame.displayWidth,
+        fieldSpec.y * fieldFrame.displayHeight
+      );
+      const bottomRight = displayPointToPage(
+        fieldFrame,
+        (fieldSpec.x + fieldSpec.width) * fieldFrame.displayWidth,
+        (fieldSpec.y + fieldSpec.height) * fieldFrame.displayHeight
+      );
+      const pdfX = Math.min(topLeft.x, bottomRight.x);
+      const pdfY = Math.min(topLeft.y, bottomRight.y);
+      const pdfW = Math.abs(bottomRight.x - topLeft.x);
+      const pdfH = Math.abs(bottomRight.y - topLeft.y);
 
       const name = fieldSpec.name || 'field';
       const type = fieldSpec.type.toLowerCase();
+      const existing = form.getFields().find(field => field.getName() === name);
 
       if (type === 'text' || type === 'textfield' || type === 'form-text') {
-        let textField: PDFTextField;
-        try {
-          textField = form.getTextField(name);
-        } catch {
-          textField = form.createTextField(name);
+        if (existing && !(existing instanceof PDFTextField)) {
+          throw unsupported(
+            `Cannot create text field "${name}": that name is already used by a different field type.`
+          );
         }
+        const textField = existing ?? form.createTextField(name);
         textField.addToPage(page, { x: pdfX, y: pdfY, width: pdfW, height: pdfH });
       } else if (type === 'checkbox' || type === 'form-checkbox') {
-        let checkBox: PDFCheckBox;
-        try {
-          checkBox = form.getCheckBox(name);
-        } catch {
-          checkBox = form.createCheckBox(name);
+        if (existing && !(existing instanceof PDFCheckBox)) {
+          throw unsupported(
+            `Cannot create checkbox "${name}": that name is already used by a different field type.`
+          );
         }
+        const checkBox = existing ?? form.createCheckBox(name);
         checkBox.addToPage(page, { x: pdfX, y: pdfY, width: pdfW, height: pdfH });
       } else if (type === 'radio' || type === 'radiogroup' || type === 'form-radio') {
-        let radioGroup: PDFRadioGroup;
-        try {
-          radioGroup = form.getRadioGroup(name);
-        } catch {
-          radioGroup = form.createRadioGroup(name);
+        if (existing && !(existing instanceof PDFRadioGroup)) {
+          throw unsupported(
+            `Cannot create radio group "${name}": that name is already used by a different field type.`
+          );
         }
+        const radioGroup = existing ?? form.createRadioGroup(name);
         const exportValue = fieldSpec.exportValue || 'Choice';
         radioGroup.addOptionToPage(exportValue, page, {
           x: pdfX,
@@ -3437,7 +3458,7 @@ const api: ProcessJob = {
       }
     }
     await checkpoint(job, 0.9, 'Writing file');
-    return transfer(await pseudoLinearize(doc).save({ useObjectStreams: true }));
+    return transfer(await pseudoLinearize(doc).save({ useObjectStreams: false }));
   },
 
   async flattenBackground(
@@ -3445,8 +3466,10 @@ const api: ProcessJob = {
     pageIndex: number | 'all',
     hexColor: string,
     job?: JobHandle
-  ): Promise<Uint8Array> {
-    const doc = await load(bytes, true);
+  ): Promise<{ bytes: Uint8Array; changed: boolean }> {
+    // This operation rewrites content streams, so encrypted input must follow
+    // the same refuse-closed rule as every other writer.
+    const doc = await load(bytes);
     const pages = doc.getPages();
 
     // Parse hexColor (e.g., "#ffffff")
@@ -3456,6 +3479,7 @@ const api: ProcessJob = {
 
     const indices = pageIndex === 'all' ? pages.map((_, i) => i) : [pageIndex as number];
     let i = 0;
+    let changed = false;
     for (const idx of indices) {
       if (job)
         await checkpoint(
@@ -3465,7 +3489,8 @@ const api: ProcessJob = {
         );
       i++;
       const page = pages[idx];
-      const { width, height } = page.getSize();
+      const cropBox = page.getCropBox();
+      const { x: cropX, y: cropY, width, height } = cropBox;
       const pageArea = width * height;
       const thresholdArea = pageArea * 0.95;
 
@@ -3498,7 +3523,6 @@ const api: ProcessJob = {
       const state = new GraphicsState();
 
       let backgroundRemoved = false;
-      let removedXObjectName = '';
       const filtered: import('../pdf/interpreter').Statement[] = [];
 
       // Determine what a Path Fill looks like. A path is constructed with m, l, c, v, y, re, h.
@@ -3558,28 +3582,7 @@ const api: ProcessJob = {
         // ignoring c, v, y for exactness since rect is most common for background
 
         if (!backgroundRemoved) {
-          if (op === 'Do') {
-            let xObjectName = '';
-            if (
-              stmt.operands.length > 0 &&
-              stmt.operands[stmt.operands.length - 1].type === 'name'
-            ) {
-              xObjectName = String.fromCharCode(
-                ...stmt.operands[stmt.operands.length - 1].bytes
-              ).slice(1);
-            }
-
-            // Assume unit square for Do (like in filterContentStream)
-            const p1 = transformPoint(state.ctm, 0, 0);
-            const p2 = transformPoint(state.ctm, 1, 1);
-            const area = Math.abs(p2.x - p1.x) * Math.abs(p2.y - p1.y);
-
-            if (area >= thresholdArea) {
-              backgroundRemoved = true;
-              if (xObjectName) removedXObjectName = xObjectName;
-              continue; // Drop this statement
-            }
-          } else if (
+          if (
             op === 'f' ||
             op === 'F' ||
             op === 'f*' ||
@@ -3622,17 +3625,16 @@ const api: ProcessJob = {
         filtered.push(stmt);
       }
 
-      if (removedXObjectName) {
-        const xobjDict = page.node.Resources()?.lookupMaybe(PDFName.of('XObject'), PDFDict);
-        if (xobjDict instanceof PDFDict) {
-          xobjDict.delete(PDFName.of(removedXObjectName));
-        }
-      }
+      // An image that covers the page is normally the scan itself. Removing it
+      // produces a blank page, and deleting its resource can also mutate an
+      // inherited /Resources dictionary shared by sibling pages. OPS-13 is a
+      // vector-background operation: only a large painted path is eligible.
+      if (!backgroundRemoved) continue;
 
       const injectedStream = `
 q
 ${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} rg
-0 0 ${width} ${height} re
+${cropX} ${cropY} ${width} ${height} re
 f
 Q
 `;
@@ -3646,9 +3648,17 @@ Q
       const newStream = doc.context.flateStream(combined);
       const newStreamRef = doc.context.register(newStream);
       leaf.set(PDFName.of('Contents'), newStreamRef);
+      changed = true;
     }
 
-    return await doc.save();
+    // Avoid a needless round-trip (and a misleading "cleaned" outcome) when
+    // detection found no vector background. The size guard is the same promise
+    // made by compression-adjacent operations: flattening must not grow a file.
+    if (!changed) return { bytes, changed: false };
+    const output = await pseudoLinearize(doc).save({ useObjectStreams: false });
+    return output.byteLength < bytes.byteLength
+      ? { bytes: output, changed: true }
+      : { bytes, changed: false };
   },
   async flattenDocument(bytes, job) {
     // Same order of refusals as `fillFormFields`: XFA on the raw bytes first,
@@ -3691,7 +3701,7 @@ Q
     const { baked, dropped } = flattenAnnotations(doc);
     await checkpoint(job, 0.8, 'Writing file');
     return {
-      bytes: transfer(await pseudoLinearize(doc).save({ useObjectStreams: true })),
+      bytes: transfer(await pseudoLinearize(doc).save({ useObjectStreams: false })),
       fields,
       annotationsBaked: baked,
       annotationsDropped: dropped
@@ -3727,7 +3737,7 @@ Q
       extras
     );
     await checkpoint(job, 0.95, 'Writing file');
-    return transfer(await pseudoLinearize(outDoc).save({ useObjectStreams: true }));
+    return transfer(await pseudoLinearize(outDoc).save({ useObjectStreams: false }));
   },
 
   async readOutline(bytes) {
@@ -3796,7 +3806,7 @@ Q
         sliceExtras
       );
       return {
-        bytes: transfer(await pseudoLinearize(outDoc).save({ useObjectStreams: true })),
+        bytes: transfer(await pseudoLinearize(outDoc).save({ useObjectStreams: false })),
         isZip: false,
         fileCount: 1
       };
@@ -3830,7 +3840,7 @@ Q
           extras?.fileNames?.[i],
           `${baseName}-${String(i + 1).padStart(pad, '0')}`
         )
-      ] = await pseudoLinearize(outDoc).save({ useObjectStreams: true });
+      ] = await pseudoLinearize(outDoc).save({ useObjectStreams: false });
     }
 
     await checkpoint(job, 0.95, 'Compressing archive');
@@ -4166,7 +4176,7 @@ Q
 
     reattachAcroForm(out, [source]);
     await checkpoint(job, 0.95, 'Writing file');
-    const rebuilt = await pseudoLinearize(out).save({ useObjectStreams: true });
+    const rebuilt = await pseudoLinearize(out).save({ useObjectStreams: false });
 
     // CMP-04: a "compressed" file that is not smaller is not saved. Returning the
     // original bytes is the only honest outcome.
@@ -4252,7 +4262,7 @@ Q
 
       page.drawImage(embedded, { x, y, width: drawWidth, height: drawHeight });
     }
-    return transfer(await pseudoLinearize(doc).save({ useObjectStreams: true }));
+    return transfer(await pseudoLinearize(doc).save({ useObjectStreams: false }));
   },
 
   /**
@@ -4668,7 +4678,7 @@ Q
 
     reattachAcroForm(out, [doc]);
     await checkpoint(job, 0.95, 'Writing file');
-    return transfer(await pseudoLinearize(out).save({ useObjectStreams: true }));
+    return transfer(await pseudoLinearize(out).save({ useObjectStreams: false }));
   },
 
   async planImageRedactions(bytes, regions) {
@@ -4805,7 +4815,7 @@ Q
     // text was supposed to be gone.
     sweepUnreachableObjects(out);
     await checkpoint(job, 0.95, 'Writing file');
-    return transfer(await pseudoLinearize(out).save({ useObjectStreams: true }));
+    return transfer(await pseudoLinearize(out).save({ useObjectStreams: false }));
   },
 
   async collectOffPageText(bytes) {
@@ -4872,7 +4882,7 @@ Q
 
     await checkpoint(job, 0.95, 'Saving');
     return {
-      bytes: transfer(await pseudoLinearize(doc).save({ useObjectStreams: true })),
+      bytes: transfer(await pseudoLinearize(doc).save({ useObjectStreams: false })),
       ...report
     };
   },

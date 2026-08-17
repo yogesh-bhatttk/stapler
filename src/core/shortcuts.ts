@@ -21,6 +21,11 @@ export interface ShortcutDefinition {
   defaultBinding: ShortcutBinding;
 }
 
+function normalizedShortcutKey(key: string): string {
+  const normalized = key.toLowerCase();
+  return normalized === 'backspace' ? 'delete' : normalized;
+}
+
 export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
   {
     id: 'palette',
@@ -98,13 +103,10 @@ export function getEffectiveBinding(id: string): ShortcutBinding {
 export function eventMatchesShortcut(event: KeyboardEvent, binding: ShortcutBinding): boolean {
   if (!binding || !binding.key) return false;
   const mod = event.metaKey || event.ctrlKey;
-  const eventKey = event.key.toLowerCase();
-  const bindingKey = binding.key.toLowerCase();
+  const eventKey = normalizedShortcutKey(event.key);
+  const bindingKey = normalizedShortcutKey(binding.key);
 
-  const keyMatches =
-    eventKey === bindingKey ||
-    (bindingKey === 'delete' && (eventKey === 'delete' || eventKey === 'backspace')) ||
-    (bindingKey === 'backspace' && (eventKey === 'delete' || eventKey === 'backspace'));
+  const keyMatches = eventKey === bindingKey;
 
   if (!keyMatches) return false;
   if (Boolean(binding.mod) !== Boolean(mod)) return false;
@@ -116,7 +118,7 @@ export function eventMatchesShortcut(event: KeyboardEvent, binding: ShortcutBind
 
 export function bindingsEqual(a: ShortcutBinding, b: ShortcutBinding): boolean {
   return (
-    a.key.toLowerCase() === b.key.toLowerCase() &&
+    normalizedShortcutKey(a.key) === normalizedShortcutKey(b.key) &&
     Boolean(a.mod) === Boolean(b.mod) &&
     Boolean(a.shift) === Boolean(b.shift) &&
     Boolean(a.alt) === Boolean(b.alt)

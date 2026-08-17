@@ -120,6 +120,17 @@ describe('accessibility', () => {
     expect(recovered[key]).toBe('Survives a save');
   });
 
+  it('also accepts the stable image-name key used by the alt-text editor', async () => {
+    const { doc, imageRef } = await makeDocWithImage();
+    await applyAltTextToDoc(doc, { '0:Im1': 'Stable key survives compose' });
+
+    const bytes = await doc.save({ useObjectStreams: false });
+    const recovered = await readAltText(bytes);
+
+    expect(recovered[`0:${imageRef.objectNumber}`]).toBe('Stable key survives compose');
+    expect(recovered['0:Im1']).toBe('Stable key survives compose');
+  });
+
   it('reads nothing back from a document with no structure tree', async () => {
     const doc = await PDFDocument.create();
     doc.addPage([100, 100]);

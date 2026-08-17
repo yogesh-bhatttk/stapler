@@ -28,7 +28,7 @@ function encodeString(str: string): Uint8Array {
 
 export async function applyAltTextToDoc(
   doc: PDFDocument,
-  altTexts: Record<string, string> // key is `${pageIndex}:${objectNumber}`
+  altTexts: Record<string, string> // key is `${pageIndex}:${objectNumber}` or `${pageIndex}:${xObjectName}`
 ): Promise<void> {
   const pages = doc.getPages();
 
@@ -89,12 +89,17 @@ export async function applyAltTextToDoc(
     const resources = page.node.Resources();
     const xobjects = resources?.lookupMaybe(PDFName.of('XObject'), PDFDict);
 
-    // We need to resolve names to object numbers to check against altTexts
+    // We resolve the drawn image name to an object number, but accept either the
+    // stable `${pageIndex}:${xObjectName}` editor key or the legacy object-number
+    // form when looking up the text to attach.
     const nameToObjectNum = new Map<string, number>();
+    const objectNumToName = new Map<number, string>();
     if (xobjects) {
       for (const [key, value] of xobjects.entries()) {
         if (value instanceof PDFRef) {
-          nameToObjectNum.set(key.asString().replace(/^\//, ''), value.objectNumber);
+          const name = key.asString().replace(/^\//, '');
+          nameToObjectNum.set(name, value.objectNumber);
+          objectNumToName.set(value.objectNumber, name);
         }
       }
     }
@@ -158,7 +163,7 @@ export async function applyAltTextToDoc(
 
         if (objNum !== undefined) {
           const key = `${pageIndex}:${objNum}`;
-          const altText = altTexts[key];
+          const altText = altTexts[key] ?? altTexts[`${pageIndex}:${xobjName}`];
 
           if (altText) {
             // Wrap in BDC ... EMC
@@ -454,10 +459,13 @@ export async function readAltTextFromDoc(doc: PDFDocument): Promise<Record<strin
     const resources = page.node.Resources();
     const xobjects = resources?.lookupMaybe(PDFName.of('XObject'), PDFDict);
     const nameToObjectNum = new Map<string, number>();
+    const objectNumToName = new Map<number, string>();
     if (xobjects) {
       for (const [key, value] of xobjects.entries()) {
         if (value instanceof PDFRef) {
-          nameToObjectNum.set(key.asString().replace(/^\//, ''), value.objectNumber);
+          const name = key.asString().replace(/^\//, '');
+          nameToObjectNum.set(name, value.objectNumber);
+          objectNumToName.set(value.objectNumber, name);
         }
       }
     }
@@ -473,7 +481,9 @@ export async function readAltTextFromDoc(doc: PDFDocument): Promise<Record<strin
       for (const mcid of element.mcids) {
         const objNum = byMcid.get(mcid);
         if (objNum === undefined) continue;
+        const name = objectNumToName.get(objNum);
         result[`${pageIndex}:${objNum}`] = element.alt;
+        if (name) result[`${pageIndex}:${name}`] = element.alt;
       }
     }
   }

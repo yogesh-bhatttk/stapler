@@ -47,6 +47,19 @@ test.describe('first run', () => {
     await page.keyboard.press('Escape');
     await expect(sheet).toBeHidden();
   });
+
+  test('shortcut rows are keyboard operable', async ({ page }) => {
+    await openApp(page);
+    await gotoTool(page, 'shortcuts');
+
+    const row = page.getByTestId('shortcut-row-palette');
+    await expect(row).toHaveRole('button');
+    await row.focus();
+    await page.keyboard.press('Enter');
+    await expect(row).toContainText('Press key...');
+    await page.keyboard.press('Escape');
+    await expect(row).toContainText('Ctrl K');
+  });
 });
 
 test.describe('accessibility', () => {

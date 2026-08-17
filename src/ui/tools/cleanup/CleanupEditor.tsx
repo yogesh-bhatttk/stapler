@@ -226,7 +226,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
       let bytes: Uint8Array;
       let resultPageIndex: number;
       if (settings.flattenBackground) {
-        bytes = await processWorker.lease(api =>
+        const flattened = await processWorker.lease(api =>
           api.flattenBackground(
             source.bytes,
             page.sourceIndex,
@@ -234,6 +234,11 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
             createJobHandle(job)
           )
         );
+        if (!flattened.changed) {
+          notify('info', 'No vector background was found to flatten.');
+          return;
+        }
+        bytes = flattened.bytes;
         resultPageIndex = page.sourceIndex;
       } else {
         const jpeg = await encodeJpeg(after);
@@ -307,7 +312,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         const firstSource = sources.value[firstSourceId];
         if (!firstSource) throw new Error('Source not found');
         job.onProgress?.(0.05, 'Flattening the background');
-        bytes = await processWorker.lease(api =>
+        const flattened = await processWorker.lease(api =>
           api.flattenBackground(
             firstSource.bytes,
             'all',
@@ -315,6 +320,11 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
             createJobHandle(job)
           )
         );
+        if (!flattened.changed) {
+          notify('info', 'No vector background was found to flatten.');
+          return;
+        }
+        bytes = flattened.bytes;
       } else {
         const jpegs: Uint8Array[] = [];
         const originalSizes: { width: number; height: number }[] = [];

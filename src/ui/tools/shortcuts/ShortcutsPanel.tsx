@@ -99,12 +99,14 @@ export function ShortcutsPanel() {
             const isEditing = editingId === def.id;
 
             return (
-              <div
+              <button
                 key={def.id}
+                type="button"
                 onClick={() => {
                   setConflictMsg(null);
                   setEditingId(isEditing ? null : def.id);
                 }}
+                aria-pressed={isEditing}
                 style={{
                   display: 'flex',
                   justifyContent: 'space-between',
@@ -113,7 +115,11 @@ export function ShortcutsPanel() {
                   borderRadius: 'var(--radius-md)',
                   border: isEditing ? '2px solid var(--primary)' : '1px solid var(--hairline)',
                   cursor: 'pointer',
-                  background: isEditing ? 'var(--surface-2)' : 'transparent'
+                  background: isEditing ? 'var(--surface-2)' : 'transparent',
+                  color: 'inherit',
+                  font: 'inherit',
+                  textAlign: 'left',
+                  width: '100%'
                 }}
                 data-testid={`shortcut-row-${def.id}`}
               >
@@ -132,7 +138,7 @@ export function ShortcutsPanel() {
                 >
                   {isEditing ? t('Press key...') : formatBinding(binding)}
                 </kbd>
-              </div>
+              </button>
             );
           })}
         </div>

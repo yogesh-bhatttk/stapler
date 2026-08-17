@@ -9,7 +9,7 @@ import { importFiles } from '../../../core/import';
 import { logEvent, fromUnknown } from '../../../core/errors';
 import { useTranslation } from '../../../core/i18n';
 import { activeDoc, sources, makePageRefs, type StaplerDoc } from '../../../core/store';
-import { exportVisualDiff } from '../../../core/operations';
+import { exportComparePdf } from '../../../core/compare-export';
 import { useJob } from '../../useJob';
 
 export function ComparePanel() {
@@ -39,29 +39,36 @@ export function ComparePanel() {
   };
 
   const handleExportDiff = () =>
-    run({ label: t('Exporting visual diff'), scope: 'compare' }, async job => {
-      const docA = activeDoc.value;
-      if (!docA || !settings.compareSourceId) return;
+    run(
+      {
+        label: t(settings.diffMode === 'text' ? 'Exporting text diff' : 'Exporting visual diff'),
+        scope: 'compare'
+      },
+      async job => {
+        const docA = activeDoc.value;
+        if (!docA || !settings.compareSourceId) return;
 
-      const compareSource = sources.value[settings.compareSourceId];
-      if (!compareSource) return;
+        const compareSource = sources.value[settings.compareSourceId];
+        if (!compareSource) return;
 
-      const docB: StaplerDoc = {
-        id: compareSource.id,
-        name: compareSource.name,
-        pages: makePageRefs(compareSource.id, compareSource.pageCount),
-        annotations: [],
-        dirty: false
-      };
+        const docB: StaplerDoc = {
+          id: compareSource.id,
+          name: compareSource.name,
+          pages: makePageRefs(compareSource.id, compareSource.pageCount),
+          annotations: [],
+          dirty: false
+        };
 
-      const outBytes = await exportVisualDiff(docA, docB, [], {
-        sensitivity: settings.sensitivity,
-        signal: job.signal
-      });
+        const outBytes = await exportComparePdf(docA, docB, {
+          diffMode: settings.diffMode,
+          sensitivity: settings.sensitivity,
+          signal: job.signal
+        });
 
-      const stem = docA.name.replace(/\.[^.]+$/, '');
-      await platform.saveFileAs(outBytes, `${stem}-diff.pdf`);
-    });
+        const stem = docA.name.replace(/\.[^.]+$/, '');
+        await platform.saveFileAs(outBytes, `${stem}-diff.pdf`);
+      }
+    );
 
   const update = (patch: Partial<typeof settings>) => {
     compareSettings.value = { ...settings, ...patch };

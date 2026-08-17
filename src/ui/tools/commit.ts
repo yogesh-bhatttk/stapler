@@ -49,10 +49,11 @@ import {
   targetSizeBytes
 } from './compress/state';
 import {
-  flattenOnExport,
+  annotateFlattenOnExport,
   markdownToPdfSource,
   pdfToImageSettings,
   removeBlanksThreshold,
+  signFlattenOnExport,
   splitSettings
 } from './state';
 import { extractSettings } from './extract/state';
@@ -284,8 +285,12 @@ const exportComposed: CommitHandler = async ({ doc, job }) => {
  * link its clickability, and saying so is the difference between a finalize and
  * a silent loss.
  */
-async function finalize(bytes: Uint8Array, job?: JobOptions): Promise<Uint8Array> {
-  if (!flattenOnExport.value) return bytes;
+async function finalize(
+  bytes: Uint8Array,
+  flatten: boolean,
+  job?: JobOptions
+): Promise<Uint8Array> {
+  if (!flatten) return bytes;
   const result = await flattenDocument(bytes, job ?? {});
   const parts: string[] = [];
   if (result.fields > 0) parts.push(`${result.fields} form field${result.fields === 1 ? '' : 's'}`);
@@ -353,7 +358,12 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       },
       job
     );
-    await save(doc, await finalize(bytes, job), `${stem(doc.name)}-stapler.pdf`, job);
+    await save(
+      doc,
+      await finalize(bytes, annotateFlattenOnExport.value, job),
+      `${stem(doc.name)}-stapler.pdf`,
+      job
+    );
   },
 
   split: async ({ doc, job }) => {
@@ -514,6 +524,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       const outcome = await compressToTargetSize(original, targetBytes, job);
       if (outcome.plan) {
         lastCompressionResult.value = {
+          documentId: doc.id,
           plan: outcome.plan,
           originalBytes: outcome.originalBytes,
           compressedBytes: outcome.achievedBytes,
@@ -586,6 +597,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
 
     const result = await compressDocument(original, settings, report, job);
     lastCompressionResult.value = {
+      documentId: doc.id,
       plan: result.plan,
       originalBytes: result.originalBytes,
       compressedBytes: result.bytes.byteLength,
@@ -665,7 +677,12 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       // are one decision. With the toggle off the values stay interactive.
       bytes = await fillFormFields(bytes, formValues.value, false, job);
     }
-    await save(doc, await finalize(bytes, job), `${stem(doc.name)}-signed.pdf`, job);
+    await save(
+      doc,
+      await finalize(bytes, signFlattenOnExport.value, job),
+      `${stem(doc.name)}-signed.pdf`,
+      job
+    );
   },
 
   normalize: async ({ doc, job }) => {
@@ -779,10 +796,10 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       return;
     }
 
-    // Deliberately *not* `finalize`. `flattenOnExport` belongs to Sign and
-    // Annotate, whose panels show the toggle; OCR has no such control, so
-    // routing its export through the shared signal meant a checkbox the user set
-    // in another tool silently flattened this document's forms and annotations.
+    // Deliberately *not* `finalize`. The flatten toggle belongs to Sign and
+    // Annotate, whose panels show the control; OCR has no such setting, so
+    // routing its export through that path would silently flatten this document
+    // if we threaded the panel choice through from somewhere else.
     // OCR adds an invisible text layer and changes nothing else.
     await save(doc, result.bytes, `${stem(doc.name)}-ocr.pdf`);
   },
@@ -851,7 +868,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     const bytes = await currentDocumentBytes(job);
     // The panel's column setting, not a hardcoded 4: the action bar's primary CTA
     // and the panel's own button are two routes to one export and must agree.
-    const sheet = await exportContactSheet(bytes, contactSheetColumns.value, job);
+    const sheet = await exportContactSheet(doc.id, bytes, contactSheetColumns.value, job);
     await save(doc, sheet, `${stem(doc.name)}-contact-sheet.pdf`);
   },
   compare: async () => {},

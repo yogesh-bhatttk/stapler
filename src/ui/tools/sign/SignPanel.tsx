@@ -267,7 +267,7 @@ export function SignPanel() {
         {t('Detect signature lines')}
       </Button>
 
-      <FlattenOption />
+      <FlattenOption mode="sign" />
 
       <p className={`${panelStyles.note} ${panelStyles.noteInfo}`}>
         {t('These are stamped signature images. Stapler makes no claim about legal validity.')}

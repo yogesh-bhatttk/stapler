@@ -5,20 +5,16 @@ import { exportAnnotationSummary, type SummaryAnnotation } from '../../../core/a
 import { pageAnnotations } from './state';
 import { useTranslation } from '../../../core/i18n';
 import { ANNOTATION_COLORS } from '../../../core/doc-colors';
-import { commit } from '../../../core/history';
-import { highlightsForRegions, type HighlightPage } from '../../../core/highlight';
 import { notify } from '../../../core/notify';
-import { currentDocumentBytes, findTextRegions } from '../../../core/operations';
-import { displayedAspectRatio } from '../../../core/rotation';
-import { activeDoc, sources } from '../../../core/store';
+import { activeDoc } from '../../../core/store';
 import { Button } from '../../components/Button';
 import { Checkbox, Field, RadioGroup, Slider, TextInput } from '../../components/Field';
 import { panelStyles } from '../../shell/OptionsPanel';
 import { useJob } from '../../useJob';
 import { FlattenOption } from '../FlattenOption';
+import { searchAndHighlightMatches } from './search';
 import {
   activeAnnotationTool,
-  addAnnotations,
   annotationColor,
   annotationStrokeWidth,
   AnnotationType
@@ -44,15 +40,18 @@ export function AnnotatePanel() {
    * ANN-03 — every match becomes a highlight on ANN-01's layer.
    *
    * The search itself is `findTextRegions`, the same worker call RED's
-   * find-and-mark uses; only what is built from the result differs. `commit()` is
-   * called once before the batch, so the whole search is one undo step (DOC-06).
+   * find-and-mark uses; only what is built from the result differs. The helper
+   * keeps the search one undo step and drops stale results if the active
+   * document changes before the worker returns.
    */
   const handleExportSummary = async () => {
     const current = activeDoc.value;
     if (!current) return;
+    const currentPageKeys = new Set(current.pages.map(page => page.key));
 
     const allLayerAnns: SummaryAnnotation[] = [];
     for (const [pageKey, anns] of Object.entries(pageAnnotations.value)) {
+      if (!currentPageKeys.has(pageKey)) continue;
       for (const ann of anns) {
         allLayerAnns.push({ ...ann, pageKey });
       }
@@ -90,39 +89,7 @@ export function AnnotatePanel() {
 
   const highlightMatches = () =>
     run({ label: `Searching for "${query.trim()}"`, scope: 'annotate.search' }, async job => {
-      const current = activeDoc.value;
-      if (!current) return;
-      const bytes = await currentDocumentBytes(job);
-      const found = await findTextRegions(bytes, query.trim(), matchCase, job);
-      if (found.length === 0) {
-        notify('warning', `No matches for "${query.trim()}".`);
-        return;
-      }
-
-      // `findText` indexes the pages of the document just composed, which is
-      // `doc.pages` in order, so the page at a match's index is the page whose
-      // key the annotation belongs to.
-      const pages: HighlightPage[] = current.pages.map(page => {
-        const size = sources.value[page.sourceDocId]?.pageSizes[page.sourceIndex];
-        return {
-          key: page.key,
-          aspect: 1 / displayedAspectRatio(size?.width ?? 0, size?.height ?? 0, page.rotation)
-        };
-      });
-
-      const { highlights, unplaced } = highlightsForRegions(found, pages, annotationColor.value);
-      if (highlights.length === 0) {
-        notify('warning', `No matches for "${query.trim()}" on any page of this document.`);
-        return;
-      }
-      commit();
-      addAnnotations(highlights);
-      notify('info', `Highlighted ${highlights.length} match(es).`, {
-        detail:
-          unplaced > 0
-            ? `${unplaced} match(es) fell outside this document's pages and were not highlighted. Undo removes the whole search.`
-            : 'Undo removes the whole search in one step; each highlight is an ordinary annotation you can move or delete.'
-      });
+      await searchAndHighlightMatches(query, matchCase, job);
     });
 
   return (
@@ -216,7 +183,7 @@ export function AnnotatePanel() {
         Export annotation summary
       </Button>
 
-      <FlattenOption />
+      <FlattenOption mode="annotate" />
     </>
   );
 }

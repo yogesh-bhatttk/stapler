@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { PDFDocument } from 'pdf-lib';
+import { degrees, PDFDocument } from 'pdf-lib';
 import { processWorkerImpl, type NewFormField } from '../../src/core/workers/process.worker';
 import { extractFormFieldsToCreate } from '../../src/core/operations';
 import type { Annotation } from '../../src/core/store';
+import { displayFrame, displayPointToPage } from '../../src/core/rotation';
 
 async function makeBlankPdf(): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
@@ -176,5 +177,94 @@ describe('SGN-06: Create Form Fields', () => {
     });
     expect(extracted[1].name).toBe('opt_in');
     expect(extracted[2].exportValue).toBe('monthly');
+  });
+
+  it('names a conflicting existing field instead of surfacing a pdf-lib error', async () => {
+    const inputBytes = await makeBlankPdf();
+    await expect(
+      processWorkerImpl.compose(
+        [{ key: 'p1', sourceDocId: 'doc1', sourceIndex: 0, rotation: 0 }],
+        { doc1: inputBytes },
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          formFieldsToCreate: [
+            {
+              pageKey: 'p1',
+              type: 'text',
+              name: 'same-name',
+              x: 0.1,
+              y: 0.1,
+              width: 0.2,
+              height: 0.05
+            },
+            {
+              pageKey: 'p1',
+              type: 'checkbox',
+              name: 'same-name',
+              x: 0.1,
+              y: 0.2,
+              width: 0.05,
+              height: 0.05
+            }
+          ]
+        }
+      )
+    ).rejects.toMatchObject({
+      kind: 'UnsupportedFeature',
+      message: expect.stringContaining('same-name')
+    });
+  });
+
+  it('maps new widget rectangles through the displayed crop and rotation frame', async () => {
+    const source = await PDFDocument.create();
+    const sourcePage = source.addPage([600, 800]);
+    sourcePage.setRotation(degrees(90));
+    sourcePage.setCropBox(100, 200, 300, 400);
+    const bytes = await source.save();
+
+    const output = await processWorkerImpl.compose(
+      [{ key: 'p1', sourceDocId: 'doc1', sourceIndex: 0, rotation: 0 }],
+      { doc1: bytes },
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        formFieldsToCreate: [
+          { pageKey: 'p1', type: 'text', name: 'rotated', x: 0.1, y: 0.2, width: 0.3, height: 0.1 }
+        ]
+      }
+    );
+    const outputDoc = await PDFDocument.load(output);
+    const field = outputDoc.getForm().getTextField('rotated');
+    const rect = field.acroField.getWidgets()[0].getRectangle();
+    const outputPage = outputDoc.getPage(0);
+    const crop = outputPage.getCropBox();
+    const frame = displayFrame(
+      crop.width,
+      crop.height,
+      outputPage.getRotation().angle,
+      crop.x,
+      crop.y
+    );
+    const a = displayPointToPage(frame, 0.1 * frame.displayWidth, 0.2 * frame.displayHeight);
+    const b = displayPointToPage(frame, 0.4 * frame.displayWidth, 0.3 * frame.displayHeight);
+
+    // Map two corners of the 0.1,0.2,0.3,0.1 UI box in display space; taking
+    // extents yields the raw-page widget rectangle under /Rotate and CropBox.
+    // pdf-lib expands the widget rectangle by its half-point default border.
+    expect(Math.abs(rect.x - Math.min(a.x, b.x))).toBeLessThanOrEqual(1);
+    expect(Math.abs(rect.y - Math.min(a.y, b.y))).toBeLessThanOrEqual(1);
+    expect(Math.abs(rect.width - Math.abs(b.x - a.x))).toBeLessThanOrEqual(1);
+    expect(Math.abs(rect.height - Math.abs(b.y - a.y))).toBeLessThanOrEqual(1);
   });
 });

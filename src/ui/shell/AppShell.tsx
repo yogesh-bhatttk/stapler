@@ -111,12 +111,19 @@ export function AppShell({ children }: { children: ComponentChildren }) {
       if (isTypingTarget(event.target)) return;
 
       const doc = activeDoc.value;
-
-      const file = await platform.readClipboardImage();
+      // Prefer the event payload: it is available for an ordinary OS paste and
+      // does not require the async Clipboard permission. Preventing the default
+      // also stops a focused browser control from receiving an accidental image
+      // paste while we turn it into a page.
+      const eventImage = Array.from(event.clipboardData?.items ?? [])
+        .find(item => item.type.startsWith('image/'))
+        ?.getAsFile();
+      const file = eventImage ?? (await platform.readClipboardImage());
       if (!file) {
         notify('warning', 'No image found on the clipboard.');
         return;
       }
+      event.preventDefault();
 
       const options = await requestOptions([file]);
       if (!options) return;

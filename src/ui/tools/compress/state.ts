@@ -108,6 +108,8 @@ export function projectedOutput(
 }
 
 export interface LastCompressionResult {
+  /** The workspace document that produced these measured numbers. */
+  documentId: string;
   plan: CompressionPlan;
   originalBytes: number;
   compressedBytes: number;

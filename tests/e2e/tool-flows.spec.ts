@@ -1058,12 +1058,15 @@ test.describe('tool flows', () => {
     await field.fill('Ada Lovelace');
     await expect(field).toHaveValue('Ada Lovelace');
 
+    const flatten = page.getByRole('checkbox', { name: /Flatten form fields/ });
+    await expect(flatten).not.toBeChecked();
+
     const bytes = await commitAndRead(page, 'Export signed PDF');
-    // The sign tool flattens, so the value is drawn into the page rather than left
-    // in /V. Its appearance stream must carry the text.
     const doc = await PDFDocument.load(bytes);
     expect(doc.getPageCount()).toBe(1);
-    expect(await drawnText(bytes)).toContain('Ada Lovelace');
+    expect(doc.catalog.get(PDFName.of('AcroForm'))).toBeDefined();
+    expect(doc.getPage(0).node.Annots()).not.toBeUndefined();
+    expect(doc.getForm().getTextField('name.first').getText()).toBe('Ada Lovelace');
   });
 
   /**
@@ -1071,7 +1074,7 @@ test.describe('tool flows', () => {
    * them and not on the notification: no `/AcroForm`, no `/Annots`, and the
    * values still findable as text.
    */
-  test('sign: finalizing removes the form and the annotation dictionaries (SGN-05)', async ({
+  test('sign: enabling finalize from the keyboard removes the form and the annotation dictionaries (SGN-05)', async ({
     page
   }) => {
     const file = await ensureFixture('acroform.pdf', () => acroformPdf());
@@ -1083,9 +1086,10 @@ test.describe('tool flows', () => {
     await field.click();
     await field.fill('Ada Lovelace');
 
-    // Finalize is on by default — the same behaviour the fill path always had,
-    // now as a visible control rather than a hardcoded argument.
     const flatten = page.getByRole('checkbox', { name: /Flatten form fields/ });
+    await expect(flatten).not.toBeChecked();
+    await flatten.focus();
+    await page.keyboard.press(' ');
     await expect(flatten).toBeChecked();
 
     const bytes = await commitAndRead(page, 'Export signed PDF');
@@ -1098,10 +1102,10 @@ test.describe('tool flows', () => {
   });
 
   /**
-   * The other half of making it a choice: turning it off from the keyboard has to
-   * actually produce a still-fillable form, or the control is decoration.
+   * The other half of making it a choice: turning it on from the keyboard has to
+   * actually produce a finalized form, or the control is decoration.
    */
-  test('sign: unchecking finalize from the keyboard leaves the form fillable (SGN-05)', async ({
+  test('sign: checking finalize from the keyboard bakes the form into the page (SGN-05)', async ({
     page
   }) => {
     const file = await ensureFixture('acroform.pdf', () => acroformPdf());
@@ -1116,11 +1120,14 @@ test.describe('tool flows', () => {
     const flatten = page.getByRole('checkbox', { name: /Flatten form fields/ });
     await flatten.focus();
     await page.keyboard.press(' ');
-    await expect(flatten).not.toBeChecked();
+    await expect(flatten).toBeChecked();
 
     const bytes = await commitAndRead(page, 'Export signed PDF');
     const doc = await PDFDocument.load(bytes);
-    expect(doc.getForm().getTextField('name.first').getText()).toBe('Ada Lovelace');
+    expect(doc.catalog.get(PDFName.of('AcroForm'))).toBeUndefined();
+    expect(doc.getForm().getFields()).toHaveLength(0);
+    expect(doc.getPage(0).node.Annots()).toBeUndefined();
+    expect(await drawnText(bytes)).toContain('Ada Lovelace');
   });
 
   /**

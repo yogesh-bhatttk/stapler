@@ -493,10 +493,253 @@ Severity: **Critical** (silent data loss / security-relevant / core promise brok
 
 ---
 
+## 11 — Fresh audit (2026-08-17): EPIC-15 (v1.1) PDF internals
+
+The original audit above predates most of EPIC-15's 20 tickets and doesn't cover them.
+This pass targets those specifically, verified against code and (where present) tests,
+not against `Status: Done` lines.
+
+- [x] **[Critical] OPS-13 flatten-background deletes the scan itself, producing a blank
+  white page.** ~~Fixed 2026-08-17~~ — full-page `Do` image XObjects are never candidates
+  for removal; OPS-13 only removes a qualifying full-page vector fill. The operation now
+  returns an explicit unchanged outcome when no vector background is found, so the UI does
+  not report a false success. Regression coverage builds a real full-page scan and verifies
+  byte-identical output.
+  `src/core/workers/process.worker.ts` (`flattenBackground`),
+  `tests/unit/flatten-background.test.ts`
+
+- [x] **[Critical] OPS-13 deletes a resource-dict entry that may be shared across the whole
+  page tree, corrupting pages the user never touched.** ~~Fixed 2026-08-17~~ — flatten no
+  longer mutates `/Resources` at all. Removing a vector paint from its content stream does
+  not require deleting its resource, and this avoids mutation of an inherited dictionary
+  shared by sibling pages.
+  `src/core/workers/process.worker.ts` (`flattenBackground`)
+
+- [x] **[High] OPS-13 loads encrypted documents with `ignoreEncryption: true` instead of
+  refusing.** ~~Fixed 2026-08-17~~ — `flattenBackground` now uses the normal refuse-closed
+  `load(bytes)` path. The other `allowEncrypted` calls are read-only inspection paths and
+  remain separately reviewable.
+  `src/core/workers/process.worker.ts` (`flattenBackground`)
+
+- [x] **[High] OPS-13 has zero test coverage of any kind**, plus: the injected cover rect
+  uses `page.getSize()` and ignores a non-zero MediaBox/CropBox origin, it's injected
+  unconditionally even when detection found nothing (reporting success over an unchanged
+  page), and the save path skips the "never emit output larger than input" guard every other
+  compression-adjacent save uses. Treat `flattenBackground`
+  (`process.worker.ts:3443-3652`) as unshipped, not as a bug list — it's the least-reviewed
+  code in EPIC-15.
+  ~~Fixed 2026-08-17~~ — the injected rectangle now uses the page's crop-box origin, the
+  operation reports an unchanged result when no vector background is detected, and the
+  final save is refused unless it is smaller than the input. Regression coverage exercises
+  both the real scan case and the fixed crop/rotation math.
+  `src/core/workers/process.worker.ts`, `tests/unit/flatten-background.test.ts`,
+  `tests/unit/form-fields-create.test.ts`
+
+- [x] **[High] SGN-06's own default setting deletes the form fields it just created.**
+  ~~Fixed 2026-08-17~~ — Sign now defaults to leaving its exported form fields interactive,
+  while Annotate keeps the old finalized default for page marks. The shared toggle was split
+  into per-tool settings, and the Sign e2e coverage now checks both the default fillable
+  export and the keyboard path that opts into flattening.
+  `src/ui/tools/commit.ts`, `src/ui/tools/state.ts`, `src/ui/tools/FlattenOption.tsx`,
+  `tests/e2e/tool-flows.spec.ts`
+
+- [x] **[High] SGN-06 places form-field rects in raw page space, ignoring rotation and
+  crop — reintroduces the §3 rotation-coordinate bug class in a new tool.** Every other
+  overlay placement in the same function (crop, watermark, header/footer, Bates, stamps)
+  goes through `displayFrame`/`placeDisplayBox`/`marginFrame` specifically to handle a
+  rotated or cropped page. The new field-placement code instead computes directly from
+  `page.getSize()`. On a page with `/Rotate 90` the field lands transposed and
+  mis-sized; on a cropped page it ignores the crop-box origin entirely. No rotated or
+  cropped fixture exists in the test.
+  ~~Fixed 2026-08-17~~ — widgets now map their two displayed corners through the same
+  crop-aware display frame used by stamps, then take the raw-page extents. A rotated/cropped
+  integration test verifies the resulting widget rectangle.
+  `src/core/workers/process.worker.ts` (`composePages`),
+  `tests/unit/form-fields-create.test.ts`
+
+- [x] **[Medium] SGN-06 aborts the whole export with a raw pdf-lib error on a field-name
+  conflict.** If the source document already has a field with the requested name but a
+  different type, `form.getTextField(name)` throws (wrong type), the fallback
+  `createTextField(name)` then throws `FieldAlreadyExistsError`, uncaught, inside
+  `composePages` — surfacing an internal pdf-lib message instead of a named conflict.
+  ~~Fixed 2026-08-17~~ — an existing field is inspected before reuse; a conflicting type now
+  throws a named `UnsupportedFeature` error that includes the requested field name.
+  `src/core/workers/process.worker.ts` (`composePages`),
+  `tests/unit/form-fields-create.test.ts`
+
+- [x] **[Medium] DOC-08's fast-web-view ordering is unmet on nearly every real export
+  path.** 11 of the 13 `pseudoLinearize(...).save(...)` call sites pass
+  `useObjectStreams: true`, which the module's own comment says "buys nothing beyond
+  ordering the page content streams" — `linearize.test.ts:139` asserts that caveat rather
+  than the AC ("first page's objects precede later pages' in byte offset"). Only two save
+  sites (`:4194`, `:4923`) get the real behaviour. There is also no user-facing control
+  despite the ticket calling the behaviour optional — `setFastWebViewOrdering` has no
+  caller anywhere in `src/ui`. The module itself is honest about its limits; the ticket's
+  `Status: Done` is not.
+  ~~Fixed 2026-08-17~~ — the real export paths now save with plain xref tables so the
+  first-page-first ordering actually reaches the output bytes. The ordering module keeps
+  its documented object-stream caveat for callers that opt into it directly, but the user
+  exports now take the fast-web-view path the ticket described.
+  `src/core/workers/process.worker.ts`, `tests/unit/process.test.ts`
+
+- [x] **[Medium] CMP-06's exported report can show a different document's numbers than the
+  one currently open — a repeated pattern, see §12.** `lastCompressionResult`
+  (`src/ui/tools/compress/state.ts:119`) is a module-level signal never cleared on document
+  switch. Compress doc A, switch to doc B, click "Export report" without re-running: the
+  file is named for B but contains A's byte totals and per-image stats, with no indication
+  it's stale. Secondarily, even the fresh case measures pre-`applyProtection` byte length, so
+  an RED-06-encrypted export's report understates the real file on disk. The test suite
+  (`tests/unit/compress-report.test.ts`) only exercises hand-written report data, never a
+  real produced PDF, so the AC's actual cross-check (report matches output file size) is
+  untested.
+  ~~Partially fixed 2026-08-17~~ — each measured result carries its producing document ID;
+  another open document falls back to its clearly-labelled estimate rather than exporting
+  stale measurements. The protected-output-size cross-check remains open.
+  `src/ui/tools/compress/state.ts`, `src/ui/tools/compress/CompressPanel.tsx`
+
+- [x] **[Low] CNV-07's one test never exercises the real clipboard path or the
+  insert-at-index branch.** The e2e test sets a production-code test hook
+  (`window.__mockClipboardImage`) and dispatches a bare `paste` event rather than going
+  through `navigator.clipboard.read()`; it also only ever hits the empty-workspace
+  `addDocument` branch, never `insertPages(doc.id, …, at)`, so the AC's "inserts at the
+  expected index" is unverified. Production code also never calls `preventDefault()` and
+  ignores `event.clipboardData` entirely.
+  ~~Partially fixed 2026-08-17~~ — the paste handler now consumes image data from the native
+  `ClipboardEvent.clipboardData` first and calls `preventDefault()` once it will import it;
+  the async Clipboard API remains a fallback. The e2e coverage gap remains open.
+  `src/ui/shell/AppShell.tsx`
+
+**Genuinely solid, no findings:** RED-05 (pattern precedence, Luhn check, tested declines),
+RED-06 (encryption algorithm cross-verified against poppler, per-object cancellation),
+OPS-11 (Bates numbering correctly uses the display-frame helpers, handles rotation/crop),
+OPS-12 (split-by-bookmarks filters and dedupes before slicing, no filename/slice
+mismatch), DOC-07 (compress-to-target's bisection is bounded and measurement-driven, real
+byte-level e2e assertions).
+
+## 12 — Fresh audit (2026-08-17): EPIC-15 UI state bleeds across documents
+
+Three unrelated tickets share one root cause: a module-level Preact signal holding
+per-document derived data with no document-id scoping and nothing that resets it when the
+active document changes. `src/ui/tools/outline/useOutline.ts` (OPS-10) does this correctly
+with a staleness guard — worth turning into a shared pattern/lint rule rather than patching
+each site individually.
+
+- [x] **[Critical] ACC-01 alt-text is written against the wrong object numbering and
+  silently fails to attach end-to-end.** ~~Fixed 2026-08-17~~ — the editor now keys images
+  by page plus image name, which survives a compose/rebuild cycle; the writer accepts that
+  stable key and still tolerates the legacy object-number form. A regression test exercises
+  the real save/reparse path, not just the in-memory document object.
+  `src/ui/tools/acc/AccPanel.tsx`, `src/core/pdf/accessibility.ts`,
+  `tests/unit/accessibility.test.ts`
+
+- [x] **[High] ACC-01's `altTextMap` is never cleared on document switch.**
+  ~~Fixed 2026-08-17~~ — the alt-text panel now clears its map when the active document
+  changes, then repopulates it from the current file only. The async scan is also guarded so
+  a late result from the previous document cannot overwrite the current one.
+  `src/ui/tools/acc/AccPanel.tsx`
+
+- [ ] **[High] ANN-04's annotation summary bleeds stale annotations from a previously
+  opened, unrelated document.** `pageAnnotations` (`src/ui/tools/annotate/state.ts:39`) is
+  never reset on document close/switch. `handleExportSummary`
+  (`AnnotatePanel.tsx:50-89`) now filters entries to the current document's page keys, but
+  the global store still keeps old annotations in memory and `getPageNumber`
+  (`src/core/annotation-summary.ts:76-85`) still silently falls back to page 1 for a
+  `pageKey` it can't find. Repro after the filter change now requires a stale key collision
+  or another caller that bypasses the panel filter.
+  `src/ui/tools/annotate/state.ts:39`
+
+- [x] **[Critical] DS-09's shortcut-remap rows are unreachable by keyboard.**
+  ~~Fixed 2026-08-17~~ — each shortcut row is now a real button, so Tab reaches it and
+  Enter/Space activate it with the same edit behavior as a pointer click. An e2e assertion
+  covers the palette row, though the Playwright slice in this environment still hits the
+  repo web-server startup issue before it can finish.
+  `src/ui/tools/shortcuts/ShortcutsPanel.tsx`, `tests/e2e/a11y-and-perf.spec.ts`
+
+- [x] **[Medium] DS-09's conflict detection doesn't mirror the Delete/Backspace
+  equivalence the runtime handler actually uses.** ~~Fixed 2026-08-17~~ — the shortcut
+  matcher and the conflict checker now normalize `Delete` and `Backspace` through the same
+  helper, so the panel rejects the same collision the runtime would have seen anyway. A
+  unit regression covers the exact case.
+  `src/core/shortcuts.ts`, `tests/unit/shortcuts.test.ts`
+
+- [x] **[Medium-High] ANN-05's "Export Diff PDF" ignores Text Diff mode and always
+  produces a pixel-diff.** ~~Fixed 2026-08-17~~ — the compare panel now routes through a
+  mode-aware exporter. Visual mode still uses the pixel-diff PDF; Text mode generates a
+  text-diff report that mirrors the highlighted chunks the live view shows.
+  `src/ui/tools/compare/ComparePanel.tsx`,
+  `src/core/compare-export.ts`,
+  `src/core/text-diff-export.ts`,
+  `tests/unit/compare-export.test.ts`,
+  `tests/unit/text-diff-export.test.ts`
+
+- [ ] **[Medium] ANN-03 has no staleness guard if the active document changes mid-search.**
+  `highlightMatches` captures the active document once, awaits an async worker call, then
+  commits results without rechecking the document is still active. Repro: start a search on
+  doc A, switch to doc B before it resolves — A's highlights merge into the global
+  `pageAnnotations` map and an undo step lands on B's history, producing invisible orphaned
+  annotations.
+
+- [ ] **[Medium] BAT-03 produces a double `.pdf` extension for any pattern that already
+  includes an extension.** `runner.ts:229` always appends `.pdf` regardless of pattern
+  content, and the pattern field has no guard against including one. Repro: pattern
+  `{basename}_v2.pdf` → output `name_v2.pdf.pdf`. Untested.
+  `src/ui/tools/batch/runner.ts:229`
+
+- [x] **[Medium] DOC-09's contact sheet export re-renders every page from scratch instead
+  of reusing the thumbnail cache the ticket requires.** ~~Fixed 2026-08-17~~ —
+  `exportContactSheet` now reuses any cached thumbnail bitmap first, then falls back to the
+  shared render worker and seeds the same cache for later UI use. A regression test
+  exercises the cached-hit and uncached-miss paths together.
+  `src/core/operations.ts`, `src/core/image.ts`,
+  `tests/unit/contact-sheet-export.test.ts`
+
+**Minor, not counted above:** OPS-10's move/indent `IconButton`s are never disabled at tree
+boundaries (affordance only, no data corruption); ANN-04's export bypasses `useJob()`
+(no cancellation/progress) unlike every other export in the same file.
+
+**Genuinely solid:** OPS-10 (bookmark/outline editor) — page-key-based tree, a real
+staleness guard in `useOutline.ts:29-33`, keyboard-operable native controls, round-trip
+tests. This is the pattern the three Critical/High findings above should be made to match.
+
+## 13 — Fresh audit (2026-08-17): tooling gap and a live CI regression
+
+- [ ] **[Medium] The Firefox build target injects a `tabs` permission, unconditionally
+  contradicting the "zero permissions" invariant for that target, and no check catches
+  it.** `scripts/firefox-manifest.mjs:26` does
+  `permissions: Array.from(new Set([...(manifest.permissions || []), 'tabs']))` for
+  `build:ext:firefox` — intentional, and `tests/unit/firefox-manifest.test.ts:28-30`
+  asserts it. But this means Firefox's AMO listing *will* show a permission warning,
+  contradicting CLAUDE.md's unconditional claim. Neither `.claude/hooks/check-invariants.mjs`
+  nor `scripts/check-invariants.mjs` scans the Firefox manifest transform's output or
+  `dist/firefox/manifest.json` — both only check `manifest.json`/`public/manifest.json`.
+  Either the invariant needs scoping to explicitly exempt Firefox's `tabs` permission, or
+  the enforcement scripts need to validate the Firefox output too.
+  `scripts/firefox-manifest.mjs:26`
+
+- [ ] **[High] `pnpm test:e2e` is currently red on a clean `master` — contradicts
+  `docs/TICKETS.md`'s claim of a fully green baseline across all 92 "Done" tickets.**
+  `tests/e2e/a11y-and-perf.spec.ts:64` fails an axe-core color-contrast check: the batch
+  route's primary "Run Batch" button live-renders at `#fcfcfe` on `#616dd3` (4.42:1),
+  below the required 4.5:1, even though `pnpm check`'s static `check-contrast.mjs` reports
+  the `--on-primary`/`--primary` token pair at 4.70:1 in both themes. The live DOM value
+  diverges from the token audit — likely a route-specific override or an untested
+  state/variant class on that specific button. `pnpm check` (597/597 unit tests) is green;
+  only the e2e suite catches this. 86/87 e2e tests pass.
+  `tests/e2e/a11y-and-perf.spec.ts:64`, batch action bar primary button
+
 ## Suggested order of attack
 
 1. Redaction's vector/image handling (§1) — security-relevant, silent failure, highest risk.
-2. Shared catalog-stripping bug (§0) — one fix, two call sites, already solved a third place.
-3. Rotation coordinate mapping (§3) — five tools, one root cause, one fix.
-4. Dead export buttons — contact sheet (§5), table extraction (§6) — trivial wiring fixes.
-5. SGN default settings deleting form fields (§7) — one default flip + resource-dict fix.
+2. OPS-13 flatten-background (§11) — currently produces blank pages / cross-page corruption
+   on its core use case; effectively unshipped despite `Status: Done`.
+3. SGN-06 default-flattens its own output, and ACC-01/CMP-06/ANN-04's stale-signal bleed
+   (§11, §12) — all silent-wrong-output classes, same fix shape (staleness/reset guards).
+4. Shared catalog-stripping bug (§0) — one fix, two call sites, already solved a third place.
+5. Rotation coordinate mapping (§3, and its reappearance in SGN-06 §11) — six tools now,
+   one root cause, one fix, worth a shared helper/lint rule so it stops recurring.
+6. DS-09 keyboard-unreachable remap rows (§12) — hard accessibility invariant violation.
+7. The e2e contrast regression (§13) — blocks a genuinely green baseline; find the
+   diverging button style before shipping.
+8. Dead export buttons — contact sheet (§5), table extraction (§6) — trivial wiring fixes.
+9. SGN default settings deleting form fields (§7, original pass) — one default flip +
+   resource-dict fix.
