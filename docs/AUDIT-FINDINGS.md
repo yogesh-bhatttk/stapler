@@ -115,13 +115,14 @@ Severity: **Critical** (silent data loss / security-relevant / core promise brok
 
 ## 2 — Compression (CMP-01..06)
 
-- [ ] **[Critical] Safety-image skip list is computed, then ignored on the raster route.**
-  Unsafe images (Separation ink, JBIG2/JPX, colour-key mask, soft mask) are correctly added
-  to `plan.skipped` — then any textless page is routed to full-page raster re-encode
-  *without consulting that list*. Reproduced: textless page with a `/Separation` image gets
-  flattened to RGB JPEG (ink plate destroyed) while the report claims it was untouched.
-  `src/core/compress-plan.ts:264, 280-296` (untested branch: `tests/unit/compress-plan.test.ts:85-105`
-  only covers text-heavy pages)
+- [x] **[Critical] Safety-image skip list is computed, then ignored on the raster route.**
+  ~~Verified fixed 2026-08-17~~ — `hasUnsafeImage` already gates the textless (raster) route
+  in `compress-plan.ts`: a page with an unsafe image and no text now routes to
+  `already-optimized` with an explicit reason, not to `raster`. The line numbers were stale
+  and the exact reproduction case was untested, so
+  `tests/unit/compress-plan.test.ts` ("never rasterises a textless page whose image is
+  unsafe to re-encode") now covers a textless page with a `/Separation` image directly.
+  `src/core/compress-plan.ts:264, 280-296`
 
 - [x] **[High] A zero-work compression run can still report savings.** ~~Fixed 2026-08-17~~ —
   the zero-work guard (`hasRaster`/`hasReencoded`) turned out to be present already, but
@@ -196,7 +197,7 @@ Severity: **Critical** (silent data loss / security-relevant / core promise brok
   the signature" in `tests/unit/rotation-placement.test.ts`.
   `src/core/workers/process.worker.ts` (`composePages`, `drawStamps`)
 
-- [ ] **[Medium] Page-range semantics disagree within the same operation.** ~~Partially fixed
+- [x] **[Medium] Page-range semantics disagree within the same operation.** ~~Partially fixed
   2026-08-17~~ — watermark ranges now parse against `globalTotal` and match `pageOffset + i`,
   so a split no longer stamps every output as pages 1–3; `pageRefMap` also keeps the first
   instance of a duplicated page instead of the last, and named destinations (both `/Dests`
