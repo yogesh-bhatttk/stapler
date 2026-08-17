@@ -12,6 +12,7 @@
  * of them living for the lifetime of the tab.
  */
 import * as Comlink from 'comlink';
+import { notify } from '../notify';
 
 export interface WorkerClient<T> {
   /** The RPC proxy of whichever instance the next call would use. Spawns on first use. */
@@ -107,9 +108,19 @@ export function createWorkerClient<T>(
     worker.addEventListener('error', event => {
       // An instance that failed to boot must not be reused, or every later call
       // leased to it hangs on a dead port.
-      console.error(`[${name}] worker error`, event.message);
+      //
+      // This used to be a bare `console.error`: the worker died, the pool
+      // quietly shrank, and the user saw a button that did nothing with no
+      // explanation anywhere they could see. A dead worker is not a debug
+      // detail — it is the reason their document will not process.
       drop(inst);
       worker.terminate();
+      notify('danger', 'A background worker stopped unexpectedly.', {
+        detail:
+          'Retry the operation. If it fails again, reload the page — your open ' +
+          'documents are held in this tab and nothing has been written to disk.',
+        diagnostic: `[${name}] worker error: ${event.message ?? 'unknown'}`
+      });
     });
     inst.proxy = Comlink.wrap<T>(worker);
     pool.push(inst);
