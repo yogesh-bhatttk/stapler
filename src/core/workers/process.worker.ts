@@ -85,7 +85,7 @@ import {
 import type { PDFField, PDFImage, PDFContext } from 'pdf-lib';
 import { zipSync } from 'fflate';
 import type { JobHandle } from './protocol';
-import { checkpoint } from './protocol';
+import { checkpoint, subJob } from './protocol';
 import { corrupt, encrypted, internal, unsupported } from '../errors';
 import type { ImagesToPdfOptions } from '../operations';
 import type { ImageResultStat } from '../compress-report';
@@ -4519,12 +4519,13 @@ Q
     // large file is seconds of work that used to report nothing and could not
     // be cancelled at all.
     //
-    // The AES pass itself lives in `core/pdf/encrypt.ts` and is still one
-    // uninterruptible loop over every indirect object: cancellation here is
-    // honoured before it starts and after it finishes, not during.
+    // The AES pass itself lives in `core/pdf/encrypt.ts`, which now checkpoints
+    // inside its own per-object loop (see ENCRYPT_CHECKPOINT_MS): cancellation
+    // is honoured during the encryption, not only either side of it. Its 0..1
+    // progress is mapped into the 0.1–0.95 slice of this operation's bar.
     await checkpoint(job, 0, 'Reading the document');
     await checkpoint(job, 0.1, 'Encrypting');
-    const out = await encryptPdf(bytes, settings);
+    const out = await encryptPdf(bytes, settings, subJob(job, 0.1, 0.95));
     await checkpoint(job, 1, 'Encrypted');
     return out;
   },

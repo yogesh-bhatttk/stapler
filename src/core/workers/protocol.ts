@@ -22,8 +22,13 @@ import * as Comlink from 'comlink';
 import { cancelled as cancelledError } from '../errors';
 
 export interface JobPort {
-  /** `fraction` is 0..1, or null when the total is genuinely unknown. */
-  progress(fraction: number | null, label: string): void;
+  /**
+   * `fraction` is 0..1, or null when the total is genuinely unknown.
+   *
+   * A `Promise` return is allowed so a wrapper (see {@link subJob}) can forward
+   * the Comlink round-trip rather than swallowing it — `checkpoint` awaits this.
+   */
+  progress(fraction: number | null, label: string): void | Promise<void>;
   /** Resolves true once the caller has aborted. */
   cancelled(): boolean | Promise<boolean>;
 }
@@ -60,6 +65,28 @@ export const silentJob: JobPort = {
     return false;
   }
 };
+
+/**
+ * Re-scales a job handle's progress into the sub-range `[from, to]`.
+ *
+ * Lets a helper deep in `core/` (e.g. `encryptPdf`) report its own 0..1 progress
+ * without knowing where its work sits in the caller's overall bar, and without
+ * the caller's band leaking into a module that has no business knowing it.
+ * Cancellation passes straight through, unchanged.
+ */
+export function subJob(job: JobHandle | undefined, from: number, to: number): JobPort | undefined {
+  if (!job) return undefined;
+  return {
+    progress(fraction, label) {
+      const scaled =
+        fraction === null ? null : from + (to - from) * Math.min(1, Math.max(0, fraction));
+      return job.progress(scaled, label) as void | Promise<void>;
+    },
+    cancelled() {
+      return job.cancelled();
+    }
+  };
+}
 
 /**
  * Worker-side cancellation point. Throws `UserCancelled` if the caller aborted.

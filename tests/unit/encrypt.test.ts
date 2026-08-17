@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
-import { encryptPdf, permissionFlags, type ProtectionSettings } from '../../src/core/pdf/encrypt';
+import { readFileSync } from 'node:fs';
+import {
+  ENCRYPT_CHECKPOINT_OBJECTS,
+  encryptPdf,
+  permissionFlags,
+  type ProtectionSettings
+} from '../../src/core/pdf/encrypt';
+import type { JobPort } from '../../src/core/workers/protocol';
 
 // The worker module calls `Comlink.expose` at import time, which needs a real
 // message port. Same stub `process.test.ts` uses to import the implementation.
@@ -134,6 +141,131 @@ describe('encryptPdf', () => {
     await expect(open(encrypted)).rejects.toMatchObject({ name: 'PasswordException' });
     const pdf = await open(encrypted, SETTINGS.userPassword);
     expect(await pageText(pdf, 1)).toBe(PAGE_ONE);
+  });
+
+  /**
+   * The AES pass used to be one uninterruptible loop over every indirect object:
+   * `protectDocument` could only be cancelled before it started or after it
+   * finished, so "Cancel" on a large document ran the whole encryption anyway.
+   *
+   * These assertions are about *where the loop got to*, not about wall-clock
+   * time, which is too noisy to assert on in CI. The loop names the object it is
+   * about to encrypt in its progress label, so the last label observed is a
+   * direct, deterministic measurement of how far it ran.
+   */
+  describe('cancellation inside the object loop', () => {
+    const LARGE = 'tests/fixtures/text-300.pdf';
+
+    function tracker(cancelAfterChecks: number) {
+      const labels: string[] = [];
+      const fractions: (number | null)[] = [];
+      let checks = 0;
+      const port: JobPort = {
+        progress(fraction, label) {
+          fractions.push(fraction);
+          labels.push(label);
+        },
+        cancelled() {
+          checks += 1;
+          return checks > cancelAfterChecks;
+        }
+      };
+      const reached = () => {
+        const last = labels[labels.length - 1];
+        const match = last?.match(/^Encrypting object (\d+) of (\d+)$/);
+        return match ? { at: Number(match[1]), total: Number(match[2]) } : null;
+      };
+      return { port, labels, fractions, reached, checkCount: () => checks };
+    }
+
+    it('checks for cancellation repeatedly during the loop, not once at each end', async () => {
+      const bytes = new Uint8Array(readFileSync(LARGE));
+      const doc = await PDFDocument.load(bytes, {
+        ignoreEncryption: false,
+        updateMetadata: false
+      });
+      const total = doc.context.enumerateIndirectObjects().length;
+      // The fixture has to be big enough for the object gate to trip at all,
+      // otherwise this test would pass against the old single-shot loop.
+      expect(total).toBeGreaterThan(ENCRYPT_CHECKPOINT_OBJECTS * 4);
+
+      const t = tracker(Number.POSITIVE_INFINITY);
+      await encryptPdf(bytes, SETTINGS, t.port);
+
+      // One check per gate trip: at minimum the object-count floor.
+      expect(t.checkCount()).toBeGreaterThanOrEqual(Math.floor(total / ENCRYPT_CHECKPOINT_OBJECTS));
+      // Progress is monotonic and stays inside its own 0..1 span.
+      const numeric = t.fractions.filter((f): f is number => f !== null);
+      expect(numeric.every(f => f >= 0 && f <= 1)).toBe(true);
+      expect([...numeric].sort((a, b) => a - b)).toEqual(numeric);
+    });
+
+    it('stops well before completion when the caller aborts partway', async () => {
+      const bytes = new Uint8Array(readFileSync(LARGE));
+      const before = bytes.slice();
+
+      // Abort at the second cancellation check, i.e. after roughly two gates.
+      const t = tracker(1);
+      await expect(encryptPdf(bytes, SETTINGS, t.port)).rejects.toMatchObject({
+        kind: 'UserCancelled'
+      });
+
+      const reached = t.reached();
+      expect(reached).not.toBeNull();
+      // The whole point: it stopped near the start, not at the end.
+      expect(reached!.at).toBeLessThan(reached!.total / 4);
+      expect(reached!.at).toBeLessThanOrEqual(ENCRYPT_CHECKPOINT_OBJECTS * 3);
+
+      // And an abort mid-encryption leaves the caller's input byte-identical —
+      // no half-encrypted document is ever handed back or written over the
+      // original.
+      expect(bytes).toEqual(before);
+    });
+
+    it('honours a signal that is already aborted before the first object', async () => {
+      const bytes = new Uint8Array(readFileSync(LARGE));
+      const t = tracker(0);
+      await expect(encryptPdf(bytes, SETTINGS, t.port)).rejects.toMatchObject({
+        kind: 'UserCancelled'
+      });
+      const reached = t.reached();
+      // Nothing was reported at all, or only the very first gate.
+      expect(reached === null || reached.at <= ENCRYPT_CHECKPOINT_OBJECTS).toBe(true);
+    });
+
+    it('maps the encryption span into the caller-visible 0.1–0.95 band', async () => {
+      const { processWorkerImpl: impl } = await import('../../src/core/workers/process.worker');
+      const fractions: (number | null)[] = [];
+      const port: JobPort = {
+        progress(fraction) {
+          fractions.push(fraction);
+        },
+        cancelled: () => false
+      };
+      await impl.protectDocument(new Uint8Array(readFileSync(LARGE)), SETTINGS, port);
+
+      const inner = fractions.filter((f): f is number => f !== null && f > 0.1 && f < 1);
+      expect(inner.length).toBeGreaterThan(0);
+      expect(Math.min(...inner)).toBeGreaterThanOrEqual(0.1);
+      expect(Math.max(...inner)).toBeLessThanOrEqual(0.95);
+      // The bar still ends at 1, so the UI does not stall at 95%.
+      expect(fractions[fractions.length - 1]).toBe(1);
+    });
+
+    it('cancelling through the worker entry point leaves the input untouched', async () => {
+      const { processWorkerImpl: impl } = await import('../../src/core/workers/process.worker');
+      const bytes = new Uint8Array(readFileSync(LARGE));
+      const before = bytes.slice();
+      let checks = 0;
+      const port: JobPort = {
+        progress() {},
+        cancelled: () => ++checks > 3
+      };
+      await expect(impl.protectDocument(bytes, SETTINGS, port)).rejects.toMatchObject({
+        kind: 'UserCancelled'
+      });
+      expect(bytes).toEqual(before);
+    });
   });
 
   it('sets the reserved permission bits the spec requires', () => {

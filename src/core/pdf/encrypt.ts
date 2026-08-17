@@ -33,6 +33,7 @@ import {
   PDFString
 } from 'pdf-lib';
 import { encrypted, internal } from '../errors';
+import { checkpoint, type JobHandle } from '../workers/protocol';
 
 export interface ProtectionSettings {
   /** Required to open the file. Empty means "no open password", which we refuse. */
@@ -260,14 +261,41 @@ async function encryptStrings(
 }
 
 /**
+ * How often the object loop stops to report progress and test for cancellation.
+ *
+ * Two gates, whichever comes first, because neither alone is safe:
+ *
+ *  • **Time** is the one that actually bounds cancellation latency, since object
+ *    cost varies by three orders of magnitude (a 12-byte name versus a 5MB image
+ *    stream). 50ms matches the main-thread budget in CLAUDE.md and keeps the
+ *    check itself — a Comlink round-trip to the main thread — under ~2% overhead.
+ *  • **Object count** is the floor, for the case the time gate never trips.
+ *    Measured on `tests/fixtures/text-300.pdf` (604 indirect objects, ~116ms to
+ *    encrypt end to end) an object averages ~0.2ms, so 64 objects is ~13ms of
+ *    work — well inside budget, and it guarantees a check even on a document
+ *    small and fast enough that 50ms never elapses.
+ */
+export const ENCRYPT_CHECKPOINT_MS = 50;
+export const ENCRYPT_CHECKPOINT_OBJECTS = 64;
+
+/**
  * Returns `bytes` encrypted with a standard security handler.
  *
  * Throws rather than returning half-encrypted output: the caller keeps the
- * original bytes and reports the reason, per the never-corrupt rule.
+ * original bytes and reports the reason, per the never-corrupt rule. That is
+ * also what makes mid-loop cancellation safe — the partially-encrypted
+ * `PDFDocument` is local to this call and is discarded with the stack, and
+ * `bytes` itself is only ever read, never written, so an abort leaves the
+ * caller's input exactly as it was.
+ *
+ * `job` is optional so the pure-function tests can call this without a worker.
+ * Progress is reported over its own 0..1 span; see `subJob` for placing that
+ * span inside a caller's wider bar.
  */
 export async function encryptPdf(
   bytes: Uint8Array,
-  settings: ProtectionSettings
+  settings: ProtectionSettings,
+  job?: JobHandle
 ): Promise<Uint8Array> {
   if (!settings.userPassword) {
     throw internal('A password is required before a document can be protected.');
@@ -290,7 +318,28 @@ export async function encryptPdf(
   const context = doc.context;
   const seen = new Set<PDFObject>();
 
-  for (const [ref, object] of context.enumerateIndirectObjects()) {
+  // A snapshot array, not a live view: `context.assign` below replaces entries
+  // while this loop runs, and pdf-lib's `enumerateIndirectObjects` already
+  // returns a materialised array, so indexing it is exactly what the previous
+  // `for…of` iterated over.
+  const objects = context.enumerateIndirectObjects();
+  let lastCheck = performance.now();
+
+  for (let i = 0; i < objects.length; i++) {
+    const [ref, object] = objects[i];
+
+    // The cancellation point this loop used to lack entirely: `protectDocument`
+    // could only be stopped before the first object or after the last one, so a
+    // cancelled encryption of a large document ran to completion anyway.
+    if (
+      i > 0 &&
+      (i % ENCRYPT_CHECKPOINT_OBJECTS === 0 ||
+        performance.now() - lastCheck >= ENCRYPT_CHECKPOINT_MS)
+    ) {
+      await checkpoint(job, i / objects.length, `Encrypting object ${i} of ${objects.length}`);
+      lastCheck = performance.now();
+    }
+
     if (object instanceof PDFStream) {
       if (!(object instanceof PDFRawStream)) {
         // Every stream in freshly-serialised bytes parses back as a raw stream.
