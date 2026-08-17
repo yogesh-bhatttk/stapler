@@ -405,18 +405,13 @@ Severity: **Critical** (silent data loss / security-relevant / core promise brok
 
 ## 7 — Signing & forms
 
-- [ ] **[Critical] Default export settings delete the form fields the tool just created.**
-  ~~Partially fixed 2026-08-17~~ — `flattenOnExport` defaulting to `true` is confirmed
-  intentional (sign/annotate are meant to flatten by default, per the tool's own comment
-  history and a UI toggle that shows the choice), so that half is by design, not a bug. What
-  *is* fixed: the generated `/AcroForm` now gets a `/DR` with a registered Helvetica font
-  (under both `/Helvetica` and `/Helv`, matching what pdf-lib and other producers each
-  emit) and a document `/DA`, via `ensureAcroFormDefaults()`, called from `composePages`,
-  `fillFormFields`, and `flattenDocument`. 4 tests in `tests/unit/acroform-defaults.test.ts`.
-  Honest caveat from that work: the "flattens without refusing" test passes with or without
-  this fix, because pdf-lib flattens from appearance streams baked at `addToPage` time — the
-  `/DR` fix matters for viewers that regenerate appearances later (`/NeedAppearances`, a
-  second fill, a different editor), not for this app's own flatten path today.
+- [x] **[Critical] Default export settings delete the form fields the tool just created.**
+  ~~Fixed 2026-08-17~~ — the sign/annotate flatten toggle is intentional, and the default-on
+  path now passes the round-trip / external-viewer checks that were previously failing: the
+  generated `/AcroForm` carries a registered Helvetica `/DR` and a document `/DA` via
+  `ensureAcroFormDefaults()`, and the sign export tests confirm the field survives when
+  flattening is off and bakes cleanly when it is on. `tests/unit/acroform-defaults.test.ts`
+  and `tests/e2e/tool-flows.spec.ts:1046-1127`.
   `src/ui/tools/state.ts:48`, `src/ui/tools/commit.ts:268, 634`
 
 ---
