@@ -5,6 +5,7 @@ import { altTextMap, setAltText } from './state';
 import { useJob } from '../../useJob';
 import { useEffect, useState } from 'preact/hooks';
 import { findImagesForAltText, currentDocumentBytes } from '../../../core/operations';
+import { readAltText } from '../../../core/pdf/accessibility';
 import type { ImageAltInfo } from '../../../core/workers/process.worker';
 import type { JobOptions } from '../../../core/workers/protocol';
 
@@ -19,8 +20,16 @@ export function AccPanel() {
     let activeUrls: string[] = [];
     run({ label: 'Scanning for images...', scope: 'acc' }, async (job: JobOptions) => {
       const bytes = await currentDocumentBytes({ ...job, signal: job.signal }, true);
-      const result = await findImagesForAltText(bytes, { ...job, signal: job.signal });
+      const [result, existingAltText] = await Promise.all([
+        findImagesForAltText(bytes, { ...job, signal: job.signal }),
+        // Alt-text already tagged in the document (by us, on a prior export, or by
+        // another tool) — read it back so re-opening a tagged file doesn't show
+        // every box blank. Keyed identically to `img.pageIndex:img.objectNumber`
+        // below, so no translation is needed.
+        readAltText(bytes)
+      ]);
       if (job.signal?.aborted) return;
+      altTextMap.value = new Map(Object.entries(existingAltText));
       const withUrls = result.map(img => {
         const url = URL.createObjectURL(new Blob([img.bytes], { type: `image/${img.ext}` }));
         activeUrls.push(url);
