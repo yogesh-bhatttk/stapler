@@ -60,6 +60,18 @@ describe('classifyPages', () => {
     expect(plan.pages[0].route).toBe('raster');
   });
 
+  // §2 audit item: the safety skip-list used to be computed and then ignored on
+  // the textless (raster) route — a page with no text and a `/Separation` image
+  // was flattened to RGB JPEG, destroying the ink plate, while the report claimed
+  // the page was untouched. `hasUnsafeImage` now gates that route too.
+  it('never rasterises a textless page whose image is unsafe to re-encode', () => {
+    const plan = classifyPages([page([image({ colorSpace: 'Separation' })])], [text(0)], OPTIONS);
+    expect(plan.pages[0].route).toBe('already-optimized');
+    expect(plan.pages[0].reencode).toEqual([]);
+    expect(plan.actionableBytes).toBe(0);
+    expect(plan.skipped.join(' ')).toContain('Separation');
+  });
+
   it('reports a text-only page as already optimized', () => {
     const plan = classifyPages([page([])], [text(3000)], OPTIONS);
     expect(plan.pages[0].route).toBe('already-optimized');

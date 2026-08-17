@@ -265,7 +265,7 @@ export function classifyPages(
       if (!entry.safe && entry.reason) {
         skipped.add(entry.reason);
       }
-      if (!entry.safe || entry.image.hasSMask || entry.image.hasMask) {
+      if (!entry.safe) {
         hasUnsafeImage = true;
       }
     }
