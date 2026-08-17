@@ -5,6 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Privacy Policy - Stapler</title>
     <style>
+      /* This page is served as a static, unbundled file outside src/ (build:web
+         copies public/ verbatim), so it cannot `@import` or otherwise load
+         src/ui/styles/tokens.css — a separate build step would be needed just for
+         one page. Rather than leave literal colours scattered through the markup
+         (invisible to both the invariant hook and scripts/check-invariants.mjs),
+         this page declares its own small, page-scoped custom-property palette
+         here, once, with light/dark variants — the same pattern tokens.css uses,
+         just duplicated because the two files can't share a build pipeline. The
+         checker treats a `--name: <value>;` declaration as the token itself, not
+         a raw-colour usage, exactly as it does for tokens.css. Every var(...)
+         reference below resolves to one of these, never a bare literal. */
       :root {
         --bg-page: #ffffff;
         --bg-card: #f9f9f9;

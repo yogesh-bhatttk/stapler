@@ -8,18 +8,13 @@
  * `stapler:tesseract-assets` Vite plugin, because engine code is remote code
  * execution and no amount of user consent makes that acceptable (PLAN §5.4 item 2).
  *
- * Why the host is assembled rather than written as one literal: the invariant hook
- * (`.claude/hooks/check-invariants.mjs`) carves `src/core/ocr/` out of its
- * *network-API* check but not out of its `REMOTE_HOSTS` check, so any line here
- * spelling the CDN's name in full is blocked. Assembling it keeps the exception
- * where the plan says it lives instead of hiding it somewhere unaudited. The
- * cleaner long-term fix is to extend the hook's OCR carve-out to the host list;
- * this comment exists so that decision is made deliberately rather than by
- * accident.
+ * The invariant hook (`.claude/hooks/check-invariants.mjs`) carves `src/core/ocr/`
+ * out of its `REMOTE_HOSTS` check as well as its network-API check, so the host
+ * can be named in full here instead of assembled to dodge the scanner.
  */
 
 /** Host the model is fetched from. Named out loud in the confirmation dialog. */
-export const MODEL_HOST = ['cdn', 'jsdelivr', 'net'].join('.');
+export const MODEL_HOST = 'cdn.jsdelivr.net';
 
 /**
  * Pinned to an exact package path rather than a floating tag: an unpinned CDN URL

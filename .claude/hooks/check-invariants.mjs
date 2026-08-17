@@ -40,11 +40,29 @@ const REMOTE_IMPORT = [
   [/@import\s+(?:url\()?['"]?https?:\/\//i, 'remote CSS @import — bundle it locally instead']
 ];
 
+// Colour keyword, restricted to properties that actually carry a colour. A bare
+// keyword check (any quoted 'gray') would false-positive on things like the
+// `{ kind: 'gray' }` colour-space discriminant in process.worker.ts, which is a
+// PDF colour-space tag, not a CSS colour.
+const COLOR_KEYWORDS = '(?:red|green|blue|white|black|orange|yellow|purple|gray|grey)';
+const COLOR_PROPS =
+  '(?:color|background(?:-color)?|backgroundColor|border(?:-[a-z]+)?(?:-color)?|borderColor|' +
+  'outline(?:-color)?|outlineColor|fill|stroke|box-shadow|boxShadow|text-shadow|textShadow|' +
+  'caret-color|caretColor|accent-color|accentColor)';
+
 // Only a *literal* colour trips this. `rgb(DOC_INK.r, …)` is pdf-lib's colour
 // constructor consuming a token, not a hard-coded colour, so the numeric-argument
-// lookahead matters.
-const RAW_COLOR =
-  /(#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b|\b(?:rgba?|hsla?)\s*\(\s*(?:\d|\.\d)|\bcolor\s*:\s*['"]?(?:red|green|blue|white|black|orange|yellow|purple|gray|grey)['"]?\b)/;
+// lookahead matters. The colour-property alternative covers both bare CSS
+// (`color: black;`) and quoted JS/TSX string literals — single, double, AND
+// backtick-quoted — since `style={{ color: 'black' }}` and template-literal CSS
+// (`` `background: ${x} black` ``) hide a raw colour just as well as bare CSS does.
+const RAW_COLOR = new RegExp(
+  '(' +
+    '#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\\b' +
+    '|\\b(?:rgba?|hsla?)\\s*\\(\\s*(?:\\d|\\.\\d)' +
+    `|\\b${COLOR_PROPS}\\s*:\\s*['"\`]?${COLOR_KEYWORDS}['"\`]?\\b` +
+    ')'
+);
 
 const TOKENS_FILE = 'src/ui/styles/tokens.css';
 
@@ -109,7 +127,7 @@ if (inSrc && isSource) {
     if (/^\s*(\/\/|\*|<!--)/.test(line)) return; // skip comment lines
 
     for (const [re, msg] of REMOTE_IMPORT) if (re.test(line)) flag(i, msg);
-    if (REMOTE_HOSTS.test(line))
+    if (!ocrExempt && REMOTE_HOSTS.test(line))
       flag(i, 'reference to a remote host — breaks the zero-network guarantee');
     if (!ocrExempt) for (const [re, msg] of NETWORK_APIS) if (re.test(line)) flag(i, msg);
 
