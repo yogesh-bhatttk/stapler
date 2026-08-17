@@ -1,16 +1,54 @@
-import { beforeEach, describe, expect, it } from 'vitest';
-import {
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { StaplerError } from '../../src/core/errors';
+
+/**
+ * The render worker is stubbed: pdf.js needs a browser. By default `loadDocument`
+ * fails the way a *missing worker* fails (a plain Error → `InternalError`), which is
+ * what puts the indexer into its degraded latin1 mode — the mode the fixtures in
+ * this file are written for. Tests that care about a document pdf.js has *refused*
+ * swap in the error pdf.js would actually throw.
+ */
+let loadDocument: (bytes: Uint8Array) => Promise<{ handle: string }> = async () => {
+  throw new Error('render worker unavailable in this environment');
+};
+
+vi.mock('../../src/core/workers', () => {
+  const renderApi = {
+    loadDocument: (bytes: Uint8Array) => loadDocument(bytes),
+    documentText: async () => ['stub page text'],
+    closeDocument: async () => {}
+  };
+  const leaseOn =
+    <T>(target: T) =>
+    (fn: (api: T) => Promise<unknown>) =>
+      fn(target);
+  return {
+    renderWorker: {
+      lease: leaseOn(renderApi),
+      pin: () => ({ lease: leaseOn(renderApi), release: () => {} })
+    },
+    processWorker: { lease: leaseOn({}) },
+    cvWorker: { lease: leaseOn({}) }
+  };
+});
+
+const {
   clearFolderIndex,
   collectPdfFilesFromDir,
   extractSnippet,
   indexDirectory,
   searchFolderIndex,
   tokenizeText
-} from '../../src/core/ocr/folder-index';
+} = await import('../../src/core/ocr/folder-index');
+const { toasts } = await import('../../src/core/notify');
 
 describe('ocr/folder-index', () => {
   beforeEach(async () => {
     await clearFolderIndex();
+    toasts.value = [];
+    loadDocument = async () => {
+      throw new Error('render worker unavailable in this environment');
+    };
   });
 
   describe('tokenizeText & extractSnippet', () => {
@@ -177,6 +215,100 @@ describe('ocr/folder-index', () => {
       await clearFolderIndex();
       results = await searchFolderIndex('stamped');
       expect(results).toEqual([]);
+    });
+  });
+
+  describe('unreadable files and incremental re-index', () => {
+    it('skips an encrypted file with a surfaced reason instead of indexing its bytes', async () => {
+      // What pdf.js actually throws through the render worker for a password file.
+      loadDocument = async () => {
+        throw new StaplerError('Encrypted', 'The document requires a password to open.');
+      };
+
+      // Real-looking latin1 content: the old fallback scrape would have turned the
+      // parenthesised runs into "tokens" and filed them under the search index.
+      const locked = new File(
+        ['%PDF-1.4 (ciphertextgibberish confidentialpayroll) Tj'],
+        'locked.pdf',
+        { type: 'application/pdf', lastModified: 100 }
+      );
+
+      const stats = await indexDirectory({ files: [locked] } as any);
+
+      expect(stats.filesIndexed).toBe(0);
+      expect(stats.skipped).toEqual([
+        {
+          fileId: 'locked.pdf',
+          fileName: 'locked.pdf',
+          reason: 'The document requires a password to open.'
+        }
+      ]);
+      // Nothing from inside the file made it into the index.
+      expect(await searchFolderIndex('confidentialpayroll')).toEqual([]);
+      expect(await searchFolderIndex('ciphertextgibberish')).toEqual([]);
+      // And the user was told, rather than silently getting no hits forever.
+      const toast = toasts.value.at(-1);
+      expect(toast?.tone).toBe('warning');
+      expect(toast?.detail).toContain('locked.pdf');
+      expect(toast?.detail).toContain('password');
+    });
+
+    it("re-indexing one changed file leaves every other file's occurrences intact", async () => {
+      const alpha = new File(['%PDF-1.4 (alphauniquetoken shared) Tj'], 'alpha.pdf', {
+        type: 'application/pdf',
+        lastModified: 1
+      });
+      const beta = new File(['%PDF-1.4 (betauniquetoken shared) Tj'], 'beta.pdf', {
+        type: 'application/pdf',
+        lastModified: 2
+      });
+
+      await indexDirectory({ files: [alpha, beta] } as any);
+      expect((await searchFolderIndex('alphauniquetoken')).length).toBe(1);
+      expect((await searchFolderIndex('shared')).length).toBe(2);
+
+      // beta.pdf changes on disk; alpha.pdf does not.
+      const betaEdited = new File(['%PDF-1.4 (betarewrittentoken shared) Tj'], 'beta.pdf', {
+        type: 'application/pdf',
+        lastModified: 999
+      });
+      const stats = await indexDirectory({ files: [alpha, betaEdited] } as any);
+      expect(stats.filesIndexed).toBe(1);
+
+      // The whole point: alpha.pdf's entries survived a run that never touched it.
+      const alphaHits = await searchFolderIndex('alphauniquetoken');
+      expect(alphaHits.map(h => h.fileName)).toEqual(['alpha.pdf']);
+      const sharedHits = await searchFolderIndex('shared');
+      expect(sharedHits.map(h => h.fileName).sort()).toEqual(['alpha.pdf', 'beta.pdf']);
+
+      // And beta.pdf's stale token is gone, replaced by its new one.
+      expect(await searchFolderIndex('betauniquetoken')).toEqual([]);
+      expect((await searchFolderIndex('betarewrittentoken')).map(h => h.fileName)).toEqual([
+        'beta.pdf'
+      ]);
+    });
+
+    it('a file that becomes unreadable stops answering searches', async () => {
+      const doc = new File(['%PDF-1.4 (formerlyindexedtoken) Tj'], 'doc.pdf', {
+        type: 'application/pdf',
+        lastModified: 10
+      });
+      await indexDirectory({ files: [doc] } as any);
+      expect((await searchFolderIndex('formerlyindexedtoken')).length).toBe(1);
+
+      loadDocument = async () => {
+        throw new StaplerError('CorruptDocument', 'The file is not a readable PDF.');
+      };
+      const changed = new File(['%PDF-1.4 (formerlyindexedtoken) Tj'], 'doc.pdf', {
+        type: 'application/pdf',
+        lastModified: 20
+      });
+      const stats = await indexDirectory({ files: [changed] } as any);
+
+      expect(stats.skipped.map(s => s.fileName)).toEqual(['doc.pdf']);
+      // Stale hits are cleared rather than left pointing at a file we can no
+      // longer read.
+      expect(await searchFolderIndex('formerlyindexedtoken')).toEqual([]);
     });
   });
 });

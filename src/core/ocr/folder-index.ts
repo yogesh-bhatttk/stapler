@@ -15,6 +15,8 @@ import {
   type SearchIndexRecord
 } from '../db';
 import { renderWorker } from '../workers';
+import { fromUnknown, logEvent } from '../errors';
+import { notify } from '../notify';
 import type { FsaDirectoryHandle, FsaFileHandle } from '../../platform/fsa';
 
 export type { IndexOccurrence };
@@ -29,11 +31,20 @@ export interface SearchResultItem {
   score?: number;
 }
 
+export interface SkippedFile {
+  fileId: string;
+  fileName: string;
+  /** Why it could not be indexed, in the words the user should see. */
+  reason: string;
+}
+
 export interface FolderIndexStats {
   filesIndexed: number;
   pagesIndexed: number;
   totalTokens: number;
   durationMs: number;
+  /** Files deliberately not indexed — encrypted, corrupt, or otherwise unreadable. */
+  skipped: SkippedFile[];
 }
 
 export interface FolderIndexOptions {
@@ -165,28 +176,72 @@ export async function collectPdfFilesFromDir(
   return pdfs;
 }
 
-/** Extracts per-page text from a PDF file buffer. */
-export async function extractPdfTextPages(file: File): Promise<string[]> {
+export interface PageTextResult {
+  pages: string[];
+  /**
+   * Set when the document could not be read. `pages` is then empty and the caller
+   * must index nothing: the alternative — the latin1 byte scrape below — turns an
+   * encrypted file's ciphertext into "tokens" and files them under the user's
+   * search index as if they were words.
+   */
+  skipReason?: string;
+}
+
+/**
+ * Extracts per-page text from a PDF file.
+ *
+ * Three outcomes, kept distinct on purpose:
+ *
+ *  • pdf.js read it → its real text layer.
+ *  • pdf.js refused it (encrypted, corrupt, unsupported) → `skipReason`, no text.
+ *    This is the case that used to fall through to the byte scrape.
+ *  • there is no render worker at all (Node, tests, a worker that failed to boot)
+ *    → the crude latin1 scrape, which is a degraded mode rather than a wrong
+ *    answer about a specific document.
+ */
+export async function readPdfTextPages(file: File): Promise<PageTextResult> {
   const buffer = await file.arrayBuffer();
   const bytes = new Uint8Array(buffer);
 
+  let client: ReturnType<typeof renderWorker.pin>;
   try {
-    const client = renderWorker.pin();
-    try {
-      const info = await client.lease(api => api.loadDocument(bytes));
-      try {
-        const pagesText = await client.lease(api => api.documentText(info.handle));
-        return pagesText;
-      } finally {
-        await client.lease(api => api.closeDocument(info.handle)).catch(() => {});
-      }
-    } finally {
-      client.release();
-    }
+    client = renderWorker.pin();
   } catch {
-    // Fallback if renderWorker is not available or fails in Node unit test environment:
-    return fallbackExtractText(bytes);
+    // No worker environment. Degraded, but not a claim about this document.
+    return { pages: fallbackExtractText(bytes) };
   }
+
+  try {
+    const loaded = await client
+      .lease(api => api.loadDocument(bytes))
+      .then(
+        value => ({ ok: true as const, info: value }),
+        (err: unknown) => ({ ok: false as const, error: fromUnknown(err) })
+      );
+    if (!loaded.ok) {
+      // An `InternalError` here is the worker being unavailable or broken, not a
+      // verdict on this document; anything else (Encrypted, CorruptDocument,
+      // UnsupportedFeature) is pdf.js telling us it cannot read this file.
+      if (loaded.error.kind === 'InternalError') return { pages: fallbackExtractText(bytes) };
+      return { pages: [], skipReason: loaded.error.message };
+    }
+    const info = loaded.info;
+
+    try {
+      return { pages: await client.lease(api => api.documentText(info.handle)) };
+    } catch (err) {
+      return { pages: [], skipReason: fromUnknown(err).message };
+    } finally {
+      await client.lease(api => api.closeDocument(info.handle)).catch(() => {});
+    }
+  } finally {
+    client.release();
+  }
+}
+
+/** Back-compat wrapper: the text only, empty for a file that could not be read. */
+export async function extractPdfTextPages(file: File): Promise<string[]> {
+  return (await readPdfTextPages(file)).pages;
 }
 
 function fallbackExtractText(bytes: Uint8Array): string[] {
@@ -217,6 +272,15 @@ export async function indexDirectory(
   let filesIndexed = 0;
   let pagesIndexed = 0;
   let totalTokensCount = 0;
+  const skipped: SkippedFile[] = [];
+  /**
+   * The files this run actually rewrote — the only ones whose existing occurrences
+   * may be stripped. Stripping by "every file in the folder" (the old behaviour)
+   * deleted the occurrences of every *unchanged* file too, and those were never
+   * re-added because unchanged files are skipped: one edited file emptied the index
+   * for the rest of the folder.
+   */
+  const rewrittenFileIds = new Set<string>();
 
   // Map token -> Map<occurrenceKey, IndexOccurrence>
   const tokenMap = new Map<string, Map<string, IndexOccurrence>>();
@@ -246,8 +310,17 @@ export async function indexDirectory(
 
     // Clear old tokens for this file before re-indexing
     await deleteSearchIndexRecordsByFileId(fileId);
+    rewrittenFileIds.add(fileId);
 
-    const pagesText = await extractPdfTextPages(file);
+    const { pages: pagesText, skipReason } = await readPdfTextPages(file);
+    if (skipReason) {
+      // Explicitly not indexed. Its stale occurrences are still stripped below —
+      // a file that has become unreadable must not keep answering searches — but
+      // nothing is written in their place, and the user is told.
+      skipped.push({ fileId, fileName, reason: skipReason });
+      continue;
+    }
+
     filesIndexed++;
     pagesIndexed += pagesText.length;
 
@@ -287,14 +360,30 @@ export async function indexDirectory(
     });
   }
 
-  for (const [token, occMap] of tokenMap.entries()) {
+  // Tokens that only appear in files this run rewrote still need their stale
+  // occurrences cleared, even when the file contributed no new occurrence for that
+  // token (its text changed, or it became unreadable). So every stored token record
+  // touching a rewritten file is visited, not just the ones in `tokenMap`.
+  const touchedTokenKeys = new Set(tokenMap.keys());
+  if (rewrittenFileIds.size > 0) {
+    for (const record of await getSearchIndexRecordsByType('token')) {
+      if (!record.token || touchedTokenKeys.has(record.token)) continue;
+      if (record.occurrences?.some(o => rewrittenFileIds.has(o.fileId))) {
+        touchedTokenKeys.add(record.token);
+      }
+    }
+  }
+
+  for (const token of touchedTokenKeys) {
     const tokenKey = `t:${token}`;
-    const newOccurrences = Array.from(occMap.values());
+    const newOccurrences = Array.from(tokenMap.get(token)?.values() ?? []);
     totalTokensCount += newOccurrences.length;
 
     const existing = await getSearchIndexRecord(tokenKey);
     const existingOccs = existing?.occurrences ?? [];
-    const updatedOccs = existingOccs.filter(o => !pdfFiles.some(f => f.fileId === o.fileId));
+    // Only this run's files lose their old entries. Everything else stays exactly
+    // as it was indexed.
+    const updatedOccs = existingOccs.filter(o => !rewrittenFileIds.has(o.fileId));
     updatedOccs.push(...newOccurrences);
 
     recordsToStore.push({
@@ -312,11 +401,24 @@ export async function indexDirectory(
   const durationMs = Math.round(performance.now() - startTime);
   options?.onProgress?.(1, `Indexed ${filesIndexed} PDFs in ${durationMs}ms`);
 
+  if (skipped.length > 0) {
+    // Surfaced, not swallowed: a file missing from search results is invisible
+    // unless we say so. One toast for the run, naming the files.
+    const names = skipped.map(s => s.fileName);
+    notify('warning', `${skipped.length} file(s) could not be indexed`, {
+      detail: `${names.slice(0, 3).join(', ')}${names.length > 3 ? `, and ${names.length - 3} more` : ''} — ${skipped[0].reason} These files will not appear in search results.`
+    });
+    for (const entry of skipped) {
+      logEvent('warn', 'folder-index', `${entry.fileId}: ${entry.reason}`);
+    }
+  }
+
   return {
     filesIndexed,
     pagesIndexed,
     totalTokens: totalTokensCount,
-    durationMs
+    durationMs,
+    skipped
   };
 }
 
