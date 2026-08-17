@@ -7,15 +7,20 @@ import { commit } from './history';
  * component has to, and it is where the honest-reporting rules live: nothing here
  * hands the user a file it cannot stand behind.
  */
+import * as Comlink from 'comlink';
 import { processWorker, renderWorker, cvWorker } from './workers';
 import { createJobHandle, type JobOptions } from './workers/protocol';
 import type {
   ExtractedImages,
   RedactionRegion,
+  ScrubSettings,
   StampSource,
-  ImageAltInfo
+  ImageAltInfo,
+  ImageRedactionRequest,
+  RedactedImageReplacements
 } from './workers/process.worker';
-import type { PatternSuggestion, TextRegion } from './workers/render.worker';
+import type { ProtectionSettings } from './pdf/encrypt';
+import type { PatternSuggestion, RegionPixelResidue, TextRegion } from './workers/render.worker';
 import {
   MEANINGFUL_SAVING,
   classifyPages,
@@ -67,6 +72,29 @@ function toWatermarkData(settings: WatermarkSettings): WatermarkData {
     startAt: settings.startAt,
     pageRange: settings.pageRange
   };
+}
+
+/**
+ * Hands a buffer *to* the worker instead of cloning it (AUDIT-FINDINGS §4).
+ *
+ * A structured clone of a 200MB document doubles peak memory for the duration
+ * of the call, and every inbound worker call in this file used to do it. A
+ * transfer costs nothing — but it **detaches** the caller's buffer, so it is
+ * only ever correct for bytes this module owns outright and will not read
+ * again.
+ *
+ * That rules out the biggest callers, deliberately and permanently:
+ * `compose`, `rebuildCompressed` and `applyRedactions` are all given the
+ * *document store's* canonical bytes (`bytesForPages`, `currentDocumentBytes`),
+ * which the grid, the thumbnails and the next export all still need. Detaching
+ * those would empty the open document — precisely the silent corruption this
+ * codebase refuses to ship. They keep the clone.
+ *
+ * Use this only on bytes that came out of a worker one line earlier and die at
+ * this call.
+ */
+function handOver(bytes: Uint8Array): Uint8Array {
+  return Comlink.transfer(bytes, [bytes.buffer as ArrayBuffer]);
 }
 
 /** Resolves signature stamps to bytes so the worker never touches IndexedDB. */
@@ -165,6 +193,12 @@ export interface ComposeRequest {
   /** OPS-11 — a Bates stamp for every exported page. */
   bates?: import('./workers/process.worker').BatesData;
   formFieldsToCreate?: NewFormField[];
+  /**
+   * Sign and Annotate only: compose an XFA document even though its dynamic-form
+   * payload cannot survive the rebuild. Stamping on top of a flattened XFA form
+   * is what the product tells the user to do; merging one silently is not.
+   */
+  allowXfaLoss?: boolean;
 }
 
 /** DOC-05 — compose the current model into output bytes. */
@@ -197,6 +231,7 @@ export async function composeDocument(
       {
         outline: request.outline,
         bates: request.bates,
+        allowXfaLoss: request.allowXfaLoss,
         formFieldsToCreate:
           request.formFieldsToCreate ?? extractFormFieldsToCreate(request.annotations)
       }
@@ -324,16 +359,19 @@ export function splitBoundaries(
   ].sort((a, b) => a - b);
 }
 
-export async function getFormFields(bytes: Uint8Array) {
-  return processWorker.lease(api => api.getFormFields(bytes));
+export async function getFormFields(bytes: Uint8Array, options: JobOptions = {}) {
+  const job = createJobHandle(options);
+  return processWorker.lease(api => api.getFormFields(bytes, job));
 }
 
 export async function fillFormFields(
   bytes: Uint8Array,
   values: Record<string, string | string[] | boolean>,
-  flatten: boolean
+  flatten: boolean,
+  options: JobOptions = {}
 ) {
-  return processWorker.lease(api => api.fillFormFields(bytes, values, flatten));
+  const job = createJobHandle(options);
+  return processWorker.lease(api => api.fillFormFields(bytes, values, flatten, job));
 }
 
 /**
@@ -343,8 +381,36 @@ export async function fillFormFields(
  * `copyPages`, which carries `/Annots` through, so flattening before a compose
  * would have the annotations copied straight back in.
  */
-export async function flattenDocument(bytes: Uint8Array) {
-  return processWorker.lease(api => api.flattenDocument(bytes));
+export async function flattenDocument(bytes: Uint8Array, options: JobOptions = {}) {
+  const job = createJobHandle(options);
+  // The caller's `bytes` are the just-composed export, not the open document,
+  // and the composed bytes are never read again — the flattened result replaces
+  // them. See `handOver` for why the compose call itself cannot do this.
+  return processWorker.lease(api => api.flattenDocument(handOver(bytes), job));
+}
+
+/**
+ * RED-06 — encrypts already-exported bytes. Takes a job handle for the same
+ * reason everything else here does: on a large document the AES pass is
+ * seconds of work, and it used to run with no progress and no way to stop it.
+ */
+export async function protectDocument(
+  bytes: Uint8Array,
+  settings: ProtectionSettings,
+  options: JobOptions = {}
+) {
+  const job = createJobHandle(options);
+  return processWorker.lease(api => api.protectDocument(bytes, settings, job));
+}
+
+/** RED-04 — metadata scrub, with progress and cancellation like every other op. */
+export async function scrubDocumentMetadata(
+  bytes: Uint8Array,
+  settings: ScrubSettings | undefined,
+  options: JobOptions = {}
+) {
+  const job = createJobHandle(options);
+  return processWorker.lease(api => api.scrubMetadata(bytes, settings, job));
 }
 
 /* ------------------------------------------------------------------ *
@@ -632,8 +698,6 @@ export interface RedactionOutcome {
   verdicts: RegionVerdict[];
   /** Every verdict passed; the UI must block saving when false. */
   verified: boolean;
-  /** Pages whose text is no longer selectable, so we can say so plainly. */
-  rasterizedPages: number[];
 }
 
 /**
@@ -698,29 +762,143 @@ export async function applyRedactions(
 
   const job = createJobHandle(options);
 
+  // RED-02 — an image a mark only *partly* covers cannot be dropped (the rest of
+  // it is content the user kept) and must not be left intact under a black
+  // rectangle (an overlay is not a redaction). Its pixels are destroyed instead,
+  // which needs pdf.js to decode the image and pdf-lib to substitute it — two
+  // workers, so the plan is computed first and the pixel work handed across.
+  options.onProgress?.(0.4, 'Checking images');
+  const imageRequests = await processWorker.lease(api => api.planImageRedactions(bytes, regions));
+  const imageReplacements = await redactOverlappedImages(bytes, imageRequests, options);
+
   options.onProgress?.(0.55, 'Rebuilding document');
-  let output = await processWorker.lease(api => api.applyRedactions(bytes, regions, job));
+  let output = await processWorker.lease(api =>
+    api.applyRedactions(bytes, regions, imageReplacements, job)
+  );
 
   // RED-04: metadata is scrubbed as part of redaction, because redacted content
   // routinely survives in XMP, the info dictionary, and embedded thumbnails.
   options.onProgress?.(0.75, 'Stripping metadata');
-  output = await processWorker.lease(api => api.scrubMetadata(output));
+  // `output` is the redaction worker's own result, reassigned on the next line:
+  // nothing else can ever read this buffer, so it is handed over rather than
+  // copied.
+  output = await processWorker.lease(api => api.scrubMetadata(handOver(output), undefined, job));
 
   options.onProgress?.(0.85, 'Verifying');
   const verdicts = await verifyRedaction(output, regions);
 
+  // No `rasterizedPages`: this pipeline is operator-level throughout — content
+  // streams are edited and partly-covered images have their pixels replaced.
+  // Nothing is ever flattened to a page raster, so there is no such list to
+  // report. It used to be returned as a hardcoded `[]` and printed verbatim,
+  // which told the user "Pages  are now images" on every single run.
   return {
     bytes: output,
     verdicts,
-    verified: verdicts.every(v => v.pass),
-    rasterizedPages: [] // No longer rasterizing full pages
+    verified: verdicts.every(v => v.pass)
   };
+}
+
+/**
+ * Blacks out the covered part of every partly-overlapped image, in the pdf.js
+ * worker, and returns the substitutions keyed the way `applyRedactions` wants
+ * them.
+ *
+ * An image pdf.js cannot decode is *not* skipped: it throws, so the redaction
+ * fails loudly and the user's document is left untouched, rather than producing
+ * a file that says "verified" over an image that still holds the secret.
+ */
+async function redactOverlappedImages(
+  bytes: Uint8Array,
+  requests: ImageRedactionRequest[],
+  options: JobOptions
+): Promise<RedactedImageReplacements> {
+  const replacements: RedactedImageReplacements = {};
+  if (requests.length === 0) return replacements;
+
+  const byPage = new Map<number, ImageRedactionRequest[]>();
+  for (const request of requests) {
+    const list = byPage.get(request.pageIndex);
+    if (list) list.push(request);
+    else byPage.set(request.pageIndex, [request]);
+  }
+
+  return renderWorker.lease(async api => {
+    const { handle } = await api.loadDocument(bytes);
+    try {
+      let done = 0;
+      for (const [pageIndex, pageRequests] of byPage) {
+        // Decoding and re-encoding a page's images is the slowest part of a
+        // redaction on a scanned document, so it is a cancellation point like
+        // every other multi-page loop.
+        if (options.signal?.aborted) throw cancelled();
+        options.onProgress?.(
+          0.4 + (done / byPage.size) * 0.15,
+          `Redacting images on page ${pageIndex + 1}`
+        );
+        done += 1;
+        const results = await api.redactPageImages(
+          handle,
+          pageIndex,
+          pageRequests.map(r => ({ objectNumber: r.objectNumber, rects: r.rects }))
+        );
+        const byObjectNumber = new Map(results.map(r => [r.objectNumber, r]));
+        for (const request of pageRequests) {
+          const result = byObjectNumber.get(request.objectNumber);
+          if (!result?.image) {
+            throw unsupported(
+              `An image on page ${pageIndex + 1} is only partly covered by a redaction mark and ` +
+                `its pixels could not be removed. ${result?.reason ?? 'The image could not be decoded.'} ` +
+                'Drawing a black box over it would leave the original image inside the file, so ' +
+                'nothing was saved and your document is untouched. Cover the whole image with ' +
+                'the mark, or rasterise the page first.'
+            );
+          }
+          const page = (replacements[pageIndex] ??= {});
+          page[request.name] = result.image;
+        }
+      }
+      return replacements;
+    } finally {
+      await api.closeDocument(handle);
+    }
+  });
+}
+
+/**
+ * RED-03 — how much of a verification region may differ from the redaction fill
+ * before the region is treated as still holding content.
+ *
+ * Not zero, because the mark's edge is anti-aliased and a page that was JPEG
+ * compressed at some point in its life carries ringing; see
+ * `render.worker.ts`'s `FILL_CHANNEL_TOLERANCE` and `AA_INSET_FRACTION` for the
+ * two conservatisms applied before a pixel is even counted. 2% of the *interior*
+ * of a mark is far less than any glyph, rule, or image fragment a reader could
+ * recover: a single 8pt character inside a 150x20pt mark is already ~2%.
+ */
+export const MAX_RESIDUE_FRACTION = 0.02;
+
+/**
+ * Grades one region's rendered pixels. Pure, and exported so the policy can be
+ * tested without a worker; the measurement itself lives in the render worker.
+ */
+export function residueFailure(residue: RegionPixelResidue): string | null {
+  // Nothing could be sampled: the region is sub-pixel at verification DPI, so
+  // there is no room inside it for content a reader could recover. The text and
+  // string checks still apply to it.
+  if (residue.sampled === 0) return null;
+  if (residue.fraction <= MAX_RESIDUE_FRACTION) return null;
+  const percent = (residue.fraction * 100).toFixed(1);
+  return (
+    `${percent}% of the pixels inside the mark are not the redaction fill ` +
+    `(worst pixel is ${residue.maxDeviation}/255 away from it), so content is still visible there.`
+  );
 }
 
 /**
  * RED-03 — the verification gate.
  *
- * Two checks run in sequence:
+ * Three independent checks run against the *output* bytes:
  *
  *  1. Geometric: `checkRegionText` re-extracts text from the redacted output
  *     using the same coordinate system that placed the marks. Any character
@@ -728,14 +906,27 @@ export async function applyRedactions(
  *     catches hand-drawn regions that carry no search string as well as text
  *     operators.
  *
- *  2. String-level: if a region was found by search (so we know the exact
+ *  2. Pixels: `checkRegionPixels` renders each region as a viewer would draw it
+ *     and measures how far it is from the opaque redaction fill. Text extraction
+ *     is blind to a vector shape, an inline image, and to an image whose covered
+ *     pixels were only partly overwritten — all three now real possibilities,
+ *     because a partly-covered image has its pixels painted rather than the whole
+ *     XObject dropped. An overlay rectangle is not a redaction, and this is the
+ *     check that can tell the difference.
+ *
+ *  3. String-level: if a region was found by search (so we know the exact
  *     string), that string must be absent from the entire document — not just
  *     from its original page — so that a copy of the text in a footer, a
  *     header, or another section also fails verification.
  *
  * Operator-level redaction does not blank entire pages (unlike the old raster
  * path), so a "no text at all on affected pages" check would be wrong; the
- * geometric per-region check is the correct gate.
+ * per-region checks are the correct gate.
+ *
+ * A check that cannot run fails closed. A region whose pixels could not be
+ * rendered is reported as unverified, not as verified — `applyRedactions`'s
+ * caller blocks the save on any failing verdict, which is the only safe reading
+ * of "we could not look".
  */
 async function verifyRedaction(
   output: Uint8Array,
@@ -756,7 +947,18 @@ async function verifyRedaction(
       // RED-03: geometric verification — no text may remain inside any marked region.
       const regionChecks = await api.checkRegionText(handle, regions);
 
-      return regionChecks.map(({ region, foundText }) => {
+      // RED-03: pixel verification — the region must actually *render* blank.
+      // Failing closed on an error here is deliberate: an unrenderable page is
+      // a reason to refuse the save, not to declare the redaction sound.
+      let pixelChecks: { region: RedactionRegion; residue: RegionPixelResidue }[] | null = null;
+      let pixelError: string | null = null;
+      try {
+        pixelChecks = await api.checkRegionPixels(handle, regions);
+      } catch (error) {
+        pixelError = error instanceof Error ? error.message : String(error);
+      }
+
+      return regionChecks.map(({ region, foundText }, index) => {
         if (foundText.trim().length > 0) {
           return {
             region,
@@ -773,12 +975,44 @@ async function verifyRedaction(
           };
         }
 
+        if (!pixelChecks) {
+          return {
+            region,
+            pass: false,
+            detail:
+              `The redacted region on page ${region.pageIndex + 1} carries no extractable text, but it ` +
+              `could not be rendered to check its pixels, so the redaction is unproven. ${pixelError ?? ''}`.trim()
+          };
+        }
+
+        // Paired by position: `checkRegionPixels` answers in the order it was
+        // asked, one entry per region, the same contract `checkRegionText` has.
+        const pixels = pixelChecks[index];
+        if (!pixels || pixels.region.pageIndex !== region.pageIndex) {
+          return {
+            region,
+            pass: false,
+            detail:
+              `The pixel check returned no result for the region on page ${region.pageIndex + 1}, ` +
+              'so the redaction is unproven.'
+          };
+        }
+
+        const residueDetail = residueFailure(pixels.residue);
+        if (residueDetail) {
+          return {
+            region,
+            pass: false,
+            detail: `The redacted region on page ${region.pageIndex + 1} does not render blank: ${residueDetail}`
+          };
+        }
+
         return {
           region,
           pass: true,
           detail: region.text
-            ? `"${region.text}" is absent, and the redacted region is geometrically clear.`
-            : `The redacted region on page ${region.pageIndex + 1} is geometrically clear.`
+            ? `"${region.text}" is absent, the redacted region is geometrically clear, and it renders as solid fill.`
+            : `The redacted region on page ${region.pageIndex + 1} is geometrically clear and renders as solid fill.`
         };
       });
     } finally {

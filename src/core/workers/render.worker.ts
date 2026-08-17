@@ -12,10 +12,12 @@ import * as Comlink from 'comlink';
 import { openDocument, pdfjsLib } from './pdfjs-setup';
 import { checkpoint, type JobHandle } from './protocol';
 import { corrupt, encrypted, internal } from '../errors';
-import { DOC_PAGE_WHITE } from '../doc-colors';
+import { DOC_PAGE_WHITE, DOC_REDACT_RGB } from '../doc-colors';
 import { blankCoverageLimit, inkCoverage, layoutText, toRgba, type TextRun } from '../text-layout';
 import type { RedactionRegion } from './process.worker';
 import { locatePatterns, type PatternCategory } from '../patterns';
+import { paintRectsBlack, type UnitRect } from '../pdf/image-redaction';
+import { findAcrossRuns } from '../pdf/text-search';
 
 export interface DocumentInfo {
   handle: string;
@@ -95,6 +97,26 @@ export interface RegionRaster {
   height: number;
 }
 
+/**
+ * RED-03 — what a rendered redaction region actually contains, in pixels.
+ *
+ * The text-based half of verification can only prove there is no *extractable
+ * text* left inside a region. It says nothing about a vector shape, an inline
+ * image, or an image whose pixels were only partly overwritten, so this is the
+ * second, independent half: the region is rendered exactly as a viewer would
+ * draw it and compared against the opaque redaction fill.
+ */
+export interface RegionPixelResidue {
+  /** Pixels examined, i.e. the region minus the anti-aliasing inset. */
+  sampled: number;
+  /** Sampled pixels further from the fill colour than `channelTolerance`. */
+  offFill: number;
+  /** `offFill / sampled`, 0 when nothing could be sampled. */
+  fraction: number;
+  /** Largest per-channel distance from the fill seen on any sampled pixel. */
+  maxDeviation: number;
+}
+
 export interface RenderJob {
   loadDocument(bytes: Uint8Array, password?: string): Promise<DocumentInfo>;
   closeDocument(handle: string): Promise<void>;
@@ -145,6 +167,40 @@ export interface RenderJob {
     handle: string,
     regions: RedactionRegion[]
   ): Promise<{ region: RedactionRegion; foundText: string }[]>;
+  /**
+   * RED-03's pixel half — renders each region and reports how far it is from the
+   * redaction fill. Kept in the worker (rather than handing `renderRegionPng`'s
+   * PNG back and decoding it on the main thread) because decoding and scanning a
+   * region per mark is exactly the >50ms main-thread work the NFRs forbid.
+   */
+  checkRegionPixels(
+    handle: string,
+    regions: RedactionRegion[],
+    job?: JobHandle
+  ): Promise<{ region: RedactionRegion; residue: RegionPixelResidue }[]>;
+  /**
+   * RED-02 — destroys the covered pixels of an image a redaction mark only
+   * partly overlaps, and hands back the re-encoded image.
+   *
+   * The alternative the code used to take was to leave the image alone and let
+   * the black rectangle drawn on the page hide it, which hides nothing: the
+   * full-resolution original stays embedded and comes straight back out of any
+   * image extractor. An image pdf.js cannot decode (JBIG2, JPEG 2000, a broken
+   * stream) is reported as a failure rather than approximated, so the caller can
+   * refuse the redaction instead of shipping a false one.
+   */
+  redactPageImages(
+    handle: string,
+    pageIndex: number,
+    requests: { objectNumber: number; rects: UnitRect[] }[]
+  ): Promise<RedactedImageResult[]>;
+}
+
+export interface RedactedImageResult {
+  objectNumber: number;
+  /** Absent when `reason` is set — the image could not be decoded. */
+  image?: { bytes: Uint8Array; format: 'png' | 'jpeg'; width: number; height: number };
+  reason?: string;
 }
 
 interface DocEntry {
@@ -201,6 +257,398 @@ function renderParams(ctx: OffscreenCanvasRenderingContext2D, viewport: pdfjsLib
     viewport,
     background: DOC_PAGE_WHITE,
     annotationMode: pdfjsLib.AnnotationMode.ENABLE
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * SGN-02 — signature-line detection, the vector half.
+ *
+ * A real "sign here" line is almost never text. It is a stroked path, or a filled
+ * rectangle 0.8pt tall, with a small "Signature" or "Date" caption printed beneath
+ * it. Matching text runs alone therefore missed the normal case entirely and only
+ * caught the typewriter-era `_______` convention.
+ *
+ * These three functions are pure and exported so they can be tested against a real
+ * pdf.js operator list without a browser.
+ * ------------------------------------------------------------------ */
+
+/** The op codes this scan needs, structurally compatible with pdf.js's `OPS`. */
+export interface PathOpCodes {
+  save: number;
+  restore: number;
+  transform: number;
+  setLineWidth: number;
+  constructPath: number;
+  stroke: number;
+  closeStroke: number;
+  fill: number;
+  eoFill: number;
+  fillStroke: number;
+  eoFillStroke: number;
+  closeFillStroke: number;
+  closeEOFillStroke: number;
+}
+
+/** A long, thin, horizontal painted path, in PDF user space (y up). */
+export interface PageRule {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Thicker than this and it is a box, a table cell or a bar chart, not a rule. */
+const MAX_RULE_THICKNESS = 3;
+/** Shorter than this (~0.8in) and nobody is signing on it. */
+const MIN_RULE_LENGTH = 60;
+/** A rule is much wider than it is tall; this rejects short dashes and ticks. */
+const MIN_RULE_ASPECT = 8;
+
+/** Captions that mean "a person writes here". */
+const SIGNATURE_LABEL = /signature|sign here|signed by|printed name|_{5,}/i;
+/** Captions that only count when a rule is drawn next to them. */
+const RULE_LABEL = /signature|sign here|signed by|printed name|\bdate\b/i;
+
+type PathMatrix = [number, number, number, number, number, number];
+
+/** `m` applied first, then `ctm` — pdf.js's own `Util.transform` composition. */
+function composeMatrix(ctm: PathMatrix, m: PathMatrix): PathMatrix {
+  return [
+    ctm[0] * m[0] + ctm[2] * m[1],
+    ctm[1] * m[0] + ctm[3] * m[1],
+    ctm[0] * m[2] + ctm[2] * m[3],
+    ctm[1] * m[2] + ctm[3] * m[3],
+    ctm[0] * m[4] + ctm[2] * m[5] + ctm[4],
+    ctm[1] * m[4] + ctm[3] * m[5] + ctm[5]
+  ];
+}
+
+function applyMatrix(m: PathMatrix, x: number, y: number): [number, number] {
+  return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+}
+
+/**
+ * Finds every long, thin horizontal rule in a pdf.js operator list.
+ *
+ * pdf.js hands each painted path as `constructPath [paintOp, [pathData], minMax]`,
+ * where `minMax` is the path's bounding box in the *current* user space. That box
+ * plus the CTM plus the line width is everything needed here — the individual path
+ * segments are not, which is what keeps this cheap enough to run per page.
+ */
+export function horizontalRulesFromOps(
+  fnArray: number[],
+  argsArray: unknown[],
+  ops: PathOpCodes
+): PageRule[] {
+  const strokePaints = new Set([
+    ops.stroke,
+    ops.closeStroke,
+    ops.fillStroke,
+    ops.eoFillStroke,
+    ops.closeFillStroke,
+    ops.closeEOFillStroke
+  ]);
+
+  const rules: PageRule[] = [];
+  let ctm: PathMatrix = [1, 0, 0, 1, 0, 0];
+  let lineWidth = 1;
+  const stack: { ctm: PathMatrix; lineWidth: number }[] = [];
+
+  for (let i = 0; i < fnArray.length; i++) {
+    const fn = fnArray[i];
+    const args = argsArray[i];
+
+    if (fn === ops.save) {
+      stack.push({ ctm, lineWidth });
+      continue;
+    }
+    if (fn === ops.restore) {
+      const previous = stack.pop();
+      if (previous) {
+        ctm = previous.ctm;
+        lineWidth = previous.lineWidth;
+      }
+      continue;
+    }
+    if (fn === ops.transform && Array.isArray(args)) {
+      ctm = composeMatrix(ctm, args.slice(0, 6) as PathMatrix);
+      continue;
+    }
+    if (fn === ops.setLineWidth && Array.isArray(args) && typeof args[0] === 'number') {
+      lineWidth = args[0];
+      continue;
+    }
+    if (fn !== ops.constructPath || !Array.isArray(args)) continue;
+
+    const paintOp = args[0] as number;
+    const minMax = args[2] as ArrayLike<number> | undefined;
+    if (!minMax || minMax.length < 4) continue;
+
+    const [minX, minY, maxX, maxY] = [minMax[0], minMax[1], minMax[2], minMax[3]];
+    // The box may be rotated or skewed by the CTM, so take the axis-aligned bounds
+    // of all four transformed corners rather than transforming two of them.
+    const corners: [number, number][] = [
+      applyMatrix(ctm, minX, minY),
+      applyMatrix(ctm, maxX, minY),
+      applyMatrix(ctm, maxX, maxY),
+      applyMatrix(ctm, minX, maxY)
+    ];
+    const xs = corners.map(c => c[0]);
+    const ys = corners.map(c => c[1]);
+    let x = Math.min(...xs);
+    let y = Math.min(...ys);
+    let width = Math.max(...xs) - x;
+    let height = Math.max(...ys) - y;
+
+    // A zero-height stroked line is still `lineWidth` thick on the page, centred
+    // on the path — so the painted extent is the box grown by half on each side.
+    if (strokePaints.has(paintOp)) {
+      const scale = Math.sqrt(Math.abs(ctm[0] * ctm[3] - ctm[1] * ctm[2])) || 1;
+      const painted = (lineWidth || 1) * scale;
+      x -= painted / 2;
+      y -= painted / 2;
+      width += painted;
+      height += painted;
+    }
+
+    if (
+      height <= MAX_RULE_THICKNESS &&
+      width >= MIN_RULE_LENGTH &&
+      width >= height * MIN_RULE_ASPECT
+    ) {
+      rules.push({ x, y, width, height });
+    }
+  }
+
+  return rules;
+}
+
+/** Minimal view of a pdf.js viewport, so the pairing below stays testable. */
+export interface RuleViewport {
+  width: number;
+  height: number;
+  convertToViewportPoint(x: number, y: number): number[];
+}
+
+/** Minimal view of a pdf.js text run. */
+export interface RuleTextRun {
+  str: string;
+  width: number;
+  height: number;
+  transform: number[];
+}
+
+/**
+ * Pairs each drawn rule with a nearby caption and turns the survivors into
+ * signature-field suggestions sitting *on* the rule.
+ *
+ * The caption requirement is what stops every table border and page header rule in
+ * the document from being offered as a place to sign.
+ */
+export function signatureRulesToRegions(
+  rules: PageRule[],
+  runs: RuleTextRun[],
+  viewport: RuleViewport,
+  pageIndex: number
+): TextRegion[] {
+  const regions: TextRegion[] = [];
+
+  const labels = runs
+    .filter(run => run.str.trim() && RULE_LABEL.test(run.str))
+    .map(run => {
+      const height = Math.abs(run.transform[3]) || run.height || 10;
+      const [vx, vy] = viewport.convertToViewportPoint(run.transform[4], run.transform[5]);
+      return { text: run.str.trim(), x: vx, baselineY: vy, width: run.width, height };
+    });
+
+  for (const rule of rules) {
+    const [x1, y1] = viewport.convertToViewportPoint(rule.x, rule.y);
+    const [x2, y2] = viewport.convertToViewportPoint(rule.x + rule.width, rule.y + rule.height);
+    const left = Math.min(x1, x2);
+    const right = Math.max(x1, x2);
+    const top = Math.min(y1, y2);
+    const bottom = Math.max(y1, y2);
+    if (right - left < MIN_RULE_LENGTH) continue; // rotated into a vertical rule
+
+    const label = labels.find(candidate => {
+      // The caption sits just under the rule (the common case) or just above it,
+      // within about two of its own line heights.
+      const near = candidate.height * 3 + 6;
+      const verticallyClose =
+        candidate.baselineY >= top - near && candidate.baselineY <= bottom + near;
+      if (!verticallyClose) return false;
+      // …and horizontally in the same column: overlapping the rule, or starting
+      // within ~1.5in to the left of it ("Signature: ______").
+      const labelRight = candidate.x + Math.max(candidate.width, 8);
+      return labelRight >= left - 110 && candidate.x <= right + 110;
+    });
+    if (!label) continue;
+
+    const boxHeight = Math.max(label.height * 2.5, 24);
+    regions.push({
+      pageIndex,
+      x: left / viewport.width,
+      // The signature goes above the rule, resting on it.
+      y: Math.max(0, (top - boxHeight) / viewport.height),
+      width: Math.min(1, (right - left) / viewport.width),
+      height: boxHeight / viewport.height,
+      text: label.text
+    });
+  }
+
+  return regions;
+}
+
+/** True when two suggestions cover materially the same spot. */
+export function overlapsRegion(a: TextRegion, b: TextRegion): boolean {
+  const overlapX = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+  const overlapY = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+  if (overlapX <= 0 || overlapY <= 0) return false;
+  const intersection = overlapX * overlapY;
+  const smaller = Math.min(a.width * a.height, b.width * b.height);
+  return smaller > 0 && intersection / smaller > 0.5;
+}
+
+/* ------------------------------------------------------------------ *
+ * RED-03 — the pixel half of the verification gate.
+ * ------------------------------------------------------------------ */
+
+/**
+ * Renders one normalised region of a page, exactly as a viewer would draw it.
+ *
+ * Shared by `renderRegionPng` (which hands the pixels to the UI) and
+ * `checkRegionPixels` (which grades them). Rendering the *full* page viewport and
+ * translating it so the region lands on the canvas origin — rather than rendering
+ * a cropped viewport — is what keeps content that straddles the region boundary in
+ * frame, which is precisely the content a redaction is most likely to have missed.
+ */
+async function renderRegion(
+  page: pdfjsLib.PDFPageProxy,
+  region: { x: number; y: number; width: number; height: number },
+  dpi: number
+) {
+  const full = page.getViewport({ scale: dpi / 72 });
+  const px = {
+    x: region.x * full.width,
+    y: region.y * full.height,
+    width: Math.max(1, region.width * full.width),
+    height: Math.max(1, region.height * full.height)
+  };
+  const { canvas, ctx } = offscreen(px.width, px.height);
+  // Shift the page so the requested region lands on the canvas origin.
+  await page.render({
+    ...renderParams(ctx, full),
+    transform: [1, 0, 0, 1, -px.x, -px.y]
+  }).promise;
+  return { canvas, ctx, px };
+}
+
+/** Verification renders at screen resolution; more pixels prove nothing extra. */
+const VERIFY_DPI = 96;
+
+/**
+ * A full-page mark on a poster-sized page would otherwise allocate a canvas of
+ * hundreds of megabytes. Residue is a *fraction*, so downsampling a huge region
+ * costs no sensitivity worth having: surviving content large enough to matter
+ * still lands on many pixels.
+ */
+const VERIFY_MAX_SIDE = 1200;
+
+/** Below this the region is a sliver, and the AA inset would consume all of it. */
+const VERIFY_MIN_DPI = 18;
+
+/** Chosen so the region raster stays within `VERIFY_MAX_SIDE` on its long side. */
+function regionVerifyDpi(
+  region: { width: number; height: number },
+  page: pdfjsLib.PDFPageProxy
+): number {
+  const base = page.getViewport({ scale: 1 });
+  const longest = Math.max(
+    1,
+    Math.max(region.width * base.width, region.height * base.height) * (VERIFY_DPI / 72)
+  );
+  if (longest <= VERIFY_MAX_SIDE) return VERIFY_DPI;
+  return Math.max(VERIFY_MIN_DPI, (VERIFY_DPI * VERIFY_MAX_SIDE) / longest);
+}
+
+/**
+ * Per-channel slack allowed against the redaction fill, out of 255.
+ *
+ * The fill is opaque and flat, so in principle every pixel should be exactly
+ * `DOC_REDACT_RGB`. In practice the region is rendered through pdf.js's
+ * rasteriser at a DPI unrelated to the one the mark was drawn at, and a
+ * previously-JPEG-compressed page carries ringing, so an exact match would fail
+ * on correct output. 24/255 is far below the distance to any content a human
+ * could read off the region — mid-grey is 118 away, white 245.
+ */
+const FILL_CHANNEL_TOLERANCE = 24;
+
+/**
+ * Fraction of the shorter side ignored at each edge.
+ *
+ * The mark's own boundary is anti-aliased, and neighbouring content that
+ * legitimately sits *outside* the mark bleeds a pixel or two inside at render
+ * resolution. This is the same conservatism `checkRegionText` applies by scoring
+ * a glyph against the region with an approximated per-character box: both halves
+ * of the gate judge the interior of the mark and forgive its edge.
+ */
+const AA_INSET_FRACTION = 0.08;
+
+/** Pixels trimmed from each edge before sampling. 0 when the region is tiny. */
+function regionInset(width: number, height: number): number {
+  const shortest = Math.min(width, height);
+  if (shortest <= 4) return 0;
+  return Math.min(
+    Math.floor((shortest - 2) / 2),
+    Math.max(1, Math.round(shortest * AA_INSET_FRACTION))
+  );
+}
+
+/**
+ * Measures how far a rendered region is from the opaque redaction fill.
+ *
+ * Pure and exported so the grading can be tested against real pixel buffers
+ * without a browser. Returns counts rather than a verdict: the threshold is the
+ * caller's policy decision (`operations.ts`), not this function's.
+ */
+export function regionPixelResidue(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number
+): RegionPixelResidue {
+  const [fr, fg, fb] = DOC_REDACT_RGB;
+  const fill = [Math.round(fr * 255), Math.round(fg * 255), Math.round(fb * 255)];
+  const inset = regionInset(width, height);
+
+  let sampled = 0;
+  let offFill = 0;
+  let maxDeviation = 0;
+
+  for (let y = inset; y < height - inset; y++) {
+    for (let x = inset; x < width - inset; x++) {
+      const at = (y * width + x) * 4;
+      const alpha = data[at + 3];
+      // A transparent pixel is *not* fill: nothing was painted there, so
+      // whatever is underneath in a viewer shows through.
+      const deviation =
+        alpha < 255 - FILL_CHANNEL_TOLERANCE
+          ? 255
+          : Math.max(
+              Math.abs(data[at] - fill[0]),
+              Math.abs(data[at + 1] - fill[1]),
+              Math.abs(data[at + 2] - fill[2])
+            );
+      sampled++;
+      if (deviation > FILL_CHANNEL_TOLERANCE) offFill++;
+      if (deviation > maxDeviation) maxDeviation = deviation;
+    }
+  }
+
+  return {
+    sampled,
+    offFill,
+    fraction: sampled > 0 ? offFill / sampled : 0,
+    maxDeviation
   };
 }
 
@@ -299,25 +747,37 @@ const api: RenderJob = {
   async renderRegionPng(handle, pageIndex, region, dpi) {
     const page = await entry(handle).doc.getPage(pageIndex + 1);
     try {
-      const full = page.getViewport({ scale: dpi / 72 });
-      const px = {
-        x: region.x * full.width,
-        y: region.y * full.height,
-        width: Math.max(1, region.width * full.width),
-        height: Math.max(1, region.height * full.height)
-      };
-      const { canvas, ctx } = offscreen(px.width, px.height);
-      // Shift the page so the requested region lands on the canvas origin.
-      await page.render({
-        ...renderParams(ctx, full),
-        transform: [1, 0, 0, 1, -px.x, -px.y]
-      }).promise;
+      const { canvas } = await renderRegion(page, region, dpi);
       const blob = await canvas.convertToBlob({ type: 'image/png' });
       const png = new Uint8Array(await blob.arrayBuffer());
-      return Comlink.transfer({ png, width: canvas.width, height: canvas.height }, [png.buffer]);
+      const size = { width: canvas.width, height: canvas.height };
+      canvas.width = 0;
+      canvas.height = 0;
+      return Comlink.transfer({ png, ...size }, [png.buffer]);
     } finally {
       page.cleanup();
     }
+  },
+
+  async checkRegionPixels(handle, regions, job) {
+    const { doc } = entry(handle);
+    const out: { region: RedactionRegion; residue: RegionPixelResidue }[] = [];
+
+    for (let i = 0; i < regions.length; i++) {
+      await checkpoint(job, i / Math.max(1, regions.length), `Checking region ${i + 1}`);
+      const region = regions[i];
+      const page = await doc.getPage(region.pageIndex + 1);
+      try {
+        const { canvas, ctx } = await renderRegion(page, region, regionVerifyDpi(region, page));
+        const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        out.push({ region, residue: regionPixelResidue(data, canvas.width, canvas.height) });
+        canvas.width = 0;
+        canvas.height = 0;
+      } finally {
+        page.cleanup();
+      }
+    }
+    return out;
   },
 
   async extractText(handle, pageIndex, mode) {
@@ -405,10 +865,13 @@ const api: RenderJob = {
       const page = await doc.getPage(i);
       try {
         const viewport = page.getViewport({ scale: 1 });
-        for (const run of await textRuns(page)) {
-          if (!run.str.trim()) continue;
-          const haystack = matchCase ? run.str : run.str.toLowerCase();
 
+        // Matched across the whole page's text, not run by run: pdf.js splits a
+        // run at every kern pair and style change, so an occurrence the user
+        // can plainly see is regularly spread over two or three runs and used
+        // to be invisible to this search.
+        const runs = await textRuns(page);
+        for (const match of findAcrossRuns(runs, query, matchCase)) {
           // pdf.js does not expose per-glyph advance widths, so we divide the
           // total run width evenly across characters (monospace approximation).
           // For search this is intentionally over-inclusive — a slightly wider
@@ -416,21 +879,20 @@ const api: RenderJob = {
           // character on the edge may be mis-classified, but the geometric check
           // in checkRegionText uses the same approximation so both sides are
           // consistently conservative.
-          let from = 0;
-          for (;;) {
-            const at = haystack.indexOf(needle, from);
-            if (at === -1) break;
-            from = at + needle.length;
-
+          for (const slice of match.slices) {
+            const run = runs[slice.runIndex];
             const perChar = run.width / Math.max(1, run.str.length);
             const height = run.height || run.transform[3] || 12;
             regions.push({
               pageIndex: i - 1,
-              x: (run.transform[4] + at * perChar) / viewport.width,
+              x: (run.transform[4] + slice.start * perChar) / viewport.width,
               y: 1 - (run.transform[5] + height) / viewport.height,
-              width: (needle.length * perChar) / viewport.width,
+              width: ((slice.end - slice.start) * perChar) / viewport.width,
               height: height / viewport.height,
-              text: run.str.slice(at, at + needle.length)
+              // The *whole* match, on every slice: verification uses this to
+              // check the string is gone from the document, and half a string
+              // would let a partial removal pass.
+              text: match.text
             });
           }
         }
@@ -503,15 +965,16 @@ const api: RenderJob = {
   async detectSignatureLines(handle, job) {
     const { doc } = entry(handle);
     const found: TextRegion[] = [];
-    const LABEL = /signature|sign here|signed by|_{5,}/i;
 
     for (let i = 1; i <= doc.numPages; i++) {
       await checkpoint(job, (i - 1) / doc.numPages, `Scanning page ${i} of ${doc.numPages}`);
       const page = await doc.getPage(i);
       try {
         const viewport = page.getViewport({ scale: 1 });
-        for (const run of await textRuns(page)) {
-          if (!run.str.trim() || !LABEL.test(run.str)) continue;
+        const runs = await textRuns(page);
+
+        for (const run of runs) {
+          if (!run.str.trim() || !SIGNATURE_LABEL.test(run.str)) continue;
           const height = run.height || run.transform[3] || 12;
           // Suggest a box sitting just above the label's baseline.
           const boxHeight = height * 2.5;
@@ -523,6 +986,20 @@ const api: RenderJob = {
             height: boxHeight / viewport.height,
             text: run.str.trim()
           });
+        }
+
+        // The other half — and in real documents the usual half: a rule drawn as
+        // vector path content with "Signature" or "Date" printed under it. Text
+        // matching alone cannot see it, because there is no text there to match.
+        const opList = await page.getOperatorList();
+        const rules = horizontalRulesFromOps(
+          Array.from(opList.fnArray),
+          opList.argsArray,
+          pdfjsLib.OPS as unknown as PathOpCodes
+        );
+        for (const region of signatureRulesToRegions(rules, runs, viewport, i - 1)) {
+          if (found.some(existing => overlapsRegion(existing, region))) continue;
+          found.push(region);
         }
       } finally {
         page.cleanup();
@@ -596,6 +1073,62 @@ const api: RenderJob = {
       return Comlink.transfer(
         out,
         out.map(o => o.jpeg.buffer)
+      );
+    } finally {
+      page.cleanup();
+    }
+  },
+
+  async redactPageImages(handle, pageIndex, requests) {
+    if (requests.length === 0) return [];
+    const page = await entry(handle).doc.getPage(pageIndex + 1);
+    try {
+      const wanted = new Map(requests.map(r => [r.objectNumber, r.rects]));
+      const results: RedactedImageResult[] = [];
+      const seen = new Set<number>();
+
+      for (const placement of imagePlacements(await page.getOperatorList())) {
+        if (seen.size === wanted.size) break;
+        const decoded = await decodeImage(page, placement.objId);
+        // A null decode is pdf.js saying it could not read the image — JBIG2 and
+        // JPEG 2000 have no decoder here. There is no safe half-measure: the
+        // caller is told, and refuses the redaction.
+        if (!decoded) continue;
+        const rects = wanted.get(decoded.objectNumber);
+        if (!rects || seen.has(decoded.objectNumber)) continue;
+        seen.add(decoded.objectNumber);
+
+        // `decodeImage` moves any /SMask or stencil into `decoded.mask` and
+        // makes the colour buffer opaque. Both have to be blacked out: colour
+        // alone would leave the secret visible wherever the mask makes the pixel
+        // transparent, and the mask is re-attached below as PNG alpha.
+        paintRectsBlack(decoded, rects);
+
+        const bytes = await encodeRedacted(decoded);
+        results.push({
+          objectNumber: decoded.objectNumber,
+          image: {
+            bytes,
+            format: decoded.mask ? 'png' : 'jpeg',
+            width: decoded.width,
+            height: decoded.height
+          }
+        });
+      }
+
+      for (const request of requests) {
+        if (seen.has(request.objectNumber)) continue;
+        results.push({
+          objectNumber: request.objectNumber,
+          reason:
+            'pdf.js could not decode this image (JBIG2 and JPEG 2000 images have no decoder ' +
+            'here), so its pixels cannot be blacked out.'
+        });
+      }
+
+      return Comlink.transfer(
+        results,
+        results.flatMap(r => (r.image ? [r.image.bytes.buffer] : []))
       );
     } finally {
       page.cleanup();
@@ -997,6 +1530,37 @@ function bleedColour(rgba: Uint8ClampedArray, width: number, height: number): vo
   }
 }
 
+/**
+ * Re-encodes a redacted image at its source resolution.
+ *
+ * PNG when the image carried transparency, so the mask travels back as alpha and
+ * pdf-lib rebuilds the `/SMask` itself; JPEG otherwise, which is what the rest of
+ * the pipeline embeds and keeps a scanned page from ballooning. Neither is
+ * resampled: redaction must not quietly change the rest of the page's quality.
+ */
+async function encodeRedacted(decoded: DecodedImage): Promise<Uint8Array> {
+  const { width, height } = decoded;
+  const rgba = new Uint8ClampedArray(decoded.rgba);
+  if (decoded.mask) {
+    for (let p = 0; p < width * height; p++) rgba[p * 4 + 3] = decoded.mask[p];
+  }
+
+  const bitmap = await createImageBitmap(new ImageData(rgba, width, height));
+  try {
+    const { canvas, ctx } = offscreen(width, height);
+    ctx.drawImage(bitmap, 0, 0);
+    const blob = await canvas.convertToBlob(
+      decoded.mask ? { type: 'image/png' } : { type: 'image/jpeg', quality: 0.92 }
+    );
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    canvas.width = 0;
+    canvas.height = 0;
+    return bytes;
+  } finally {
+    bitmap.close();
+  }
+}
+
 interface TargetSize {
   width: number;
   height: number;
@@ -1090,3 +1654,10 @@ async function encodeMask(
 }
 
 Comlink.expose(api);
+
+/**
+ * The same object `Comlink.expose` publishes, exported so tests can drive the
+ * real implementation against real bytes instead of a mock. Mirrors
+ * `processWorkerImpl` in `process.worker.ts`.
+ */
+export const renderWorkerImpl = api;
