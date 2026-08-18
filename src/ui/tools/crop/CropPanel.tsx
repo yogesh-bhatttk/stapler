@@ -60,7 +60,7 @@ export function CropPanel() {
       </Field>
 
       <div className={panelStyles.section}>
-        <h3 className={panelStyles.title}>{t('Manual crop')}</h3>
+        <h2 className={panelStyles.title}>{t('Manual crop')}</h2>
         <p className={panelStyles.description}>
           {t(
             'Drag on the page to draw a crop box, drag its handles to resize, or drag inside it to move it. The box applies to'
@@ -73,7 +73,7 @@ export function CropPanel() {
       </div>
 
       <div className={panelStyles.section}>
-        <h3 className={panelStyles.title}>{t('Auto-trim')}</h3>
+        <h2 className={panelStyles.title}>{t('Auto-trim')}</h2>
         <p className={panelStyles.description}>
           {t(
             'Automatically detect ink on the page(s) and shrink the crop box to fit the content, removing white margins.'

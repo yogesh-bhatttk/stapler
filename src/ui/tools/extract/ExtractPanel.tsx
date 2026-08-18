@@ -1,3 +1,4 @@
+import { translate } from '../../../core/i18n';
 /**
  * Text and Markdown extraction (CNV-04).
  *
@@ -37,7 +38,7 @@ export function ExtractPanel() {
       const result = await extractDocumentText(bytes, indices, settings.mode, job);
       extractedText.value = result;
       if (!result.trim()) {
-        notify('warning', 'No extractable text on these pages.', {
+        notify('warning', translate('No extractable text on these pages.'), {
           detail: 'They are probably scanned images. OCR is planned for a later release (OCR-01).'
         });
       }
@@ -81,7 +82,7 @@ export function ExtractPanel() {
               icon={Copy}
               onClick={async () => {
                 await navigator.clipboard.writeText(text);
-                notify('success', 'Copied to the clipboard.');
+                notify('success', translate('Copied to the clipboard.'));
               }}
             >
               {t('Copy')}
@@ -90,7 +91,7 @@ export function ExtractPanel() {
               {t('Download')}
             </Button>
           </div>
-          <TextArea readOnly value={text} aria-label="Extracted text" />
+          <TextArea readOnly value={text} aria-label={translate('Extracted text')} />
         </div>
       )}
     </>

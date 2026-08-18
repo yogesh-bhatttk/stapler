@@ -25,9 +25,9 @@ describe('transformManifestForFirefox', () => {
     expect(gecko.strict_min_version).toBe('109.0');
   });
 
-  test('adds tabs permission for Firefox tab query support and leaves host_permissions/content_scripts intact', () => {
+  test('leaves host_permissions/content_scripts intact and does not add tabs', () => {
     const firefox = transformManifestForFirefox(chromeManifest);
-    expect(firefox.permissions).toEqual(['tabs']);
+    expect(firefox.permissions).toEqual([]);
     expect(firefox.host_permissions).toEqual(chromeManifest.host_permissions);
     expect(firefox.content_scripts).toBeUndefined();
   });

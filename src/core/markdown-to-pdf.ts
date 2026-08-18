@@ -47,8 +47,7 @@ export function sanitizeWinAnsiText(text: string): string {
 
   let out = '';
   for (let i = 0; i < mapped.length; i++) {
-    const code = mapped.charCodeAt(i);
-    out += code > 255 ? '?' : mapped[i];
+    out += mapped[i];
   }
   return out;
 }
@@ -125,7 +124,8 @@ export async function markdownToPdfBytes(markdown: string): Promise<Uint8Array> 
         const font = isHeader ? state.fontBold : state.fontNormal;
         row.forEach((cell, i) => {
           const text = sanitizeWinAnsiText(cell.text || '');
-          page.drawText(text.substring(0, 30), {
+          const renderText = text.length > 30 ? text.substring(0, 29) + '…' : text;
+          page.drawText(renderText, {
             x: state.x + i * colWidth,
             y: state.y,
             size: 10,

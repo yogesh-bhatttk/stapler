@@ -1,3 +1,4 @@
+import { translate } from '../../core/i18n';
 import { Moon, Search, Sun } from 'lucide-preact';
 import { useState } from 'preact/hooks';
 import { Badge } from '../components/Badge';
@@ -75,7 +76,7 @@ export function TopBar() {
             borderRadius: '4px',
             padding: '4px'
           }}
-          aria-label="Change Language"
+          aria-label={translate('Change Language')}
         >
           {locales.map(loc => (
             <option key={loc} value={loc} style={{ color: 'var(--ink)' }}>
@@ -88,7 +89,7 @@ export function TopBar() {
           type="button"
           className={styles.trustChip}
           onClick={() => setShowTrust(true)}
-          aria-label="Offline, zero network requests. Read how to verify this."
+          aria-label={translate('Offline, zero network requests. Read how to verify this.')}
         >
           <Badge variant="success">{t('Offline · 0 requests')}</Badge>
         </button>

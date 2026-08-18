@@ -22,7 +22,7 @@ export function FlattenOption({ mode }: FlattenOptionProps) {
 
   return (
     <div className={panelStyles.section}>
-      <h3 className={panelStyles.title}>{t('Finalize')}</h3>
+      <h2 className={panelStyles.title}>{t('Finalize')}</h2>
       <Checkbox
         label={t('Flatten form fields and annotations on export')}
         checked={on}

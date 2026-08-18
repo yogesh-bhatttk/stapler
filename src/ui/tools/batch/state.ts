@@ -18,20 +18,45 @@ export interface Recipe {
   };
 }
 
-export const savedRecipes = signal<Recipe[]>(
-  JSON.parse(localStorage.getItem('stapler:recipes') || '[]')
-);
+import { listRecipes, putRecipe, deleteRecipe } from '../../../core/db';
 
-savedRecipes.subscribe(recipes => {
-  localStorage.setItem('stapler:recipes', JSON.stringify(recipes));
-});
+export const savedRecipes = signal<Recipe[]>([]);
+export const recipesLoaded = signal<boolean>(false);
+
+export async function loadRecipes() {
+  if (recipesLoaded.value) return;
+  const recipes = await listRecipes();
+  const legacyStr = localStorage.getItem('stapler:recipes');
+  if (legacyStr && recipes.length === 0) {
+    const legacy = JSON.parse(legacyStr) as Recipe[];
+    for (const r of legacy) {
+      await putRecipe(r);
+      recipes.push(r);
+    }
+    localStorage.removeItem('stapler:recipes');
+  }
+  savedRecipes.value = recipes as Recipe[];
+  recipesLoaded.value = true;
+}
+
+export async function addRecipe(recipe: Recipe) {
+  await putRecipe(recipe);
+  savedRecipes.value = [...savedRecipes.value, recipe];
+}
+
+export async function removeRecipe(id: string) {
+  await deleteRecipe(id);
+  savedRecipes.value = savedRecipes.value.filter(r => r.id !== id);
+}
 
 export const activeRecipeId = signal<string | null>(null);
 
-import type { FsaDirectoryHandle } from '../../../platform/fsa';
+import type { FsaDirectoryHandle, FsaFileHandle } from '../../../platform/fsa';
 
 export const inputDirHandle = signal<FsaDirectoryHandle | FileSystemDirectoryHandle | null>(null);
 export const outputDirHandle = signal<FsaDirectoryHandle | FileSystemDirectoryHandle | null>(null);
+export const outputZipHandle = signal<FsaFileHandle | FileSystemFileHandle | null>(null);
+export const outputFormat = signal<'directory' | 'zip'>('directory');
 
 /**
  * One thing that happened to one file that the run summary has to mention.
@@ -43,7 +68,7 @@ export const outputDirHandle = signal<FsaDirectoryHandle | FileSystemDirectoryHa
  */
 export interface BatchNote {
   file: string;
-  kind: 'kept-original';
+  kind: 'kept-original' | 'failed';
   detail: string;
 }
 

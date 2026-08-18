@@ -1,3 +1,4 @@
+import { translate } from '../i18n';
 /**
  * One typed Comlink client factory, replacing five near-identical modules
  * (`process.ts`, `render.ts`, `redact.ts`, `verify.ts`, `cv.ts`) that differed
@@ -115,7 +116,7 @@ export function createWorkerClient<T>(
       // detail — it is the reason their document will not process.
       drop(inst);
       worker.terminate();
-      notify('danger', 'A background worker stopped unexpectedly.', {
+      notify('danger', translate('A background worker stopped unexpectedly.'), {
         detail:
           'Retry the operation. If it fails again, reload the page — your open ' +
           'documents are held in this tab and nothing has been written to disk.',

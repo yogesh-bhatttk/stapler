@@ -119,7 +119,7 @@ export function MetadataPanel() {
 
       {anythingFound && (
         <div className={panelStyles.section}>
-          <h3 className={panelStyles.title}>{t('Found in this file')}</h3>
+          <h2 className={panelStyles.title}>{t('Found in this file')}</h2>
           <div role="group" aria-label={t('Select what to strip')} className={panelStyles.actions}>
             <Button variant="tertiary" size="compact" onClick={() => setAll(true)}>
               {t('Select all')}
@@ -167,7 +167,7 @@ export function MetadataPanel() {
 
       {paths.length > 0 && (
         <div className={panelStyles.section}>
-          <h3 className={panelStyles.title}>{t('Filesystem paths')}</h3>
+          <h2 className={panelStyles.title}>{t('Filesystem paths')}</h2>
           <ul className={panelStyles.list}>
             {paths.map(path => (
               <li className={panelStyles.listRow} key={`${path.source}:${path.value}`}>

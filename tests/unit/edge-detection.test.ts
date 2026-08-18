@@ -4,6 +4,7 @@ import {
   isFrameQuad,
   quadArea,
   quadEdgeSupport,
+  warpPerspective,
   type Quad
 } from '../../src/core/cv/imageUtils';
 
@@ -249,5 +250,70 @@ describe('SCN-01 — detectCorners against synthetic phone photos', () => {
     for (let i = 3; i < image.data.length; i += 4) image.data[i] = 255;
     expect(() => detectCorners(image)).not.toThrow();
     expect(detectCorners(image).confident).toBe(false);
+  });
+});
+
+describe('warpPerspective', () => {
+  it('identity warp produces an exact copy', () => {
+    // Use a 5x5 source to avoid the sx >= sw - 1 boundary condition which discards the very edge
+    const src = new ImageData(5, 5);
+    for (let i = 0; i < src.data.length; i++) {
+      src.data[i] = i % 255;
+    }
+    const quad = {
+      tl: { x: 0, y: 0 },
+      tr: { x: 3, y: 0 },
+      br: { x: 3, y: 3 },
+      bl: { x: 0, y: 3 }
+    };
+    const dst = warpPerspective(src, quad, 4, 4);
+
+    // The alpha channel is forced to 255
+    for (let y = 0; y < 4; y++) {
+      for (let x = 0; x < 4; x++) {
+        const dstIdx = (y * 4 + x) * 4;
+        const srcIdx = (y * 5 + x) * 4;
+        expect(dst.data[dstIdx]).toBe(src.data[srcIdx]);
+        expect(dst.data[dstIdx + 1]).toBe(src.data[srcIdx + 1]);
+        expect(dst.data[dstIdx + 2]).toBe(src.data[srcIdx + 2]);
+        expect(dst.data[dstIdx + 3]).toBe(255);
+      }
+    }
+  });
+
+  it('out-of-bounds sampling returns white pixels', () => {
+    const src = new ImageData(2, 2);
+    // Warp from a quad that is outside the source image
+    const quad = {
+      tl: { x: 5, y: 5 },
+      tr: { x: 6, y: 5 },
+      br: { x: 6, y: 6 },
+      bl: { x: 5, y: 6 }
+    };
+    const dst = warpPerspective(src, quad, 2, 2);
+    expect(dst.data[0]).toBe(255); // R
+    expect(dst.data[1]).toBe(255); // G
+    expect(dst.data[2]).toBe(255); // B
+    expect(dst.data[3]).toBe(255); // A
+  });
+
+  it('interpolates pixels properly during scale', () => {
+    const src = new ImageData(2, 2);
+    // 2x2 gradient: 0, 100, 200, 255 (grayscale)
+    src.data.set([0, 0, 0, 255, 100, 100, 100, 255, 200, 200, 200, 255, 255, 255, 255, 255]);
+    const quad = {
+      tl: { x: 0, y: 0 },
+      tr: { x: 1, y: 0 },
+      br: { x: 1, y: 1 },
+      bl: { x: 0, y: 1 }
+    };
+    // Upscale 2x2 to 4x4
+    const dst = warpPerspective(src, quad, 4, 4);
+    // The center pixel should be a mix of the four source pixels.
+    // At dst (1,1) -> src (0.33, 0.33), so interpolated values should fall between the source values.
+    // It should not be exactly 0 or 255.
+    const i = (1 * 4 + 1) * 4;
+    expect(dst.data[i]).toBeGreaterThan(0);
+    expect(dst.data[i]).toBeLessThan(255);
   });
 });

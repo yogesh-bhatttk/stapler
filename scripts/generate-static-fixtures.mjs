@@ -108,6 +108,65 @@ function generateRawStubs() {
     '<< /Length 29 >> stream\nBT /F1 12 Tf <06450631> Tj ET\nendstream',
     '<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Arial /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> >>'
   ]);
+
+  createRawPdf('device-n.pdf', [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Count 1 /Kids [ 3 0 R ] >>',
+    `<< /Type /Page /Parent 2 0 R ${MEDIA_BOX} /Resources << /XObject << /Im1 4 0 R >> >> >>`,
+    '<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceN /BitsPerComponent 8 /Length 0 >> stream\nendstream'
+  ]);
+  createRawPdf('separation.pdf', [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Count 1 /Kids [ 3 0 R ] >>',
+    `<< /Type /Page /Parent 2 0 R ${MEDIA_BOX} /Resources << /XObject << /Im1 4 0 R >> >> >>`,
+    '<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /Separation /BitsPerComponent 8 /Length 0 >> stream\nendstream'
+  ]);
+  createRawPdf('color-key.pdf', [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Count 1 /Kids [ 3 0 R ] >>',
+    `<< /Type /Page /Parent 2 0 R ${MEDIA_BOX} /Resources << /XObject << /Im1 4 0 R >> >> >>`,
+    '<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Mask [ 0 255 ] /Length 0 >> stream\nendstream'
+  ]);
+  createRawPdf('stencil.pdf', [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Count 1 /Kids [ 3 0 R ] >>',
+    `<< /Type /Page /Parent 2 0 R ${MEDIA_BOX} /Resources << /XObject << /Im1 4 0 R >> >> >>`,
+    '<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ImageMask true /BitsPerComponent 8 /Length 0 >> stream\nendstream'
+  ]);
+  createRawPdf('soft-mask.pdf', [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Count 1 /Kids [ 3 0 R ] >>',
+    `<< /Type /Page /Parent 2 0 R ${MEDIA_BOX} /Resources << /XObject << /Im1 4 0 R >> >> >>`,
+    '<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /SMask 5 0 R /Length 0 >> stream\nendstream',
+    '<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 0 >> stream\nendstream'
+  ]);
+  createRawPdf('pre-blended.pdf', [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Count 1 /Kids [ 3 0 R ] >>',
+    `<< /Type /Page /Parent 2 0 R ${MEDIA_BOX} /Resources << /XObject << /Im1 4 0 R >> >> >>`,
+    '<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /SMask 5 0 R /Length 0 >> stream\nendstream',
+    '<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Matte [ 0 0 0 ] /Length 0 >> stream\nendstream'
+  ]);
+  createRawPdf('indexed.pdf', [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Count 1 /Kids [ 3 0 R ] >>',
+    `<< /Type /Page /Parent 2 0 R ${MEDIA_BOX} /Resources << /XObject << /Im1 4 0 R >> >> >>`,
+    '<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace [ /Indexed /DeviceRGB 255 5 0 R ] /BitsPerComponent 8 /Length 0 >> stream\nendstream',
+    '<< /Length 0 >> stream\nendstream'
+  ]);
+  createRawPdf('icc.pdf', [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Count 1 /Kids [ 3 0 R ] >>',
+    `<< /Type /Page /Parent 2 0 R ${MEDIA_BOX} /Resources << /XObject << /Im1 4 0 R >> >> >>`,
+    '<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace [ /ICCBased 5 0 R ] /BitsPerComponent 8 /Length 0 >> stream\nendstream',
+    '<< /Length 0 >> stream\nendstream'
+  ]);
+  createRawPdf('sub-byte.pdf', [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Count 1 /Kids [ 3 0 R ] >>',
+    `<< /Type /Page /Parent 2 0 R ${MEDIA_BOX} /Resources << /XObject << /Im1 4 0 R >> >> >>`,
+    '<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 1 /Length 0 >> stream\nendstream'
+  ]);
 }
 
 function generateEncodedFixtures() {

@@ -197,7 +197,7 @@ export function CompressPanel() {
           data-target-achieved={outcome.achievedBytes}
           data-target-attempts={outcome.attempts}
         >
-          <h3 className={panelStyles.title}>{t('Target result')}</h3>
+          <h2 className={panelStyles.title}>{t('Target result')}</h2>
           <SizeDelta before={outcome.originalBytes} after={outcome.achievedBytes} />
           <p className={panelStyles.description}>
             {outcome.reached
@@ -260,7 +260,7 @@ export function CompressPanel() {
 
       {report && (
         <div className={panelStyles.section}>
-          <h3 className={panelStyles.title}>{t('Projection')}</h3>
+          <h2 className={panelStyles.title}>{t('Projection')}</h2>
           <SizeDelta
             before={report.originalBytes}
             after={projection ? projection.bytes : report.estimatedBytes}

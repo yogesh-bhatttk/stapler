@@ -1,3 +1,4 @@
+import { translate } from '../../core/i18n';
 /**
  * Placing and moving stamps on a page (SGN-02).
  *
@@ -141,7 +142,7 @@ export const AnnotationOverlay = forwardRef<HTMLDivElement, AnnotationOverlayPro
             onClick={event => {
               event.stopPropagation();
               if (!armed) {
-                notify('info', 'Pick a signature or stamp first.', {
+                notify('info', translate('Pick a signature or stamp first.'), {
                   detail: 'Choose one in the panel, then click here to place it.'
                 });
                 return;
@@ -421,7 +422,7 @@ function Stamp({
       <button
         type="button"
         className={styles.remove}
-        aria-label="Remove this stamp"
+        aria-label={translate('Remove this stamp')}
         onClick={event => {
           event.stopPropagation();
           deleteAnnotation(docId, stamp.id);
@@ -433,7 +434,7 @@ function Stamp({
       <button
         type="button"
         className={styles.duplicate}
-        aria-label="Duplicate to all pages"
+        aria-label={translate('Duplicate to all pages')}
         title={t('Duplicate to all pages')}
         onClick={event => {
           event.stopPropagation();

@@ -1,3 +1,4 @@
+import { translate } from '../../../core/i18n';
 import {
   batchProgress,
   inputDirHandle,
@@ -5,6 +6,8 @@ import {
   activeRecipeId,
   savedRecipes,
   outputPattern,
+  outputFormat,
+  outputZipHandle,
   type BatchNote
 } from './state';
 import { compressSettings } from '../compress/state';
@@ -19,6 +22,7 @@ import {
   stripPdfExtension,
   deduplicateNames
 } from '../../../core/batch-filename';
+import { zipSync } from 'fflate';
 
 /** Appends a per-file outcome to the run summary. */
 function addNote(note: BatchNote): void {
@@ -31,17 +35,20 @@ function addNote(note: BatchNote): void {
 export async function runBatch(signal?: AbortSignal) {
   const inDir = inputDirHandle.value;
   const outDir = outputDirHandle.value;
-  if (!inDir || !outDir) return;
+  const outZip = outputZipHandle.value;
+  if (!inDir || (outputFormat.value === 'directory' ? !outDir : !outZip)) return;
 
   // Safety: if the input and output directory are the same filesystem entry,
   // a batch run would overwrite the source files in-place with no backup —
   // the output handle is opened with { create: true } using the same filename,
   // silently destroying the original. Reject upfront with a clear message.
   if (
+    outputFormat.value === 'directory' &&
+    outDir &&
     typeof inDir.isSameEntry === 'function' &&
     (await inDir.isSameEntry(outDir as unknown as FileSystemHandle))
   ) {
-    notify('danger', 'Input and output folders are the same', {
+    notify('danger', translate('Input and output folders are the same'), {
       detail:
         'Choose a different output folder. Running batch in-place would overwrite your originals.'
     });
@@ -83,7 +90,7 @@ export async function runBatch(signal?: AbortSignal) {
       tool => tool in configured && configured[tool] === undefined
     );
     if (missing.length > 0) {
-      notify('warning', 'Recipe is missing settings', {
+      notify('warning', translate('Recipe is missing settings'), {
         detail: `"${recipe.name}" lists ${missing.join(', ')} but has no saved settings for ${missing.length === 1 ? 'it' : 'them'}, so ${missing.length === 1 ? 'it' : 'they'} will be skipped. Re-save the recipe to capture the current settings.`
       });
     }
@@ -113,6 +120,8 @@ export async function runBatch(signal?: AbortSignal) {
 
     batchProgress.value = { ...batchProgress.value, total: files.length };
 
+    const zipEntries: Record<string, Uint8Array> = {};
+
     // BAT-03: pre-resolve all output names so collisions are detected upfront.
     const runDate = new Date();
     const pattern = outputPattern.value || '{basename}';
@@ -124,7 +133,9 @@ export async function runBatch(signal?: AbortSignal) {
     for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
       const fileHandle = files[fileIndex];
       if (signal?.aborted) {
-        notify('warning', 'Batch Cancelled', { detail: 'Processing was cancelled by the user.' });
+        notify('warning', translate('Batch Cancelled'), {
+          detail: 'Processing was cancelled by the user.'
+        });
         break;
       }
       batchProgress.value = { ...batchProgress.value, currentFile: fileHandle.name };
@@ -224,17 +235,21 @@ export async function runBatch(signal?: AbortSignal) {
           }
         }
 
-        // Save output — safe because we verified inDir !== outDir above.
+        // Save output
         // BAT-03: use the pre-resolved output name for this file.
         const outName = `${stripPdfExtension(resolvedNames[fileIndex])}.pdf`;
-        const outHandle = await outDir.getFileHandle(outName, { create: true });
-        const writable = await outHandle.createWritable();
-        try {
-          await writable.write(currentBytes);
-          await writable.close();
-        } catch (writeErr) {
-          await (writable as unknown as { abort(): Promise<void> }).abort().catch(() => {});
-          throw writeErr;
+        if (outputFormat.value === 'zip') {
+          zipEntries[outName] = currentBytes;
+        } else {
+          const outHandle = await outDir!.getFileHandle(outName, { create: true });
+          const writable = await outHandle.createWritable();
+          try {
+            await writable.write(currentBytes);
+            await writable.close();
+          } catch (writeErr) {
+            await (writable as unknown as { abort(): Promise<void> }).abort().catch(() => {});
+            throw writeErr;
+          }
         }
 
         batchProgress.value = {
@@ -243,10 +258,28 @@ export async function runBatch(signal?: AbortSignal) {
         };
       } catch (err) {
         console.error(`Failed to process ${fileHandle.name}`, err);
-        notify('danger', `Failed to process ${fileHandle.name}`, {
+        notify('danger', translate(`Failed to process ${fileHandle.name}`), {
+          detail: err instanceof Error ? err.message : String(err)
+        });
+        addNote({
+          file: fileHandle.name,
+          kind: 'failed',
           detail: err instanceof Error ? err.message : String(err)
         });
         batchProgress.value = { ...batchProgress.value, failed: batchProgress.value.failed + 1 };
+      }
+    }
+
+    if (outputFormat.value === 'zip' && outZip) {
+      batchProgress.value = { ...batchProgress.value, currentFile: 'Saving ZIP archive...' };
+      const zipBytes = zipSync(zipEntries);
+      const writable = await outZip.createWritable();
+      try {
+        await writable.write(zipBytes);
+        await writable.close();
+      } catch (writeErr) {
+        await (writable as unknown as { abort(): Promise<void> }).abort().catch(() => {});
+        throw writeErr;
       }
     }
 
@@ -264,7 +297,7 @@ export async function runBatch(signal?: AbortSignal) {
     });
   } catch (err) {
     console.error(err);
-    notify('danger', 'Batch Processing Failed', { detail: String(err) });
+    notify('danger', translate('Batch Processing Failed'), { detail: String(err) });
   } finally {
     batchProgress.value = { ...batchProgress.value, isProcessing: false };
   }

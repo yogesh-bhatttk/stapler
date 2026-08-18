@@ -23,6 +23,7 @@
  * it started rather than letting it run to completion unwatched.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { translate } from '../../../core/i18n';
 import { ZoomIn, ZoomOut } from 'lucide-preact';
 import { type PageRef } from '../../../core/store';
 import { compressMeasurement, compressReport, compressSettings, projectedOutput } from './state';
@@ -333,7 +334,7 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
       data-projected-bytes={projection ? projection.bytes : ''}
       data-projected-measured={projection ? String(projection.measured) : ''}
     >
-      <div className={styles.stage}>
+      <div className={styles.stage} tabIndex={0} aria-label={translate('Page preview, scrollable')}>
         <div
           className={`${styles.page} ${pending ? styles.pending : ''}`}
           style={{ width: width || undefined, height: height || undefined }}

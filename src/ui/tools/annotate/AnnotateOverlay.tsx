@@ -1,3 +1,4 @@
+import { translate } from '../../../core/i18n';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { commit } from '../../../core/history';
 import { ANNOTATION_COLORS, DOC_SIGNATURE_STROKE } from '../../../core/doc-colors';
@@ -121,6 +122,44 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
           ann.rect.width * width,
           ann.rect.height * height
         );
+      } else if (ann.type === 'ellipse' && ann.rect) {
+        ctx.beginPath();
+        ctx.ellipse(
+          ann.rect.x * width + (ann.rect.width * width) / 2,
+          ann.rect.y * height + (ann.rect.height * height) / 2,
+          Math.abs(ann.rect.width * width) / 2,
+          Math.abs(ann.rect.height * height) / 2,
+          0,
+          0,
+          2 * Math.PI
+        );
+        ctx.stroke();
+      } else if (ann.type === 'arrow' && ann.points && ann.points.length >= 2) {
+        const start = ann.points[0];
+        const end = ann.points[ann.points.length - 1];
+        const x1 = start.x * width;
+        const y1 = start.y * height;
+        const x2 = end.x * width;
+        const y2 = end.y * height;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+
+        const angle = Math.atan2(y2 - y1, x2 - x1);
+        const headlen = 10 + ctx.lineWidth;
+        ctx.beginPath();
+        ctx.moveTo(x2, y2);
+        ctx.lineTo(
+          x2 - headlen * Math.cos(angle - Math.PI / 6),
+          y2 - headlen * Math.sin(angle - Math.PI / 6)
+        );
+        ctx.moveTo(x2, y2);
+        ctx.lineTo(
+          x2 - headlen * Math.cos(angle + Math.PI / 6),
+          y2 - headlen * Math.sin(angle + Math.PI / 6)
+        );
+        ctx.stroke();
       } else if (ann.type === 'text' && ann.text && ann.rect) {
         ctx.font = `${ann.fontSize || 16}px sans-serif`;
         ctx.fillText(ann.text, ann.rect.x * width, ann.rect.y * height + (ann.fontSize || 16));
@@ -192,6 +231,43 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
     const x = (e.clientX - rect.left) / width;
     const y = (e.clientY - rect.top) / height;
 
+    // Check if clicked on an existing annotation (reverse order for z-index)
+    // A click on an existing annotation selects it instead of drawing a new one.
+    for (let i = annotations.length - 1; i >= 0; i--) {
+      const ann = annotations[i];
+      let hit = false;
+      const pad = 0.02; // generous hit area
+      if (ann.rect) {
+        const rx = Math.min(ann.rect.x, ann.rect.x + ann.rect.width);
+        const ry = Math.min(ann.rect.y, ann.rect.y + ann.rect.height);
+        const rw = Math.abs(ann.rect.width);
+        const rh = Math.abs(ann.rect.height);
+        if (x >= rx - pad && x <= rx + rw + pad && y >= ry - pad && y <= ry + rh + pad) {
+          hit = true;
+        }
+      } else if (ann.points && ann.points.length > 0) {
+        let minX = 1,
+          minY = 1,
+          maxX = 0,
+          maxY = 0;
+        for (const p of ann.points) {
+          if (p.x < minX) minX = p.x;
+          if (p.y < minY) minY = p.y;
+          if (p.x > maxX) maxX = p.x;
+          if (p.y > maxY) maxY = p.y;
+        }
+        if (x >= minX - pad && x <= maxX + pad && y >= minY - pad && y <= maxY + pad) {
+          hit = true;
+        }
+      }
+      if (hit) {
+        setSelectedId(ann.id);
+        return; // Stop here, do not start drawing
+      }
+    }
+
+    // Clicked empty space: deselect any existing, and start drawing
+    setSelectedId(null);
     setIsDrawing(true);
     const type = activeAnnotationTool.value;
     // Normalised to a fraction of page width, exactly like x/y above, so the
@@ -240,8 +316,12 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
       type,
       color: type === 'whiteout' ? WHITEOUT_COLOR : annotationColor.value,
       strokeWidth,
-      points: type === 'freehand' || type === 'highlight' ? [{ x, y }] : undefined,
-      rect: type === 'rectangle' || type === 'whiteout' ? { x, y, width: 0, height: 0 } : undefined
+      points:
+        type === 'freehand' || type === 'highlight' || type === 'arrow' ? [{ x, y }] : undefined,
+      rect:
+        type === 'rectangle' || type === 'whiteout' || type === 'ellipse'
+          ? { x, y, width: 0, height: 0 }
+          : undefined
     });
 
     // e.currentTarget.setPointerCapture(e.pointerId);
@@ -260,7 +340,12 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
       if (!prev) return prev;
       if ((prev.type === 'freehand' || prev.type === 'highlight') && prev.points) {
         return { ...prev, points: [...prev.points, { x, y }] };
-      } else if ((prev.type === 'rectangle' || prev.type === 'whiteout') && prev.rect) {
+      } else if (prev.type === 'arrow' && prev.points) {
+        return { ...prev, points: [prev.points[0], { x, y }] };
+      } else if (
+        (prev.type === 'rectangle' || prev.type === 'whiteout' || prev.type === 'ellipse') &&
+        prev.rect
+      ) {
         return {
           ...prev,
           rect: {
@@ -345,7 +430,7 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
     const cx = 0.5;
     const cy = 0.5;
     const ann: Annotation =
-      type === 'rectangle' || type === 'whiteout'
+      type === 'rectangle' || type === 'whiteout' || type === 'ellipse'
         ? {
             id: crypto.randomUUID(),
             type,
@@ -397,7 +482,8 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
       ArrowDown: [0, step]
     };
     const [dx, dy] = deltas[event.key];
-    const resizable = selected.type === 'rectangle' || selected.type === 'whiteout';
+    const resizable =
+      selected.type === 'rectangle' || selected.type === 'whiteout' || selected.type === 'ellipse';
 
     if ((event.ctrlKey || event.metaKey) && resizable && selected.rect) {
       commit();
@@ -439,7 +525,9 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
       height={height}
       tabIndex={0}
       role="group"
-      aria-label="Annotation drawing area. Draw with the pointer, or press Enter to add a shape at a default size and position, then use arrow keys to move it, Control plus arrows to resize a rectangle, and Delete to remove it."
+      aria-label={translate(
+        'Annotation drawing area. Draw with the pointer, or press Enter to add a shape at a default size and position, then use arrow keys to move it, Control plus arrows to resize a rectangle, and Delete to remove it.'
+      )}
       style={{
         position: 'absolute',
         top: 0,

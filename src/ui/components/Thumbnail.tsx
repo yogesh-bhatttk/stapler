@@ -19,9 +19,10 @@ import { deletePage, rotatePage, sources, type PageRef } from '../../core/store'
 import { bitmapKey, renderHandleFor, thumbnailCache } from '../../core/render-cache';
 import { isCancellation, logEvent } from '../../core/errors';
 import { normalizeRotation } from '../../core/rotation';
-import { IconButton } from './IconButton';
+import { Icon } from './Icon';
 import { mergeRefs } from './mergeRefs';
 import styles from './Thumbnail.module.css';
+import iconButtonStyles from './IconButton.module.css';
 
 export interface ThumbnailProps {
   page: PageRef;
@@ -158,25 +159,34 @@ export const Thumbnail = forwardRef<HTMLDivElement, ThumbnailProps>(function Thu
         </span>
       )}
 
-      <div className={styles.tools}>
-        <IconButton
-          icon={RotateCw}
-          size="compact"
-          aria-label={`Rotate page ${page.sourceIndex + 1} clockwise`}
+      {/*
+        These duplicate the grid's own keyboard shortcuts (R rotates, Delete
+        removes) on the `role="option"` cell, which is the grid's single roving
+        tab stop. A focusable descendant of an option is invalid per WAI-ARIA
+        (axe `no-focusable-content`) even with tabindex="-1"/aria-hidden on a
+        real <button> — the fix is to not make these natively-focusable
+        elements at all. They stay mouse-only; the keyboard path is the cell's
+        own shortcut, not these.
+      */}
+      <div className={styles.tools} aria-hidden="true">
+        <span
+          className={`${iconButtonStyles.iconButton} ${iconButtonStyles['size-compact']}`}
           onClick={event => {
             event.stopPropagation();
             rotatePage(docId, page.key, 90);
           }}
-        />
-        <IconButton
-          icon={Trash2}
-          size="compact"
-          aria-label={`Delete page ${page.sourceIndex + 1}`}
+        >
+          <Icon icon={RotateCw} size={14} />
+        </span>
+        <span
+          className={`${iconButtonStyles.iconButton} ${iconButtonStyles['size-compact']}`}
           onClick={event => {
             event.stopPropagation();
             deletePage(docId, page.key);
           }}
-        />
+        >
+          <Icon icon={Trash2} size={14} />
+        </span>
       </div>
     </div>
   );

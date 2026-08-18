@@ -32,7 +32,9 @@ import {
   sharedImagePdf,
   sharedImageDifferentSizesPdf,
   textPdf,
-  transparentImagePdf
+  transparentImagePdf,
+  contractV1Pdf,
+  contractV2Pdf
 } from './fixtures';
 import { gotoTool, openApp } from './helpers';
 
@@ -601,7 +603,7 @@ test.describe('tool flows', () => {
     const reduction = 1 - newSize / originalSize;
 
     expect(reduction).toBeGreaterThan(0.7);
-    expect(reduction).toBeLessThan(0.95);
+    expect(reduction).toBeLessThan(0.9);
   });
 
   test('compress: CMP-03 surgical path shrinks a mixed page and keeps its text', async ({
@@ -1701,8 +1703,8 @@ test.describe('tool flows', () => {
   });
 
   test('compare: opening a second document renders diffs without crashing', async ({ page }) => {
-    const file1 = await ensureFixture('text-6.pdf', () => textPdf(6));
-    const file2 = await ensureFixture('text-8.pdf', () => textPdf(8));
+    const file1 = await ensureFixture('contract-v1.pdf', contractV1Pdf);
+    const file2 = await ensureFixture('contract-v2.pdf', contractV2Pdf);
 
     await importFixture(page, file1);
     await gotoTool(page, 'compare');
@@ -1721,8 +1723,27 @@ test.describe('tool flows', () => {
     // Switch to Text diff mode
     await page.getByRole('radio', { name: 'Text Diff' }).check();
 
-    // It should render text diff chunks with 'insert' or 'delete' classes or similar
-    // Actually just verifying no crash and radio works is a good smoke test for compare flow
-    await expect(page.getByText(/Text diff shows structural text changes/i)).toBeVisible();
+    // Export the diff. The button reads "Export Diff PDF" idle and "Exporting…"
+    // while the job runs — "Exporting text diff" is only the job's internal
+    // progress label (`ComparePanel.tsx`'s `run({ label: ... })`), never text
+    // the button itself shows.
+    const outBytes = await commitAndRead(page, 'Export Diff PDF');
+
+    // Assert the exported diff contains text modifications (e.g. insertions and deletions)
+    const outDoc = await PDFDocument.load(outBytes);
+    expect(outDoc.getPageCount()).toBe(1);
+    // `allStrings` decodes every hex string at both 1-byte and 2-byte width to
+    // catch leaked text anywhere in the bytes (RED-04); that necessarily also
+    // injects a garbled reinterpretation after each real one, which breaks
+    // multi-word phrase adjacency like "New York". Real text extraction via
+    // pdf.js is what a phrase-containment check needs instead.
+    const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+    const outPdf = await pdfjsLib.getDocument({ data: outBytes.slice(), useSystemFonts: false })
+      .promise;
+    const content = await (await outPdf.getPage(1)).getTextContent();
+    const text = content.items.map(item => ('str' in item ? item.str : '')).join(' ');
+    expect(text).toContain('50'); // from V1 deletion
+    expect(text).toContain('75'); // from V2 insertion
+    expect(text).toContain('New York'); // from V2 insertion
   });
 });

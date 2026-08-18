@@ -1,3 +1,4 @@
+import { translate } from '../../../core/i18n';
 /**
  * Creating a signature: draw, type, or import (SGN-01).
  *
@@ -34,7 +35,7 @@ export function SignatureModal({
       onClose={onClose}
       size="md"
     >
-      <div className={styles.tabs} role="tablist" aria-label="Signature source">
+      <div className={styles.tabs} role="tablist" aria-label={translate('Signature source')}>
         {(['draw', 'type', 'image'] as Tab[]).map(name => (
           <button
             key={name}
@@ -67,7 +68,7 @@ async function persist(
   try {
     const trimmed = await trimTransparentToPng(bitmap);
     if (!trimmed) {
-      notify('warning', 'Nothing to save.', { detail: 'The canvas is empty.' });
+      notify('warning', translate('Nothing to save.'), { detail: 'The canvas is empty.' });
       return;
     }
     const saved = await saveSignature({
@@ -78,7 +79,7 @@ async function persist(
       purpose: isInitials ? 'initials' : 'signature'
     });
     if (saved) {
-      notify('success', 'Signature saved.', { detail: 'It stays on this device.' });
+      notify('success', translate('Signature saved.'), { detail: 'It stays on this device.' });
       onDone();
     }
   } finally {
@@ -136,7 +137,7 @@ function DrawTab({ onDone, isInitials }: { onDone: () => void; isInitials?: bool
         <canvas
           ref={canvasRef}
           className={styles.canvas}
-          aria-label="Draw your signature"
+          aria-label={translate('Draw your signature')}
           onPointerDown={event => {
             drawing.current = true;
             setHasInk(true);
@@ -201,7 +202,7 @@ function TypeTab({ onDone, isInitials }: { onDone: () => void; isInitials?: bool
         className={styles.typeInput}
         value={text}
         placeholder="Your name"
-        aria-label="Signature text"
+        aria-label={translate('Signature text')}
         onInput={event => setText((event.target as HTMLInputElement).value)}
       />
       <p>The face is whatever script font your system provides — Stapler ships no webfonts.</p>
@@ -250,7 +251,7 @@ function ImageTab({ onDone, isInitials }: { onDone: () => void; isInitials?: boo
         <TextInput
           type="file"
           accept="image/png,image/jpeg,image/webp"
-          aria-label="Signature image file"
+          aria-label={translate('Signature image file')}
           onChange={event => {
             const chosen = (event.target as HTMLInputElement).files?.[0] ?? null;
             setFile(chosen);

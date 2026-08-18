@@ -253,6 +253,8 @@
   "tool.annotate.colorWhite": "White",
   "tool.annotate.colorYellow": "Yellow",
   "tool.annotate.desc": "Draw highlights, shapes, and notes on pages.",
+  "tool.annotate.arrow": "Arrow",
+  "tool.annotate.ellipse": "Ellipse",
   "tool.annotate.findPlaceholder": "Term to highlight…",
   "tool.annotate.findText": "Find and highlight text",
   "tool.annotate.freehand": "Freehand",

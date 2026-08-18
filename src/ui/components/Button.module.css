@@ -8,7 +8,14 @@
   cursor: pointer;
   font: var(--text-body-strong);
   letter-spacing: var(--text-body-strong-ls);
-  transition: var(--transition-snappy);
+  /* `opacity` is deliberately excluded: it carries the disabled state, and
+     animating it left a brief low-contrast frame while a button transitioned
+     from disabled to enabled right after a document loaded — long enough for
+     an accessibility scan (and a real low-vision user) to catch it mid-fade. */
+  transition:
+    background-color var(--dur-fast) var(--ease-snappy),
+    transform var(--dur-fast) var(--ease-snappy),
+    box-shadow var(--dur-fast) var(--ease-snappy);
   outline: none;
   text-decoration: none;
   white-space: nowrap;

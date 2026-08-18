@@ -1,3 +1,4 @@
+import { translate } from '../../core/i18n';
 /**
  * DS-03 — every primitive in every state, for visual review and an axe-core pass.
  * Not linked from the app; reachable only at `#/dev/components`.
@@ -53,14 +54,14 @@ export function ComponentGallery() {
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
   const menuItems: ContextMenuItem[] = [
-    { label: 'Duplicate', icon: Copy, onSelect: () => notify('info', 'Duplicated') },
-    { label: 'Download', icon: Download, onSelect: () => notify('info', 'Downloaded') },
+    { label: 'Duplicate', icon: Copy, onSelect: () => notify('info', translate('Duplicated')) },
+    { label: 'Download', icon: Download, onSelect: () => notify('info', translate('Downloaded')) },
     { label: 'Disabled item', icon: Star, disabled: true, onSelect: () => {} },
     {
       label: 'Delete',
       icon: Trash2,
       danger: true,
-      onSelect: () => notify('danger', 'Deleted')
+      onSelect: () => notify('danger', translate('Deleted'))
     }
   ];
 
@@ -99,10 +100,10 @@ export function ComponentGallery() {
       </Section>
 
       <Section title="IconButton">
-        <IconButton icon={Settings} aria-label="Settings" />
-        <IconButton icon={Settings} aria-label="Settings" active />
-        <IconButton icon={Settings} aria-label="Settings" size="compact" />
-        <IconButton icon={Settings} aria-label="Settings" disabled />
+        <IconButton icon={Settings} aria-label={translate('Settings')} />
+        <IconButton icon={Settings} aria-label={translate('Settings')} active />
+        <IconButton icon={Settings} aria-label={translate('Settings')} size="compact" />
+        <IconButton icon={Settings} aria-label={translate('Settings')} disabled />
       </Section>
 
       <Section title="Badge">
@@ -112,7 +113,7 @@ export function ComponentGallery() {
 
       <Section title="Chip">
         <Chip>Static</Chip>
-        <Chip onRemove={() => notify('info', 'Removed')} removeLabel="Remove tag">
+        <Chip onRemove={() => notify('info', translate('Removed'))} removeLabel="Remove tag">
           Removable
         </Chip>
         <Chip selected={chipSelected} onClick={() => setChipSelected(v => !v)}>
@@ -258,7 +259,10 @@ export function ComponentGallery() {
         <Button variant="secondary" onClick={() => setModalOpen(true)}>
           Open modal
         </Button>
-        <Button variant="secondary" onClick={() => notify('success', 'Saved', { detail: 'Done.' })}>
+        <Button
+          variant="secondary"
+          onClick={() => notify('success', translate('Saved'), { detail: 'Done.' })}
+        >
           Show toast
         </Button>
         <Button

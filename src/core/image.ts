@@ -47,14 +47,14 @@ export async function bitmapToJpeg(bitmap: ImageBitmap, quality = 0.9): Promise<
   return new Uint8Array(await blob.arrayBuffer());
 }
 
-export async function imageFileToJpeg(file: File, quality = 0.9): Promise<Uint8Array> {
-  let sourceBlob: Blob = file;
+export async function imageFileToJpegs(file: File, quality = 0.9): Promise<Uint8Array[]> {
+  let sourceBlobs: Blob[] = [file];
 
   if (file.name.toLowerCase().endsWith('.heic') || file.type === 'image/heic') {
     try {
       const heic2any = (await import('heic2any')).default;
       const result = await heic2any({ blob: file, toType: 'image/png' });
-      sourceBlob = Array.isArray(result) ? result[0] : result;
+      sourceBlobs = Array.isArray(result) ? result : [result];
     } catch (err) {
       throw corrupt(
         `Failed to decode HEIC file ${file.name}: ${err instanceof Error ? err.message : String(err)}`
@@ -69,19 +69,23 @@ export async function imageFileToJpeg(file: File, quality = 0.9): Promise<Uint8A
       const UTIF = await import('utif');
       const buffer = await file.arrayBuffer();
       const ifds = UTIF.decode(buffer);
-      UTIF.decodeImage(buffer, ifds[0]);
-      const rgba = UTIF.toRGBA8(ifds[0]);
+      const blobs: Blob[] = [];
+      for (const ifd of ifds) {
+        UTIF.decodeImage(buffer, ifd);
+        const rgba = UTIF.toRGBA8(ifd);
 
-      const width = ifds[0].width;
-      const height = ifds[0].height;
-      const canvas = new OffscreenCanvas(width, height);
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error('No 2d context for TIFF conversion');
+        const width = ifd.width;
+        const height = ifd.height;
+        const canvas = new OffscreenCanvas(width, height);
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('No 2d context for TIFF conversion');
 
-      const imageData = new ImageData(new Uint8ClampedArray(rgba.buffer), width, height);
-      ctx.putImageData(imageData, 0, 0);
+        const imageData = new ImageData(new Uint8ClampedArray(rgba.buffer), width, height);
+        ctx.putImageData(imageData, 0, 0);
 
-      sourceBlob = await canvas.convertToBlob({ type: 'image/png' });
+        blobs.push(await canvas.convertToBlob({ type: 'image/png' }));
+      }
+      sourceBlobs = blobs;
     } catch (err) {
       throw corrupt(
         `Failed to decode TIFF file ${file.name}: ${err instanceof Error ? err.message : String(err)}`
@@ -89,20 +93,24 @@ export async function imageFileToJpeg(file: File, quality = 0.9): Promise<Uint8A
     }
   }
 
-  let bitmap: ImageBitmap;
-  try {
-    bitmap = await createImageBitmap(sourceBlob, { imageOrientation: 'from-image' });
-  } catch (err) {
-    throw corrupt(
-      `${file.name} could not be decoded as an image: ${err instanceof Error ? err.message : String(err)}`
-    );
-  }
+  const jpegs: Uint8Array[] = [];
+  for (const blob of sourceBlobs) {
+    let bitmap: ImageBitmap;
+    try {
+      bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+    } catch (err) {
+      throw corrupt(
+        `${file.name} could not be decoded as an image: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
 
-  try {
-    return await bitmapToJpeg(bitmap, quality);
-  } finally {
-    bitmap.close();
+    try {
+      jpegs.push(await bitmapToJpeg(bitmap, quality));
+    } finally {
+      bitmap.close();
+    }
   }
+  return jpegs;
 }
 
 /**

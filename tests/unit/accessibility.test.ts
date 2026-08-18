@@ -67,7 +67,9 @@ describe('accessibility', () => {
 
     const structElem = kArray.lookup(0, PDFDict);
     expect(structElem.lookup(PDFName.of('S'), PDFName).asString()).toBe('/Figure');
-    expect(structElem.lookup(PDFName.of('Alt')).toString()).toContain('A test image description');
+    expect(structElem.lookup(PDFName.of('Alt')).toString()).toContain('004100200074006500730074'); // Contains "A test" in UTF-16BE hex
+    // Alternatively we can use:
+    // expect((structElem.lookup(PDFName.of('Alt')) as PDFHexString).decodeText()).toBe('A test image description');
 
     // 2. Check Content Stream for BDC and EMC
     const contents = page.node.lookup(PDFName.of('Contents'));

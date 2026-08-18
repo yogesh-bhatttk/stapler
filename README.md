@@ -19,7 +19,7 @@ Your files never leave your device. All processing is done locally. We do not co
 
 For more details, please see our [Privacy Policy](public/privacy.html).
 
-**Verify it yourself** rather than take our word for it: open DevTools' Network tab, clear it, and use any tool — no request to any server appears, only local files. The same check runs automatically in CI on every change (`pnpm run verify`, which includes the zero-network E2E assertion in `tests/e2e/zero-network.spec.ts`), so it cannot regress unnoticed.
+**Verify it yourself** rather than take our word for it: open DevTools' Network tab, clear it, and use any tool — no request to any server appears, only local files. The same check can be verified by running the test suite (`pnpm run verify`, which includes the zero-network E2E assertion in `tests/e2e/zero-network.spec.ts`).
 
 ## Installation
 

@@ -36,7 +36,7 @@ export function NormalizePanel() {
       </p>
 
       <div className={panelStyles.section}>
-        <h3 className={panelStyles.title}>{t('Dimensions')}</h3>
+        <h2 className={panelStyles.title}>{t('Dimensions')}</h2>
         <Field label={t('Target size')}>
           {id => (
             <select
@@ -61,7 +61,7 @@ export function NormalizePanel() {
       </div>
 
       <div className={panelStyles.section}>
-        <h3 className={panelStyles.title}>{t('Layout')}</h3>
+        <h2 className={panelStyles.title}>{t('Layout')}</h2>
         <Field label={t('Scaling behavior')}>
           {id => (
             <select

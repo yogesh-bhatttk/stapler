@@ -112,18 +112,18 @@ test.describe('DOC-02 import and validation', () => {
   /**
    * DOC-02 requires PNG, JPEG, WebP, TIFF and HEIC to be accepted. Each of these is a
    * different decode path — the browser's own decoder for PNG/JPEG/WebP, `utif` for
-   * TIFF — and none of them had been run through the real pipeline before.
-   *
-   * HEIC is absent on purpose: there is no offline HEIC encoder in this toolchain, so
-   * no fixture can be generated for it (tests/fixtures/README.md).
+   * TIFF, and `heic2any` for HEIC — and none of them had been run through the real pipeline before.
    */
   for (const { file, format } of [
     { file: 'tests/fixtures/sample.png', format: 'PNG' },
     { file: 'tests/fixtures/tiny.jpg', format: 'JPEG' },
     { file: 'tests/fixtures/sample.webp', format: 'WebP' },
-    { file: 'tests/fixtures/sample.tiff', format: 'TIFF' }
+    { file: 'tests/fixtures/sample.tiff', format: 'TIFF' },
+    { file: 'tests/fixtures/sample.heic', format: 'HEIC' }
   ]) {
     test(`a ${format} image imports as a one-page PDF`, async ({ page }) => {
+      page.on('console', msg => console.log('BROWSER:', msg.text()));
+      page.on('pageerror', err => console.log('PAGE ERROR:', err.message));
       await openApp(page);
       await importThrough(page, file);
 

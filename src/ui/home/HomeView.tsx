@@ -1,3 +1,4 @@
+import { translate } from '../../core/i18n';
 /**
  * DS-05 — the home launcher: drop zone, searchable grouped tool grid, and Recents.
  *
@@ -49,7 +50,7 @@ export function HomeView() {
       // Chrome drops file permission between sessions, so this re-prompts.
       const handle = await platform.reopenHandle(entry.id);
       if (!handle) {
-        notify('warning', `Could not reopen ${entry.name}.`, {
+        notify('warning', translate(`Could not reopen ${entry.name}.`), {
           detail: 'Permission was declined, or the file has moved. Open it again from disk.'
         });
         return;
@@ -73,7 +74,7 @@ export function HomeView() {
         });
       }
       for (const failure of outcome.failures) {
-        notify('danger', `Could not open ${failure.name}`, { detail: failure.message });
+        notify('danger', translate(`Could not open ${failure.name}`), { detail: failure.message });
       }
       if (outcome.imported.length > 0) setLocation(toolRoute('organize'));
     } catch (err) {

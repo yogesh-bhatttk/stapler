@@ -1030,7 +1030,10 @@ const api: RenderJob = {
           // Suggest a box sitting just above the label's baseline.
           const boxHeight = height * 2.5;
           const box = textRunViewportBox(run, viewport);
-          const [, baselineYPx] = viewport.convertToViewportPoint(run.transform[4], run.transform[5]);
+          const [, baselineYPx] = viewport.convertToViewportPoint(
+            run.transform[4],
+            run.transform[5]
+          );
           const baselineY = baselineYPx / viewport.height;
           found.push({
             pageIndex: i - 1,

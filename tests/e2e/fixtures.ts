@@ -59,6 +59,49 @@ export const BOOKMARK_CHAPTERS = [
   { title: 'Appendix', page: 6 }
 ];
 
+export async function contractV1Pdf(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage([595.28, 841.89]);
+  page.drawText('Independent Contractor Agreement', { x: 50, y: 780, size: 18, font });
+  page.drawText('This agreement is between Company A and Contractor B.', {
+    x: 50,
+    y: 740,
+    size: 12,
+    font
+  });
+  page.drawText('The contractor will be paid $50 per hour.', { x: 50, y: 700, size: 12, font });
+  page.drawText('Confidentiality: The contractor shall not disclose trade secrets.', {
+    x: 50,
+    y: 660,
+    size: 12,
+    font
+  });
+  page.drawText('Governing Law: California', { x: 50, y: 620, size: 12, font });
+  return doc.save();
+}
+
+export async function contractV2Pdf(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage([595.28, 841.89]);
+  page.drawText('Independent Contractor Agreement', { x: 50, y: 780, size: 18, font });
+  page.drawText('This agreement is between Company A and Contractor B.', {
+    x: 50,
+    y: 740,
+    size: 12,
+    font
+  });
+  page.drawText('The contractor will be paid $75 per hour.', { x: 50, y: 700, size: 12, font });
+  page.drawText('The contractor will also receive a 10% bonus.', { x: 50, y: 680, size: 12, font }); // Insertion
+  page.drawText(
+    'Confidentiality: The contractor shall not disclose trade secrets or proprietary info.',
+    { x: 50, y: 660, size: 12, font }
+  );
+  page.drawText('Governing Law: New York', { x: 50, y: 620, size: 12, font }); // Modification
+  return doc.save();
+}
+
 /**
  * A 9-page document carrying a real `/Outlines` tree — the fixture OPS-10's editor
  * and OPS-12's split mode both need. Written by hand because pdf-lib has no outline

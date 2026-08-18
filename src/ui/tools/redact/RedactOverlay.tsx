@@ -1,3 +1,4 @@
+import { translate } from '../../../core/i18n';
 /**
  * Drawing redaction rectangles on a page (RED-01).
  *
@@ -160,7 +161,9 @@ export function RedactOverlay({ pageIndex, width, height, rotation }: RedactOver
       onPointerCancel={() => setDraft(null)}
       tabIndex={0}
       role="group"
-      aria-label="Redaction drawing area. Drag to mark a region, or press Enter to add one at a default size and position, then use arrow keys to move it and Control plus arrows to resize it."
+      aria-label={translate(
+        'Redaction drawing area. Drag to mark a region, or press Enter to add one at a default size and position, then use arrow keys to move it and Control plus arrows to resize it.'
+      )}
       onKeyDown={event => {
         if (event.target !== event.currentTarget) return;
         if (event.key !== 'Enter' && event.key !== ' ') return;

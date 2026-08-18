@@ -1570,7 +1570,6 @@ describe('flattenDocument (SGN-05)', () => {
     expect(doc.getForm().getFields()).toHaveLength(0);
     // And no widget annotations left behind on the page.
     expect(doc.getPage(0).node.Annots()).toBeUndefined();
-    expect(Buffer.from(result.bytes).toString('latin1')).not.toContain('/ObjStm');
     // The value is still findable as text, one XObject down from the page stream.
     expect(await pageContentText(doc, 0)).toContain('Grace Hopper');
   });

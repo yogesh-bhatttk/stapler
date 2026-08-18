@@ -10,6 +10,9 @@ import { activeDoc, selectedPageKeys } from '../../../core/store';
 import { panelStyles } from '../../shell/OptionsPanel';
 import { useTranslation } from '../../../core/i18n';
 import { extractImagesReport, summarize } from './state';
+import { extractImagesSettings } from '../state';
+import { RadioGroup } from '../../components/Field';
+import { hasDirectoryPicker } from '../../../platform/fsa';
 
 export function ExtractImagesPanel() {
   const t = useTranslation();
@@ -55,6 +58,21 @@ export function ExtractImagesPanel() {
             </ul>
           )}
         </div>
+      )}
+
+      {hasDirectoryPicker() && (
+        <RadioGroup<'zip' | 'directory'>
+          legend={t('Output Format')}
+          name="outputFormat"
+          value={extractImagesSettings.value.outputFormat}
+          onChange={format =>
+            (extractImagesSettings.value = { ...extractImagesSettings.value, outputFormat: format })
+          }
+          options={[
+            { value: 'zip', label: 'ZIP Archive' },
+            { value: 'directory', label: 'Output Folder', hint: 'Save directly to a folder' }
+          ]}
+        />
       )}
     </>
   );

@@ -1,3 +1,4 @@
+import { translate } from '../../core/i18n';
 /**
  * DS-06 — the command palette.
  *
@@ -184,7 +185,7 @@ export const CommandPalette = forwardRef<HTMLDivElement, Record<string, never>>(
           className={styles.palette}
           role="dialog"
           aria-modal="true"
-          aria-label="Command palette"
+          aria-label={translate('Command palette')}
         >
           <div className={styles.inputRow}>
             <Search size={18} aria-hidden="true" />

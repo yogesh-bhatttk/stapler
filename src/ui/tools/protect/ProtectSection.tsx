@@ -20,9 +20,9 @@ export function ProtectSection() {
 
   return (
     <div className={panelStyles.section}>
-      <h3 className={panelStyles.title}>
+      <h2 className={panelStyles.title}>
         <Lock size={14} aria-hidden="true" /> {t('Password protection')}
-      </h3>
+      </h2>
       <p className={panelStyles.description}>
         {t(
           'Encrypts the exported file with AES-256. The document open here is unaffected, and Stapler still cannot open or unlock a file it was not given the password for.'

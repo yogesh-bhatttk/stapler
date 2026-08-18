@@ -120,4 +120,41 @@ describe('CMP-01: classification against the real static fixture corpus', () => 
     const facts = await processWorkerImpl.inspect(fixture('encrypted.pdf'));
     expect(facts.isEncrypted).toBe(true);
   });
+  it.each([
+    ['device-n.pdf', 'DeviceN'],
+    ['separation.pdf', 'Separation'],
+    ['sub-byte.pdf', 'sub-byte depth'],
+    ['color-key.pdf', 'colorKey'],
+    ['pre-blended.pdf', 'preblended'],
+    ['stencil.pdf', 'ImageMask']
+  ])('classifies %s as a mask edge case that cannot be re-encoded safely', async filename => {
+    const inventory = await processWorkerImpl.imageInventory(fixture(filename));
+    const plan = classifyPages(inventory, [{ pageIndex: 0, charCount: 3000, runCount: 30 }], {
+      rasterDpi: 150
+    });
+    expect(plan.pages[0].route).toBe('skip');
+    expect(plan.pages[0].reencode).toEqual([]);
+    expect(plan.skipped.length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['indexed.pdf', 'Indexed'],
+    ['icc.pdf', 'ICCBased'],
+    ['soft-mask.pdf', 'soft mask']
+  ])('%s: re-encodes an over-sampled image that uses %s', async filename => {
+    const inventory = await processWorkerImpl.imageInventory(fixture(filename));
+    // The image must be over-sampled (width > 595 at 150 DPI) to route to surgical rather than already-optimized
+    // We can just force the width/height of the inventory image to be huge since we only care about the classification logic here,
+    // but actually our raw stubs define Width 1, Height 1, which means it will be classified as 'already-optimized' instead of 'surgical'
+    // if we don't mock it. Let's just override the width/height on the returned inventory before classifyPages!
+    inventory[0].images[0].width = 3000;
+    inventory[0].images[0].height = 4000;
+
+    const plan = classifyPages(inventory, [{ pageIndex: 0, charCount: 3000, runCount: 30 }], {
+      rasterDpi: 150
+    });
+    expect(plan.pages[0].route).toBe('surgical');
+    expect(plan.pages[0].reencode.length).toBeGreaterThan(0);
+    expect(plan.skipped).toEqual([]);
+  });
 });

@@ -64,7 +64,18 @@ test.describe('first run', () => {
 
 test.describe('accessibility', () => {
   test('every route has one main landmark, a title, and no positive tabindex', async ({ page }) => {
+    // 1. Scan Home Route (DS-05)
+    await page.goto('/');
+    let accessibilityScanResults = await new AxeBuilder({ page }).analyze();
+    expect(accessibilityScanResults.violations).toEqual([]);
+
+    // 2. Open a document to unlock document-gated panels
+    const file = await ensureFixture('text-6.pdf', () => textPdf(6));
     await openApp(page);
+    await page.locator('input[type="file"]').setInputFiles(file);
+    await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
+
+    // 3. Scan all tools
     for (const tool of TOOLS) {
       await gotoTool(page, tool);
       await expect(page.locator('header')).toBeVisible();
@@ -73,7 +84,7 @@ test.describe('accessibility', () => {
         await page.locator('[tabindex]:not([tabindex="0"]):not([tabindex="-1"])').count()
       ).toBe(0);
 
-      const accessibilityScanResults = await new AxeBuilder({ page }).analyze();
+      accessibilityScanResults = await new AxeBuilder({ page }).analyze();
       expect(accessibilityScanResults.violations).toEqual([]);
     }
   });
@@ -268,7 +279,7 @@ test.describe('performance budgets (PLAN §5.1)', () => {
     // Check memory usage after heavy file
     const mem1 = await page.evaluate(() => (performance as any).memory?.usedJSHeapSize || 0);
 
-    // Close the file (using the Close button or navigating to home and starting over)
+    // Close the file
     await page.getByRole('button', { name: 'Close heavy.pdf' }).click();
     await page.goto('/#/');
     await expect(page.locator('input[type="file"]')).toBeVisible();
@@ -276,20 +287,27 @@ test.describe('performance budgets (PLAN §5.1)', () => {
     // Now process the 300-page file
     await page.locator('input[type="file"]').setInputFiles(longFile);
     await gotoTool(page, 'organize');
-
-    // Wait for row windowing and rendering to settle
     await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
 
-    // Scroll to the bottom to force rendering of later pages
+    const mem2 = await page.evaluate(() => (performance as any).memory?.usedJSHeapSize || 0);
+
+    // Close the second file
+    await page.getByRole('button', { name: 'Close text-300.pdf' }).click();
+    await page.goto('/#/');
+    await expect(page.locator('input[type="file"]')).toBeVisible();
+
+    // Now process the third file (heavy again) to satisfy the 3-file sequence AC
+    await page.locator('input[type="file"]').setInputFiles(heavyFile);
+    await gotoTool(page, 'organize');
+    await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
+
     const scroller = page.locator('[data-testid="pagegrid-scroller"]');
     if (await scroller.isVisible()) {
       await scroller.evaluate(e => e.scrollTo(0, e.scrollHeight));
     }
-
-    // Wait for bottom thumbnails to render
     await page.waitForTimeout(1000);
 
-    const mem2 = await page.evaluate(() => (performance as any).memory?.usedJSHeapSize || 0);
+    const mem3 = await page.evaluate(() => (performance as any).memory?.usedJSHeapSize || 0);
 
     // The ceiling should be generous enough for Chrome in headless, but if the app leaks
     // offscreen canvases or PDF docs, memory will balloon to 500MB+. We assert < 200MB.
@@ -299,14 +317,15 @@ test.describe('performance budgets (PLAN §5.1)', () => {
     // *this realm's* heap. The render and process workers have their own, and
     // that is where re-encoded pages and decoded images actually accumulate, so
     // this asserts the main thread does not balloon — not that the whole app
-    // stays under 300MB. The API that would cover workers,
+    // stays under 200MB. The API that would cover workers,
     // `performance.measureUserAgentSpecificMemory()`, requires cross-origin
     // isolation (COOP/COEP), which neither the extension page nor the static web
     // twin currently sets; adding those headers to satisfy a test would change
     // what ships. Worker-heap budget therefore remains unverified here.
-    if (mem1 > 0 && mem2 > 0) {
-      expect(mem1).toBeLessThan(300 * 1024 * 1024); // 300MB
-      expect(mem2).toBeLessThan(300 * 1024 * 1024); // 300MB
+    if (mem1 > 0 && mem2 > 0 && mem3 > 0) {
+      expect(mem1).toBeLessThan(200 * 1024 * 1024); // 200MB
+      expect(mem2).toBeLessThan(200 * 1024 * 1024); // 200MB
+      expect(mem3).toBeLessThan(200 * 1024 * 1024); // 200MB
     }
   });
 
@@ -320,15 +339,25 @@ test.describe('performance budgets (PLAN §5.1)', () => {
     const files = Array(10).fill(file);
     await openApp(page);
     await page.locator('input[type="file"]').setInputFiles(files[0]);
+    // The app auto-navigates to 'organize' once the import resolves (see
+    // HomeView's `setLocation(toolRoute('organize'))`); switching tools before
+    // that resolves races it and our `gotoTool('merge')` gets clobbered.
+    await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
     await gotoTool(page, 'merge');
     await expect(page.getByRole('heading', { name: 'Source files' })).toBeVisible({
       timeout: 30_000
     });
 
     const started = Date.now();
+    // Playwright's headless Chromium auto-cancels a native file-chooser dialog
+    // when nothing is listening for it; `input.click()`'s own `cancel` handler
+    // then removes the dynamically-created `<input>` before a later
+    // `locator('input[type="file"]').last()` can ever find it. Listening for
+    // the `filechooser` event and feeding it directly avoids that race.
+    const filechooserPromise = page.waitForEvent('filechooser');
     await page.getByRole('button', { name: 'Add PDFs or images' }).click();
-    const picker = page.locator('input[type="file"]').last();
-    await picker.setInputFiles(files.slice(1));
+    const filechooser = await filechooserPromise;
+    await filechooser.setFiles(files.slice(1));
 
     await expect(page.locator('ol').first().locator('li')).toHaveCount(10, { timeout: 30_000 });
 

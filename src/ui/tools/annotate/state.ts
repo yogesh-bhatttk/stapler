@@ -2,7 +2,7 @@ import { signal } from '@preact/signals';
 import { ANNOTATION_COLORS } from '../../../core/doc-colors';
 
 export type AnnotationType =
-  'freehand' | 'highlight' | 'rectangle' | 'text' | 'sticky' | 'whiteout';
+  'freehand' | 'highlight' | 'rectangle' | 'text' | 'sticky' | 'whiteout' | 'arrow' | 'ellipse';
 
 export interface Point {
   x: number;

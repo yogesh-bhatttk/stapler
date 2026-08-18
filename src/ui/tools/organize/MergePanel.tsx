@@ -1,3 +1,4 @@
+import { translate } from '../../../core/i18n';
 /**
  * Merge / insert options (OPS-01, OPS-04).
  *
@@ -54,10 +55,10 @@ export function MergePanel() {
         }
         // A failure on one file never stops the others, and each says why.
         for (const failure of outcome.failures) {
-          notify('danger', `Could not add ${failure.name}`, { detail: failure.message });
+          notify('danger', translate(`Could not add ${failure.name}`), { detail: failure.message });
         }
         if (outcome.imported.length > 0) {
-          notify('success', `Added ${outcome.imported.length} document(s).`);
+          notify('success', translate(`Added ${outcome.imported.length} document(s).`));
         }
       });
     } catch (err) {
@@ -76,7 +77,7 @@ export function MergePanel() {
 
       {sourceList.length > 0 && (
         <div className={panelStyles.section}>
-          <h3 className={panelStyles.title}>{t('Source files')}</h3>
+          <h2 className={panelStyles.title}>{t('Source files')}</h2>
           <ol className={panelStyles.list}>
             {sourceList.map((source, index) => (
               <li className={panelStyles.listRow} key={source.id} title={source.name}>

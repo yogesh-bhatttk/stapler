@@ -1,3 +1,4 @@
+import { translate } from './i18n';
 /**
  * F-06 — the IndexedDB layer.
  *
@@ -15,7 +16,7 @@ import { notify } from './notify';
 import type { FsaFileHandle } from '../platform/fsa';
 
 const DB_NAME = 'stapler';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 export interface IndexOccurrence {
   fileId: string;
@@ -35,6 +36,14 @@ export interface SearchIndexRecord {
   size?: number;
   handle?: FsaFileHandle;
   indexedAt?: number;
+}
+
+export interface Recipe {
+  id: string;
+  name: string;
+  tools: string[];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  settings: any;
 }
 
 interface StaplerSchema extends DBSchema {
@@ -74,6 +83,10 @@ interface StaplerSchema extends DBSchema {
       'by-fileId': string;
     };
   };
+  recipes: {
+    key: string;
+    value: Recipe;
+  };
 }
 
 let dbPromise: Promise<IDBPDatabase<StaplerSchema>> | null = null;
@@ -102,6 +115,11 @@ function open(): Promise<IDBPDatabase<StaplerSchema>> {
             searchIndex.createIndex('by-token', 'token');
             searchIndex.createIndex('by-type', 'type');
             searchIndex.createIndex('by-fileId', 'fileId');
+          }
+        }
+        if (oldVersion < 3) {
+          if (!db.objectStoreNames.contains('recipes')) {
+            db.createObjectStore('recipes', { keyPath: 'id' });
           }
         }
       },
@@ -136,7 +154,7 @@ async function guard<T>(scope: string, fn: (db: IDBPDatabase<StaplerSchema>) => 
   } catch (err) {
     if (isQuotaError(err)) {
       logEvent('error', scope, 'Storage quota exceeded');
-      notify('warning', 'Local storage is full.', {
+      notify('warning', translate('Local storage is full.'), {
         detail:
           'Stapler could not save to browser storage. Your document is unaffected — delete ' +
           'saved signatures or clear site data to free space.'
@@ -314,4 +332,23 @@ export async function deleteSearchIndexRecordsByFileId(fileId: string): Promise<
     await tx.done;
   });
   return result.ok;
+}
+
+/* ---------------- recipes ---------------- */
+
+export async function putRecipe(recipe: Recipe): Promise<boolean> {
+  return (await guard('db.putRecipe', db => db.put('recipes', recipe))).ok;
+}
+
+export async function getRecipe(id: string): Promise<Recipe | null> {
+  return (await guard('db.getRecipe', db => db.get('recipes', id))).value ?? null;
+}
+
+export async function listRecipes(): Promise<Recipe[]> {
+  const result = await guard('db.listRecipes', db => db.getAll('recipes'));
+  return result.value ?? [];
+}
+
+export async function deleteRecipe(id: string) {
+  await guard('db.deleteRecipe', db => db.delete('recipes', id));
 }

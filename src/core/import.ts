@@ -12,7 +12,7 @@ import { processWorker, renderWorker } from './workers';
 import { createJobHandle, type JobOptions } from './workers/protocol';
 import { cancelled, corrupt, fromUnknown, isCancellation, unsupported } from './errors';
 import { makePageRefs, registerSource, type PageRef, type SourceDocument } from './store';
-import { imageFileToJpeg, isSupportedImage } from './image';
+import { imageFileToJpegs, isSupportedImage } from './image';
 import { hasXfaMarker, XFA_MESSAGE } from './pdf/xfa';
 
 /** Warn rather than refuse — the plan has no size limit, only a warning (§5.1). */
@@ -168,7 +168,7 @@ async function importImages(
     // 120MB TIFF is as slow to decode as a 120MB PDF is to parse.
     const oversized = largeFileWarning(files[i].size);
     if (oversized) warnings.push(`${files[i].name}: ${oversized}`);
-    jpegs.push(await imageFileToJpeg(files[i], imageOptions?.quality ?? 0.9));
+    jpegs.push(...(await imageFileToJpegs(files[i], imageOptions?.quality ?? 0.9)));
   }
 
   const bytes = await processWorker.lease(api => api.imagesToPdf(jpegs, imageOptions, job));

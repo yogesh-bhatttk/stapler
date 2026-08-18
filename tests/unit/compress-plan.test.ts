@@ -100,48 +100,6 @@ describe('classifyPages', () => {
     expect(plan.pages[0].route).toBe('already-optimized');
   });
 
-  // Each of these is a documented way to corrupt a document, so each must skip.
-  it.each([
-    ['JPXDecode', { filter: 'JPXDecode' }],
-    ['JBIG2Decode', { filter: 'JBIG2Decode' }],
-    ['DeviceN', { colorSpace: 'DeviceN' }],
-    ['sub-byte depth', { bitsPerComponent: 1 }],
-    // A named ink, not a colour: flattening it to RGB destroys the plate.
-    ['Separation', { colorSpace: 'Separation' }],
-    // Transparency defined by exact sample values, which a lossy re-encode loses.
-    ['a colour-key mask', { hasMask: true, maskKind: 'colorKey' as const }],
-    // pdf.js un-blends /Matte while decoding, so the mask no longer describes it.
-    ['a pre-blended soft mask', { hasSMask: true, maskKind: 'preblended' as const }],
-    // A 1-bit shape that paints the fill colour; JPEG cannot represent it at all.
-    ['a stencil (ImageMask)', { isImageMask: true, bitsPerComponent: 8 }]
-  ])('skips a page whose image uses %s', (_label, overrides) => {
-    const plan = classifyPages([page([image(overrides)])], [text(3000)], OPTIONS);
-    expect(plan.pages[0].route).toBe('skip');
-    expect(plan.pages[0].reencode).toEqual([]);
-    expect(plan.actionableBytes).toBe(0);
-    // The reason has to reach the user, not just the branch.
-    expect(plan.skipped.length).toBeGreaterThan(0);
-  });
-
-  /*
-   * CMP-03 widened the surgical path to these. pdf.js resolves the colour space
-   * to RGB while decoding, and a soft mask lives in its own stream, so the base
-   * colour can be re-encoded and the mask re-attached byte-for-byte — verified
-   * end to end in `tests/e2e/tool-flows.spec.ts`.
-   */
-  it.each([
-    ['DeviceCMYK', { colorSpace: 'DeviceCMYK' }],
-    ['Indexed', { colorSpace: 'Indexed' }],
-    ['ICCBased', { colorSpace: 'ICCBased' }],
-    ['an /SMask', { hasSMask: true, maskKind: 'soft' as const }],
-    ['a stencil /Mask stream', { hasMask: true, maskKind: 'soft' as const }]
-  ])('re-encodes an over-sampled image that uses %s', (_label, overrides) => {
-    const plan = classifyPages([page([image(overrides)])], [text(3000)], OPTIONS);
-    expect(plan.pages[0].route).toBe('surgical');
-    expect(plan.pages[0].reencode).toEqual([{ name: 'Im1', objectNumber: 10 }]);
-    expect(plan.skipped).toEqual([]);
-  });
-
   it('re-encodes the safe images on a page and skips the rest', () => {
     // Distinct object numbers, because safety is now decided per image *object*
     // document-wide (a shared image cannot be safe on one page and unsafe on

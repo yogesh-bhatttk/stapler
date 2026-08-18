@@ -1,3 +1,4 @@
+import { translate } from '../../core/i18n';
 /**
  * The application shell: top bar, rail, canvas, options panel, action bar, plus the
  * global overlays (palette, toasts, confirmations, first-run, shortcuts).
@@ -125,7 +126,7 @@ export function AppShell({ children }: { children: ComponentChildren }) {
         ?.getAsFile();
       const file = eventImage ?? (await platform.readClipboardImage());
       if (!file) {
-        notify('warning', 'No image found on the clipboard.');
+        notify('warning', translate('No image found on the clipboard.'));
         return;
       }
       event.preventDefault();

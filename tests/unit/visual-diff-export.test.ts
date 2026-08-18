@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { PDFDocument } from 'pdf-lib';
+import { PDFDocument, PDFName } from 'pdf-lib';
 import { pixelDiff } from '../../src/core/pixel-diff';
 import { exportVisualDiff, type PageDiffResult } from '../../src/core/visual-diff-export';
 import { type StaplerDoc } from '../../src/core/store';
@@ -73,6 +73,12 @@ describe('exportVisualDiff (ANN-05)', () => {
     const page = pdf.getPage(0);
     expect(page.getWidth()).toBeGreaterThan(0);
     expect(page.getHeight()).toBeGreaterThan(0);
+
+    // Actually verify the image was rendered (Bug 31)
+    const resources = page.node.Resources();
+    expect(resources).toBeDefined();
+    const xObjects = resources!.get(PDFName.of('XObject'));
+    expect(xObjects).toBeDefined();
   });
 
   it('exports visual diff PDF for removed-content fixture', async () => {
@@ -99,6 +105,12 @@ describe('exportVisualDiff (ANN-05)', () => {
 
     const pdf = await PDFDocument.load(exportedBytes);
     expect(pdf.getPageCount()).toBe(1);
+
+    const page = pdf.getPage(0);
+    const resources = page.node.Resources();
+    expect(resources).toBeDefined();
+    const xObjects = resources!.get(PDFName.of('XObject'));
+    expect(xObjects).toBeDefined();
   });
 
   it('handles multi-page document diff exports', async () => {

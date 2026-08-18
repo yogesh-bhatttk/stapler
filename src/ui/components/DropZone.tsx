@@ -1,3 +1,4 @@
+import { translate } from '../../core/i18n';
 /**
  * DS-05 — the drop zone.
  */
@@ -81,7 +82,7 @@ export const DropZone = forwardRef<HTMLLabelElement, DropZoneProps>(function Dro
         }
       }
       for (const failure of outcome.failures) {
-        notify('danger', `Could not open ${failure.name}`, { detail: failure.message });
+        notify('danger', translate(`Could not open ${failure.name}`), { detail: failure.message });
       }
 
       if (outcome.imported.length > 0) {
@@ -111,73 +112,77 @@ export const DropZone = forwardRef<HTMLLabelElement, DropZoneProps>(function Dro
   };
 
   return (
-    <label
-      ref={ref}
-      className={[styles.dropzone, state !== 'idle' ? styles[state] : ''].filter(Boolean).join(' ')}
-      aria-label="Choose PDFs or images to open"
-      aria-busy={state === 'busy'}
-      onClick={event => {
-        if (!platform.supportsFileSystemAccess) return;
-        event.preventDefault();
-        void browse();
-      }}
-      onDragEnter={event => {
-        event.preventDefault();
-        depth.current += 1;
-        setState(accepts(event.dataTransfer) ? 'active' : 'reject');
-      }}
-      onDragOver={event => {
-        event.preventDefault();
-        if (event.dataTransfer) {
-          event.dataTransfer.dropEffect = accepts(event.dataTransfer) ? 'copy' : 'none';
-        }
-      }}
-      onDragLeave={event => {
-        event.preventDefault();
-        depth.current -= 1;
-        if (depth.current <= 0) setState('idle');
-      }}
-      onDrop={event => {
-        event.preventDefault();
-        depth.current = 0;
-        const files = Array.from(event.dataTransfer?.files ?? []);
-        if (files.length === 0) {
-          setState('idle');
-          return;
-        }
-        void process(files);
-      }}
-    >
-      <input
-        ref={inputRef}
-        className="srOnly"
-        type="file"
-        multiple
-        accept={acceptToInputAccept(PDF_AND_IMAGES)}
-        aria-label="Choose PDFs or images to open"
-        onChange={event => {
-          const input = event.target as HTMLInputElement;
-          const files = Array.from(input.files ?? []);
-          input.value = '';
-          if (files.length > 0) void process(files);
+    <>
+      <label
+        ref={ref}
+        className={[styles.dropzone, state !== 'idle' ? styles[state] : '']
+          .filter(Boolean)
+          .join(' ')}
+        aria-label={translate('Choose PDFs or images to open')}
+        aria-busy={state === 'busy'}
+        onClick={event => {
+          if (!platform.supportsFileSystemAccess) return;
+          event.preventDefault();
+          void browse();
         }}
-      />
-      <UploadCloud size={40} aria-hidden="true" />
+        onDragEnter={event => {
+          event.preventDefault();
+          depth.current += 1;
+          setState(accepts(event.dataTransfer) ? 'active' : 'reject');
+        }}
+        onDragOver={event => {
+          event.preventDefault();
+          if (event.dataTransfer) {
+            event.dataTransfer.dropEffect = accepts(event.dataTransfer) ? 'copy' : 'none';
+          }
+        }}
+        onDragLeave={event => {
+          event.preventDefault();
+          depth.current -= 1;
+          if (depth.current <= 0) setState('idle');
+        }}
+        onDrop={event => {
+          event.preventDefault();
+          depth.current = 0;
+          const files = Array.from(event.dataTransfer?.files ?? []);
+          if (files.length === 0) {
+            setState('idle');
+            return;
+          }
+          void process(files);
+        }}
+      >
+        <input
+          ref={inputRef}
+          className="srOnly"
+          type="file"
+          multiple
+          accept={acceptToInputAccept(PDF_AND_IMAGES)}
+          aria-label={translate('Choose PDFs or images to open')}
+          onChange={event => {
+            const input = event.target as HTMLInputElement;
+            const files = Array.from(input.files ?? []);
+            input.value = '';
+            if (files.length > 0) void process(files);
+          }}
+        />
+        <UploadCloud size={40} aria-hidden="true" />
+        {state === 'busy' && progress ? (
+          <ProgressBar label={progress.label} value={progress.value} />
+        ) : (
+          <>
+            <span className={styles.title}>
+              {state === 'reject' ? 'Only PDFs and images' : 'Drop PDFs or images here'}
+            </span>
+            <span className={styles.hint}>
+              {state === 'reject'
+                ? `${SUPPORTED_FORMATS} are supported.`
+                : 'or choose files — nothing is uploaded'}
+            </span>
+          </>
+        )}
+      </label>
       {node}
-      {state === 'busy' && progress ? (
-        <ProgressBar label={progress.label} value={progress.value} />
-      ) : (
-        <>
-          <span className={styles.title}>
-            {state === 'reject' ? 'Only PDFs and images' : 'Drop PDFs or images here'}
-          </span>
-          <span className={styles.hint}>
-            {state === 'reject'
-              ? `${SUPPORTED_FORMATS} are supported.`
-              : 'or choose files — nothing is uploaded'}
-          </span>
-        </>
-      )}
-    </label>
+    </>
   );
 });

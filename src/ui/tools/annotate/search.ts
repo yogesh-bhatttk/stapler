@@ -1,3 +1,4 @@
+import { translate } from '../../../core/i18n';
 import { commit } from '../../../core/history';
 import { currentDocumentBytes, findTextRegions } from '../../../core/operations';
 import { displayedAspectRatio } from '../../../core/rotation';
@@ -48,7 +49,7 @@ export async function searchAndHighlightMatches(
   }
 
   if (found.length === 0) {
-    notify('warning', `No matches for "${trimmed}".`);
+    notify('warning', translate(`No matches for "${trimmed}".`));
     return { applied: false, matches: 0, unplaced: 0 };
   }
 
@@ -60,13 +61,13 @@ export async function searchAndHighlightMatches(
   }
 
   if (highlights.length === 0) {
-    notify('warning', `No matches for "${trimmed}" on any page of this document.`);
+    notify('warning', translate(`No matches for "${trimmed}" on any page of this document.`));
     return { applied: false, matches: 0, unplaced: 0 };
   }
 
   commit();
   addAnnotations(highlights);
-  notify('info', `Highlighted ${highlights.length} match(es).`, {
+  notify('info', translate(`Highlighted ${highlights.length} match(es).`), {
     detail:
       unplaced > 0
         ? `${unplaced} match(es) fell outside this document's pages and were not highlighted. Undo removes the whole search.`

@@ -1,3 +1,4 @@
+import { translate } from '../../core/i18n';
 /**
  * The tool rail, driven by the registry in core/tools.ts. Previously every item was
  * hand-written here *and* the same set was re-derived in the options panel, the
@@ -13,7 +14,7 @@ export function ToolRail() {
   const [location] = useLocation();
 
   return (
-    <nav className={styles.rail} aria-label="Tools">
+    <nav className={styles.rail} aria-label={translate('Tools')}>
       {groupedTools().map(({ group, tools }) => (
         <div className={styles.railGroup} key={group}>
           <h2 className={styles.railHeading}>{group}</h2>

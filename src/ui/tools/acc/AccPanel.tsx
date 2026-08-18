@@ -64,7 +64,7 @@ export function AccPanel() {
       </p>
 
       <div className={panelStyles.section}>
-        <h3 className={panelStyles.heading}>{t('Images in Document')}</h3>
+        <h2 className={panelStyles.heading}>{t('Images in Document')}</h2>
         {images.length === 0 ? (
           <p className={panelStyles.note}>{t('Loading images or no images found...')}</p>
         ) : (
@@ -81,10 +81,14 @@ export function AccPanel() {
                   <div
                     style={{ display: 'flex', flexDirection: 'column', flex: 1, gap: '0.25rem' }}
                   >
-                    <label style={{ fontSize: '11px', color: 'var(--ink-subtle)' }}>
+                    <label
+                      htmlFor={`alt-text-${key}`}
+                      style={{ fontSize: '11px', color: 'var(--ink-subtle)' }}
+                    >
                       Page {img.pageIndex + 1} - {img.name}
                     </label>
                     <input
+                      id={`alt-text-${key}`}
                       type="text"
                       className="text-input"
                       style={{ width: '100%', padding: '4px' }}

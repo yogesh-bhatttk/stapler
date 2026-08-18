@@ -1,3 +1,4 @@
+import { translate } from '../../core/i18n';
 /**
  * `FileTabs` from DESIGN-ADAPTATION §4.2 / §5. It was specified in the layout and
  * listed as a component to build, but never existed — so a multi-document workspace
@@ -28,21 +29,31 @@ export function FileTabs() {
   };
 
   return (
-    <div className={styles.tabs} role="tablist" aria-label="Open documents">
+    // Not a full ARIA `tablist` pattern (no roving-tabindex arrow-key
+    // navigation, no linked `tabpanel`) and each tab carries a close control
+    // a `tablist`'s required-children rule forbids as a sibling of `tab` — so
+    // this is a plain labelled group of buttons, with `aria-current` marking
+    // the active document instead of `aria-selected`.
+    <div className={styles.tabs} aria-label={translate('Open documents')}>
       {docs.map(doc => {
         const active = doc.id === activeDocId.value;
         return (
-          <button
+          <div
             key={doc.id}
-            type="button"
-            role="tab"
-            aria-selected={active}
             className={`${styles.tab} ${active ? styles.tabActive : ''}`}
-            onClick={() => (activeDocId.value = doc.id)}
             title={doc.name}
           >
-            {doc.dirty && <span className={styles.dirtyDot} aria-label="Unsaved changes" />}
-            <span className={styles.tabName}>{doc.name}</span>
+            <button
+              type="button"
+              aria-current={active ? 'true' : undefined}
+              className={styles.tabTrigger}
+              onClick={() => (activeDocId.value = doc.id)}
+            >
+              {doc.dirty && (
+                <span className={styles.dirtyDot} aria-label={translate('Unsaved changes')} />
+              )}
+              <span className={styles.tabName}>{doc.name}</span>
+            </button>
             <span
               // A nested <button> is invalid HTML, so the close affordance is a
               // span with its own keyboard handling.
@@ -62,7 +73,7 @@ export function FileTabs() {
             >
               <X size={12} aria-hidden="true" />
             </span>
-          </button>
+          </div>
         );
       })}
     </div>

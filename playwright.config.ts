@@ -25,7 +25,7 @@ export default defineConfig({
     // Preview the *built* site, not the dev server: the dev server injects its own
     // websocket client, so a zero-network assertion against it would be meaningless.
     command:
-      'BUILD_TARGET=web pnpm exec vite build && pnpm exec vite preview --port 4173 --strictPort',
+      'BUILD_TARGET=web VITE_E2E_TEST_HOOKS=true pnpm exec vite build && pnpm exec vite preview --port 4173 --strictPort',
     port: 4173,
     reuseExistingServer: false,
     timeout: 180_000

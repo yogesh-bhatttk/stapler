@@ -24,7 +24,15 @@ import { deleteHandle, listHandles, readHandle, writeHandle } from '../core/db';
 
 export async function readClipboardImage(): Promise<File | null> {
   const win = window as unknown as { __mockClipboardImage?: File };
-  if (import.meta.env.MODE === 'test' && win.__mockClipboardImage) {
+  // `MODE === 'test'` covers vitest, but Playwright's e2e suite drives a real
+  // production build (`vite build` + `vite preview`, mode 'production') so
+  // clipboard paste can be exercised against zero-network build output — that
+  // build sets `VITE_E2E_TEST_HOOKS` explicitly (see playwright.config.ts) so
+  // this stays absent from the actual store/website builds.
+  if (
+    (import.meta.env.MODE === 'test' || import.meta.env.VITE_E2E_TEST_HOOKS === 'true') &&
+    win.__mockClipboardImage
+  ) {
     return win.__mockClipboardImage;
   }
   try {

@@ -1,3 +1,4 @@
+import { translate } from '../../core/i18n';
 /**
  * The one modal shell.
  *
@@ -95,7 +96,9 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(function Modal(
             {icon}
             {title}
           </h2>
-          {dismissible && <IconButton icon={X} onClick={onClose} aria-label="Close dialog" />}
+          {dismissible && (
+            <IconButton icon={X} onClick={onClose} aria-label={translate('Close dialog')} />
+          )}
         </div>
         <div className={styles.body}>{children}</div>
         {footer && <div className={styles.footer}>{footer}</div>}

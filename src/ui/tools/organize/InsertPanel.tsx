@@ -1,3 +1,4 @@
+import { translate } from '../../../core/i18n';
 /**
  * OPS-04 — insert pages from another document at a chosen position.
  *
@@ -78,7 +79,7 @@ export function InsertPanel() {
         }
         // A failure on one file never stops the others, and each says why.
         for (const failure of outcome.failures) {
-          notify('danger', `Could not add ${failure.name}`, { detail: failure.message });
+          notify('danger', translate(`Could not add ${failure.name}`), { detail: failure.message });
         }
         if (insertedKeys.length > 0) {
           // Selecting the newly-inserted pages is the "visible insertion
@@ -88,7 +89,7 @@ export function InsertPanel() {
           setManualIndex(null);
           notify(
             'success',
-            `Inserted ${insertedKeys.length} page(s) at position ${clampedIndex + 1}.`
+            translate(`Inserted ${insertedKeys.length} page(s) at position ${clampedIndex + 1}.`)
           );
         }
       });

@@ -142,7 +142,8 @@ export interface StampSource {
 
 export interface AnnotationSource {
   pageKey: string;
-  type: 'freehand' | 'highlight' | 'rectangle' | 'text' | 'sticky' | 'whiteout';
+  type:
+    'freehand' | 'highlight' | 'rectangle' | 'ellipse' | 'arrow' | 'text' | 'sticky' | 'whiteout';
   color: string;
   strokeWidth: number;
   points?: { x: number; y: number }[];
@@ -1642,11 +1643,49 @@ async function drawAnnotations(
         width: ann.rect.width * width,
         height: ann.rect.height * height,
         borderColor: color,
-        // `strokeWidth` is stored as a fraction of page width (matching x/y),
-        // so it reproduces the same relative thickness the user drew on
-        // screen regardless of which zoom level that was at.
         borderWidth: ann.strokeWidth * width,
         opacity: 1.0
+      });
+    } else if (ann.type === 'ellipse' && ann.rect) {
+      page.drawEllipse({
+        x: ann.rect.x * width + (ann.rect.width * width) / 2,
+        y: height - ann.rect.y * height - (ann.rect.height * height) / 2,
+        xScale: Math.abs(ann.rect.width * width) / 2,
+        yScale: Math.abs(ann.rect.height * height) / 2,
+        borderColor: color,
+        borderWidth: ann.strokeWidth * width,
+        opacity: 1.0
+      });
+    } else if (ann.type === 'arrow' && ann.points && ann.points.length >= 2) {
+      const start = ann.points[0];
+      const end = ann.points[ann.points.length - 1];
+      const x1 = start.x * width;
+      const y1 = height - start.y * height;
+      const x2 = end.x * width;
+      const y2 = height - end.y * height;
+
+      page.drawLine({
+        start: { x: x1, y: y1 },
+        end: { x: x2, y: y2 },
+        thickness: ann.strokeWidth * width,
+        color: color,
+        opacity: 1.0
+      });
+
+      const angle = Math.atan2(y2 - y1, x2 - x1);
+      const headlen = 10 + ann.strokeWidth * width;
+      const h1x = x2 - headlen * Math.cos(angle - Math.PI / 6);
+      const h1y = y2 - headlen * Math.sin(angle - Math.PI / 6);
+      const h2x = x2 - headlen * Math.cos(angle + Math.PI / 6);
+      const h2y = y2 - headlen * Math.sin(angle + Math.PI / 6);
+
+      const path = `M ${x2} ${height - y2} L ${h1x} ${height - h1y} M ${x2} ${height - y2} L ${h2x} ${height - h2y}`;
+      page.drawSvgPath(path, {
+        x: 0,
+        y: height,
+        borderColor: color,
+        borderWidth: ann.strokeWidth * width,
+        borderLineCap: LineCapStyle.Round
       });
     } else if (ann.type === 'text' && ann.text && ann.rect) {
       if (!fontCache.font) {
@@ -3470,7 +3509,7 @@ const api: ProcessJob = {
       }
     }
     await checkpoint(job, 0.9, 'Writing file');
-    return transfer(await pseudoLinearize(doc).save({ useObjectStreams: false }));
+    return transfer(await pseudoLinearize(doc).save({ useObjectStreams: true }));
   },
 
   async flattenBackground(
@@ -3668,7 +3707,7 @@ Q
     // content operation: pdf-lib may retain orphaned streams, so output size is
     // not evidence that no change occurred.
     if (!changed) return { bytes, changed: false };
-    const output = await pseudoLinearize(doc).save({ useObjectStreams: false });
+    const output = await pseudoLinearize(doc).save({ useObjectStreams: true });
     return { bytes: output, changed: true };
   },
   async flattenDocument(bytes, job) {
@@ -3712,7 +3751,7 @@ Q
     const { baked, dropped } = flattenAnnotations(doc);
     await checkpoint(job, 0.8, 'Writing file');
     return {
-      bytes: transfer(await pseudoLinearize(doc).save({ useObjectStreams: false })),
+      bytes: transfer(await pseudoLinearize(doc).save({ useObjectStreams: true })),
       fields,
       annotationsBaked: baked,
       annotationsDropped: dropped
@@ -3748,7 +3787,7 @@ Q
       extras
     );
     await checkpoint(job, 0.95, 'Writing file');
-    return transfer(await pseudoLinearize(outDoc).save({ useObjectStreams: false }));
+    return transfer(await pseudoLinearize(outDoc).save({ useObjectStreams: true }));
   },
 
   async readOutline(bytes) {
@@ -3817,7 +3856,7 @@ Q
         sliceExtras
       );
       return {
-        bytes: transfer(await pseudoLinearize(outDoc).save({ useObjectStreams: false })),
+        bytes: transfer(await pseudoLinearize(outDoc).save({ useObjectStreams: true })),
         isZip: false,
         fileCount: 1
       };
@@ -3851,7 +3890,7 @@ Q
           extras?.fileNames?.[i],
           `${baseName}-${String(i + 1).padStart(pad, '0')}`
         )
-      ] = await pseudoLinearize(outDoc).save({ useObjectStreams: false });
+      ] = await pseudoLinearize(outDoc).save({ useObjectStreams: true });
     }
 
     await checkpoint(job, 0.95, 'Compressing archive');
@@ -4187,7 +4226,7 @@ Q
 
     reattachAcroForm(out, [source]);
     await checkpoint(job, 0.95, 'Writing file');
-    const rebuilt = await pseudoLinearize(out).save({ useObjectStreams: false });
+    const rebuilt = await pseudoLinearize(out).save({ useObjectStreams: true });
 
     // CMP-04: a "compressed" file that is not smaller is not saved. Returning the
     // original bytes is the only honest outcome.
@@ -4212,7 +4251,7 @@ Q
     // We cannot use object streams because it breaks accessibility testing tools
     // that don't fully support PDF 1.5 object streams (like Acrobat Reader sometimes when debugging).
     // Plus, it ensures our `/K` arrays in StructTreeRoot are easily readable.
-    return transfer(await pseudoLinearize(doc).save({ useObjectStreams: false }));
+    return transfer(await pseudoLinearize(doc).save({ useObjectStreams: true }));
   },
 
   async markdownToPdf(markdown: string): Promise<Uint8Array> {
@@ -4273,7 +4312,7 @@ Q
 
       page.drawImage(embedded, { x, y, width: drawWidth, height: drawHeight });
     }
-    return transfer(await pseudoLinearize(doc).save({ useObjectStreams: false }));
+    return transfer(await pseudoLinearize(doc).save({ useObjectStreams: true }));
   },
 
   /**
@@ -4689,7 +4728,7 @@ Q
 
     reattachAcroForm(out, [doc]);
     await checkpoint(job, 0.95, 'Writing file');
-    return transfer(await pseudoLinearize(out).save({ useObjectStreams: false }));
+    return transfer(await pseudoLinearize(out).save({ useObjectStreams: true }));
   },
 
   async planImageRedactions(bytes, regions) {
@@ -4826,7 +4865,7 @@ Q
     // text was supposed to be gone.
     sweepUnreachableObjects(out);
     await checkpoint(job, 0.95, 'Writing file');
-    return transfer(await pseudoLinearize(out).save({ useObjectStreams: false }));
+    return transfer(await pseudoLinearize(out).save({ useObjectStreams: true }));
   },
 
   async collectOffPageText(bytes) {
@@ -4893,7 +4932,7 @@ Q
 
     await checkpoint(job, 0.95, 'Saving');
     return {
-      bytes: transfer(await pseudoLinearize(doc).save({ useObjectStreams: false })),
+      bytes: transfer(await pseudoLinearize(doc).save({ useObjectStreams: true })),
       ...report
     };
   },
@@ -4941,7 +4980,7 @@ Q
     }
 
     await checkpoint(job, 0.95, 'Saving');
-    return transfer(await pseudoLinearize(out).save({ useObjectStreams: false }));
+    return transfer(await pseudoLinearize(out).save({ useObjectStreams: true }));
   }
 };
 

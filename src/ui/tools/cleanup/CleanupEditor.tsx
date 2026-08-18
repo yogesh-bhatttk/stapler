@@ -1,3 +1,4 @@
+import { translate } from '../../../core/i18n';
 /**
  * Scan cleanup: before/after compare, draggable corners, and apply (SCN-01..03).
  *
@@ -125,7 +126,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
           if (!detection.confident) {
             // SCN-01: when detection is not trustworthy, say so and hand over the
             // handles rather than silently cropping to a guess.
-            notify('info', 'Could not find the page edges confidently.', {
+            notify('info', translate('Could not find the page edges confidently.'), {
               detail: 'Drag the four corner handles to mark the page yourself.'
             });
           }
@@ -235,7 +236,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
           )
         );
         if (!flattened.changed) {
-          notify('info', 'No vector background was found to flatten.');
+          notify('info', translate('No vector background was found to flatten.'));
           return;
         }
         bytes = flattened.bytes;
@@ -259,6 +260,9 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         );
         resultPageIndex = 0;
       }
+
+      notify('success', translate('Page cleaned.'));
+
       // pin() keeps load and close on the same pool instance — two independent
       // lease() calls could land on different instances and leave the close a
       // silent no-op on the wrong one.
@@ -284,12 +288,12 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
       if (pages.length === 1 && resultPageIndex === 0) {
         replaceWithSource(docId, newSource);
       } else {
-        notify('info', 'Applied to this page.', {
+        notify('info', translate('Applied to this page.'), {
           detail: 'Move to the next page to clean it, then export when you are done.'
         });
         repointPage(docId, page.key, newSource.id, resultPageIndex);
       }
-      notify('success', 'Page cleaned.');
+      notify('success', translate('Page cleaned.'));
     });
 
   const applyToAll = () =>
@@ -321,7 +325,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
           )
         );
         if (!flattened.changed) {
-          notify('info', 'No vector background was found to flatten.');
+          notify('info', translate('No vector background was found to flatten.'));
           return;
         }
         bytes = flattened.bytes;
@@ -425,7 +429,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
 
       registerSource(newSource);
       replaceWithSource(docId, newSource);
-      notify('success', 'All pages cleaned.');
+      notify('success', translate('All pages cleaned.'));
     });
 
   if (!page || !source) return null;
@@ -451,7 +455,11 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
             setSplit(Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)));
           }}
         >
-          <canvas ref={canvasRef} className={styles.canvas} aria-label="Before and after" />
+          <canvas
+            ref={canvasRef}
+            className={styles.canvas}
+            aria-label={translate('Before and after')}
+          />
 
           <span className={styles.label + ' ' + styles.labelBefore}>Original</span>
           <span className={styles.label + ' ' + styles.labelAfter}>Cleaned</span>

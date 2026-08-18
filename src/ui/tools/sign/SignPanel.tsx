@@ -120,7 +120,7 @@ export function SignPanel() {
       )}
 
       <div className={panelStyles.section}>
-        <h3 className={panelStyles.title}>{t('Signatures')}</h3>
+        <h2 className={panelStyles.title}>{t('Signatures')}</h2>
         <div className={styles.list}>
           {signatures.value
             .filter(s => s.purpose !== 'initials')
@@ -169,7 +169,7 @@ export function SignPanel() {
       </div>
 
       <div className={panelStyles.section}>
-        <h3 className={panelStyles.title}>{t('Initials')}</h3>
+        <h2 className={panelStyles.title}>{t('Initials')}</h2>
         <div className={styles.list}>
           {signatures.value
             .filter(s => s.purpose === 'initials')
@@ -218,7 +218,7 @@ export function SignPanel() {
       </div>
 
       <div className={panelStyles.section}>
-        <h3 className={panelStyles.title}>{t('Other stamps')}</h3>
+        <h2 className={panelStyles.title}>{t('Other stamps')}</h2>
         <div className={styles.stampGrid}>
           {STAMPS.map(stamp => {
             const active = armed?.type === stamp.type;
@@ -239,7 +239,7 @@ export function SignPanel() {
       </div>
 
       <div className={panelStyles.section}>
-        <h3 className={panelStyles.title}>{t('Create form fields')}</h3>
+        <h2 className={panelStyles.title}>{t('Create form fields')}</h2>
         <div className={styles.stampGrid}>
           {FORM_FIELDS.map(stamp => {
             const active = armed?.type === stamp.type;

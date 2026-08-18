@@ -35,7 +35,7 @@ export function VerificationReport() {
 
   return (
     <div className={panelStyles.section}>
-      <h3 className={panelStyles.title}>{t('Verification')}</h3>
+      <h2 className={panelStyles.title}>{t('Verification')}</h2>
       <p className={report.verified ? styles.pass : styles.fail}>
         {report.verified
           ? `All ${report.verdicts.length} region(s) verified.`

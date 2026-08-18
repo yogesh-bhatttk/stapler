@@ -1,3 +1,4 @@
+import { translate } from '../../../core/i18n';
 /**
  * Redaction options and the verification report (RED-01, RED-03).
  *
@@ -38,10 +39,13 @@ export function RedactPanel() {
       patternSuggestions.value = found;
       patternScanRan.value = true;
       if (found.length === 0) {
-        notify('info', 'No emails, phone numbers, SSNs, card numbers, or IP addresses found.');
+        notify(
+          'info',
+          translate('No emails, phone numbers, SSNs, card numbers, or IP addresses found.')
+        );
         return;
       }
-      notify('info', `${found.length} suggestion(s) found — nothing is marked yet.`, {
+      notify('info', translate(`${found.length} suggestion(s) found — nothing is marked yet.`), {
         detail: 'Accept the ones you want redacted; the rest are left alone.'
       });
     });
@@ -67,13 +71,13 @@ export function RedactPanel() {
       const bytes = await currentDocumentBytes(job);
       const found = await findTextRegions(bytes, query.trim(), matchCase, job);
       if (found.length === 0) {
-        notify('warning', `No matches for "${query.trim()}".`);
+        notify('warning', translate(`No matches for "${query.trim()}".`));
         return;
       }
       // Existing marks are kept: searching twice for different terms should add to
       // the list, not replace it.
       pendingRedactions.value = [...regions, ...found];
-      notify('info', `Marked ${found.length} occurrence(s).`, {
+      notify('info', translate(`Marked ${found.length} occurrence(s).`), {
         detail: 'Review the list, then use Verify & apply.'
       });
     });
@@ -101,7 +105,7 @@ export function RedactPanel() {
       <hr className={panelStyles.divider} />
 
       <div className={panelStyles.section}>
-        <h3 className={panelStyles.title}>{t('Suggested marks')}</h3>
+        <h2 className={panelStyles.title}>{t('Suggested marks')}</h2>
         <p className={panelStyles.description}>
           {t(
             'Scans the page text for emails, phone numbers, US Social Security numbers, Luhn-valid card numbers, and IP addresses. Suggestions are never redacted until you accept them; an accepted one becomes an ordinary mark you can move, resize, or remove.'
@@ -117,9 +121,9 @@ export function RedactPanel() {
 
         {byCategory.map(({ category, items }) => (
           <div className={panelStyles.section} key={category}>
-            <h4 className={panelStyles.title}>
+            <h3 className={panelStyles.title}>
               {t(PATTERN_LABELS[category])} ({items.length})
-            </h4>
+            </h3>
             <ul className={panelStyles.list} aria-label={`${PATTERN_LABELS[category]} suggestions`}>
               {items.map(item => (
                 <li className={panelStyles.listRow} key={item.id}>
@@ -157,10 +161,10 @@ export function RedactPanel() {
       <hr className={panelStyles.divider} />
 
       <div className={panelStyles.section}>
-        <h3 className={panelStyles.title}>
+        <h2 className={panelStyles.title}>
           {t('Marks (')}
           {regions.length})
-        </h3>
+        </h2>
         {regions.length === 0 ? (
           <p className={panelStyles.description}>
             {t(

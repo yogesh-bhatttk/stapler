@@ -1,3 +1,4 @@
+import { translate } from '../i18n';
 /**
  * OCR-02 — Folder Index and Search.
  *
@@ -17,6 +18,7 @@ import {
 import { renderWorker } from '../workers';
 import { fromUnknown, logEvent } from '../errors';
 import { notify } from '../notify';
+import { createJobHandle } from '../workers/protocol';
 import type { FsaDirectoryHandle, FsaFileHandle } from '../../platform/fsa';
 
 export type { IndexOccurrence };
@@ -51,7 +53,6 @@ export interface FolderIndexOptions {
   onProgress?: (progress: number, label: string) => void;
   signal?: AbortSignal;
   forceReindex?: boolean;
-  enableOcr?: boolean;
 }
 
 /** Tokenizes text into unique lowercase words/tokens. */
@@ -199,7 +200,10 @@ export interface PageTextResult {
  *    → the crude latin1 scrape, which is a degraded mode rather than a wrong
  *    answer about a specific document.
  */
-export async function readPdfTextPages(file: File): Promise<PageTextResult> {
+export async function readPdfTextPages(
+  file: File,
+  options?: { signal?: AbortSignal; onProgress?: (fraction: number | null, label: string) => void }
+): Promise<PageTextResult> {
   const buffer = await file.arrayBuffer();
   const bytes = new Uint8Array(buffer);
 
@@ -228,7 +232,8 @@ export async function readPdfTextPages(file: File): Promise<PageTextResult> {
     const info = loaded.info;
 
     try {
-      return { pages: await client.lease(api => api.documentText(info.handle)) };
+      const job = options ? createJobHandle(options) : undefined;
+      return { pages: await client.lease(api => api.documentText(info.handle, job)) };
     } catch (err) {
       return { pages: [], skipReason: fromUnknown(err).message };
     } finally {
@@ -239,7 +244,6 @@ export async function readPdfTextPages(file: File): Promise<PageTextResult> {
   }
 }
 
-/** Back-compat wrapper: the text only, empty for a file that could not be read. */
 export async function extractPdfTextPages(file: File): Promise<string[]> {
   return (await readPdfTextPages(file)).pages;
 }
@@ -312,7 +316,19 @@ export async function indexDirectory(
     await deleteSearchIndexRecordsByFileId(fileId);
     rewrittenFileIds.add(fileId);
 
-    const { pages: pagesText, skipReason } = await readPdfTextPages(file);
+    const fileBaseFrac = i / (pdfFiles.length || 1);
+    const fileWeight = 1 / (pdfFiles.length || 1);
+
+    const { pages: pagesText, skipReason } = await readPdfTextPages(file, {
+      signal: options?.signal,
+      onProgress: (localFrac, localLabel) => {
+        options?.onProgress?.(
+          fileBaseFrac + fileWeight * (localFrac ?? 0),
+          `Indexing ${fileName} (${i + 1}/${pdfFiles.length})${localLabel ? ` — ${localLabel}` : ''}`
+        );
+      }
+    });
+
     if (skipReason) {
       // Explicitly not indexed. Its stale occurrences are still stripped below —
       // a file that has become unreadable must not keep answering searches — but
@@ -405,7 +421,7 @@ export async function indexDirectory(
     // Surfaced, not swallowed: a file missing from search results is invisible
     // unless we say so. One toast for the run, naming the files.
     const names = skipped.map(s => s.fileName);
-    notify('warning', `${skipped.length} file(s) could not be indexed`, {
+    notify('warning', translate(`${skipped.length} file(s) could not be indexed`), {
       detail: `${names.slice(0, 3).join(', ')}${names.length > 3 ? `, and ${names.length - 3} more` : ''} — ${skipped[0].reason} These files will not appear in search results.`
     });
     for (const entry of skipped) {

@@ -1,3 +1,4 @@
+import { translate } from '../../core/i18n';
 /**
  * `SinglePageView` from DESIGN-ADAPTATION §4.2: one page at a real size with an
  * overlay layer, for sign, redact, and cleanup.
@@ -111,7 +112,7 @@ export function SinglePageView({
 
   return (
     <div className={styles.wrapper}>
-      <div className={styles.stage}>
+      <div className={styles.stage} tabIndex={0} aria-label={translate('Page preview, scrollable')}>
         <div
           className={styles.page}
           data-index={pageIndex}
@@ -169,7 +170,7 @@ export function SinglePageView({
           <IconButton
             icon={ZoomOut}
             size="compact"
-            aria-label="Zoom out"
+            aria-label={translate('Zoom out')}
             disabled={zoomStep === 0}
             onClick={() => setZoomStep(step => Math.max(0, step - 1))}
           />
@@ -177,7 +178,7 @@ export function SinglePageView({
           <IconButton
             icon={ZoomIn}
             size="compact"
-            aria-label="Zoom in"
+            aria-label={translate('Zoom in')}
             disabled={zoomStep === ZOOM_STEPS.length - 1}
             onClick={() => setZoomStep(step => Math.min(ZOOM_STEPS.length - 1, step + 1))}
           />

@@ -1,3 +1,4 @@
+import { translate } from '../../../core/i18n';
 import { useState } from 'preact/hooks';
 import { Search, FileText } from 'lucide-preact';
 import { platform } from '../../../platform/current';
@@ -69,7 +70,7 @@ export function AnnotatePanel() {
 
     const combined = [...allLayerAnns, ...docAnns];
     if (combined.length === 0) {
-      notify('warning', 'No annotations to export.');
+      notify('warning', translate('No annotations to export.'));
       return;
     }
 
@@ -78,10 +79,10 @@ export function AnnotatePanel() {
       const fileStem = current.name.replace(/\.[^.]+$/, '') || 'document';
       const saved = await platform.saveFileAs(summaryBytes, `${fileStem}-annotation-summary.pdf`);
       if (saved) {
-        notify('success', 'Exported annotation summary PDF.');
+        notify('success', translate('Exported annotation summary PDF.'));
       }
     } catch (err) {
-      notify('danger', 'Could not export annotation summary.', {
+      notify('danger', translate('Could not export annotation summary.'), {
         detail: err instanceof Error ? err.message : String(err)
       });
     }
@@ -128,6 +129,8 @@ export function AnnotatePanel() {
           { value: 'freehand', label: t('tool.annotate.freehand') },
           { value: 'highlight', label: t('tool.annotate.highlight') },
           { value: 'rectangle', label: t('tool.annotate.rectangle') },
+          { value: 'ellipse', label: t('tool.annotate.ellipse') },
+          { value: 'arrow', label: t('tool.annotate.arrow') },
           { value: 'text', label: t('tool.annotate.text') },
           { value: 'sticky', label: t('tool.annotate.sticky') },
           { value: 'whiteout', label: t('tool.annotate.whiteout') }
@@ -168,7 +171,9 @@ export function AnnotatePanel() {
       </div>
 
       <div className={panelStyles.section}>
-        <label className={panelStyles.label}>{t('tool.annotate.strokeWidth')}</label>
+        <label className={panelStyles.label} htmlFor="stroke-width">
+          {t('tool.annotate.strokeWidth')}
+        </label>
         <Slider
           id="stroke-width"
           min={1}

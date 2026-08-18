@@ -47,12 +47,6 @@ the application. `.gitignore` allow-lists exactly these files inside `tests/fixt
   so `DOC-02`'s "accept PNG, JPEG, WebP, TIFF, HEIC" is exercised through the real import
   pipeline (`tests/e2e/import.spec.ts`) rather than asserted. Built with ImageMagick.
 
-  **HEIC has no fixture.** ImageMagick in this toolchain reads HEIC but cannot write it
-  (`HEIC  r--`), and no other offline encoder here produces one, so the HEIC branch of
-  `core/image.ts` is covered only up to its routing and its failure message — see the
-  honest note on `DOC-02` in `docs/TICKETS.md`. Dropping a real `.heic` file in by hand is
-  the only way to close that gap.
-
 Regenerate any of these (after deleting the file) with `npm run fixtures:static`. The raw
 hand-built ones (`jbig2`, `jpx`, `xfa`, `cjk`, `rtl`) always regenerate offline; the other
 three need `convert` (ImageMagick) and `gs` (Ghostscript) on `PATH`.

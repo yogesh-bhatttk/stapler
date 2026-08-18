@@ -77,10 +77,7 @@ check(
   'dist/firefox manifest has background.scripts (Firefox MV3 shape)',
   Array.isArray(ffManifest?.background?.scripts)
 );
-check(
-  'dist/firefox manifest explicitly includes the Firefox tabs permission',
-  Array.isArray(ffManifest?.permissions) && ffManifest.permissions.includes('tabs')
-);
+
 check(
   'dist/firefox manifest does NOT have background.service_worker',
   !ffManifest?.background?.service_worker

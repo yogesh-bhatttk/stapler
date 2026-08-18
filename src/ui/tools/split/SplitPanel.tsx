@@ -9,6 +9,7 @@ import { splitSettings, type SplitMode } from '../state';
 import { outlineDocId, outlineLoading, outlineTree, topLevelSlices } from '../outline/state';
 import { useDocumentOutline } from '../outline/useOutline';
 import { useTranslation } from '../../../core/i18n';
+import { hasDirectoryPicker } from '../../../platform/fsa';
 
 export function SplitPanel() {
   const t = useTranslation();
@@ -108,8 +109,23 @@ export function SplitPanel() {
         {settings.mode === 'extract'
           ? `${selectedPageKeys.value.size} page(s) selected.`
           : `Produces ${boundaries.length + 1} file(s).` +
-            (boundaries.length > 0 ? ' Multiple files are delivered as a ZIP.' : '')}
+            (boundaries.length > 0 && settings.outputFormat === 'zip'
+              ? ' Multiple files are delivered as a ZIP.'
+              : '')}
       </p>
+
+      {settings.mode !== 'extract' && hasDirectoryPicker() && (
+        <RadioGroup<'zip' | 'directory'>
+          legend={t('Output Format')}
+          name="outputFormat"
+          value={settings.outputFormat}
+          onChange={format => update({ outputFormat: format })}
+          options={[
+            { value: 'zip', label: 'ZIP Archive' },
+            { value: 'directory', label: 'Output Folder', hint: 'Save directly to a folder' }
+          ]}
+        />
+      )}
     </>
   );
 }

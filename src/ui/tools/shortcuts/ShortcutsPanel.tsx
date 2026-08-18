@@ -1,7 +1,7 @@
 /**
  * DS-09 — Shortcuts panel for customizing keyboard shortcuts.
  */
-import { useState, useEffect } from 'preact/hooks';
+import { useState, useEffect, useRef } from 'preact/hooks';
 import { RotateCcw } from 'lucide-preact';
 import {
   SHORTCUT_DEFINITIONS,
@@ -25,10 +25,26 @@ export function ShortcutsPanel() {
   // Subscribe to changes in customShortcuts
   void customShortcuts.value;
 
-  useEffect(() => {
-    if (!editingId) return;
+  /**
+   * `editingId` mirrored into a ref so the listener below can read the current
+   * value without being in its effect's dependency array.
+   *
+   * It used to be `useEffect(() => { if (!editingId) return; ...attach...},
+   * [editingId])` — attach/detach the listener each time editing starts or
+   * stops. That leaves a real gap: the render that shows "Press key..." commits
+   * before the effect that attaches the listener runs, so a fast Escape (or any
+   * remap key) sent right after that text appears can land in the gap and be
+   * silently lost, leaving the row stuck in edit mode forever. One listener
+   * that lives for the component's whole mount removes the gap entirely.
+   */
+  const editingIdRef = useRef(editingId);
+  editingIdRef.current = editingId;
 
+  useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      const currentEditingId = editingIdRef.current;
+      if (!currentEditingId) return;
+
       e.preventDefault();
       e.stopPropagation();
 
@@ -48,7 +64,7 @@ export function ShortcutsPanel() {
         alt: e.altKey
       };
 
-      const result = setShortcutOverride(editingId, binding);
+      const result = setShortcutOverride(currentEditingId, binding);
       if (result.success) {
         setEditingId(null);
         setConflictMsg(null);
@@ -62,7 +78,7 @@ export function ShortcutsPanel() {
 
     window.addEventListener('keydown', onKeyDown, { capture: true });
     return () => window.removeEventListener('keydown', onKeyDown, { capture: true });
-  }, [editingId, t]);
+  }, []);
 
   const handleReset = () => {
     resetShortcuts();

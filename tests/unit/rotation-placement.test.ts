@@ -202,7 +202,11 @@ describe('displayPointToPage is the exact inverse of pdf.js PageViewport', () =>
 
   it('maps a displayed click back into the raw page frame', () => {
     const frame = displayFrame(RAW_W, RAW_H, 90);
-    const point = displayPointToNormalizedPage(frame, frame.displayWidth * 0.25, frame.displayHeight * 0.75);
+    const point = displayPointToNormalizedPage(
+      frame,
+      frame.displayWidth * 0.25,
+      frame.displayHeight * 0.75
+    );
     expect(point.x).toBeCloseTo(0.75, 6);
     expect(point.y).toBeCloseTo(0.75, 6);
   });

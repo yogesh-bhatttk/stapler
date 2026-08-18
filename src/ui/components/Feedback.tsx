@@ -1,3 +1,4 @@
+import { translate } from '../../core/i18n';
 /**
  * Toasts, progress, empty states, and the size delta.
  *
@@ -44,7 +45,7 @@ function ToastCard({ toast }: { toast: Toast }) {
       <IconButton
         icon={X}
         size="compact"
-        aria-label="Dismiss notification"
+        aria-label={translate('Dismiss notification')}
         onClick={() => dismissToast(toast.id)}
       />
     </div>

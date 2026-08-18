@@ -14,12 +14,14 @@ export interface SplitSettings {
   mode: SplitMode;
   everyN: number;
   customBoundaries: string;
+  outputFormat: 'zip' | 'directory';
 }
 
 export const splitSettings = signal<SplitSettings>({
   mode: 'extract',
   everyN: 2,
-  customBoundaries: ''
+  customBoundaries: '',
+  outputFormat: 'zip'
 });
 
 export interface PdfToImageSettings {
@@ -56,3 +58,11 @@ export const annotateFlattenOnExport = signal(true);
  * configures, the action bar commits, same split as every other tool.
  */
 export const markdownToPdfSource = signal('');
+
+export interface ExtractImagesSettings {
+  outputFormat: 'zip' | 'directory';
+}
+
+export const extractImagesSettings = signal<ExtractImagesSettings>({
+  outputFormat: 'zip'
+});

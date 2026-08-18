@@ -62,11 +62,14 @@ export function initLocale(savedLocale?: string) {
     const exactBrowserLocale = locales.find(
       locale => locale.toLowerCase() === navigator.language.toLowerCase()
     );
-    const browserLang = navigator.language.split('-')[0];
+    const browserLang = navigator.language.split('-')[0].toLowerCase();
     if (exactBrowserLocale) {
       target = exactBrowserLocale;
-    } else if (locales.includes(browserLang as Locale)) {
-      target = browserLang;
+    } else {
+      const fallback = locales.find(locale => locale.toLowerCase().startsWith(browserLang));
+      if (fallback) {
+        target = fallback;
+      }
     }
   }
 
@@ -75,21 +78,31 @@ export function initLocale(savedLocale?: string) {
 
 export function useTranslation() {
   const locale = currentLocale.value;
+  void locale;
   // Read (not just referenced) so a dictionary finishing its async load always
   // schedules a re-render, even on the 'en' default where `currentLocale`
   // itself never changes value — see the comment on `dictionaryVersion`.
   void dictionaryVersion.value;
 
   return function t(key: string): string {
-    const dict = dictionaries[locale];
-    if (dict && key in dict) {
-      return dict[key];
-    }
-
-    if (dictionaries['en'] && key in dictionaries['en']) {
-      return dictionaries['en'][key];
-    }
-
-    return key;
+    return translate(key);
   };
+}
+
+/**
+ * Non-reactive translation for use outside of React components.
+ * Returns the translation for the current locale immediately.
+ */
+export function translate(key: string): string {
+  const locale = currentLocale.value;
+  const dict = dictionaries[locale];
+  if (dict && key in dict) {
+    return dict[key];
+  }
+
+  if (dictionaries['en'] && key in dictionaries['en']) {
+    return dictionaries['en'][key];
+  }
+
+  return key;
 }

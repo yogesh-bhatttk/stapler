@@ -107,7 +107,7 @@ export function FolderSearchPanel() {
 
   return (
     <div className={panelStyles.section}>
-      <h3 className={panelStyles.title}>{t('Folder Search & Index')}</h3>
+      <h2 className={panelStyles.title}>{t('Folder Search & Index')}</h2>
 
       <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
         <button

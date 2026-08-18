@@ -1,4 +1,4 @@
-import { PDFDocument, StandardFonts, rgb, type PDFPage, type PDFFont } from 'pdf-lib';
+import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import { diffText, type DiffChunk } from './diff';
 import { internal } from './errors';
 import { renderWorker } from './workers';
@@ -100,61 +100,6 @@ function wrapTokens(
   return lines;
 }
 
-function drawWrappedDiff(
-  page: PDFPage,
-  chunks: DiffChunk[],
-  font: PDFFont,
-  boldFont: PDFFont,
-  title: string,
-  compareLabel: string
-): void {
-  const lineYStart = PAGE_HEIGHT - PAGE_MARGIN - HEADER_SIZE - 22;
-  const diffLines = wrapTokens(chunks, font);
-
-  page.drawText(title, {
-    x: PAGE_MARGIN,
-    y: PAGE_HEIGHT - PAGE_MARGIN - HEADER_SIZE,
-    size: HEADER_SIZE,
-    font: boldFont,
-    color: COLORS.equal
-  });
-
-  page.drawText(compareLabel, {
-    x: PAGE_MARGIN,
-    y: PAGE_HEIGHT - PAGE_MARGIN - HEADER_SIZE - 16,
-    size: 9,
-    font,
-    color: COLORS.equal
-  });
-
-  let y = lineYStart;
-  for (const line of diffLines) {
-    let x = PAGE_MARGIN;
-    for (const token of line) {
-      if (token.op !== 'equal') {
-        page.drawRectangle({
-          x,
-          y: y - 2,
-          width: token.width,
-          height: BODY_SIZE + 5,
-          color: token.op === 'insert' ? BACKGROUNDS.insert : BACKGROUNDS.delete,
-          opacity: 1
-        });
-      }
-
-      page.drawText(token.text, {
-        x,
-        y,
-        size: BODY_SIZE,
-        font,
-        color: COLORS[token.op]
-      });
-      x += token.width;
-    }
-    y -= LINE_HEIGHT;
-  }
-}
-
 export async function exportTextDiff(docA: StaplerDoc, docB: StaplerDoc): Promise<Uint8Array> {
   const pdfDoc = await PDFDocument.create();
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
@@ -180,24 +125,83 @@ export async function exportTextDiff(docA: StaplerDoc, docB: StaplerDoc): Promis
     try {
       handleA = (await api.loadDocument(sourceA.bytes)).handle;
       handleB = (await api.loadDocument(sourceB.bytes)).handle;
-      for (let i = 0; i < totalPages; i++) {
-        const pageA = docA.pages[i];
-        const pageB = docB.pages[i];
-        const baseText =
-          i < pageCountA ? await api.extractText(handleA, pageA!.sourceIndex, 'text') : '';
-        const compareText =
-          i < pageCountB ? await api.extractText(handleB, pageB!.sourceIndex, 'text') : '';
 
+      let fullBaseText = '';
+      let fullCompareText = '';
+
+      for (let i = 0; i < pageCountA; i++) {
+        const pageA = docA.pages[i];
+        fullBaseText += (await api.extractText(handleA, pageA.sourceIndex, 'text')) + '\n\n';
+      }
+      for (let i = 0; i < pageCountB; i++) {
+        const pageB = docB.pages[i];
+        fullCompareText += (await api.extractText(handleB, pageB.sourceIndex, 'text')) + '\n\n';
+      }
+
+      const chunks = diffText(fullBaseText, fullCompareText);
+      const diffLines = wrapTokens(chunks, font);
+
+      const lineYStart = PAGE_HEIGHT - PAGE_MARGIN - HEADER_SIZE - 22;
+      const maxLinesPerPage = Math.floor((lineYStart - PAGE_MARGIN) / LINE_HEIGHT);
+
+      let currentLineIdx = 0;
+      let pageNum = 1;
+
+      while (currentLineIdx < diffLines.length || pageNum === 1) {
         const page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
-        const chunks = diffText(baseText, compareText);
-        drawWrappedDiff(
-          page,
-          chunks,
+        const title = `Text Diff - Page ${pageNum}`;
+        const compareLabel = `${docA.name} vs ${docB.name}`;
+
+        page.drawText(title, {
+          x: PAGE_MARGIN,
+          y: PAGE_HEIGHT - PAGE_MARGIN - HEADER_SIZE,
+          size: HEADER_SIZE,
+          font: boldFont,
+          color: COLORS.equal
+        });
+
+        page.drawText(compareLabel, {
+          x: PAGE_MARGIN,
+          y: PAGE_HEIGHT - PAGE_MARGIN - HEADER_SIZE - 16,
+          size: 9,
           font,
-          boldFont,
-          `Text Diff - Page ${i + 1}`,
-          `${docA.name} vs ${docB.name}`
-        );
+          color: COLORS.equal
+        });
+
+        let y = lineYStart;
+        const endLineIdx = Math.min(currentLineIdx + maxLinesPerPage, diffLines.length);
+
+        for (let i = currentLineIdx; i < endLineIdx; i++) {
+          const line = diffLines[i];
+          let x = PAGE_MARGIN;
+          for (const token of line) {
+            if (token.op !== 'equal') {
+              page.drawRectangle({
+                x,
+                y: y - 2,
+                width: token.width,
+                height: BODY_SIZE + 5,
+                color: token.op === 'insert' ? BACKGROUNDS.insert : BACKGROUNDS.delete,
+                opacity: 1
+              });
+            }
+
+            // Replace newlines with spaces for rendering text as drawText does not support newlines
+            const renderText = token.text.replace(/\n/g, ' ');
+            page.drawText(renderText, {
+              x,
+              y,
+              size: BODY_SIZE,
+              font,
+              color: COLORS[token.op]
+            });
+            x += token.width;
+          }
+          y -= LINE_HEIGHT;
+        }
+
+        currentLineIdx = endLineIdx;
+        pageNum++;
       }
     } finally {
       if (handleA) await api.closeDocument(handleA).catch(() => {});

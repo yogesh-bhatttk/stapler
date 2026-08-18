@@ -1,3 +1,4 @@
+import { translate } from '../../../core/i18n';
 import { useState } from 'preact/hooks';
 import { Download, Table, RefreshCw } from 'lucide-preact';
 import { activeDoc } from '../../../core/store';
@@ -52,7 +53,7 @@ export function TableExtractPanel() {
       const extracted = extractTableFromPage(items);
 
       if (extracted.rows.length === 0) {
-        notify('warning', `No structured table data found on page ${pageIndex + 1}.`);
+        notify('warning', translate(`No structured table data found on page ${pageIndex + 1}.`));
       }
 
       setGrid(extracted);
@@ -86,7 +87,7 @@ export function TableExtractPanel() {
       new TextEncoder().encode(csv),
       `${stem}-page${pageIndex + 1}-table.csv`
     );
-    notify('success', 'Exported CSV file.');
+    notify('success', translate('Exported CSV file.'));
   };
 
   const handleExportTsv = async () => {
@@ -98,7 +99,7 @@ export function TableExtractPanel() {
       new TextEncoder().encode(tsv),
       `${stem}-page${pageIndex + 1}-table.tsv`
     );
-    notify('success', 'Exported TSV file.');
+    notify('success', translate('Exported TSV file.'));
   };
 
   const handleExportXlsx = async () => {
@@ -107,7 +108,7 @@ export function TableExtractPanel() {
     const xlsx = exportTableToXlsx(getExportGrid());
     const stem = doc.name.replace(/\.[^.]+$/, '');
     await platform.saveFileAs(xlsx, `${stem}-page${pageIndex + 1}-table.xlsx`);
-    notify('success', 'Exported XLSX file.');
+    notify('success', translate('Exported XLSX file.'));
   };
 
   const hasPreview = grid !== null && editedRows.length > 0;
@@ -118,9 +119,9 @@ export function TableExtractPanel() {
         className={panelStyles.section}
         style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
       >
-        <h3 className="text-section" style={{ margin: 0 }}>
+        <h2 className="text-section" style={{ margin: 0 }}>
           {t('Table extraction')}
-        </h3>
+        </h2>
         <Badge variant="neutral">(Beta)</Badge>
       </div>
 

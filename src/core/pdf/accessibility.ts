@@ -20,6 +20,14 @@ import {
 } from './interpreter';
 import { decodeStream } from './interpreter';
 
+function utf16BeHex(text: string): string {
+  let hex = 'FEFF';
+  for (let i = 0; i < text.length; i++) {
+    hex += text.charCodeAt(i).toString(16).padStart(4, '0');
+  }
+  return hex;
+}
+
 function encodeString(str: string): Uint8Array {
   const bytes = new Uint8Array(str.length);
   for (let i = 0; i < str.length; i++) bytes[i] = str.charCodeAt(i);
@@ -193,7 +201,7 @@ export async function applyAltTextToDoc(
               P: structTreeRoot,
               Pg: page.ref,
               K: mcid,
-              Alt: PDFString.of(altText)
+              Alt: PDFHexString.of(utf16BeHex(altText))
             });
             structElems.push(structElem);
             structElemsByMcid.push({ mcid, elem: structElem });

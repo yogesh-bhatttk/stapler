@@ -1,3 +1,4 @@
+import { translate } from '../../../core/i18n';
 import {
   batesSettings,
   watermarkSettings,
@@ -99,7 +100,7 @@ export function WatermarkPanel() {
                 id={id}
                 type="file"
                 accept="image/png,image/jpeg"
-                aria-label="Watermark image file"
+                aria-label={translate('Watermark image file')}
                 className={styles.input}
                 onChange={e => {
                   const file = (e.currentTarget as HTMLInputElement).files?.[0] ?? null;
@@ -247,7 +248,7 @@ export function WatermarkPanel() {
       )}
 
       <div className={styles.sectionDivider} />
-      <h3 className={styles.sectionHeading}>{t('Bates numbering')}</h3>
+      <h2 className={styles.sectionHeading}>{t('Bates numbering')}</h2>
       <p className={styles.hint}>
         {t(
           'Sequential legal numbering, stamped on every exported page and continuous across a split. Independent of the page numbers above.'
@@ -339,7 +340,7 @@ export function WatermarkPanel() {
       )}
 
       <div className={styles.sectionDivider} />
-      <h3 className={styles.sectionHeading}>{t('Header & footer')}</h3>
+      <h2 className={styles.sectionHeading}>{t('Header & footer')}</h2>
       <p className={styles.hint}>
         {t(
           'A fixed, unrotated line printed in the page margin — distinct from the watermark stamp above. Use'

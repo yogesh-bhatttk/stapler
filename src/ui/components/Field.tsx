@@ -1,3 +1,4 @@
+import { translate } from '../../core/i18n';
 /**
  * Form primitives from DESIGN-ADAPTATION §5.
  *
@@ -290,7 +291,7 @@ export const NumberStepper = forwardRef<HTMLInputElement, NumberStepperProps>(
         <IconButton
           icon={Minus}
           size="compact"
-          aria-label="Decrease"
+          aria-label={translate('Decrease')}
           disabled={disabled || value <= min}
           onClick={() => commit(value - step)}
         />
@@ -329,7 +330,7 @@ export const NumberStepper = forwardRef<HTMLInputElement, NumberStepperProps>(
         <IconButton
           icon={Plus}
           size="compact"
-          aria-label="Increase"
+          aria-label={translate('Increase')}
           disabled={disabled || value >= max}
           onClick={() => commit(value + step)}
         />
