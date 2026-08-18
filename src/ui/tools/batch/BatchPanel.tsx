@@ -1,7 +1,9 @@
 import { translate } from '../../../core/i18n';
+import { ChevronDown, ChevronUp } from 'lucide-preact';
 import { Button } from '../../components/Button';
-import { Field, Select } from '../../components/Field';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { IconButton } from '../../components/IconButton';
+import { Checkbox, Field, Select } from '../../components/Field';
+import { panelStyles } from '../../shell/panelStyles';
 import {
   inputDirHandle,
   outputDirHandle,
@@ -26,7 +28,7 @@ import type { NormalizeSettings } from '../normalize/state';
 import { runBatch } from './runner';
 import { useTranslation } from '../../../core/i18n';
 
-import { useRef, useEffect } from 'preact/hooks';
+import { useRef, useEffect, useState } from 'preact/hooks';
 
 import {
   hasDirectoryPicker,
@@ -36,9 +38,20 @@ import {
 } from '../../../platform/fsa';
 import { notify } from '../../../core/notify';
 
+/** The only tools a recipe can chain, in the order they'd normally run. */
+const RECIPE_TOOL_CHOICES: { id: Recipe['tools'][number]; label: string }[] = [
+  { id: 'watermark', label: 'Watermark' },
+  { id: 'normalize', label: 'Normalize' },
+  { id: 'nup', label: 'N-up' },
+  { id: 'compress', label: 'Compress' }
+];
+
 export function BatchPanel() {
   const t = useTranslation();
   const abortControllerRef = useRef<AbortController | null>(null);
+  const [recipeFormOpen, setRecipeFormOpen] = useState(false);
+  const [draftName, setDraftName] = useState('');
+  const [draftTools, setDraftTools] = useState<Recipe['tools']>([]);
 
   useEffect(() => {
     loadRecipes().catch(e => console.error('Failed to load recipes', e));
@@ -121,26 +134,35 @@ export function BatchPanel() {
   const snapshot = <T,>(value: T | null | undefined): T | undefined =>
     value == null ? undefined : (structuredClone(value) as T);
 
-  const handleSaveRecipe = async () => {
-    const name = window.prompt('Recipe name:');
-    if (!name) return;
+  const openRecipeForm = () => {
+    setDraftName('');
+    setDraftTools(RECIPE_TOOL_CHOICES.map(c => c.id));
+    setRecipeFormOpen(true);
+  };
 
-    // Ask user for tools and order
-    const defaultTools = ['watermark', 'normalize', 'nup', 'compress'];
-    const toolsInput = window.prompt(
-      'Enter tools for this recipe in order (comma separated):\nAvailable: watermark, normalize, nup, compress',
-      defaultTools.join(', ')
-    );
-    if (!toolsInput) return;
-    const tools = toolsInput
-      .split(',')
-      .map(t => t.trim().toLowerCase())
-      .filter(t => defaultTools.includes(t)) as Recipe['tools'];
+  const toggleDraftTool = (id: Recipe['tools'][number], included: boolean) => {
+    setDraftTools(prev => (included ? [...prev, id] : prev.filter(t => t !== id)));
+  };
+
+  const moveDraftTool = (id: Recipe['tools'][number], delta: 1 | -1) => {
+    setDraftTools(prev => {
+      const index = prev.indexOf(id);
+      const target = index + delta;
+      if (index === -1 || target < 0 || target >= prev.length) return prev;
+      const next = [...prev];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  };
+
+  const handleSaveRecipe = async () => {
+    const name = draftName.trim();
+    if (!name || draftTools.length === 0) return;
 
     const newRecipe: Recipe = {
       id: crypto.randomUUID(),
       name,
-      tools,
+      tools: draftTools,
       settings: {
         compress: snapshot<CompressSettings>(compressSettings.value),
         watermark: snapshot<WatermarkSettings>(watermarkSettings.value),
@@ -151,6 +173,7 @@ export function BatchPanel() {
     };
     await addRecipe(newRecipe);
     activeRecipeId.value = newRecipe.id;
+    setRecipeFormOpen(false);
   };
 
   const handleExportRecipes = () => {
@@ -234,7 +257,7 @@ export function BatchPanel() {
           )}
         </Field>
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-          <Button onClick={handleSaveRecipe} variant="secondary">
+          <Button onClick={openRecipeForm} variant="secondary">
             {t('Save current as recipe')}
           </Button>
           <Button onClick={handleExportRecipes} variant="secondary">
@@ -244,6 +267,69 @@ export function BatchPanel() {
             {t('Import')}
           </Button>
         </div>
+
+        {recipeFormOpen && (
+          <div className={panelStyles.section} style={{ marginTop: '8px' }}>
+            <Field label={t('Recipe name')}>
+              {id => (
+                <input
+                  id={id}
+                  type="text"
+                  value={draftName}
+                  onInput={e => setDraftName((e.target as HTMLInputElement).value)}
+                  style={{ width: '100%' }}
+                />
+              )}
+            </Field>
+
+            <p style={{ fontSize: '0.85em', margin: '8px 0 4px', opacity: 0.8 }}>
+              {t('Tools to run, in order')}
+            </p>
+            {RECIPE_TOOL_CHOICES.map(choice => {
+              const index = draftTools.indexOf(choice.id);
+              const included = index !== -1;
+              return (
+                <div key={choice.id} style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <Checkbox
+                    label={included ? `${index + 1}. ${choice.label}` : choice.label}
+                    checked={included}
+                    onChange={checked => toggleDraftTool(choice.id, checked)}
+                  />
+                  {included && (
+                    <>
+                      <IconButton
+                        icon={ChevronUp}
+                        size="compact"
+                        aria-label={`Move ${choice.label} earlier`}
+                        disabled={index === 0}
+                        onClick={() => moveDraftTool(choice.id, -1)}
+                      />
+                      <IconButton
+                        icon={ChevronDown}
+                        size="compact"
+                        aria-label={`Move ${choice.label} later`}
+                        disabled={index === draftTools.length - 1}
+                        onClick={() => moveDraftTool(choice.id, 1)}
+                      />
+                    </>
+                  )}
+                </div>
+              );
+            })}
+
+            <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+              <Button
+                onClick={handleSaveRecipe}
+                disabled={!draftName.trim() || draftTools.length === 0}
+              >
+                {t('Save recipe')}
+              </Button>
+              <Button variant="secondary" onClick={() => setRecipeFormOpen(false)}>
+                {t('Cancel')}
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className={panelStyles.section}>

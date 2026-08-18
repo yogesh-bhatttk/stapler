@@ -9,7 +9,7 @@
  */
 import { CheckCircle2, XCircle } from 'lucide-preact';
 import { Button } from '../../components/Button';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { redactionReport } from './state';
 import styles from './VerificationReport.module.css';
 import { useTranslation } from '../../../core/i18n';

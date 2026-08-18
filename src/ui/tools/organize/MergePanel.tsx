@@ -16,7 +16,7 @@ import { Button } from '../../components/Button';
 import { useImageImportOptions } from '../../useImageImportOptions';
 import { isPdfFile } from '../../../core/import';
 import { isSupportedImage } from '../../../core/image';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { useJob } from '../../useJob';
 import { useTranslation } from '../../../core/i18n';
 

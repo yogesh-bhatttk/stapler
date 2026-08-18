@@ -3,7 +3,7 @@ import { activeDoc, activePageIndex } from '../../../core/store';
 import { commit } from '../../../core/history';
 import { Button } from '../../components/Button';
 import { Field, Select } from '../../components/Field';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { cropBoxes, cropSettings, pagesForScope, type CropScope } from './state';
 import { useJob } from '../../useJob';
 import { autoTrimDocument } from '../../../core/operations';

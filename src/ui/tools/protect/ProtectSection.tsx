@@ -8,7 +8,7 @@
  */
 import { Lock } from 'lucide-preact';
 import { Checkbox, Field, TextInput } from '../../components/Field';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { useTranslation } from '../../../core/i18n';
 import { protection, protectionIssue, type ProtectionState } from './state';
 

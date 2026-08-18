@@ -15,7 +15,7 @@ import { currentDocumentBytes, planCompression } from '../../../core/operations'
 import { Button } from '../../components/Button';
 import { Field, NumberInput, RadioGroup, Select, Slider } from '../../components/Field';
 import { SizeDelta, formatBytes } from '../../components/Feedback';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import {
   compressMeasurement,
   compressMode,

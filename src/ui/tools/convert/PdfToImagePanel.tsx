@@ -3,7 +3,7 @@
  */
 import { activeDoc, selectedPageKeys } from '../../../core/store';
 import { Field, RadioGroup, Select } from '../../components/Field';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { pdfToImageSettings } from '../state';
 import { useTranslation } from '../../../core/i18n';
 

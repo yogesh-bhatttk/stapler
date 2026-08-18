@@ -1,4 +1,4 @@
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { inputDirHandle, outputDirHandle, batchProgress } from './state';
 import { EmptyState } from '../../components/Feedback';
 import { useTranslation } from '../../../core/i18n';

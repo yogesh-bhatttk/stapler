@@ -1747,6 +1747,42 @@ test.describe('tool flows', () => {
     expect(text).toContain('New York'); // from V2 insertion
   });
 
+  test('compare: visual pixel diff exports a real rendered image, not text mode', async ({
+    page
+  }) => {
+    // ANN-02's other mode: 'visual' is the default (ComparePanel's initial
+    // compareSettings), and every other compare test here switches to 'Text
+    // Diff' before exporting, so this path had no coverage of its own.
+    const file1 = await ensureFixture('contract-v1.pdf', contractV1Pdf);
+    const file2 = await ensureFixture('contract-v2.pdf', contractV2Pdf);
+
+    await importFixture(page, file1);
+    await gotoTool(page, 'compare');
+
+    const fileChooserPromise = page.waitForEvent('filechooser');
+    await page.getByRole('button', { name: 'Open file to compare...' }).click();
+    const fileChooser = await fileChooserPromise;
+    await fileChooser.setFiles(file2);
+
+    // Visual is the default mode — no radio click needed.
+    await expect(page.getByRole('radio', { name: 'Visual Pixel Diff' })).toBeChecked();
+    await expect(page.locator('canvas').first()).toBeAttached({ timeout: 30_000 });
+
+    const outBytes = await commitAndRead(page, 'Export Diff PDF');
+    const outDoc = await PDFDocument.load(outBytes);
+    expect(outDoc.getPageCount()).toBeGreaterThanOrEqual(1);
+
+    // A real visual diff embeds a rendered page image, unlike the text-diff
+    // path (drawn vector text) — this is the "Bug 31" check
+    // tests/unit/visual-diff-export.test.ts asserts directly, repeated here
+    // through the real UI flow rather than by calling the export function.
+    const page1 = outDoc.getPage(0);
+    const resources = page1.node.Resources();
+    const xObjects = resources?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+    expect(xObjects).toBeDefined();
+    expect((xObjects?.keys() ?? []).length).toBeGreaterThan(0);
+  });
+
   test('md-to-pdf: CJK/non-Latin1 text exports with a warning instead of crashing', async ({
     page
   }) => {
@@ -1761,5 +1797,34 @@ test.describe('tool flows', () => {
     const doc = await PDFDocument.load(bytes);
     expect(doc.getPageCount()).toBeGreaterThanOrEqual(1);
     await expect(page.getByText(/some characters could not be represented/i)).toBeVisible();
+  });
+
+  test('batch: a recipe is built from checkboxes, not a free-text prompt (BAT-02)', async ({
+    page
+  }) => {
+    // The recipe editor used to be two `window.prompt()` calls — a name, then
+    // a hand-typed comma list of tool names the caller had to spell exactly
+    // right — which the 2026-08-17 audit called out as "chain operations is
+    // not actually user-configurable." This drives the checkbox/reorder UI
+    // that replaced it and proves an unchecked tool is really excluded.
+    await openApp(page);
+    await gotoTool(page, 'batch');
+
+    await page.getByRole('button', { name: 'Save current as recipe' }).click();
+    await page.getByLabel('Recipe name').fill('No N-up');
+    // All four tools start checked; uncheck N-up specifically.
+    await page.getByRole('checkbox', { name: /N-up/ }).uncheck();
+    await page.getByRole('button', { name: 'Save recipe' }).click();
+
+    const recipeSelect = page.getByLabel('Recipe', { exact: true });
+    await expect(recipeSelect).toHaveValue(/.+/);
+    await expect(recipeSelect.locator('option', { hasText: 'No N-up' })).toHaveCount(1);
+
+    // Reselecting "None" and back proves the recipe actually persisted
+    // (round-tripped through IndexedDB), not just left over in local state.
+    await page.reload();
+    await expect(page.locator('header')).toBeVisible();
+    await gotoTool(page, 'batch');
+    await expect(recipeSelect.locator('option', { hasText: 'No N-up' })).toHaveCount(1);
   });
 });

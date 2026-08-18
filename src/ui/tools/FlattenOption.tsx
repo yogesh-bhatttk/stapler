@@ -8,7 +8,7 @@
  */
 import { useTranslation } from '../../core/i18n';
 import { Checkbox } from '../components/Field';
-import { panelStyles } from '../shell/OptionsPanel';
+import { panelStyles } from '../shell/panelStyles';
 import { annotateFlattenOnExport, signFlattenOnExport } from './state';
 
 export interface FlattenOptionProps {

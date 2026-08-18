@@ -9,7 +9,7 @@ import { currentDocumentBytes, detectBlankPages } from '../../../core/operations
 import { notify } from '../../../core/notify';
 import { Button } from '../../components/Button';
 import { Field, Slider } from '../../components/Field';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { removeBlanksThreshold } from '../state';
 import { useJob } from '../../useJob';
 import { useTranslation } from '../../../core/i18n';

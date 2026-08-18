@@ -1,5 +1,5 @@
 import { activeDoc } from '../../../core/store';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { useTranslation } from '../../../core/i18n';
 import { altTextMap, clearAltText, setAltText } from './state';
 import { useJob } from '../../useJob';

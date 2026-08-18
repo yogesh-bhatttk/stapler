@@ -1,6 +1,6 @@
 import { useTranslation } from '../../../core/i18n';
 import { Field } from '../../components/Field';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { markdownToPdfSource } from '../state';
 
 export function MarkdownToPdfPanel() {

@@ -8,11 +8,24 @@ import { translate } from '../../core/i18n';
  * inside a text stamp undid a document mutation instead of the typing.
  */
 import type { ComponentChildren } from 'preact';
+import { lazy, Suspense } from 'preact/compat';
 import { useEffect, useState } from 'preact/hooks';
 import { TopBar } from './TopBar';
 import { ToolRail } from './ToolRail';
-import { OptionsPanel } from './OptionsPanel';
-import { ActionBar } from './ActionBar';
+
+/**
+ * `OptionsPanel` statically imports every tool panel (~25 modules and
+ * everything they pull in), and `ActionBar` statically imports `commit.ts`
+ * (every tool's export/save logic). Both render `null` on the home route —
+ * there's no tool selected yet — but a static `import` bundles the code
+ * regardless of whether it renders anything, so the plain marketing landing
+ * page was shipping ~290KB gzipped of editor code it could never use
+ * (DIST-03: this was most of the gap between the measured Lighthouse
+ * performance score and the ≥95 target). Lazy-loading defers that cost to
+ * the moment a tool is actually selected.
+ */
+const OptionsPanel = lazy(() => import('./OptionsPanel').then(m => ({ default: m.OptionsPanel })));
+const ActionBar = lazy(() => import('./ActionBar').then(m => ({ default: m.ActionBar })));
 import { CommandPalette } from '../components/CommandPalette';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ToastRegion } from '../components/Feedback';
@@ -176,9 +189,13 @@ export function AppShell({ children }: { children: ComponentChildren }) {
         <ToolRail />
         <main className={styles.center}>
           <div className={styles.canvasWrapper}>{children}</div>
-          <ActionBar />
+          <Suspense fallback={null}>
+            <ActionBar />
+          </Suspense>
         </main>
-        <OptionsPanel />
+        <Suspense fallback={null}>
+          <OptionsPanel />
+        </Suspense>
       </div>
 
       <CommandPalette />

@@ -2,7 +2,7 @@
  * OCR-01 & OCR-02 — the OCR options panel.
  */
 import { Checkbox, Field, Select } from '../../components/Field';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { selectedPageKeys } from '../../../core/store';
 import { OCR_LANGUAGES } from '../../../core/ocr/model';
 import { useTranslation } from '../../../core/i18n';

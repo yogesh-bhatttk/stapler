@@ -13,7 +13,7 @@ import {
   selectedPageKeys
 } from '../../../core/store';
 import { Button } from '../../components/Button';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { useTranslation } from '../../../core/i18n';
 
 export function OrganizePanel() {

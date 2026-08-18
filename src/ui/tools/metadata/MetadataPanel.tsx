@@ -18,7 +18,7 @@ import { currentDocumentBytes } from '../../../core/operations';
 import { processWorker } from '../../../core/workers';
 import type { MetadataFindings } from '../../../core/workers/process.worker';
 import { Button } from '../../components/Button';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { useJob } from '../../useJob';
 import { Checkbox } from '../../components/Field';
 import { scrubSettings, type ExtendedScrubSettings } from './state';

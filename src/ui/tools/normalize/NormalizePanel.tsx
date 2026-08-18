@@ -1,5 +1,5 @@
 import { Field } from '../../components/Field';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { normalizeSettings, type NormalizeSettings, type PaperSize, type ScaleMode } from './state';
 import styles from './NormalizePanel.module.css';
 import { useTranslation } from '../../../core/i18n';

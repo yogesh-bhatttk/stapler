@@ -1,5 +1,17 @@
-import { PDFDocument, StandardFonts, PDFFont } from 'pdf-lib';
+import {
+  PDFDocument,
+  StandardFonts,
+  PDFFont,
+  PDFPage,
+  PDFName,
+  PDFRef,
+  PDFString,
+  rgb
+} from 'pdf-lib';
 import { marked } from 'marked';
+import { SUMMARY_ACCENT_RGB } from './doc-colors';
+
+const LINK_COLOR = rgb(...SUMMARY_ACCENT_RGB);
 
 const MARGIN = 50;
 const PAGE_WIDTH = 595.28; // A4
@@ -13,28 +25,64 @@ interface DrawState {
   fontMono: PDFFont;
 }
 
-function wordWrap(text: string, font: PDFFont, size: number, maxWidth: number): string[] {
-  const words = text.split(' ');
-  const lines: string[] = [];
-  let currentLine = '';
+/** A run of plain text, optionally the visible text of a markdown link. */
+interface InlineRun {
+  text: string;
+  href?: string;
+}
 
-  for (const word of words) {
-    const testLine = currentLine ? `${currentLine} ${word}` : word;
-    const width = font.widthOfTextAtSize(testLine, size);
-    if (width > maxWidth && currentLine) {
-      lines.push(currentLine);
-      currentLine = word;
-    } else {
-      currentLine = testLine;
+/** A single word within a wrapped line, carrying its run's link (if any). */
+interface Word {
+  text: string;
+  href?: string;
+}
+
+/**
+ * `marked`'s inline token tree for a paragraph/heading/list-item text.
+ * Minimal shape — only the fields this module reads.
+ */
+interface InlineToken {
+  type: string;
+  text?: string;
+  raw?: string;
+  href?: string;
+  tokens?: InlineToken[];
+}
+
+/**
+ * Flattens marked's inline token tree (text/strong/em/codespan/link/...) into
+ * plain-text runs, keeping a link's `href` attached to its visible text and
+ * discarding markdown syntax for everything else (bold/italic render as plain
+ * text — CNV-05 never asked for styled inline runs, only for links to survive
+ * as real links instead of literal `[text](url)` syntax).
+ */
+function flattenInlineTokens(tokens: InlineToken[] | undefined, fallbackText: string): InlineRun[] {
+  if (!tokens || tokens.length === 0) return fallbackText ? [{ text: fallbackText }] : [];
+  const runs: InlineRun[] = [];
+  for (const tok of tokens) {
+    if (tok.type === 'link') {
+      const linkText = flattenInlineTokens(tok.tokens, tok.text ?? '')
+        .map(r => r.text)
+        .join('');
+      if (linkText) runs.push({ text: linkText, href: tok.href });
+    } else if (tok.type === 'image') {
+      // No raster support here; keep the alt text so the reference isn't lost.
+      if (tok.text) runs.push({ text: tok.text });
+    } else if (tok.tokens) {
+      // strong/em/del/... — recurse and drop the formatting itself.
+      runs.push(...flattenInlineTokens(tok.tokens, tok.text ?? ''));
+    } else if (tok.type === 'br') {
+      runs.push({ text: ' ' });
+    } else if (tok.text || tok.raw) {
+      runs.push({ text: tok.text ?? tok.raw ?? '' });
     }
   }
-  if (currentLine) lines.push(currentLine);
-  return lines;
+  return runs;
 }
 
 /**
  * `page.drawText` with a StandardFonts font throws on any codepoint WinAnsi
- * can't represent (CJK, Cyrillic, most of Arabic/Hebrew, ...) \u2014 a total export
+ * can't represent (CJK, Cyrillic, most of Arabic/Hebrew, ...) — a total export
  * failure, not a degradation. Until this exports through an embedded Unicode
  * font, the least-bad option is what a WinAnsi-only fallback has always had
  * to do: substitute and say so, never crash and never silently drop the whole
@@ -55,46 +103,30 @@ export function hadUnsupportedCharacter(): boolean {
 const WIN_ANSI_MAX_CODE_POINT = 0xff;
 
 /**
- * The rest of Windows-1252's 0x80\u20130x9F block that WinAnsiEncoding actually
+ * The rest of Windows-1252's 0x80–0x9F block that WinAnsiEncoding actually
  * supports beyond plain Latin-1 (the smart quotes/dashes/etc. above are
  * already normalized to ASCII by the replacements before this runs, so they
- * never reach this set). Without it, a codepoint like \u20AC would fail the plain
+ * never reach this set). Without it, a codepoint like € would fail the plain
  * `> 0xFF` check and get replaced even though the font can render it fine.
  */
 const WIN_ANSI_EXTRA_CODE_POINTS = new Set(
-  [
-    '\u20AC',
-    '\u0192',
-    '\u201E',
-    '\u2020',
-    '\u2021',
-    '\u02C6',
-    '\u2030',
-    '\u0160',
-    '\u2039',
-    '\u0152',
-    '\u017D',
-    '\u02DC',
-    '\u0161',
-    '\u203A',
-    '\u0153',
-    '\u017E',
-    '\u0178'
-  ].map(c => c.codePointAt(0))
+  ['€', 'ƒ', '„', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', 'Ž', '˜', 'š', '›', 'œ', 'ž', 'Ÿ'].map(c =>
+    c.codePointAt(0)
+  )
 );
 
 export function sanitizeWinAnsiText(text: string): string {
   if (!text) return '';
   const mapped = text
-    .replace(/[\u201C\u201D]/g, '"')
-    .replace(/[\u2018\u2019]/g, "'")
-    .replace(/[\u2013\u2014]/g, '-')
-    .replace(/\u2022/g, '-')
-    .replace(/\u2026/g, '...')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/[–—]/g, '-')
+    .replace(/•/g, '-')
+    .replace(/…/g, '...')
     .replace(/\u00A0/g, ' ')
-    .replace(/\u2122/g, '(TM)')
-    .replace(/\u00A9/g, '(C)')
-    .replace(/\u00AE/g, '(R)');
+    .replace(/™/g, '(TM)')
+    .replace(/©/g, '(C)')
+    .replace(/®/g, '(R)');
 
   let out = '';
   for (const char of mapped) {
@@ -107,6 +139,79 @@ export function sanitizeWinAnsiText(text: string): string {
     }
   }
   return out;
+}
+
+/** Splits sanitized runs into words, dropping empty tokens from whitespace collapse. */
+function runsToWords(runs: InlineRun[]): Word[] {
+  const words: Word[] = [];
+  for (const run of runs) {
+    const clean = sanitizeWinAnsiText(run.text.replace(/\r/g, '').replace(/\n/g, ' '));
+    for (const part of clean.split(/\s+/)) {
+      if (part.length > 0) words.push({ text: part, href: run.href });
+    }
+  }
+  return words;
+}
+
+/** Greedy word-wrap over `Word`s (link-aware), same line-breaking rule as before. */
+function wrapWords(words: Word[], font: PDFFont, size: number, maxWidth: number): Word[][] {
+  const lines: Word[][] = [];
+  let currentLine: Word[] = [];
+  let currentWidth = 0;
+  const spaceWidth = font.widthOfTextAtSize(' ', size);
+
+  for (const word of words) {
+    const wordWidth = font.widthOfTextAtSize(word.text, size);
+    const addedWidth = currentLine.length > 0 ? spaceWidth + wordWidth : wordWidth;
+    if (currentWidth + addedWidth > maxWidth && currentLine.length > 0) {
+      lines.push(currentLine);
+      currentLine = [word];
+      currentWidth = wordWidth;
+    } else {
+      currentLine.push(word);
+      currentWidth += addedWidth;
+    }
+  }
+  if (currentLine.length > 0) lines.push(currentLine);
+  return lines;
+}
+
+/**
+ * Adds a `/Link` annotation with a URI action — pdf-lib has no high-level API
+ * for this, so it's built from the same low-level `context.obj` primitives
+ * `src/core/pdf/accessibility.ts` and `encrypt.ts` already use elsewhere in
+ * this codebase. `Border: [0, 0, 0]` suppresses the default blue-box outline
+ * most viewers would otherwise draw; the link text itself is colored instead.
+ */
+function addLinkAnnotation(
+  page: PDFPage,
+  rect: [number, number, number, number],
+  url: string
+): void {
+  const context = page.doc.context;
+  const annot = context.obj({
+    Type: 'Annot',
+    Subtype: 'Link',
+    Rect: rect,
+    Border: [0, 0, 0],
+    A: {
+      Type: 'Action',
+      S: 'URI',
+      URI: PDFString.of(url)
+    }
+  });
+  const ref = context.register(annot) as PDFRef;
+  page.node.set(
+    PDFName.of('Annots'),
+    (() => {
+      const existing = page.node.Annots();
+      if (existing) {
+        existing.push(ref);
+        return existing;
+      }
+      return context.obj([ref]);
+    })()
+  );
 }
 
 export async function markdownToPdfBytes(markdown: string): Promise<Uint8Array> {
@@ -133,75 +238,160 @@ export async function markdownToPdfBytes(markdown: string): Promise<Uint8Array> 
     }
   };
 
-  const drawTextWrapped = (text: string, font: PDFFont, size: number, indent = 0) => {
-    // Strip carriage returns, normalize Unicode, and handle basic text
-    const clean = sanitizeWinAnsiText(text.replace(/\r/g, '').replace(/\n/g, ' '));
-    const lines = wordWrap(clean, font, size, PAGE_WIDTH - MARGIN * 2 - indent);
-    for (const line of lines) {
-      advanceY(size * 1.5);
-      page.drawText(line, { x: state.x + indent, y: state.y, size, font });
+  /** Draws one wrapped line of words at the current cursor, adding a link
+   * annotation for each contiguous run of words that share an `href`. */
+  const drawWordsLine = (words: Word[], x: number, y: number, font: PDFFont, size: number) => {
+    let cursorX = x;
+    const spaceWidth = font.widthOfTextAtSize(' ', size);
+    let i = 0;
+    while (i < words.length) {
+      const href = words[i].href;
+      const groupStartX = cursorX;
+      while (i < words.length && words[i].href === href) {
+        const word = words[i];
+        page.drawText(word.text, {
+          x: cursorX,
+          y,
+          size,
+          font,
+          color: href ? LINK_COLOR : undefined
+        });
+        cursorX += font.widthOfTextAtSize(word.text, size);
+        i++;
+        if (i < words.length && words[i].href === href) cursorX += spaceWidth;
+      }
+      if (href) {
+        addLinkAnnotation(page, [groupStartX, y - 2, cursorX, y + size], href);
+      }
+      if (i < words.length) cursorX += spaceWidth;
     }
   };
 
-  const tokens = marked.lexer(markdown);
+  const drawInlineWrapped = (runs: InlineRun[], font: PDFFont, size: number, indent = 0) => {
+    const words = runsToWords(runs);
+    const lines = wrapWords(words, font, size, PAGE_WIDTH - MARGIN * 2 - indent);
+    for (const line of lines) {
+      advanceY(size * 1.5);
+      drawWordsLine(line, state.x + indent, state.y, font, size);
+    }
+  };
+
+  const drawTextWrapped = (text: string, font: PDFFont, size: number, indent = 0) => {
+    drawInlineWrapped([{ text }], font, size, indent);
+  };
+
+  /** Word-wraps a table cell into as many lines as it needs, instead of truncating it. */
+  const wrapCellLines = (text: string, font: PDFFont, size: number, maxWidth: number): string[] => {
+    const clean = sanitizeWinAnsiText(text);
+    if (!clean) return [''];
+    return wordWrapPlain(clean, font, size, maxWidth);
+  };
+
+  const tokens = marked.lexer(markdown) as unknown as (InlineToken & {
+    type: string;
+    depth?: number;
+    ordered?: boolean;
+    items?: { tokens?: InlineToken[]; text: string }[];
+    header?: { tokens?: InlineToken[]; text: string }[];
+    rows?: { tokens?: InlineToken[]; text: string }[][];
+  })[];
 
   for (const token of tokens) {
     if (token.type === 'heading') {
       advanceY(10);
       const size = token.depth === 1 ? 24 : token.depth === 2 ? 18 : 14;
-      drawTextWrapped(token.text, state.fontBold, size);
+      drawInlineWrapped(flattenInlineTokens(token.tokens, token.text ?? ''), state.fontBold, size);
       advanceY(5);
     } else if (token.type === 'paragraph') {
-      drawTextWrapped(token.text, state.fontNormal, 12);
+      drawInlineWrapped(flattenInlineTokens(token.tokens, token.text ?? ''), state.fontNormal, 12);
       advanceY(8);
     } else if (token.type === 'space') {
       // Ignored
     } else if (token.type === 'list') {
       const isOrdered = token.ordered;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      token.items.forEach((item: any, index: number) => {
+      (token.items ?? []).forEach((item, index) => {
         const bullet = isOrdered ? `${index + 1}. ` : '- ';
-        drawTextWrapped(bullet + item.text, state.fontNormal, 12, 15);
+        const runs = flattenInlineTokens(item.tokens, item.text ?? '');
+        if (runs.length > 0) runs[0] = { ...runs[0], text: bullet + runs[0].text };
+        else runs.push({ text: bullet });
+        drawInlineWrapped(runs, state.fontNormal, 12, 15);
       });
       advanceY(8);
     } else if (token.type === 'code') {
       advanceY(5);
-      const lines = token.text.split('\n');
+      const lines = (token.text ?? '').split('\n');
       for (const line of lines) {
         drawTextWrapped(line, state.fontMono, 10, 15);
       }
       advanceY(10);
     } else if (token.type === 'table') {
-      // Simplistic table rendering
+      // Simplistic table rendering: each cell wraps to fit its column rather
+      // than truncating (CNV-05) — a row's height is the tallest cell in it.
       advanceY(5);
-      const colWidth = (PAGE_WIDTH - MARGIN * 2) / token.header.length;
+      const colWidth = (PAGE_WIDTH - MARGIN * 2) / (token.header?.length ?? 1);
+      const cellPadding = 4;
+      const lineHeight = 12;
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const drawRow = (row: any[], isHeader: boolean) => {
-        advanceY(16);
+      const drawRow = (row: { tokens?: InlineToken[]; text: string }[], isHeader: boolean) => {
         const font = isHeader ? state.fontBold : state.fontNormal;
-        row.forEach((cell, i) => {
-          const text = sanitizeWinAnsiText(cell.text || '');
-          const renderText = text.length > 30 ? text.substring(0, 29) + '…' : text;
-          page.drawText(renderText, {
-            x: state.x + i * colWidth,
-            y: state.y,
-            size: 10,
-            font
+        const cellLines = row.map(cell => {
+          const plain = flattenInlineTokens(cell.tokens, cell.text ?? '')
+            .map(r => r.text)
+            .join('');
+          return wrapCellLines(plain, font, 10, colWidth - cellPadding * 2);
+        });
+        const rowLines = Math.max(1, ...cellLines.map(lines => lines.length));
+
+        advanceY(lineHeight); // top of the row, before any page-break check below
+        // A multi-line row must not have its later lines pushed onto a new
+        // page while its first line stays on the old one.
+        if (state.y - (rowLines - 1) * lineHeight < MARGIN) {
+          page = doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+          state.y = PAGE_HEIGHT - MARGIN - lineHeight;
+        }
+
+        cellLines.forEach((lines, i) => {
+          lines.forEach((line, lineIndex) => {
+            page.drawText(line, {
+              x: state.x + i * colWidth,
+              y: state.y - lineIndex * lineHeight,
+              size: 10,
+              font
+            });
           });
         });
+        state.y -= (rowLines - 1) * lineHeight;
       };
 
-      drawRow(token.header, true);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      token.rows.forEach((row: any) => drawRow(row, false));
+      drawRow(token.header ?? [], true);
+      (token.rows ?? []).forEach(row => drawRow(row, false));
       advanceY(10);
     } else {
       // Fallback for generic elements (e.g. blockquote, html)
-      drawTextWrapped(token.raw, state.fontNormal, 12);
+      drawTextWrapped(token.raw ?? '', state.fontNormal, 12);
       advanceY(8);
     }
   }
 
   return await doc.save();
+}
+
+/** The original flat-string word-wrap, kept for table cells and code lines. */
+function wordWrapPlain(text: string, font: PDFFont, size: number, maxWidth: number): string[] {
+  const words = text.split(' ');
+  const lines: string[] = [];
+  let currentLine = '';
+
+  for (const word of words) {
+    const testLine = currentLine ? `${currentLine} ${word}` : word;
+    const width = font.widthOfTextAtSize(testLine, size);
+    if (width > maxWidth && currentLine) {
+      lines.push(currentLine);
+      currentLine = word;
+    } else {
+      currentLine = testLine;
+    }
+  }
+  if (currentLine) lines.push(currentLine);
+  return lines;
 }

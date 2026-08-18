@@ -16,7 +16,7 @@ import { notify } from '../../../core/notify';
 import { Button } from '../../components/Button';
 import { IconButton } from '../../components/IconButton';
 import { Checkbox, Field, TextInput } from '../../components/Field';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { VerificationReport } from './VerificationReport';
 import { patternScanRan, patternSuggestions, pendingRedactions, redactionReport } from './state';
 import { useJob } from '../../useJob';

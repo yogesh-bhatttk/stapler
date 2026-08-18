@@ -13,7 +13,7 @@ import {
   type ShortcutBinding
 } from '../../../core/shortcuts';
 import { Button } from '../../components/Button';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { notify } from '../../../core/notify';
 import { useTranslation } from '../../../core/i18n';
 

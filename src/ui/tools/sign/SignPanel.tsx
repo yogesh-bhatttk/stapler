@@ -31,7 +31,7 @@ import {
 import { notify } from '../../../core/notify';
 import { Button } from '../../components/Button';
 import { IconButton } from '../../components/IconButton';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { FlattenOption } from '../FlattenOption';
 import { SignatureModal } from './SignatureModal';
 import { activeStamp, signatureSuggestions, formFields, formValues, type StampType } from './state';

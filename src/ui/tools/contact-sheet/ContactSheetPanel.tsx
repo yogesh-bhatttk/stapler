@@ -10,7 +10,7 @@ import { currentDocumentBytes, exportContactSheet } from '../../../core/operatio
 import { platform } from '../../../platform/current';
 import { Button } from '../../components/Button';
 import { Field } from '../../components/Field';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { useJob } from '../../useJob';
 import { useTranslation } from '../../../core/i18n';
 import { CONTACT_SHEET_COL_OPTIONS, contactSheetColumns } from './state';

@@ -6,7 +6,7 @@
  */
 import { useState } from 'preact/hooks';
 import { Field, TextInput } from '../../components/Field';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { useTranslation } from '../../../core/i18n';
 import { showDirectoryPicker } from '../../../platform/fsa';
 import {

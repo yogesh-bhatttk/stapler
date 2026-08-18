@@ -10,7 +10,7 @@ import { notify } from '../../../core/notify';
 import { activeDoc } from '../../../core/store';
 import { Button } from '../../components/Button';
 import { Checkbox, Field, RadioGroup, Slider, TextInput } from '../../components/Field';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { useJob } from '../../useJob';
 import { FlattenOption } from '../FlattenOption';
 import { searchAndHighlightMatches } from './search';

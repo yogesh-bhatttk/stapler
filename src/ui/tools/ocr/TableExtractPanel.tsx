@@ -8,7 +8,7 @@ import { platform } from '../../../platform/current';
 import { Button } from '../../components/Button';
 import { Badge } from '../../components/Badge';
 import { Field, Select } from '../../components/Field';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { useJob } from '../../useJob';
 import { useTranslation } from '../../../core/i18n';
 import {

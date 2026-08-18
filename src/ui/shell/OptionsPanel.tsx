@@ -92,5 +92,3 @@ export function OptionsPanel() {
     </aside>
   );
 }
-
-export { styles as panelStyles };

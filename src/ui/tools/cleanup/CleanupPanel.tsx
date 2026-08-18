@@ -3,7 +3,7 @@
  */
 import { cleanupSettings, isDetectingCorners } from './state';
 import { Checkbox, Field, RadioGroup, Slider } from '../../components/Field';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import type { Preset } from '../../../core/cv/enhance';
 import { useTranslation } from '../../../core/i18n';
 

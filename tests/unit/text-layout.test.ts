@@ -221,4 +221,77 @@ describe('sanitizeWinAnsiText and markdownToPdfBytes', () => {
     expect(bytes).toBeInstanceOf(Uint8Array);
     expect(bytes.length).toBeGreaterThan(0);
   });
+
+  describe('links become real PDF link annotations, not literal markdown syntax', () => {
+    it('adds a /Link annotation with the right URI for an inline link', async () => {
+      const md = 'See [the Stapler repo](https://example.com/stapler) for details.';
+      const bytes = await markdownToPdfBytes(md);
+
+      const { PDFDocument: PDFLib, PDFName, PDFDict, PDFString } = await import('pdf-lib');
+      const doc = await PDFLib.load(bytes);
+      const page = doc.getPage(0);
+      const annots = page.node.Annots();
+      expect(annots).toBeDefined();
+
+      const uris: string[] = [];
+      for (let i = 0; i < (annots?.size() ?? 0); i++) {
+        const annot = annots!.lookup(i, PDFDict);
+        expect(annot.get(PDFName.of('Subtype'))?.toString()).toBe('/Link');
+        const action = annot.lookupMaybe(PDFName.of('A'), PDFDict);
+        const uri = action?.get(PDFName.of('URI'));
+        if (uri) uris.push(uri instanceof PDFString ? uri.asString() : String(uri));
+      }
+      expect(uris).toContain('https://example.com/stapler');
+    });
+
+    it('renders the link’s visible text, not the raw [text](url) syntax', async () => {
+      const md = 'See [the Stapler repo](https://example.com/stapler) for details.';
+      const bytes = await markdownToPdfBytes(md);
+
+      const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+      const pdf = await pdfjsLib.getDocument({ data: bytes.slice(), useSystemFonts: false })
+        .promise;
+      const content = await (await pdf.getPage(1)).getTextContent();
+      const text = content.items.map(item => ('str' in item ? item.str : '')).join(' ');
+
+      expect(text).toContain('the Stapler repo');
+      expect(text).not.toContain('[');
+      expect(text).not.toContain('](');
+    });
+
+    it('gives multiple links on the page distinct URIs', async () => {
+      const md = '[One](https://example.com/one) and [Two](https://example.com/two).';
+      const bytes = await markdownToPdfBytes(md);
+
+      const { PDFDocument: PDFLib, PDFName, PDFDict, PDFString } = await import('pdf-lib');
+      const doc = await PDFLib.load(bytes);
+      const annots = doc.getPage(0).node.Annots();
+      const uris = new Set<string>();
+      for (let i = 0; i < (annots?.size() ?? 0); i++) {
+        const annot = annots!.lookup(i, PDFDict);
+        const action = annot.lookupMaybe(PDFName.of('A'), PDFDict);
+        const uri = action?.get(PDFName.of('URI'));
+        if (uri) uris.add(uri instanceof PDFString ? uri.asString() : String(uri));
+      }
+      expect(uris).toEqual(new Set(['https://example.com/one', 'https://example.com/two']));
+    });
+  });
+
+  describe('table cells wrap instead of truncating', () => {
+    it('keeps the full text of a cell longer than the old 30-character cutoff', async () => {
+      const longCell = 'This cell has considerably more than thirty characters of content in it';
+      const md = `| Field | Value |\n| --- | --- |\n| Note | ${longCell} |\n`;
+      const bytes = await markdownToPdfBytes(md);
+
+      const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+      const pdf = await pdfjsLib.getDocument({ data: bytes.slice(), useSystemFonts: false })
+        .promise;
+      const content = await (await pdf.getPage(1)).getTextContent();
+      const text = content.items.map(item => ('str' in item ? item.str : '')).join(' ');
+
+      expect(text).toContain('considerably');
+      expect(text).toContain('content in it');
+      expect(text).not.toContain('…');
+    });
+  });
 });

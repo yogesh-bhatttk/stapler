@@ -4,7 +4,7 @@
 import { activeDoc, selectedPageKeys } from '../../../core/store';
 import { splitBoundaries } from '../../../core/operations';
 import { Field, NumberInput, RadioGroup, TextInput } from '../../components/Field';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { splitSettings, type SplitMode } from '../state';
 import { outlineDocId, outlineLoading, outlineTree, topLevelSlices } from '../outline/state';
 import { useDocumentOutline } from '../outline/useOutline';

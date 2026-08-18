@@ -7,7 +7,7 @@
  * including the ones deliberately left in it.
  */
 import { activeDoc, selectedPageKeys } from '../../../core/store';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { useTranslation } from '../../../core/i18n';
 import { extractImagesReport, summarize } from './state';
 import { extractImagesSettings } from '../state';

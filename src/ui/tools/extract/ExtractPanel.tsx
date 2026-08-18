@@ -13,7 +13,7 @@ import { notify } from '../../../core/notify';
 import { platform } from '../../../platform/current';
 import { Button } from '../../components/Button';
 import { RadioGroup, TextArea } from '../../components/Field';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { extractSettings, extractedText } from './state';
 import { useJob } from '../../useJob';
 import { useTranslation } from '../../../core/i18n';

@@ -17,7 +17,7 @@ import {
 import { activeDoc, activePageIndex } from '../../../core/store';
 import { IconButton } from '../../components/IconButton';
 import { Button } from '../../components/Button';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { useTranslation } from '../../../core/i18n';
 import styles from './OutlinePanel.module.css';
 import { useDocumentOutline } from './useOutline';

@@ -3,7 +3,7 @@ import { Download } from 'lucide-preact';
 import { compareSettings } from './state';
 import { Button } from '../../components/Button';
 import { RadioGroup, Slider, Field } from '../../components/Field';
-import { panelStyles } from '../../shell/OptionsPanel';
+import { panelStyles } from '../../shell/panelStyles';
 import { platform } from '../../../platform/current';
 import { importFiles } from '../../../core/import';
 import { logEvent, fromUnknown } from '../../../core/errors';
