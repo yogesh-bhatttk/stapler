@@ -43,7 +43,6 @@ export function AccPanel() {
         activeUrls.push(url);
         return { ...img, url };
       });
-      if (cancelled) return;
       setImages(withUrls);
     });
 

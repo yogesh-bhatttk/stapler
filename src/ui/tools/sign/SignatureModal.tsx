@@ -42,6 +42,9 @@ export function SignatureModal({
             type="button"
             role="tab"
             aria-selected={tab === name}
+            aria-controls={`tabpanel-${name}`}
+            id={`tab-${name}`}
+            tabIndex={tab === name ? 0 : -1}
             className={`${styles.tab} ${tab === name ? styles.tabActive : ''}`}
             onClick={() => setTab(name)}
           >
@@ -50,9 +53,11 @@ export function SignatureModal({
         ))}
       </div>
 
-      {tab === 'draw' && <DrawTab onDone={onClose} isInitials={isInitials} />}
-      {tab === 'type' && <TypeTab onDone={onClose} isInitials={isInitials} />}
-      {tab === 'image' && <ImageTab onDone={onClose} isInitials={isInitials} />}
+      <div id={`tabpanel-${tab}`} role="tabpanel" aria-labelledby={`tab-${tab}`} tabIndex={0}>
+        {tab === 'draw' && <DrawTab onDone={onClose} isInitials={isInitials} />}
+        {tab === 'type' && <TypeTab onDone={onClose} isInitials={isInitials} />}
+        {tab === 'image' && <ImageTab onDone={onClose} isInitials={isInitials} />}
+      </div>
     </Modal>
   );
 }
@@ -96,7 +101,7 @@ function DrawTab({ onDone, isInitials }: { onDone: () => void; isInitials?: bool
     const canvas = canvasRef.current;
     if (!canvas) return;
     // Back the canvas at device resolution so the exported PNG is not soft.
-    const dpr = Math.min(2, devicePixelRatio || 1);
+    const dpr = window.devicePixelRatio || 1;
     canvas.width = canvas.clientWidth * dpr;
     canvas.height = canvas.clientHeight * dpr;
     const ctx = canvas.getContext('2d');
@@ -255,7 +260,6 @@ function ImageTab({ onDone, isInitials }: { onDone: () => void; isInitials?: boo
           onChange={event => {
             const chosen = (event.target as HTMLInputElement).files?.[0] ?? null;
             setFile(chosen);
-            if (preview) URL.revokeObjectURL(preview);
             setPreview(chosen ? URL.createObjectURL(chosen) : null);
           }}
         />
