@@ -10,6 +10,7 @@
 import { useEffect } from 'preact/hooks';
 import { activeDoc, sources } from '../../../core/store';
 import { readDocumentOutline } from '../../../core/operations';
+import { readSourceBytes } from '../../../core/opfs';
 import { notifyError } from '../../../core/notify';
 import {
   countUnresolved,
@@ -56,7 +57,7 @@ export function useDocumentOutline(): void {
     let stale = false;
     void (async () => {
       try {
-        const nodes = source ? await readDocumentOutline(source.bytes) : [];
+        const nodes = source ? await readDocumentOutline(await readSourceBytes(source.id)) : [];
         if (stale) return;
         // Outline destinations address the source document; the workspace addresses
         // pages by key, so map through the pages that came from that source.

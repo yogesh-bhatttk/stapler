@@ -3,6 +3,7 @@ import { encodePng } from './png';
 import { pixelDiff } from './pixel-diff';
 import { sources, type StaplerDoc } from './store';
 import { composeDocument } from './operations';
+import { readSourceBytes } from './opfs';
 import { renderWorker } from './workers';
 import { internal } from './errors';
 
@@ -62,12 +63,12 @@ export async function exportVisualDiff(
     // background we do not need.
     if (!diffImg) {
       try {
-        const bytesA =
-          sourceA?.bytes ??
-          (await composeDocument({ pages: docA.pages, annotations: docA.annotations }));
-        const bytesB =
-          sourceB?.bytes ??
-          (await composeDocument({ pages: docB.pages, annotations: docB.annotations }));
+        const bytesA = sourceA
+          ? await readSourceBytes(sourceA.id)
+          : await composeDocument({ pages: docA.pages, annotations: docA.annotations });
+        const bytesB = sourceB
+          ? await readSourceBytes(sourceB.id)
+          : await composeDocument({ pages: docB.pages, annotations: docB.annotations });
 
         await renderWorker.lease(async api => {
           let handleA: string | undefined;

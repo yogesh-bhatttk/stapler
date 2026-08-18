@@ -20,6 +20,7 @@ import {
   type SourceDocument
 } from '../../../core/store';
 import { renderHandleFor } from '../../../core/render-cache';
+import { readSourceBytes, writeSourceBytes } from '../../../core/opfs';
 import { cvWorker, processWorker, renderWorker } from '../../../core/workers';
 import { createJobHandle } from '../../../core/workers/protocol';
 import { frameQuad, isFrameQuad, type Quad } from '../../../core/cv/imageUtils';
@@ -91,7 +92,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
 
     void (async () => {
       try {
-        const { handle, client } = await renderHandleFor(source.id, source.bytes);
+        const { handle, client } = await renderHandleFor(source.id);
         const bitmap = await client.lease(api =>
           api.renderPage(handle, page.sourceIndex, WORK_DPI / 72)
         );
@@ -227,13 +228,9 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
       let bytes: Uint8Array;
       let resultPageIndex: number;
       if (settings.flattenBackground) {
+        const sourceBytes = await readSourceBytes(source.id);
         const flattened = await processWorker.lease(api =>
-          api.flattenBackground(
-            source.bytes,
-            page.sourceIndex,
-            settings.flattenTint,
-            createJobHandle(job)
-          )
+          api.flattenBackground(sourceBytes, page.sourceIndex, settings.flattenTint, createJobHandle(job))
         );
         if (!flattened.changed) {
           notify('info', translate('No vector background was found to flatten.'));
@@ -273,7 +270,6 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         newSource = {
           id: crypto.randomUUID(),
           name: `${source?.name ?? 'page'} (cleaned)`,
-          bytes,
           pageCount: info.pageCount,
           pageSizes: info.pageSizes
         };
@@ -282,6 +278,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         client.release();
       }
 
+      await writeSourceBytes(newSource.id, bytes);
       registerSource(newSource);
       // A single-page result (the non-flatten path) is replaced outright; flatten's
       // whole-document result repoints just this page, leaving its siblings alone.
@@ -316,13 +313,9 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         const firstSource = sources.value[firstSourceId];
         if (!firstSource) throw new Error('Source not found');
         job.onProgress?.(0.05, 'Flattening the background');
+        const firstSourceBytes = await readSourceBytes(firstSource.id);
         const flattened = await processWorker.lease(api =>
-          api.flattenBackground(
-            firstSource.bytes,
-            'all',
-            settings.flattenTint,
-            createJobHandle(job)
-          )
+          api.flattenBackground(firstSourceBytes, 'all', settings.flattenTint, createJobHandle(job))
         );
         if (!flattened.changed) {
           notify('info', translate('No vector background was found to flatten.'));
@@ -341,7 +334,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
           const s = sources.value[p.sourceDocId];
           if (!s) throw new Error(`Source not found for page ${i + 1}`);
 
-          const { handle, client } = await renderHandleFor(s.id, s.bytes);
+          const { handle, client } = await renderHandleFor(s.id);
           const bitmap = await client.lease(api =>
             api.renderPage(handle, p.sourceIndex, WORK_DPI / 72)
           );
@@ -418,7 +411,6 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         newSource = {
           id: crypto.randomUUID(),
           name: `${firstSource?.name ?? 'document'} (cleaned)`,
-          bytes,
           pageCount: info.pageCount,
           pageSizes: info.pageSizes
         };
@@ -427,6 +419,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         client.release();
       }
 
+      await writeSourceBytes(newSource.id, bytes);
       registerSource(newSource);
       replaceWithSource(docId, newSource);
       notify('success', translate('All pages cleaned.'));

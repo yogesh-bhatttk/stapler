@@ -3,6 +3,7 @@ import { diffText, type DiffChunk } from './diff';
 import { internal } from './errors';
 import { renderWorker } from './workers';
 import { sources, type StaplerDoc } from './store';
+import { readSourceBytes } from './opfs';
 import {
   DOC_PAGE_RGB,
   DOC_REDACT_RGB,
@@ -123,8 +124,8 @@ export async function exportTextDiff(docA: StaplerDoc, docB: StaplerDoc): Promis
     let handleA: string | undefined;
     let handleB: string | undefined;
     try {
-      handleA = (await api.loadDocument(sourceA.bytes)).handle;
-      handleB = (await api.loadDocument(sourceB.bytes)).handle;
+      handleA = (await api.loadDocument(await readSourceBytes(sourceA.id))).handle;
+      handleB = (await api.loadDocument(await readSourceBytes(sourceB.id))).handle;
 
       let fullBaseText = '';
       let fullCompareText = '';

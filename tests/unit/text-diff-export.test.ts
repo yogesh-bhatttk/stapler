@@ -19,6 +19,7 @@ vi.mock('../../src/core/workers', () => ({
 
 import { exportTextDiff } from '../../src/core/text-diff-export';
 import { sources } from '../../src/core/store';
+import { writeSourceBytes } from '../../src/core/opfs';
 
 async function decodeContentText(doc: PDFDocument, pageIndex: number): Promise<string> {
   const { decodeStream } = await import('../../src/core/pdf/interpreter');
@@ -57,23 +58,23 @@ function decodeHexLiterals(content: string): string {
 }
 
 describe('exportTextDiff', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     sources.value = {
       base: {
         id: 'base',
-        bytes: new Uint8Array([1]),
         name: 'base.pdf',
         pageCount: 1,
         pageSizes: [{ width: 612, height: 792 }]
       },
       compare: {
         id: 'compare',
-        bytes: new Uint8Array([2]),
         name: 'compare.pdf',
         pageCount: 1,
         pageSizes: [{ width: 612, height: 792 }]
       }
     };
+    await writeSourceBytes('base', new Uint8Array([1]));
+    await writeSourceBytes('compare', new Uint8Array([2]));
   });
 
   it('embeds the text diff chunks into a PDF report', async () => {

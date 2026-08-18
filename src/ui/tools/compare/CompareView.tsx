@@ -9,6 +9,7 @@ import { pixelDiff } from '../../../core/pixel-diff';
 import { diffText, DiffChunk } from '../../../core/diff';
 import styles from '../../shell/SinglePageView.module.css';
 import { useTranslation } from '../../../core/i18n';
+import { readSourceBytes } from '../../../core/opfs';
 
 export interface CompareViewProps {
   pages: PageRef[];
@@ -52,11 +53,14 @@ export function CompareView({ pages, pageIndex }: CompareViewProps) {
       let compareHandle: string | undefined;
 
       try {
-        const baseHandleInfo = await baseClient.lease(api => api.loadDocument(source.bytes));
+        const baseBytes = await readSourceBytes(source.id);
+        const compareBytes = await readSourceBytes(compareSource.id);
+
+        const baseHandleInfo = await baseClient.lease(api => api.loadDocument(baseBytes));
         baseHandle = baseHandleInfo.handle;
 
         const compareHandleInfo = await compareClient.lease(api =>
-          api.loadDocument(compareSource.bytes)
+          api.loadDocument(compareBytes)
         );
         compareHandle = compareHandleInfo.handle;
 

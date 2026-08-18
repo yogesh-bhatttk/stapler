@@ -16,7 +16,7 @@
 import { computed, signal } from '@preact/signals';
 import { commit, historySourceRefCount, resetHistory } from './history';
 import { normalizeRotation } from './rotation';
-import { pruneRenderHandles, renderHandleHoldsSource } from './render-cache';
+import { pruneRenderHandles } from './render-cache';
 import { deleteSourceBytes, readSourceBytes } from './opfs';
 export interface PageRef {
   /** Stable across reorders, so thumbnails and selection survive a move. */

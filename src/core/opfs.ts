@@ -38,7 +38,7 @@ export async function deleteSourceBytes(id: string): Promise<void> {
   try {
     const root = await navigator.storage.getDirectory();
     await root.removeEntry(`${id}.pdf`);
-  } catch (err) {
+  } catch {
     // Harmless if the file does not exist.
   }
 }
