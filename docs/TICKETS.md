@@ -7,13 +7,10 @@ Companion to [`PLAN.md`](PLAN.md) and [`DESIGN-ADAPTATION.md`](DESIGN-ADAPTATION
 
 Each ticket carries a **Status** line, audited against the code rather than against
 intent — this file is the single source of truth for per-ticket state (an earlier
-parallel `STATUS.md` was removed once it drifted out of sync with the entries below).
+parallel `STATUS.md`, and later a `REMAINING-WORK-PLAN.md` snapshot, were both
+removed once they drifted out of sync with the entries below — re-derive "what's
+left" from this file's Status lines, not from a cached summary of them).
 Reproduce the evidence with `pnpm check && pnpm test && pnpm test:e2e`.
-
-For a snapshot of what's left and how to approach it, see
-[`REMAINING-WORK-PLAN.md`](REMAINING-WORK-PLAN.md) — it does not replace this file
-as the source of truth and will go stale as tickets close; re-derive it from this
-file's Status lines rather than trusting it once it's old.
 
 Every ticket must satisfy this **definition of done**, in addition to its own criteria:
 

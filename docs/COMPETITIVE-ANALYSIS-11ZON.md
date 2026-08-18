@@ -7,8 +7,9 @@
 > lines of `TICKETS.md` and missed them. The user-motivation findings in round 2 below
 > (especially why target-size compression is the primary demand driver) are still
 > accurate and worth keeping — they just argue for **verifying** existing work rather
-> than building new work. See `docs/AUDIT-SPEC-DOC07-CNV06-RED06.md` for the independent
-> verification brief written from this correction.
+> than building new work. That independent verification has since run (the
+> 2026-08-17 audit round) and confirmed all three genuinely meet their acceptance
+> criteria against real output bytes.
 
 ## Round 2: why people actually use it (user-motivation research)
 
