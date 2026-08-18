@@ -258,7 +258,7 @@ export async function runBatch(signal?: AbortSignal) {
         };
       } catch (err) {
         console.error(`Failed to process ${fileHandle.name}`, err);
-        notify('danger', translate(`Failed to process ${fileHandle.name}`), {
+        notify('danger', translate('Failed to process {name}', { name: fileHandle.name }), {
           detail: err instanceof Error ? err.message : String(err)
         });
         addNote({

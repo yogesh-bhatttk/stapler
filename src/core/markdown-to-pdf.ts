@@ -32,6 +32,57 @@ function wordWrap(text: string, font: PDFFont, size: number, maxWidth: number): 
   return lines;
 }
 
+/**
+ * `page.drawText` with a StandardFonts font throws on any codepoint WinAnsi
+ * can't represent (CJK, Cyrillic, most of Arabic/Hebrew, ...) \u2014 a total export
+ * failure, not a degradation. Until this exports through an embedded Unicode
+ * font, the least-bad option is what a WinAnsi-only fallback has always had
+ * to do: substitute and say so, never crash and never silently drop the whole
+ * document. `sawUnsupportedCharacter` is set whenever a substitution happens,
+ * so the caller can surface a clear, honest warning instead of pretending the
+ * text made it through.
+ */
+let sawUnsupportedCharacter = false;
+
+export function resetUnsupportedCharacterFlag(): void {
+  sawUnsupportedCharacter = false;
+}
+
+export function hadUnsupportedCharacter(): boolean {
+  return sawUnsupportedCharacter;
+}
+
+const WIN_ANSI_MAX_CODE_POINT = 0xff;
+
+/**
+ * The rest of Windows-1252's 0x80\u20130x9F block that WinAnsiEncoding actually
+ * supports beyond plain Latin-1 (the smart quotes/dashes/etc. above are
+ * already normalized to ASCII by the replacements before this runs, so they
+ * never reach this set). Without it, a codepoint like \u20AC would fail the plain
+ * `> 0xFF` check and get replaced even though the font can render it fine.
+ */
+const WIN_ANSI_EXTRA_CODE_POINTS = new Set(
+  [
+    '\u20AC',
+    '\u0192',
+    '\u201E',
+    '\u2020',
+    '\u2021',
+    '\u02C6',
+    '\u2030',
+    '\u0160',
+    '\u2039',
+    '\u0152',
+    '\u017D',
+    '\u02DC',
+    '\u0161',
+    '\u203A',
+    '\u0153',
+    '\u017E',
+    '\u0178'
+  ].map(c => c.codePointAt(0))
+);
+
 export function sanitizeWinAnsiText(text: string): string {
   if (!text) return '';
   const mapped = text
@@ -46,13 +97,20 @@ export function sanitizeWinAnsiText(text: string): string {
     .replace(/\u00AE/g, '(R)');
 
   let out = '';
-  for (let i = 0; i < mapped.length; i++) {
-    out += mapped[i];
+  for (const char of mapped) {
+    const codePoint = char.codePointAt(0)!;
+    if (codePoint > WIN_ANSI_MAX_CODE_POINT && !WIN_ANSI_EXTRA_CODE_POINTS.has(codePoint)) {
+      sawUnsupportedCharacter = true;
+      out += '?';
+    } else {
+      out += char;
+    }
   }
   return out;
 }
 
 export async function markdownToPdfBytes(markdown: string): Promise<Uint8Array> {
+  resetUnsupportedCharacterFlag();
   const doc = await PDFDocument.create();
   const fontNormal = await doc.embedFont(StandardFonts.Helvetica);
   const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);

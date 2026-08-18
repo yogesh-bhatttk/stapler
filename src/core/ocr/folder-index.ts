@@ -421,9 +421,13 @@ export async function indexDirectory(
     // Surfaced, not swallowed: a file missing from search results is invisible
     // unless we say so. One toast for the run, naming the files.
     const names = skipped.map(s => s.fileName);
-    notify('warning', translate(`${skipped.length} file(s) could not be indexed`), {
-      detail: `${names.slice(0, 3).join(', ')}${names.length > 3 ? `, and ${names.length - 3} more` : ''} — ${skipped[0].reason} These files will not appear in search results.`
-    });
+    notify(
+      'warning',
+      translate('{count} file(s) could not be indexed', { count: skipped.length }),
+      {
+        detail: `${names.slice(0, 3).join(', ')}${names.length > 3 ? `, and ${names.length - 3} more` : ''} — ${skipped[0].reason} These files will not appear in search results.`
+      }
+    );
     for (const entry of skipped) {
       logEvent('warn', 'folder-index', `${entry.fileId}: ${entry.reason}`);
     }

@@ -90,7 +90,7 @@ import { corrupt, encrypted, internal, unsupported } from '../errors';
 import type { ImagesToPdfOptions } from '../operations';
 import type { ImageResultStat } from '../compress-report';
 import { DOC_HAIRLINE_RGB, DOC_INK_RGB, DOC_REDACT_RGB } from '../doc-colors';
-import { markdownToPdfBytes } from '../markdown-to-pdf';
+import { markdownToPdfBytes, hadUnsupportedCharacter } from '../markdown-to-pdf';
 import { batesLabel } from '../bates';
 import { encodePng } from '../png';
 import { addOcrTextLayerToDocument } from '../ocr/textLayer';
@@ -509,7 +509,9 @@ export interface ProcessJob {
     job?: JobHandle
   ): Promise<Uint8Array>;
 
-  markdownToPdf(markdown: string): Promise<Uint8Array>;
+  markdownToPdf(
+    markdown: string
+  ): Promise<{ bytes: Uint8Array; hadUnsupportedCharacters: boolean }>;
   readMetadata(bytes: Uint8Array): Promise<MetadataFindings>;
   scrubMetadata(bytes: Uint8Array, settings?: ScrubSettings, job?: JobHandle): Promise<Uint8Array>;
   /**
@@ -4254,8 +4256,13 @@ Q
     return transfer(await pseudoLinearize(doc).save({ useObjectStreams: true }));
   },
 
-  async markdownToPdf(markdown: string): Promise<Uint8Array> {
-    return await markdownToPdfBytes(markdown);
+  async markdownToPdf(
+    markdown: string
+  ): Promise<{ bytes: Uint8Array; hadUnsupportedCharacters: boolean }> {
+    const bytes = await markdownToPdfBytes(markdown);
+    return Comlink.transfer({ bytes, hadUnsupportedCharacters: hadUnsupportedCharacter() }, [
+      bytes.buffer
+    ]);
   },
 
   async imagesToPdf(images, options, job) {

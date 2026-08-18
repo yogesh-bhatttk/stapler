@@ -24,7 +24,7 @@ export const ImageOptionsDialog = forwardRef<HTMLDivElement, ImageOptionsDialogP
     return (
       <Modal
         ref={ref}
-        title={t(`Import ${count} image${count === 1 ? '' : 's'}`)}
+        title={t('Import {count} image{plural}', { count, plural: count === 1 ? '' : 's' })}
         onClose={onCancel}
         footer={
           <>

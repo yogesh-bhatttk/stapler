@@ -1746,4 +1746,20 @@ test.describe('tool flows', () => {
     expect(text).toContain('75'); // from V2 insertion
     expect(text).toContain('New York'); // from V2 insertion
   });
+
+  test('md-to-pdf: CJK/non-Latin1 text exports with a warning instead of crashing', async ({
+    page
+  }) => {
+    // CNV-05 regression: `page.drawText` with the WinAnsi-only StandardFonts
+    // used here throws on any codepoint it can't represent. This must
+    // degrade — substitute and warn — never fail the whole export.
+    await openApp(page);
+    await gotoTool(page, 'md-to-pdf');
+    await page.getByLabel('Markdown Content').fill('# 日本語のタイトル\n\nSome mixed 中文 text.');
+
+    const bytes = await commitAndRead(page, 'Export PDF');
+    const doc = await PDFDocument.load(bytes);
+    expect(doc.getPageCount()).toBeGreaterThanOrEqual(1);
+    await expect(page.getByText(/some characters could not be represented/i)).toBeVisible();
+  });
 });

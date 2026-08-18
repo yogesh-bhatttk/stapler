@@ -11,12 +11,33 @@ import { StaplerError } from '../../src/core/errors';
 let loadDocument: (bytes: Uint8Array) => Promise<{ handle: string }> = async () => {
   throw new Error('render worker unavailable in this environment');
 };
+let documentTextFn: (handle: string) => Promise<string[]> = async () => ['stub page text'];
+let closeDocumentFn: (handle: string) => Promise<void> = async () => {};
+
+// Only needed so `../../src/core/workers/render.worker` (imported below to get
+// at the real `documentText` for one test) can load in Node: it imports
+// pdfjs-dist's browser build directly, which needs DOM APIs (`DOMMatrix`) this
+// environment doesn't have, and calls `Comlink.expose` at import time.
+// `redaction-verify.test.ts` sets up the same pair of mocks for the same reason.
+vi.mock('comlink', () => ({
+  expose: vi.fn(),
+  transfer: vi.fn(value => value),
+  proxy: vi.fn(value => value)
+}));
+vi.mock('../../src/core/workers/pdfjs-setup', async () => {
+  const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  return {
+    pdfjsLib,
+    openDocument: ({ data, password }: { data: Uint8Array; password?: string }) =>
+      pdfjsLib.getDocument({ data, password, disableFontFace: true })
+  };
+});
 
 vi.mock('../../src/core/workers', () => {
   const renderApi = {
     loadDocument: (bytes: Uint8Array) => loadDocument(bytes),
-    documentText: async () => ['stub page text'],
-    closeDocument: async () => {}
+    documentText: (handle: string) => documentTextFn(handle),
+    closeDocument: (handle: string) => closeDocumentFn(handle)
   };
   const leaseOn =
     <T>(target: T) =>
@@ -35,12 +56,15 @@ vi.mock('../../src/core/workers', () => {
 const {
   clearFolderIndex,
   collectPdfFilesFromDir,
+  extractPdfTextPages,
   extractSnippet,
   indexDirectory,
   searchFolderIndex,
   tokenizeText
 } = await import('../../src/core/ocr/folder-index');
 const { toasts } = await import('../../src/core/notify');
+const { renderWorkerImpl } = await import('../../src/core/workers/render.worker');
+const { PDFDocument, StandardFonts } = await import('pdf-lib');
 
 describe('ocr/folder-index', () => {
   beforeEach(async () => {
@@ -49,6 +73,8 @@ describe('ocr/folder-index', () => {
     loadDocument = async () => {
       throw new Error('render worker unavailable in this environment');
     };
+    documentTextFn = async () => ['stub page text'];
+    closeDocumentFn = async () => {};
   });
 
   describe('tokenizeText & extractSnippet', () => {
@@ -98,6 +124,40 @@ describe('ocr/folder-index', () => {
       expect(pdfs.length).toBe(2);
       expect(pdfs[0].fileName).toBe('invoice1.pdf');
       expect(pdfs[1].fileName).toBe('report2.pdf');
+    });
+
+    /**
+     * OCR-02's own audit finding: every other test here only ever exercises
+     * `fallbackExtractText`'s crude latin1 scrape (the `%PDF-1.4 ...` fixtures
+     * above aren't real PDFs pdf.js can open), so a break in the *real*
+     * `documentText` pdf.js path — the one an actual folder of PDFs uses —
+     * would pass every test in this file undetected. This wires the mocked
+     * render-worker client through to `renderWorkerImpl`, the real pdf.js
+     * implementation `redaction-verify.test.ts` also exercises directly, so
+     * `extractPdfTextPages` runs the genuine multi-page extraction.
+     */
+    it('extracts real per-page text through pdf.js, not the degraded fallback', async () => {
+      const doc = await PDFDocument.create();
+      const font = await doc.embedFont(StandardFonts.Helvetica);
+      const page1 = doc.addPage([300, 300]);
+      page1.drawText('Alpha page one content', { x: 20, y: 250, size: 14, font });
+      const page2 = doc.addPage([300, 300]);
+      page2.drawText('Beta page two content', { x: 20, y: 250, size: 14, font });
+      const bytes = await doc.save();
+
+      loadDocument = bytes => renderWorkerImpl.loadDocument(bytes);
+      documentTextFn = handle => renderWorkerImpl.documentText(handle);
+      closeDocumentFn = handle => renderWorkerImpl.closeDocument(handle);
+
+      const file = new File([bytes], 'real.pdf', { type: 'application/pdf' });
+      const pages = await extractPdfTextPages(file);
+
+      expect(pages).toHaveLength(2);
+      expect(pages[0]).toContain('Alpha page one content');
+      expect(pages[1]).toContain('Beta page two content');
+      // The stub every other test in this file gets would fail this: it
+      // always returns the single-page `['stub page text']` array.
+      expect(pages).not.toContain('stub page text');
     });
 
     it('indexes multiple PDFs and stores inverted index entries', async () => {

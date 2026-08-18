@@ -49,7 +49,7 @@ export async function searchAndHighlightMatches(
   }
 
   if (found.length === 0) {
-    notify('warning', translate(`No matches for "${trimmed}".`));
+    notify('warning', translate('No matches for "{query}".', { query: trimmed }));
     return { applied: false, matches: 0, unplaced: 0 };
   }
 
@@ -61,13 +61,16 @@ export async function searchAndHighlightMatches(
   }
 
   if (highlights.length === 0) {
-    notify('warning', translate(`No matches for "${trimmed}" on any page of this document.`));
+    notify(
+      'warning',
+      translate('No matches for "{query}" on any page of this document.', { query: trimmed })
+    );
     return { applied: false, matches: 0, unplaced: 0 };
   }
 
   commit();
   addAnnotations(highlights);
-  notify('info', translate(`Highlighted ${highlights.length} match(es).`), {
+  notify('info', translate('Highlighted {count} match(es).', { count: highlights.length }), {
     detail:
       unplaced > 0
         ? `${unplaced} match(es) fell outside this document's pages and were not highlighted. Undo removes the whole search.`

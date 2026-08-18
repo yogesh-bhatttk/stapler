@@ -167,7 +167,7 @@ async function save(
     if (overwrite) {
       const saved = await platform.saveOver(doc.sourceHandle.fileId, bytes);
       if (saved) {
-        notify('success', translate(`Saved ${doc.name}`), {
+        notify('success', translate('Saved {name}', { name: doc.name }), {
           detail: note(formatBytes(bytes.byteLength))
         });
       } else {
@@ -181,7 +181,9 @@ async function save(
 
   const saved = await platform.saveFileAs(bytes, name);
   if (saved)
-    notify('success', translate(`Saved ${name}`), { detail: note(formatBytes(bytes.byteLength)) });
+    notify('success', translate('Saved {name}', { name }), {
+      detail: note(formatBytes(bytes.byteLength))
+    });
   return saved;
 }
 
@@ -448,7 +450,10 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       for (const [fileName, bytes] of Object.entries(files)) {
         await dir.write(fileName, bytes);
       }
-      notify('success', translate(`Saved ${Object.keys(files).length} files to directory`));
+      notify(
+        'success',
+        translate('Saved {count} files to directory', { count: Object.keys(files).length })
+      );
     } else {
       await save(doc, result.bytes, `${stem(doc.name)}-split.zip`);
     }
@@ -521,14 +526,19 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         for (const [fileName, bytes] of Object.entries(files)) {
           await dir.write(fileName, bytes);
         }
-        notify('success', translate(`Saved ${summary.fileCount} images to directory`));
+        notify(
+          'success',
+          translate('Saved {count} images to directory', { count: summary.fileCount })
+        );
       }
     } else {
       const saved = await save(doc, result.bytes, `${stem(doc.name)}-images.zip`);
       if (saved && summary.skippedCount > 0) {
         notify(
           'warning',
-          translate(`${summary.skippedCount} image(s) were left in the document.`),
+          translate('{count} image(s) were left in the document.', {
+            count: summary.skippedCount
+          }),
           {
             detail: summary.reasons.join(' ')
           }
@@ -606,9 +616,13 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
 
       const savedTarget = await save(doc, outcome.bytes, `${stem(doc.name)}-compressed.pdf`);
       if (savedTarget && outcome.reachedTarget) {
-        notify('success', translate(`Reached ${formatBytes(outcome.achievedBytes)}`), {
-          detail: `Target was ${formatBytes(targetBytes)}. ${formatBytes(outcome.originalBytes)} → ${formatBytes(outcome.achievedBytes)} at ${outcome.settings?.dpi} DPI, ${Math.round((outcome.settings?.quality ?? 0) * 100)}% quality.`
-        });
+        notify(
+          'success',
+          translate('Reached {size}', { size: formatBytes(outcome.achievedBytes) }),
+          {
+            detail: `Target was ${formatBytes(targetBytes)}. ${formatBytes(outcome.originalBytes)} → ${formatBytes(outcome.achievedBytes)} at ${outcome.settings?.dpi} DPI, ${Math.round((outcome.settings?.quality ?? 0) * 100)}% quality.`
+          }
+        );
       }
       return;
     }
@@ -650,7 +664,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     const saved = await save(doc, result.bytes, `${stem(doc.name)}-compressed.pdf`);
     if (saved) {
       const percent = Math.round((1 - result.bytes.byteLength / result.originalBytes) * 100);
-      notify('success', translate(`Reduced by ${percent}%`), {
+      notify('success', translate('Reduced by {percent}%', { percent }), {
         detail: `${formatBytes(result.originalBytes)} → ${formatBytes(result.bytes.byteLength)}`
       });
     }
@@ -861,11 +875,15 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     }
 
     if (rows.length === 0) {
-      notify('warning', translate(`No structured table data found on page ${pageIndex + 1}.`), {
-        detail:
-          'Nothing was exported. Table extraction reads text positions, so a scanned page ' +
-          'needs OCR first, and a page with no tabular text has nothing to infer.'
-      });
+      notify(
+        'warning',
+        translate('No structured table data found on page {page}.', { page: pageIndex + 1 }),
+        {
+          detail:
+            'Nothing was exported. Table extraction reads text positions, so a scanned page ' +
+            'needs OCR first, and a page with no tabular text has nothing to infer.'
+        }
+      );
       return;
     }
 
@@ -890,7 +908,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
 
     const saved = await platform.saveFileAs(out.bytes, out.name);
     if (saved) {
-      notify('success', translate(`Saved ${out.name}`), {
+      notify('success', translate('Saved {name}', { name: out.name }), {
         detail: `${grid.rowCount} rows x ${grid.columnCount} columns from page ${pageIndex + 1}`
       });
     }
@@ -919,9 +937,19 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       });
       return;
     }
-    const bytes = await processWorker.lease(api => api.markdownToPdf(markdown));
+    const { bytes, hadUnsupportedCharacters } = await processWorker.lease(api =>
+      api.markdownToPdf(markdown)
+    );
     const saved = await platform.saveFileAs(bytes, 'document.pdf');
-    if (saved) notify('success', translate('PDF saved successfully.'));
+    if (!saved) return;
+    if (hadUnsupportedCharacters) {
+      notify('warning', translate('PDF saved, but some characters could not be represented.'), {
+        detail:
+          'This export uses a fixed set of Latin fonts and replaced unsupported characters (e.g. CJK, Cyrillic, Arabic) with "?". Affected text will need to be checked manually.'
+      });
+    } else {
+      notify('success', translate('PDF saved successfully.'));
+    }
   },
   shortcuts: async () => {}
 };

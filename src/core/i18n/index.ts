@@ -76,6 +76,8 @@ export function initLocale(savedLocale?: string) {
   return setLocale(target as Locale);
 }
 
+export type TranslationParams = Record<string, string | number>;
+
 export function useTranslation() {
   const locale = currentLocale.value;
   void locale;
@@ -84,25 +86,35 @@ export function useTranslation() {
   // itself never changes value — see the comment on `dictionaryVersion`.
   void dictionaryVersion.value;
 
-  return function t(key: string): string {
-    return translate(key);
+  return function t(key: string, params?: TranslationParams): string {
+    return translate(key, params);
   };
 }
 
 /**
  * Non-reactive translation for use outside of React components.
  * Returns the translation for the current locale immediately.
+ *
+ * `key` must be a static string — a stable dictionary lookup key, never a
+ * template literal built from user data (`` `Saved ${doc.name}` ``). An
+ * interpolated key can never match a dictionary entry (each call produces a
+ * different string), so it silently falls straight through to whatever
+ * English text the interpolation happened to produce, in every locale. Pass
+ * variable data through `params` instead — `translate('Saved {name}', {
+ * name: doc.name })` — and it's substituted into whichever string resolves
+ * (current locale, English fallback, or the raw key), so translation is at
+ * least *possible* once a dictionary entry for the key exists.
  */
-export function translate(key: string): string {
+export function translate(key: string, params?: TranslationParams): string {
   const locale = currentLocale.value;
   const dict = dictionaries[locale];
-  if (dict && key in dict) {
-    return dict[key];
-  }
+  const resolved = dict && key in dict ? dict[key] : dictionaries['en']?.[key];
+  return interpolate(resolved ?? key, params);
+}
 
-  if (dictionaries['en'] && key in dictionaries['en']) {
-    return dictionaries['en'][key];
-  }
-
-  return key;
+function interpolate(text: string, params?: TranslationParams): string {
+  if (!params) return text;
+  return text.replace(/\{(\w+)\}/g, (match, name) =>
+    name in params ? String(params[name]) : match
+  );
 }

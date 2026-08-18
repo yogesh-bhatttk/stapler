@@ -82,7 +82,9 @@ export const DropZone = forwardRef<HTMLLabelElement, DropZoneProps>(function Dro
         }
       }
       for (const failure of outcome.failures) {
-        notify('danger', translate(`Could not open ${failure.name}`), { detail: failure.message });
+        notify('danger', translate('Could not open {name}', { name: failure.name }), {
+          detail: failure.message
+        });
       }
 
       if (outcome.imported.length > 0) {

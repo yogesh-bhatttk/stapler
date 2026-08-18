@@ -55,10 +55,15 @@ export function MergePanel() {
         }
         // A failure on one file never stops the others, and each says why.
         for (const failure of outcome.failures) {
-          notify('danger', translate(`Could not add ${failure.name}`), { detail: failure.message });
+          notify('danger', translate('Could not add {name}', { name: failure.name }), {
+            detail: failure.message
+          });
         }
         if (outcome.imported.length > 0) {
-          notify('success', translate(`Added ${outcome.imported.length} document(s).`));
+          notify(
+            'success',
+            translate('Added {count} document(s).', { count: outcome.imported.length })
+          );
         }
       });
     } catch (err) {

@@ -53,7 +53,10 @@ export function TableExtractPanel() {
       const extracted = extractTableFromPage(items);
 
       if (extracted.rows.length === 0) {
-        notify('warning', translate(`No structured table data found on page ${pageIndex + 1}.`));
+        notify(
+          'warning',
+          translate('No structured table data found on page {page}.', { page: pageIndex + 1 })
+        );
       }
 
       setGrid(extracted);

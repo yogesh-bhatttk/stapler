@@ -180,13 +180,38 @@ describe('inkCoverage and blankCoverageLimit', () => {
   });
 });
 
-import { sanitizeWinAnsiText, markdownToPdfBytes } from '../../src/core/markdown-to-pdf';
+import {
+  sanitizeWinAnsiText,
+  markdownToPdfBytes,
+  hadUnsupportedCharacter
+} from '../../src/core/markdown-to-pdf';
 
 describe('sanitizeWinAnsiText and markdownToPdfBytes', () => {
   it('sanitizes smart quotes, dashes, and unicode symbols to WinAnsi equivalents', () => {
     const raw = '“Hello” — ‘World’ • Test… \u00A0 Trademark™ © ®';
     const sanitized = sanitizeWinAnsiText(raw);
     expect(sanitized).toBe('"Hello" - \'World\' - Test...   Trademark(TM) (C) (R)');
+  });
+
+  it('passes through Windows-1252 characters WinAnsi actually supports, like the euro sign', () => {
+    expect(sanitizeWinAnsiText('Price: €50')).toBe('Price: €50');
+    expect(hadUnsupportedCharacter()).toBe(false);
+  });
+
+  it('substitutes CJK/non-Latin1 text with "?" instead of crashing, and flags it', async () => {
+    // CNV-05 regression: a prior fix removed the >255 substitution entirely,
+    // so `page.drawText` (WinAnsi-only) threw on any CJK/Cyrillic/Arabic
+    // character instead of degrading. This must never throw.
+    const md = '# 日本語のタイトル\n\nSome mixed 中文 text.';
+    const bytes = await markdownToPdfBytes(md);
+    expect(bytes).toBeInstanceOf(Uint8Array);
+    expect(bytes.length).toBeGreaterThan(0);
+    expect(hadUnsupportedCharacter()).toBe(true);
+  });
+
+  it('does not flag unsupported characters for plain ASCII/Latin1 input', async () => {
+    await markdownToPdfBytes('# Plain ASCII title\n\nNothing exotic here.');
+    expect(hadUnsupportedCharacter()).toBe(false);
   });
 
   it('converts Markdown containing non-ASCII characters to PDF bytes without throwing', async () => {

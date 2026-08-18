@@ -45,9 +45,15 @@ export function RedactPanel() {
         );
         return;
       }
-      notify('info', translate(`${found.length} suggestion(s) found — nothing is marked yet.`), {
-        detail: 'Accept the ones you want redacted; the rest are left alone.'
-      });
+      notify(
+        'info',
+        translate('{count} suggestion(s) found — nothing is marked yet.', {
+          count: found.length
+        }),
+        {
+          detail: 'Accept the ones you want redacted; the rest are left alone.'
+        }
+      );
     });
 
   /** Accepting is the only path from a suggestion to a mark. */
@@ -71,13 +77,13 @@ export function RedactPanel() {
       const bytes = await currentDocumentBytes(job);
       const found = await findTextRegions(bytes, query.trim(), matchCase, job);
       if (found.length === 0) {
-        notify('warning', translate(`No matches for "${query.trim()}".`));
+        notify('warning', translate('No matches for "{query}".', { query: query.trim() }));
         return;
       }
       // Existing marks are kept: searching twice for different terms should add to
       // the list, not replace it.
       pendingRedactions.value = [...regions, ...found];
-      notify('info', translate(`Marked ${found.length} occurrence(s).`), {
+      notify('info', translate('Marked {count} occurrence(s).', { count: found.length }), {
         detail: 'Review the list, then use Verify & apply.'
       });
     });
