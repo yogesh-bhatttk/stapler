@@ -139,6 +139,14 @@ export function createWorkerClient<T>(
     return pool.reduce((least, inst) => (inst.leases < least.leases ? inst : least));
   };
 
+  const registry =
+    typeof FinalizationRegistry !== 'undefined'
+      ? new FinalizationRegistry<Instance<T>>(inst => {
+          inst.leases -= 1;
+          scheduleIdle(inst);
+        })
+      : null;
+
   return {
     api() {
       return acquire().proxy;
@@ -160,7 +168,7 @@ export function createWorkerClient<T>(
       const inst = acquire();
       inst.leases += 1;
       let released = false;
-      return {
+      const pinned: PinnedClient<T> = {
         async lease(fn) {
           if (released) {
             throw new Error('Cannot lease from a released pinned client');
@@ -183,8 +191,11 @@ export function createWorkerClient<T>(
           released = true;
           inst.leases -= 1;
           scheduleIdle(inst);
+          registry?.unregister(pinned);
         }
       };
+      registry?.register(pinned, inst, pinned);
+      return pinned;
     }
   };
 }

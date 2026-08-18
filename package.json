@@ -48,7 +48,7 @@
     "idb": "^8.0.3",
     "lucide-preact": "^1.28.0",
     "marked": "^18.0.9",
-    "pdf-lib": "^1.17.1",
+    "pdf-lib": "npm:@cantoo/pdf-lib@^2.9.1",
     "pdfjs-dist": "^6.2.108",
     "preact": "^10.29.8",
     "tesseract.js": "^7.0.0",

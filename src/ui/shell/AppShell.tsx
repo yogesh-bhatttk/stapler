@@ -28,6 +28,7 @@ const OptionsPanel = lazy(() => import('./OptionsPanel').then(m => ({ default: m
 const ActionBar = lazy(() => import('./ActionBar').then(m => ({ default: m.ActionBar })));
 import { CommandPalette } from '../components/CommandPalette';
 import { ConfirmDialog } from '../components/ConfirmDialog';
+import { OcrConsentDialog } from '../components/OcrConsentDialog';
 import { ToastRegion } from '../components/Feedback';
 import { ShortcutModal } from '../components/ShortcutModal';
 import { WelcomeModal } from '../components/WelcomeModal';
@@ -200,6 +201,7 @@ export function AppShell({ children }: { children: ComponentChildren }) {
 
       <CommandPalette />
       <ConfirmDialog />
+      <OcrConsentDialog />
       <ToastRegion />
       {node}
       {isShortcutSheetOpen.value && (

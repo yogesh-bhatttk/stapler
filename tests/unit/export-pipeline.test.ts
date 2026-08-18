@@ -33,6 +33,7 @@ import {
 } from '../../src/core/store';
 import { resetHistory } from '../../src/core/history';
 import { sanitizeFileStem, splitBoundaries } from '../../src/core/operations';
+import { __memoryFallback } from '../../src/core/opfs';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -58,7 +59,8 @@ async function countPages(bytes: Uint8Array): Promise<number> {
 let counter = 0;
 function registerPdf(bytes: Uint8Array): string {
   const id = `src-${++counter}`;
-  sources.value = { ...sources.value, [id]: { id, bytes, name: `${id}.pdf` } };
+  __memoryFallback.set(id, bytes);
+  sources.value = { ...sources.value, [id]: { id, name: `${id}.pdf`, pageCount: 1, pageSizes: [] } as any };
   return id;
 }
 
@@ -66,7 +68,7 @@ function registerPdf(bytes: Uint8Array): string {
 async function composeCurrent(doc: StaplerDoc): Promise<Uint8Array> {
   return processWorkerImpl.compose(
     doc.pages,
-    bytesForPages(doc.pages),
+    await bytesForPages(doc.pages),
     [],
     undefined,
     undefined,

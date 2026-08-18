@@ -102,12 +102,20 @@ function open(): Promise<IDBPDatabase<StaplerSchema>> {
         // Each version's migration is additive and independent, so a user on any
         // past version lands on the same schema.
         if (oldVersion < 1) {
-          const handles = db.createObjectStore('handles', { keyPath: 'id' });
-          handles.createIndex('by-openedAt', 'openedAt');
-          const signatures = db.createObjectStore('signatures', { keyPath: 'id' });
-          signatures.createIndex('by-createdAt', 'createdAt');
-          db.createObjectStore('presets', { keyPath: 'id' });
-          db.createObjectStore('settings');
+          if (!db.objectStoreNames.contains('handles')) {
+            const handles = db.createObjectStore('handles', { keyPath: 'id' });
+            handles.createIndex('by-openedAt', 'openedAt');
+          }
+          if (!db.objectStoreNames.contains('signatures')) {
+            const signatures = db.createObjectStore('signatures', { keyPath: 'id' });
+            signatures.createIndex('by-createdAt', 'createdAt');
+          }
+          if (!db.objectStoreNames.contains('presets')) {
+            db.createObjectStore('presets', { keyPath: 'id' });
+          }
+          if (!db.objectStoreNames.contains('settings')) {
+            db.createObjectStore('settings');
+          }
         }
         if (oldVersion < 2) {
           if (!db.objectStoreNames.contains('searchIndex')) {

@@ -17,7 +17,7 @@ import { computed, signal } from '@preact/signals';
 import { commit, historySourceRefCount, resetHistory } from './history';
 import { normalizeRotation } from './rotation';
 import { pruneRenderHandles, renderHandleHoldsSource } from './render-cache';
-
+import { deleteSourceBytes, readSourceBytes } from './opfs';
 export interface PageRef {
   /** Stable across reorders, so thumbnails and selection survive a move. */
   key: string;
@@ -47,7 +47,6 @@ export interface Annotation {
 export interface SourceDocument {
   id: string;
   name: string;
-  bytes: Uint8Array;
   pageCount: number;
   /** Unrotated page sizes in points, for correct thumbnail aspect ratios. */
   pageSizes: { width: number; height: number }[];
@@ -174,67 +173,22 @@ export interface SourceOwners {
 }
 
 export function sourceOwners(sourceId: string): SourceOwners {
-  const source = sources.value[sourceId];
   return {
     pages: sourceRefCount(sourceId),
     documents: sourceDocRefCount(sourceId),
     history: historySourceRefCount(sourceId),
-    renderHandle: source ? renderHandleHoldsSource(sourceId, source.bytes) : false
+    renderHandle: false // Obsolete with OPFS
   };
 }
 
-/**
- * Whether `sources[sourceId].bytes` may be **transferred** (and therefore
- * detached) on a worker call made on behalf of `owningDocId`.
- *
- * Transferring a buffer that any other holder can still read empties the open
- * document with no error — the exact silent corruption CLAUDE.md forbids — so
- * this answers "no" unless every one of the following holds:
- *
- *  • exactly one open document references the source, and it is the one the
- *    operation is running on (which is about to have its pages repointed at the
- *    operation's *result*, so its own reference dies with the call);
- *  • no undo/redo snapshot references it. `replaceWithSource` calls `commit()`,
- *    so redaction and scan cleanup are undoable *by design*, and undo must find
- *    the pre-operation bytes still readable;
- *  • no render-worker handle is keyed on this byte array. `renderHandleFor`
- *    caches on object identity and would serve a detached buffer to the next
- *    reopen, so a document with a thumbnail on screen is not transferable.
- *
- * **This predicate is not wired into any `postMessage` transfer list today**,
- * and measuring it is why (see `transferableSourceIds`). It is the gate that any
- * future transfer must pass, plus the instrument that shows whether passing it
- * is possible.
- */
-export function canTransferSourceBytes(sourceId: string, owningDocId: string): boolean {
-  const owners = sourceOwners(sourceId);
-  if (owners.documents !== 1) return false;
-  if (owners.history !== 0) return false;
-  if (owners.renderHandle) return false;
-  const owner = documents.value.find(d => d.pages.some(p => p.sourceDocId === sourceId));
-  return owner?.id === owningDocId;
-}
-
-/**
- * The subset of `pages`' sources that {@link canTransferSourceBytes} clears.
- *
- * Reported rather than applied: see `handOver` in `operations.ts` and the §4
- * entry in `docs/AUDIT-FINDINGS.md` for why the answer is, in the shipped app,
- * essentially always the empty array.
- */
-export function transferableSourceIds(pages: PageRef[], owningDocId: string): string[] {
-  const ids = new Set(pages.map(p => p.sourceDocId));
-  return [...ids].filter(id => canTransferSourceBytes(id, owningDocId));
-}
-
 /** Bytes for every source the given pages refer to, and nothing else. */
-export function bytesForPages(pages: PageRef[]): Record<string, Uint8Array> {
+export async function bytesForPages(pages: PageRef[]): Promise<Record<string, Uint8Array>> {
   const out: Record<string, Uint8Array> = {};
   for (const page of pages) {
     const source = sources.value[page.sourceDocId];
-    // Sending every open document's bytes to the worker, as the old export path
-    // did, copied hundreds of megabytes per export.
-    if (source && !out[page.sourceDocId]) out[page.sourceDocId] = source.bytes;
+    if (source && !out[page.sourceDocId]) {
+      out[page.sourceDocId] = await readSourceBytes(page.sourceDocId);
+    }
   }
   return out;
 }
@@ -262,7 +216,11 @@ export function closeDocument(id: string): void {
   const stillUsed = new Set(documents.value.flatMap(d => d.pages.map(p => p.sourceDocId)));
   const kept: Record<string, SourceDocument> = {};
   for (const [key, value] of Object.entries(sources.value)) {
-    if (stillUsed.has(key)) kept[key] = value;
+    if (stillUsed.has(key)) {
+      kept[key] = value;
+    } else {
+      deleteSourceBytes(key).catch(() => {});
+    }
   }
   sources.value = kept;
   pruneRenderHandles(stillUsed);

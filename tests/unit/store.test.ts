@@ -4,7 +4,6 @@ import {
   addDocument,
   appendPages,
   bytesForPages,
-  canTransferSourceBytes,
   closeDocument,
   deletePages,
   documents,
@@ -22,16 +21,17 @@ import {
   sourceDocRefCount,
   sourceRefCount,
   sources,
-  transferableSourceIds,
   type StaplerDoc
 } from '../../src/core/store';
 import { historySourceRefCount, resetHistory } from '../../src/core/history';
+import { __memoryFallback } from '../../src/core/opfs';
 
 function seed(pageCount = 5, sourceId = 'src-a'): StaplerDoc {
+  const id = sourceId ?? crypto.randomUUID();
+  __memoryFallback.set(id, new Uint8Array([1, 2, 3]));
   registerSource({
     id: sourceId,
     name: `${sourceId}.pdf`,
-    bytes: new Uint8Array([1, 2, 3]),
     pageCount,
     pageSizes: Array.from({ length: pageCount }, () => ({ width: 595, height: 842 }))
   });
@@ -244,21 +244,21 @@ describe('selectPageRange', () => {
 describe('bytesForPages', () => {
   // The old export path sent every open document's bytes to the worker on every
   // export, copying hundreds of megabytes for a one-page extract.
-  it('returns only the sources the given pages refer to', () => {
+  it('returns only the sources the given pages refer to', async () => {
     const doc = seed(3, 'src-a');
+    __memoryFallback.set('src-b', new Uint8Array([9]));
     registerSource({
       id: 'src-b',
       name: 'b.pdf',
-      bytes: new Uint8Array([9]),
       pageCount: 1,
       pageSizes: [{ width: 10, height: 10 }]
     });
-    expect(Object.keys(bytesForPages(doc.pages))).toEqual(['src-a']);
+    expect(Object.keys(await bytesForPages(doc.pages))).toEqual(['src-a']);
   });
 
-  it('deduplicates a source referenced by many pages', () => {
+  it('deduplicates a source referenced by many pages', async () => {
     const doc = seed(50);
-    expect(Object.keys(bytesForPages(doc.pages)).length).toBe(1);
+    expect(Object.keys(await bytesForPages(doc.pages)).length).toBe(1);
   });
 });
 
@@ -429,43 +429,3 @@ describe('source reference counting', () => {
   });
 });
 
-describe('canTransferSourceBytes', () => {
-  it('refuses while a second document shares the source', () => {
-    const first = seed(1, 'shared');
-    addDocument({
-      id: 'doc-2',
-      name: 'second.pdf',
-      pages: makePageRefs('shared', 1),
-      annotations: [],
-      dirty: false
-    });
-    expect(canTransferSourceBytes('shared', first.id)).toBe(false);
-    expect(canTransferSourceBytes('shared', 'doc-2')).toBe(false);
-  });
-
-  it('refuses while any undo snapshot can still reach the source', () => {
-    const doc = seed(2, 'src-a');
-    // No history yet: the only owner is the one document.
-    expect(historySourceRefCount('src-a')).toBe(0);
-    expect(canTransferSourceBytes('src-a', doc.id)).toBe(true);
-
-    // One edit — any edit — puts the pre-edit pages in the undo stack, and undo
-    // must find those bytes readable. This is why the gate almost never opens.
-    rotatePages(doc.id, [doc.pages[0].key], 90);
-    expect(historySourceRefCount('src-a')).toBeGreaterThan(0);
-    expect(canTransferSourceBytes('src-a', doc.id)).toBe(false);
-  });
-
-  it('refuses for a document that does not own the source', () => {
-    seed(1, 'src-a');
-    expect(canTransferSourceBytes('src-a', 'some-other-doc')).toBe(false);
-    expect(canTransferSourceBytes('missing-source', 'doc-1')).toBe(false);
-  });
-
-  it('reports nothing transferable once history exists, via transferableSourceIds', () => {
-    const doc = seed(2, 'src-a');
-    expect(transferableSourceIds(doc.pages, doc.id)).toEqual(['src-a']);
-    rotatePages(doc.id, [doc.pages[0].key], 90);
-    expect(transferableSourceIds(documents.value[0].pages, doc.id)).toEqual([]);
-  });
-});

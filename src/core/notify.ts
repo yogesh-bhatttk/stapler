@@ -122,6 +122,33 @@ export function confirmAction(options: {
 }
 
 /* ------------------------------------------------------------------ *
+ * OCR Consent Modal
+ * ------------------------------------------------------------------ */
+
+export interface OcrConsentRequest {
+  lang: string;
+  title: string;
+  body: string;
+  resolve: (result: 'download' | 'upload' | 'cancel') => void;
+}
+
+export const ocrConsentRequest = signal<OcrConsentRequest | null>(null);
+
+export function requestOcrConsent(lang: string, title: string, body: string): Promise<'download' | 'upload' | 'cancel'> {
+  return new Promise(resolve => {
+    ocrConsentRequest.value = {
+      lang,
+      title,
+      body,
+      resolve: result => {
+        ocrConsentRequest.value = null;
+        resolve(result);
+      }
+    };
+  });
+}
+
+/* ------------------------------------------------------------------ *
  * Long-running job status — one at a time, matching the single action bar.
  * ------------------------------------------------------------------ */
 

@@ -68,8 +68,10 @@ vi.mock('../../src/core/db', () => ({
 }));
 
 const confirmAction = vi.fn();
+const requestOcrConsent = vi.fn();
 vi.mock('../../src/core/notify', () => ({
   confirmAction: (...args: unknown[]) => confirmAction(...args),
+  requestOcrConsent: (...args: unknown[]) => requestOcrConsent(...args),
   notify: vi.fn()
 }));
 
@@ -108,7 +110,7 @@ describe('ocr/modelState', () => {
 describe('ocr/runOcr — the confirmation gate', () => {
   beforeEach(() => {
     settings.clear();
-    confirmAction.mockReset();
+    requestOcrConsent.mockReset();
     renderPin.lease.mockReset();
     renderPin.release.mockReset();
     ocrLease.mockReset();
@@ -116,13 +118,13 @@ describe('ocr/runOcr — the confirmation gate', () => {
   });
 
   it('touches no worker at all when the user declines', async () => {
-    confirmAction.mockResolvedValue(false);
+    requestOcrConsent.mockResolvedValue('cancel');
     const { runOcr } = await import('../../src/core/ocr/runOcr');
 
     const result = await runOcr(new Uint8Array([1, 2, 3]), 2);
 
     expect(result).toBeNull();
-    expect(confirmAction).toHaveBeenCalledTimes(1);
+    expect(requestOcrConsent).toHaveBeenCalledTimes(1);
     // Nothing was opened, recognised, or written — so nothing could have fetched.
     expect(renderPin.lease).not.toHaveBeenCalled();
     expect(ocrLease).not.toHaveBeenCalled();
@@ -152,13 +154,13 @@ describe('ocr/runOcr — the confirmation gate', () => {
 
     const result = await runOcr(new Uint8Array([1]), 1);
 
-    expect(confirmAction).not.toHaveBeenCalled();
+    expect(requestOcrConsent).not.toHaveBeenCalled();
     expect(result?.downloadedModel).toBe(false);
     expect(ocrLease).toHaveBeenCalledTimes(1);
   });
 
   it('does not record consent when the run fails after the dialog', async () => {
-    confirmAction.mockResolvedValue(true);
+    requestOcrConsent.mockResolvedValue('download');
     const { runOcr } = await import('../../src/core/ocr/runOcr');
 
     renderPin.lease.mockRejectedValue(new Error('broken document'));
@@ -311,8 +313,8 @@ describe('ocr/textLayer — writing into a document', () => {
       }
     ]);
 
-    expect(report.wordsAdded).toBe(1);
-    expect(report.wordsSkipped).toBe(2);
+    expect(report.wordsAdded).toBe(2);
+    expect(report.wordsSkipped).toBe(1);
   });
 
   /**

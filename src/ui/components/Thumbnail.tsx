@@ -105,7 +105,7 @@ export const Thumbnail = forwardRef<HTMLDivElement, ThumbnailProps>(function Thu
     setState('loading');
     void (async () => {
       try {
-        const { handle, client } = await renderHandleFor(source.id, source.bytes);
+        const { handle, client } = await renderHandleFor(source.id);
         if (cancelled) return;
         const bitmap = await client.lease(api => api.renderPage(handle, page.sourceIndex, scale));
         if (cancelled) {

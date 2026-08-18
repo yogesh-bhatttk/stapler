@@ -16,6 +16,7 @@ import { renderWorker } from './workers';
 import type { PinnedClient } from './workers/client';
 import type { RenderJob } from './workers/render.worker';
 import { logEvent } from './errors';
+import { readSourceBytes } from './opfs';
 
 /** Bitmaps are GPU-backed; the ceiling is a count because we cannot measure them. */
 const MAX_BITMAPS = 120;
@@ -115,8 +116,6 @@ export function bitmapKey(sourceId: string, pageIndex: number, scale: number): s
 
 interface HandleEntry {
   promise: Promise<{ handle: string; client: PinnedClient<RenderJob> }>;
-  /** Kept so an invalidated source is reopened rather than served stale. */
-  bytes: Uint8Array;
 }
 
 const handles = new Map<string, HandleEntry>();
@@ -126,40 +125,26 @@ const handles = new Map<string, HandleEntry>();
  * fifty thumbnails ask simultaneously.
  */
 export function renderHandleFor(
-  sourceId: string,
-  bytes: Uint8Array
+  sourceId: string
 ): Promise<{ handle: string; client: PinnedClient<RenderJob> }> {
   const existing = handles.get(sourceId);
-  if (existing && existing.bytes === bytes) return existing.promise;
-  if (existing) closeRenderHandle(sourceId);
+  if (existing) return existing.promise;
 
   const client = renderWorker.pin();
-  const promise = client
-    .lease(api => api.loadDocument(bytes))
-    .then(info => ({ handle: info.handle, client }))
-    .catch(err => {
-      // A failed open must not be cached, or every later thumbnail reuses the
-      // rejection and the page stays blank with no way to retry.
-      client.release();
-      handles.delete(sourceId);
-      throw err;
-    });
+  const promise = readSourceBytes(sourceId).then(bytes => 
+    client
+      .lease(api => api.loadDocument(bytes))
+      .then(info => ({ handle: info.handle, client }))
+  ).catch(err => {
+    // A failed open must not be cached, or every later thumbnail reuses the
+    // rejection and the page stays blank with no way to retry.
+    client.release();
+    handles.delete(sourceId);
+    throw err;
+  });
 
-  handles.set(sourceId, { promise, bytes });
+  handles.set(sourceId, { promise });
   return promise;
-}
-
-/**
- * Whether an open render handle is keyed on this exact byte array.
- *
- * Identity, not equality: `renderHandleFor` reuses a handle only while
- * `entry.bytes === bytes`, so the cached entry is a live holder of that buffer.
- * Detaching it would leave the entry looking valid while a reopen loaded zero
- * bytes — which is why `store.canTransferSourceBytes` treats an on-screen
- * thumbnail as a reason not to transfer.
- */
-export function renderHandleHoldsSource(sourceId: string, bytes: Uint8Array): boolean {
-  return handles.get(sourceId)?.bytes === bytes;
 }
 
 export function closeRenderHandle(sourceId: string): void {

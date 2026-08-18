@@ -42,6 +42,7 @@ import {
   type Annotation,
   type PageRef
 } from './store';
+import { readSourceBytes } from './opfs';
 import { bitmapToJpeg } from './image';
 import { bitmapKey, thumbnailCache } from './render-cache';
 import { getSignature } from './signatures';
@@ -232,10 +233,15 @@ export async function composeDocument(
     ...p,
     cropBox: request.cropBoxes?.[p.key]
   }));
+  const bytes = await bytesForPages(request.pages);
+  for (const [id, buf] of Object.entries(bytes)) {
+    bytes[id] = Comlink.transfer(buf, [buf.buffer as ArrayBuffer]);
+  }
+
   return processWorker.lease(api =>
     api.compose(
       mappedPages,
-      bytesForPages(request.pages),
+      bytes,
       stamps,
       request.watermark && hasWatermarkContent(request.watermark)
         ? toWatermarkData(request.watermark)
@@ -272,10 +278,15 @@ export async function splitDocument(request: SplitRequest, options: JobOptions =
     ...p,
     cropBox: request.cropBoxes?.[p.key]
   }));
+  const bytes = await bytesForPages(request.pages);
+  for (const [id, buf] of Object.entries(bytes)) {
+    bytes[id] = Comlink.transfer(buf, [buf.buffer as ArrayBuffer]);
+  }
+
   return processWorker.lease(api =>
     api.composeSplit(
       mappedPages,
-      bytesForPages(request.pages),
+      bytes,
       request.boundaries,
       stamps,
       request.watermark && hasWatermarkContent(request.watermark)
@@ -1240,7 +1251,7 @@ export async function currentDocumentBytes(
     !normalize;
   if (untouched) {
     const single = Object.values(sources.value).find(s => s.id === doc.pages[0].sourceDocId);
-    if (single) return single.bytes;
+    if (single) return await readSourceBytes(single.id);
   }
 
   return composeDocument(

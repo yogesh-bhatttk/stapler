@@ -245,7 +245,15 @@ export function saveViaDownload(bytes: Uint8Array, suggestedName: string): boole
   document.body.append(anchor);
   anchor.click();
   anchor.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  let revoked = false;
+  const cleanup = () => {
+    if (revoked) return;
+    revoked = true;
+    URL.revokeObjectURL(url);
+    window.removeEventListener('focus', cleanup);
+  };
+  window.addEventListener('focus', cleanup);
+  setTimeout(cleanup, 60_000);
   return true;
 }
 

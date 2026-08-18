@@ -14,9 +14,10 @@
 import * as Comlink from 'comlink';
 import { renderWorker, ocrWorker, processWorker } from '../workers';
 import { createJobHandle, type JobOptions } from '../workers/protocol';
-import { confirmAction } from '../notify';
+import { requestOcrConsent } from '../notify';
 import { cancelled, internal } from '../errors';
 import { isModelDownloaded, markModelDownloaded } from './modelState';
+import { hasModelBytes } from '../opfs';
 import { DEFAULT_OCR_LANGUAGE, findLanguage, MODEL_HOST, resolveModelBase } from './model';
 import type { OcrLayerReport, OcrPageLayer } from './types';
 
@@ -71,14 +72,17 @@ export function modelConsentCopy(lang: string): { title: string; body: string } 
  * Returns false when the user declined.
  */
 async function ensureConsent(lang: string): Promise<boolean> {
-  if (await isModelDownloaded(lang)) return true;
   const { title, body } = modelConsentCopy(lang);
-  return confirmAction({
-    title,
-    body,
-    confirmLabel: 'Download and run OCR',
-    cancelLabel: 'Not now'
-  });
+  const result = await requestOcrConsent(lang, title, body);
+  
+  if (result === 'cancel') return false;
+  if (result === 'upload') {
+    // We already stored the file to OPFS via the UI when 'upload' resolves.
+    return true;
+  }
+  
+  // 'download'
+  return true;
 }
 
 /**
@@ -102,7 +106,7 @@ export async function runOcr(
     .sort((a, b) => a - b);
   if (pages.length === 0) throw internal('No pages were selected for OCR.');
 
-  const alreadyHave = await isModelDownloaded(lang);
+  const alreadyHave = (await hasModelBytes(lang)) || (await isModelDownloaded(lang));
   if (!alreadyHave) {
     const consented = await ensureConsent(lang);
     // Nothing has been spawned, opened, or requested at this point. Declining is

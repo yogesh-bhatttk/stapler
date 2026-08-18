@@ -45,6 +45,9 @@ import {
   type StaplerDoc
 } from '../../src/core/store';
 import { resetHistory } from '../../src/core/history';
+import { __memoryFallback } from '../../src/core/opfs';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 
 /** Every page's visible text, in document order — enough to prove order and content. */
 async function pageTexts(bytes: Uint8Array): Promise<string[]> {
@@ -88,13 +91,13 @@ async function pageTexts(bytes: Uint8Array): Promise<string[]> {
 }
 
 function seedDoc(sourceId: string, pageCount: number, bytes: Uint8Array): StaplerDoc {
+  __memoryFallback.set(sourceId, bytes);
   registerSource({
     id: sourceId,
     name: `${sourceId}.pdf`,
-    bytes,
     pageCount,
     pageSizes: Array.from({ length: pageCount }, () => ({ width: 595.28, height: 841.89 }))
-  });
+  } as any);
   const doc: StaplerDoc = {
     id: `${sourceId}-doc`,
     name: 'doc.pdf',
@@ -115,7 +118,7 @@ function currentDoc(docId: string): StaplerDoc {
 async function composeCurrent(doc: StaplerDoc): Promise<Uint8Array> {
   return processWorkerImpl.compose(
     doc.pages,
-    bytesForPages(doc.pages),
+    await bytesForPages(doc.pages),
     [],
     undefined,
     undefined,
@@ -139,13 +142,14 @@ describe('golden: OPS-01 merge', () => {
     const { textPdf } = await import('../e2e/fixtures');
     const a = seedDoc('merge-a', 2, await textPdf(2));
     appendPages(a.id, makePageRefs('merge-b', 3));
+    const bBytes = await textPdf(3);
+    __memoryFallback.set('merge-b', bBytes);
     registerSource({
       id: 'merge-b',
       name: 'merge-b.pdf',
-      bytes: await textPdf(3),
       pageCount: 3,
       pageSizes: Array.from({ length: 3 }, () => ({ width: 595.28, height: 841.89 }))
-    });
+    } as any);
 
     const doc = currentDoc(a.id);
     expect(doc.pages).toHaveLength(5);
@@ -204,16 +208,17 @@ describe('golden: OPS-01 merge', () => {
 
     const srcBytes = await src.save();
 
-    const { textPdf } = await import('../e2e/fixtures');
+    const { textPdf, FIXTURES_DIR } = await import('../e2e/fixtures');
     const a = seedDoc('bookmarked', 2, srcBytes);
     appendPages(a.id, makePageRefs('plain', 1));
+    const plainBytes = await textPdf(1);
+    __memoryFallback.set('plain', plainBytes);
     registerSource({
       id: 'plain',
       name: 'plain.pdf',
-      bytes: await textPdf(1),
       pageCount: 1,
       pageSizes: [{ width: 595.28, height: 841.89 }]
-    });
+    } as any);
 
     const doc = currentDoc(a.id);
     const output = await composeCurrent(doc);
@@ -274,13 +279,14 @@ describe('golden: OPS-04 insert pages from another document', () => {
   it('splices pages from a second source into the middle, keeping both intact', async () => {
     const { textPdf } = await import('../e2e/fixtures');
     const doc = seedDoc('insert-a', 3, await textPdf(3));
+    const insertBBytes = await textPdf(4, 'B Page');
+    __memoryFallback.set('insert-b', insertBBytes);
     registerSource({
       id: 'insert-b',
       name: 'insert-b.pdf',
-      bytes: await textPdf(2),
-      pageCount: 2,
-      pageSizes: Array.from({ length: 2 }, () => ({ width: 595.28, height: 841.89 }))
-    });
+      pageCount: 4,
+      pageSizes: Array.from({ length: 4 }, () => ({ width: 595.28, height: 841.89 }))
+    } as any);
 
     insertPages(doc.id, makePageRefs('insert-b', 2), 1);
 

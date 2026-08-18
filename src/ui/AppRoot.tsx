@@ -16,6 +16,8 @@ import { ComponentGallery } from './dev/ComponentGallery';
 import { EmptyState } from './components/Feedback';
 import { Button } from './components/Button';
 
+import { ErrorBoundary } from './components/ErrorBoundary';
+
 function NotFound() {
   return (
     <EmptyState
@@ -33,16 +35,18 @@ function NotFound() {
 export function App() {
   return (
     <Router hook={useHashLocation}>
-      <AppShell>
-        <Switch>
-          <Route path="/" component={HomeView} />
-          {/* Not linked from the app; a visual-review surface for DS-03. */}
-          <Route path="/dev/components" component={ComponentGallery} />
-          {/* Every tool shares one route; the tool registry decides what renders. */}
-          <Route path="/tool/:toolId" component={Canvas} />
-          <Route component={NotFound} />
-        </Switch>
-      </AppShell>
+      <ErrorBoundary>
+        <AppShell>
+          <Switch>
+            <Route path="/" component={HomeView} />
+            {/* Not linked from the app; a visual-review surface for DS-03. */}
+            <Route path="/dev/components" component={ComponentGallery} />
+            {/* Every tool shares one route; the tool registry decides what renders. */}
+            <Route path="/tool/:toolId" component={Canvas} />
+            <Route component={NotFound} />
+          </Switch>
+        </AppShell>
+      </ErrorBoundary>
     </Router>
   );
 }

@@ -12,6 +12,7 @@ import { processWorker, renderWorker } from './workers';
 import { createJobHandle, type JobOptions } from './workers/protocol';
 import { cancelled, corrupt, fromUnknown, isCancellation, unsupported } from './errors';
 import { makePageRefs, registerSource, type PageRef, type SourceDocument } from './store';
+import { writeSourceBytes } from './opfs';
 import { imageFileToJpegs, isSupportedImage } from './image';
 import { hasXfaMarker, XFA_MESSAGE } from './pdf/xfa';
 
@@ -125,10 +126,10 @@ async function importPdf(file: File, options: JobOptions): Promise<ImportedFile>
       const source: SourceDocument = {
         id,
         name: file.name,
-        bytes,
         pageCount: info.pageCount,
         pageSizes: info.pageSizes
       };
+      await writeSourceBytes(id, bytes);
       registerSource(source);
       options.onProgress?.(1, `Imported ${file.name}`);
       // `makePageRefs` takes the same id the source was registered under; that
@@ -180,10 +181,10 @@ async function importImages(
       const source: SourceDocument = {
         id,
         name: files.length === 1 ? replaceExtension(files[0].name) : 'Images.pdf',
-        bytes,
         pageCount: info.pageCount,
         pageSizes: info.pageSizes
       };
+      await writeSourceBytes(id, bytes);
       registerSource(source);
       return {
         originalFile: files[0],

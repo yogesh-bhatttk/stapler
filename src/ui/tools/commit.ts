@@ -42,6 +42,7 @@ import { formatBytes } from '../components/Feedback';
 import type { JobOptions } from '../../core/workers/protocol';
 import { createJobHandle } from '../../core/workers/protocol';
 import { findTool, type ToolId } from '../../core/tools';
+import { writeSourceBytes } from '../../core/opfs';
 import {
   compressMode,
   compressSettings,
@@ -763,7 +764,6 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     const source = {
       id: crypto.randomUUID(),
       name: `${stem(doc.name)}-redacted.pdf`,
-      bytes: outcome.bytes,
       pageCount: doc.pages.length,
       pageSizes: [] as { width: number; height: number }[]
     };
@@ -781,6 +781,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       client.release();
     }
 
+    await writeSourceBytes(source.id, outcome.bytes);
     registerSource(source);
     replaceWithSource(doc.id, source);
     pendingRedactions.value = [];

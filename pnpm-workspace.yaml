@@ -1,2 +1,4 @@
 packages:
   - '.'
+minimumReleaseAgeExclude:
+  - '@cantoo/pdf-lib@2.9.1'

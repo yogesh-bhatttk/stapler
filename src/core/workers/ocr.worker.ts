@@ -159,7 +159,11 @@ const api: OCRJob = {
     let engine: Tesseract.Worker | null = null;
 
     try {
-      engine = await createWorker(options.lang, OEM.LSTM_ONLY, {
+      const { readModelBytes } = await import('../opfs');
+      const modelBytes = await readModelBytes(options.lang);
+      const langsParam = modelBytes ? [{ code: options.lang, data: modelBytes }] : options.lang;
+
+      engine = await createWorker(langsParam, OEM.LSTM_ONLY, {
         workerPath: WORKER_PATH,
         corePath: CORE_PATH,
         langPath: options.modelBase,
