@@ -95,6 +95,17 @@ git-ignored — deterministic, so re-running tests reproduces them identically:
   displays the author and every copy of the path before, and after a strip none of them
   survive anywhere in the decompressed output bytes.
 
+- `photo-rotated.heic` — a real HEIC file (HEVC Main Still Picture) whose pixels are
+  physically stored rotated 90° with an EXIF `Orientation=6` tag telling a correct reader
+  to rotate it back to an upright 400×300 landscape image: red square top-left, blue
+  square bottom-right. `sample.heic` already covers "HEIC decodes without crashing"; this
+  one is the fixture the corpus was missing for orientation specifically — the same class
+  of bug CNV-01's "a sideways photo must not stay sideways" JPEG handling exists for, never
+  previously provable for HEIC since `heic2any` decodes through an intermediate PNG blob.
+  Built with Python's `pillow-heif` + `piexif` (`pip install pillow-heif piexif`; not
+  reproducible by `fixtures:static`'s ImageMagick/Ghostscript path since neither writes
+  real HEIC).
+
 `tests/e2e/fixtures.ts` also exports `largePdf` (300 pages), `rotatedPdf` (90/180/270°
 pages), `acroformPdf` (fillable text field + checkbox), and `corruptPdf` (truncated PDF) —
 each written under the fixture name passed to `ensureFixture` by the test that needs it,

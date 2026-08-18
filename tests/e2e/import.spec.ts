@@ -166,6 +166,58 @@ test.describe('DOC-02 import and validation', () => {
   });
 
   /**
+   * HEIC's disclosed unknown: orientation (`sample.heic` above already covers
+   * plain decode-without-crashing). This fixture's pixels are
+   * physically stored rotated 90°, with an EXIF Orientation=6 tag telling a
+   * correct reader to rotate it back — the same shape of bug CNV-01's own
+   * `imageOrientation: 'from-image'` comment describes for JPEG ("a sideways
+   * photo must not stay sideways"), never previously proven for HEIC
+   * specifically since heic2any decodes to an intermediate PNG blob first.
+   */
+  test('a rotated .heic photo with EXIF orientation imports right-side up', async ({ page }) => {
+    await openApp(page);
+    await importThrough(page, 'tests/fixtures/photo-rotated.heic');
+
+    const grid = page.getByRole('listbox', { name: /Pages of/ });
+    await expect(grid).toBeVisible({ timeout: 30_000 });
+
+    // The fixture (scripts don't generate this one — built once with
+    // pillow-heif + piexif) draws a red square at the top-left of the
+    // *upright* 400×300 landscape image and a blue square at bottom-right.
+    // A reader that ignored the EXIF Orientation=6 tag would show the raw
+    // 300×400 portrait storage instead, putting neither color in that corner.
+    await page.waitForFunction(
+      () => {
+        const canvas = document.querySelector<HTMLCanvasElement>('[role="option"] canvas');
+        const ctx = canvas?.getContext('2d');
+        if (!canvas || !ctx || canvas.width < 2 || canvas.height < 2) return false;
+        return ctx.getImageData(canvas.width >> 1, canvas.height >> 1, 1, 1).data[3] > 0;
+      },
+      undefined,
+      { timeout: 30_000 }
+    );
+
+    const [topLeft, bottomRight] = await page.evaluate(() => {
+      const canvas = document.querySelector<HTMLCanvasElement>('[role="option"] canvas')!;
+      const ctx = canvas.getContext('2d')!;
+      const sample = (fx: number, fy: number) => {
+        const x = Math.min(canvas.width - 1, Math.round(fx * canvas.width));
+        const y = Math.min(canvas.height - 1, Math.round(fy * canvas.height));
+        const d = ctx.getImageData(x, y, 1, 1).data;
+        return [d[0], d[1], d[2]];
+      };
+      return [sample(0.05, 0.05), sample(0.95, 0.95)];
+    });
+
+    // Red top-left: R channel clearly dominant.
+    expect(topLeft[0]).toBeGreaterThan(150);
+    expect(topLeft[0] - topLeft[2]).toBeGreaterThan(50);
+    // Blue bottom-right: B channel clearly dominant.
+    expect(bottomRight[2]).toBeGreaterThan(150);
+    expect(bottomRight[2] - bottomRight[0]).toBeGreaterThan(50);
+  });
+
+  /**
    * The acceptance criterion itself: *every* fixture in the corpus either imports or
    * produces its specific, accurate explanation. Written as a sweep rather than a
    * list so a fixture added later is covered the day it lands.

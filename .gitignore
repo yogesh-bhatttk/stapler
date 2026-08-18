@@ -21,6 +21,8 @@ tests/fixtures/*
 !tests/fixtures/sample.png
 !tests/fixtures/sample.webp
 !tests/fixtures/sample.tiff
+!tests/fixtures/sample.heic
+!tests/fixtures/photo-rotated.heic
 
 # Throwaway probe scripts (see eslint.config.js ignores).
 .scratch/

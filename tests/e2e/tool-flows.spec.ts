@@ -1827,4 +1827,46 @@ test.describe('tool flows', () => {
     await gotoTool(page, 'batch');
     await expect(recipeSelect.locator('option', { hasText: 'No N-up' })).toHaveCount(1);
   });
+
+  test('ocr: the one disclosed network exception actually downloads the real model and recognizes text (OCR-01)', async ({
+    page
+  }) => {
+    // Every other e2e test — and the zero-network sweep itself — treats network
+    // access as forbidden. This is deliberately the one exception: the audit's
+    // own honest disclaimer was that a sandbox with no network access couldn't
+    // test the real download, only the URL-construction unit tests around it.
+    // This environment has real internet access, so this proves the actual
+    // flow: consent dialog → real fetch from the named host → tesseract
+    // recognizes real text → an invisible text layer lands in the export.
+    test.setTimeout(180_000);
+
+    await importFixture(page, 'tests/fixtures/scanned_skewed.pdf');
+    await gotoTool(page, 'ocr');
+
+    await page.getByRole('button', { name: 'Run OCR & export' }).click();
+
+    const dialog = page.getByRole('dialog', { name: /Download the English OCR language model/ });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText('cdn.jsdelivr.net');
+
+    const download = page.waitForEvent('download', { timeout: 150_000 });
+    await dialog.getByRole('button', { name: 'Download and run OCR' }).click();
+    const saved = await download;
+    const location = await saved.path();
+    expect(location).toBeTruthy();
+
+    // The fixture's image reads "Scanned\nDocument" (scripts/generate-static-
+    // fixtures.mjs) — real tesseract output on real pixels, not a fixture with
+    // canned text already in it.
+    await expect(page.getByText(/words added/i)).toBeVisible();
+    const bytes = new Uint8Array(readFileSync(location!));
+    const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+    const pdf = await pdfjsLib.getDocument({ data: bytes.slice(), useSystemFonts: false }).promise;
+    const content = await (await pdf.getPage(1)).getTextContent();
+    const text = content.items
+      .map(item => ('str' in item ? item.str : ''))
+      .join(' ')
+      .toLowerCase();
+    expect(text).toMatch(/scan|document/);
+  });
 });
