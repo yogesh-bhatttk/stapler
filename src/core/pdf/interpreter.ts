@@ -901,6 +901,149 @@ export function filterContentStream(
   return { filtered, finalState: state, strippedXObjectNames, partialImageCoverage };
 }
 
+/** Text-showing and text-state operators — everything legal inside `BT`...`ET`. */
+const TEXT_OPERATORS = new Set([
+  'BT',
+  'ET',
+  'Tc',
+  'Tw',
+  'Tz',
+  'TL',
+  'Tf',
+  'Tr',
+  'Ts',
+  'Td',
+  'TD',
+  'Tm',
+  'T*',
+  'Tj',
+  'TJ',
+  "'",
+  '"'
+]);
+
+export interface StripTextObjectsResult {
+  filtered: Statement[];
+  /** Number of `BT`...`ET` spans removed. */
+  removed: number;
+}
+
+/**
+ * Removes every *invisible* text object (`BT`...`ET`, inclusive, rendered
+ * under `Tr` mode 3) from a content stream — used to clear a broken or
+ * duplicate pre-existing OCR text layer (a scanning app's own bad OCR, or a
+ * previous Stapler OCR run) before writing a fresh one, rather than stacking
+ * a second layer on top of the first.
+ *
+ * Requiring rendering mode 3 is the actual safety property here, not a detail:
+ * every mainstream "searchable scan" producer — Adobe Scan, Acrobat's own OCR,
+ * this codebase's own `textLayer.ts` — draws recognised text invisibly over
+ * the page image, specifically so it can be searched and selected without
+ * being seen. Real, user-authored visible text never uses it (there is no
+ * reason to draw text no one can see). So a `Tr 3` block is unambiguously OCR
+ * metadata, and a block that never enters that mode is left alone even if
+ * every other operator inside it would otherwise qualify — dropping the fill
+ * colour a *visible* word was drawn in would still be silent, real content
+ * loss.
+ *
+ * `Tr` is graphics state, not text state: unlike `Tf`/`Tm`, it is not reset by
+ * `BT`/`ET` and is commonly set *once*, outside the text object, covering
+ * several `BT`...`ET` blocks after it — exactly what this codebase's own
+ * `textLayer.ts` emits (`setTextRenderingMode` once, before a whole page's
+ * words). So this tracks `Tr` across the *whole* stream, scoped by `q`/`Q`
+ * like any other graphics-state value, rather than only looking inside each
+ * span. A span whose safety cannot be fully accounted for (see below) marks
+ * the running `Tr` value unknown rather than trusting a flat textual scan
+ * that might have missed its own internal `q`/`Q` scoping — a later span
+ * cannot be misjudged invisible from a guess.
+ *
+ * The "every statement in the span is a text operator" check is a second,
+ * independent guard: `q`/`Q`, `cm`, a path, or a `Do` inside a text object is
+ * a shape this function does not expect, so that span is left untouched
+ * rather than risk unbalancing state something after it depends on.
+ * Malformed input (a `BT` with no matching `ET`) is left alone for the same
+ * reason.
+ */
+export function stripTextObjects(statements: Statement[]): StripTextObjectsResult {
+  const filtered: Statement[] = [];
+  let removed = 0;
+  let i = 0;
+
+  // `null` means "unknown" — never treated as invisible.
+  let currentTr: string | null = '0';
+  const trStack: (string | null)[] = [];
+
+  while (i < statements.length) {
+    const stmt = statements[i];
+    const op = String.fromCharCode(...stmt.operator.bytes);
+
+    if (op === 'q') {
+      trStack.push(currentTr);
+      filtered.push(stmt);
+      i++;
+      continue;
+    }
+    if (op === 'Q') {
+      if (trStack.length > 0) currentTr = trStack.pop()!;
+      filtered.push(stmt);
+      i++;
+      continue;
+    }
+    if (op === 'Tr' && stmt.operands.length === 1) {
+      currentTr = String.fromCharCode(...stmt.operands[0].bytes);
+      filtered.push(stmt);
+      i++;
+      continue;
+    }
+    if (op !== 'BT') {
+      filtered.push(stmt);
+      i++;
+      continue;
+    }
+
+    let j = i + 1;
+    let safe = true;
+    let trAfter: string | null = currentTr;
+    let invisible = currentTr === '3';
+    while (j < statements.length) {
+      const inner = statements[j];
+      const innerOp = String.fromCharCode(...inner.operator.bytes);
+      if (innerOp === 'ET') break;
+      if (!TEXT_OPERATORS.has(innerOp)) safe = false;
+      if (innerOp === 'Tr' && inner.operands.length === 1) {
+        trAfter = String.fromCharCode(...inner.operands[0].bytes);
+        if (trAfter === '3') invisible = true;
+      }
+      j++;
+    }
+
+    if (j >= statements.length || !safe) {
+      for (let k = i; k <= Math.min(j, statements.length - 1); k++) filtered.push(statements[k]);
+      i = j + 1;
+      // This span's own q/Q (if any) were not tracked above — a flat scan
+      // cannot know what state they leave `Tr` in — so anything after it is
+      // treated as unknown rather than trusted from a guess.
+      currentTr = null;
+      continue;
+    }
+
+    if (!invisible) {
+      for (let k = i; k <= j; k++) filtered.push(statements[k]);
+      i = j + 1;
+      currentTr = trAfter;
+      continue;
+    }
+
+    // Every statement from BT through ET (inclusive) is a text operator, and
+    // the span explicitly rendered invisibly.
+    removed++;
+    i = j + 1;
+    currentTr = trAfter;
+  }
+
+  return { filtered, removed };
+}
+
 /**
  * Decompresses a PDF FlateDecode stream.
  *

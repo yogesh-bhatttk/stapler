@@ -832,7 +832,8 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     ocrReport.value = {
       wordsAdded: result.wordsAdded,
       wordsSkipped: result.wordsSkipped,
-      pages: result.pagesTouched
+      pages: result.pagesTouched,
+      pagesReplaced: result.pagesReplaced
     };
 
     if (result.wordsAdded === 0) {

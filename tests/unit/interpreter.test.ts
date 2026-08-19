@@ -11,6 +11,7 @@ import {
   filterContentStream,
   parseContentStream,
   serializeStatements,
+  stripTextObjects,
   tokenizeContentStream,
   type FontInfo,
   type Rect
@@ -196,5 +197,101 @@ describe('Tc/Tw/Tz survive q/Q like the rest of the graphics state', () => {
     expect(result.finalState.charSpacing).toBe(0);
     expect(result.finalState.wordSpacing).toBe(0);
     expect(result.finalState.horizontalScale).toBe(1);
+  });
+});
+
+/**
+ * OCR-04 — clearing a broken pre-existing text layer before writing a fresh
+ * one from a re-OCR pass.
+ */
+describe('stripTextObjects', () => {
+  const strip = (source: string) => {
+    const statements = parseContentStream(tokenizeContentStream(enc(source)));
+    const result = stripTextObjects(statements);
+    return { ...result, text: new TextDecoder().decode(serializeStatements(result.filtered)) };
+  };
+
+  it('removes an invisible text object entirely, counting it', () => {
+    const result = strip('q 1 0 0 1 0 0 cm /Im0 Do Q\nBT 3 Tr /F1 12 Tf 10 700 Td (Hello) Tj ET\n');
+    expect(result.removed).toBe(1);
+    expect(result.text).not.toContain('BT');
+    expect(result.text).not.toContain('Tj');
+    // The image draw around it survives untouched.
+    expect(result.text).toContain('/Im0 Do');
+  });
+
+  it('removes a text object whose `Tr 3` was set before `BT`, scoped by q/Q', () => {
+    // The exact shape `textLayer.ts`'s own `drawInvisibleWords` emits: one
+    // `Tr` covering several words' worth of BT/ET blocks, not one per block.
+    const result = strip('q\n3 Tr\nBT /F1 12 Tf (Hello) Tj ET\nBT /F1 12 Tf (World) Tj ET\nQ\n');
+    expect(result.removed).toBe(2);
+    expect(result.text).not.toContain('Tj');
+  });
+
+  it('does not misjudge a later block after an unsafe span, defaulting to unknown', () => {
+    // The first BT block is left alone (its internal `q`/`Q` is foreign to a
+    // text object). Inside that untouched span, `3 Tr` is set and then
+    // restored back by `Q` — the real, rendered state after this block is
+    // *visible*. A flat textual scan that just remembers "the last Tr value
+    // seen" would wrongly conclude "invisible" (it saw the `3` and never
+    // un-saw it), and strip the second block's real, visible "(b)" on that
+    // wrong belief. Marking the state unknown after any unsafe span is what
+    // prevents that.
+    const result = strip('BT (a) Tj q 3 Tr Q ET\nBT (b) Tj ET\n');
+    expect(result.removed).toBe(0);
+    expect(result.text).toContain('(a)');
+    expect(result.text).toContain('(b)');
+  });
+
+  it('removes multiple invisible text objects and counts each', () => {
+    const result = strip('BT 3 Tr (a) Tj ET\nBT 3 Tr (b) Tj ET\nBT 3 Tr (c) Tj ET\n');
+    expect(result.removed).toBe(3);
+    expect(result.text.trim()).toBe('');
+  });
+
+  it('never removes visible text drawn with a fill colour', () => {
+    // `0 0 0 rg` is exactly the shape pdf-lib's own `drawText` emits for
+    // ordinary, user-visible black text — the regression this test guards
+    // against: an earlier version of the "every operator must be a text
+    // operator" guard alone happened to reject this block too (because `rg`
+    // is not a text operator), which looked safe but was safe for the wrong
+    // reason. The real, load-bearing property is the missing `3 Tr`: no
+    // mainstream OCR layer omits it, and no visible text needs one.
+    const result = strip('BT 0 0 0 rg /F1 12 Tf 10 700 Td (Hello) Tj ET\n');
+    expect(result.removed).toBe(0);
+    expect(result.text).toContain('Tj');
+  });
+
+  it('leaves visible text alone even when every operator inside is otherwise a text operator', () => {
+    // Isolates the invisible-mode requirement from the "no foreign operator"
+    // guard: this block is built entirely from operators in the safe set, so
+    // only the missing `3 Tr` protects it.
+    const withoutTr = strip('BT /F1 12 Tf (Hello) Tj ET\n');
+    const explicitlyVisible = strip('BT 0 Tr /F1 12 Tf (Hello) Tj ET\n');
+    expect(withoutTr.removed).toBe(0);
+    expect(withoutTr.text).toContain('Tj');
+    expect(explicitlyVisible.removed).toBe(0);
+    expect(explicitlyVisible.text).toContain('Tj');
+  });
+
+  it('leaves an invisible text object alone if it contains a non-text operator', () => {
+    // Not a realistic producer, but if one exists this must not risk an
+    // unbalanced q/Q by deleting only half of a pair.
+    const result = strip('BT 3 Tr (a) Tj q 1 0 0 1 0 0 cm Q ET\n');
+    expect(result.removed).toBe(0);
+    expect(result.text).toContain('BT');
+    expect(result.text).toContain('ET');
+  });
+
+  it('leaves an unterminated BT alone rather than guessing where it ends', () => {
+    const result = strip('BT 3 Tr /F1 12 Tf (Hello) Tj\n');
+    expect(result.removed).toBe(0);
+    expect(result.text).toContain('BT');
+  });
+
+  it('leaves a stream with no text objects untouched', () => {
+    const result = strip('q 1 0 0 1 0 0 cm /Im0 Do Q\n');
+    expect(result.removed).toBe(0);
+    expect(result.text).toContain('/Im0 Do');
   });
 });

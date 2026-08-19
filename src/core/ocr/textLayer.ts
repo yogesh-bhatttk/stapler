@@ -19,12 +19,15 @@
  * loaded outside a worker.
  */
 import {
+  PDFArray,
   PDFDocument,
   PDFFont,
   PDFHexString,
   PDFName,
   PDFOperator,
   PDFPage,
+  PDFRef,
+  PDFStream,
   beginText,
   endText,
   popGraphicsState,
@@ -39,6 +42,13 @@ import {
 } from 'pdf-lib';
 import { Encodings } from '@pdf-lib/standard-fonts';
 import { embedDevanagariFont } from './devanagariFont';
+import {
+  decodeStream,
+  parseContentStream,
+  serializeStatements,
+  stripTextObjects,
+  tokenizeContentStream
+} from '../pdf/interpreter';
 import type { OcrLayerReport, OcrPageLayer } from './types';
 
 /** The page box pdf.js rasterised, in PDF points. Mirrors pdf.js's `page.view`. */
@@ -252,6 +262,79 @@ export function drawInvisibleWords(
 }
 
 /**
+ * Removes any pre-existing text objects from `page`'s content stream(s) before
+ * a fresh OCR pass writes its own — e.g. the broken invisible layer some
+ * scanning apps embed (a corrupt glyph→Unicode mapping that turns Devanagari
+ * into mojibake on extraction, while looking fine on screen), or a Stapler OCR
+ * layer from an earlier run. Without this, re-running OCR just stacks a second
+ * layer on top of the first, and a text extractor returns both, jumbled.
+ *
+ * Deliberately conservative: only a single `/Contents` stream or array of
+ * streams, each uncompressed or plain `FlateDecode`, is rewritten. Anything
+ * else (an unrecognised filter, a non-stream entry) leaves the page exactly as
+ * it was — falling back to today's append-only behaviour — rather than risk
+ * misreading a shape this function was not built to handle. Returns `true`
+ * only if a text object was actually found and removed.
+ */
+async function stripExistingText(doc: PDFDocument, page: PDFPage): Promise<boolean> {
+  const contents = page.node.Contents();
+  if (!contents) return false;
+
+  const refs: (PDFRef | PDFStream)[] =
+    contents instanceof PDFArray
+      ? (Array.from({ length: contents.size() }, (_, i) => contents.get(i)) as (
+          PDFRef | PDFStream
+        )[])
+      : [contents as PDFRef | PDFStream];
+
+  const chunks: Uint8Array[] = [];
+  let removedAny = false;
+
+  for (const ref of refs) {
+    const resolved = ref instanceof PDFStream ? ref : doc.context.lookup(ref as PDFRef);
+    if (!(resolved instanceof PDFStream)) return false;
+
+    const filter = resolved.dict.get(PDFName.of('Filter'));
+    const isFlate = filter === PDFName.of('FlateDecode');
+    if (filter !== undefined && !isFlate) return false;
+
+    let decoded: Uint8Array;
+    try {
+      decoded = isFlate ? await decodeStream(resolved.getContents()) : resolved.getContents();
+    } catch {
+      return false;
+    }
+
+    let statements;
+    try {
+      statements = parseContentStream(tokenizeContentStream(decoded));
+    } catch {
+      return false;
+    }
+
+    const { filtered, removed } = stripTextObjects(statements);
+    if (removed > 0) removedAny = true;
+    chunks.push(serializeStatements(filtered));
+  }
+
+  if (!removedAny) return false;
+
+  let totalLength = 0;
+  for (const chunk of chunks) totalLength += chunk.length + 1;
+  const merged = new Uint8Array(totalLength);
+  let pos = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, pos);
+    pos += chunk.length;
+    merged[pos++] = 0x0a;
+  }
+
+  const newStream = doc.context.flateStream(merged.slice(0, pos));
+  page.node.set(PDFName.of('Contents'), doc.context.register(newStream));
+  return true;
+}
+
+/**
  * Adds an invisible text layer to `doc` in place, one page at a time.
  *
  * Helvetica is embedded once for the whole document, unsubsetted, because the
@@ -267,7 +350,8 @@ export async function addOcrTextLayerToDocument(
   layers: OcrPageLayer[]
 ): Promise<OcrLayerReport> {
   const withWords = layers.filter(layer => layer.words.length > 0);
-  if (withWords.length === 0) return { wordsAdded: 0, wordsSkipped: 0, pagesTouched: 0 };
+  if (withWords.length === 0)
+    return { wordsAdded: 0, wordsSkipped: 0, pagesTouched: 0, pagesReplaced: 0 };
 
   const helvetica = await doc.embedStandardFont(StandardFonts.Helvetica);
   const needsFallback = withWords.some(layer =>
@@ -283,10 +367,12 @@ export async function addOcrTextLayerToDocument(
   let wordsAdded = 0;
   let wordsSkipped = 0;
   let pagesTouched = 0;
+  let pagesReplaced = 0;
 
   for (const layer of withWords) {
     const page = pages[layer.pageIndex];
     if (!page) continue;
+    if (await stripExistingText(doc, page)) pagesReplaced++;
     const candidates: FontChoice[] = [
       {
         font: helvetica,
@@ -307,5 +393,5 @@ export async function addOcrTextLayerToDocument(
     if (added > 0) pagesTouched++;
   }
 
-  return { wordsAdded, wordsSkipped, pagesTouched };
+  return { wordsAdded, wordsSkipped, pagesTouched, pagesReplaced };
 }

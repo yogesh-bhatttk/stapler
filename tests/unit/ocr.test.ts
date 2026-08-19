@@ -155,7 +155,8 @@ describe('ocr/runOcr — the confirmation gate', () => {
       bytes: new Uint8Array([9]),
       wordsAdded: 0,
       wordsSkipped: 0,
-      pagesTouched: 0
+      pagesTouched: 0,
+      pagesReplaced: 0
     });
 
     const result = await runOcr(new Uint8Array([1]), 1);
@@ -221,7 +222,8 @@ describe('ocr/runOcr — combined-language download', () => {
       bytes: new Uint8Array([9]),
       wordsAdded: 0,
       wordsSkipped: 0,
-      pagesTouched: 0
+      pagesTouched: 0,
+      pagesReplaced: 0
     });
   };
 
@@ -419,7 +421,7 @@ describe('ocr/textLayer — writing into a document', () => {
       }
     ]);
 
-    expect(report).toEqual({ wordsAdded: 2, wordsSkipped: 0, pagesTouched: 1 });
+    expect(report).toEqual({ wordsAdded: 2, wordsSkipped: 0, pagesTouched: 1, pagesReplaced: 0 });
 
     const after = pageStreamBytes(doc, 0);
     // Four streams: pdf-lib brackets the page's existing content in its own
@@ -584,7 +586,57 @@ describe('ocr/textLayer — writing into a document', () => {
       { pageIndex: 0, bitmapWidth: 200, bitmapHeight: 400, dpi: 72, words: [] }
     ]);
 
-    expect(report).toEqual({ wordsAdded: 0, wordsSkipped: 0, pagesTouched: 0 });
+    expect(report).toEqual({ wordsAdded: 0, wordsSkipped: 0, pagesTouched: 0, pagesReplaced: 0 });
     expect(pageStreamBytes(doc, 0).length).toBe(before.length);
+  });
+
+  /**
+   * The actual bug report this feature exists for: a scanning app's own OCR
+   * pass left a broken, garbled invisible text layer over a scan. Re-running
+   * Stapler's OCR on that page must *replace* it, not stack a second layer
+   * that a text extractor then returns mixed in with the first.
+   */
+  it('replaces a pre-existing invisible text layer rather than stacking a second one', async () => {
+    const { addOcrTextLayerToDocument } = await import('../../src/core/ocr/textLayer');
+
+    // First pass: simulates the broken layer already in the file — same
+    // shape a real scanning app's OCR would have produced.
+    const doc = await fixtureWithVisibleText();
+    const firstPass = await addOcrTextLayerToDocument(doc, [
+      {
+        pageIndex: 0,
+        bitmapWidth: 200,
+        bitmapHeight: 400,
+        dpi: 72,
+        words: [{ text: 'gArB1sh', bbox: { x0: 40, y0: 10, x1: 90, y1: 22 }, confidence: 40 }]
+      }
+    ]);
+    expect(firstPass.wordsAdded).toBe(1);
+    expect(firstPass.pagesReplaced).toBe(0); // Nothing to replace yet.
+    const reloaded = await PDFDocument.load(await doc.save());
+
+    // Second pass: Stapler's own re-OCR, with the corrected word.
+    const secondPass = await addOcrTextLayerToDocument(reloaded, [
+      {
+        pageIndex: 0,
+        bitmapWidth: 200,
+        bitmapHeight: 400,
+        dpi: 72,
+        words: [{ text: 'Ottoline', bbox: { x0: 40, y0: 10, x1: 90, y1: 22 }, confidence: 96 }]
+      }
+    ]);
+    expect(secondPass.wordsAdded).toBe(1);
+    expect(secondPass.pagesReplaced).toBe(1);
+
+    const bytes = await reloaded.save();
+    const lib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+    const pdf = await lib.getDocument({ data: bytes.slice(), useSystemFonts: false }).promise;
+    const content = await (await pdf.getPage(1)).getTextContent();
+    const text = content.items.map(item => ('str' in item ? item.str : '')).join(' ');
+
+    expect(text).not.toContain('gArB1sh');
+    expect(text).toContain('Ottoline');
+    // The page's own visible content is untouched by either pass.
+    expect(text).toContain('VISIBLE');
   });
 });

@@ -62,4 +62,10 @@ export interface OcrLayerReport {
    */
   wordsSkipped: number;
   pagesTouched: number;
+  /**
+   * Pages where a pre-existing text layer (a scanning app's own broken OCR, or
+   * an earlier Stapler OCR run) was removed before the new one was written, so
+   * the two never stack. See `stripExistingText` in `textLayer.ts`.
+   */
+  pagesReplaced: number;
 }

@@ -73,6 +73,13 @@ export function OcrPanel() {
               '.' +
               (report.wordsSkipped > 0
                 ? ' ' + report.wordsSkipped + ' could not be encoded and were left out.'
+                : '') +
+              (report.pagesReplaced > 0
+                ? ' Replaced an existing, broken text layer on ' +
+                  report.pagesReplaced +
+                  ' page' +
+                  (report.pagesReplaced === 1 ? '' : 's') +
+                  '.'
                 : '')}
         </p>
       )}
