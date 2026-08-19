@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PDFArray, PDFDocument, PDFName, PDFStream, StandardFonts } from 'pdf-lib';
 
 /**
@@ -81,11 +81,13 @@ vi.mock('../../src/core/notify', () => ({
  * model. If none of these is called, nothing was requested.
  */
 const renderPin = { lease: vi.fn(), release: vi.fn() };
+const cvLease = vi.fn();
 const ocrLease = vi.fn();
 const processLease = vi.fn();
 
 vi.mock('../../src/core/workers', () => ({
   renderWorker: { pin: () => renderPin },
+  cvWorker: { lease: (...args: unknown[]) => cvLease(...args) },
   ocrWorker: { lease: (...args: unknown[]) => ocrLease(...args) },
   processWorker: { lease: (...args: unknown[]) => processLease(...args) }
 }));
@@ -113,6 +115,7 @@ describe('ocr/runOcr — the confirmation gate', () => {
     requestOcrConsent.mockReset();
     renderPin.lease.mockReset();
     renderPin.release.mockReset();
+    cvLease.mockReset();
     ocrLease.mockReset();
     processLease.mockReset();
   });
@@ -144,6 +147,9 @@ describe('ocr/runOcr — the confirmation gate', () => {
         closeDocument: async () => {}
       })
     );
+    cvLease.mockImplementation(async (fn: (api: unknown) => unknown) =>
+      fn({ cleanupForOcr: async (bitmap: unknown) => bitmap })
+    );
     ocrLease.mockResolvedValue({ words: [], text: '' });
     processLease.mockResolvedValue({
       bytes: new Uint8Array([9]),
@@ -174,12 +180,153 @@ describe('ocr/runOcr — the confirmation gate', () => {
 
   it('names the model, its size, the host, and the one-time nature in the dialog', async () => {
     const { modelConsentCopy } = await import('../../src/core/ocr/runOcr');
-    const { body } = modelConsentCopy('eng');
+    const { body } = modelConsentCopy(['eng']);
     expect(body).toContain('cdn.jsdelivr.net');
     expect(body).toMatch(/\d+ MB/);
     expect(body).toMatch(/once/i);
     expect(body).toMatch(/no network/i);
     expect(body).toMatch(/never uploaded/i);
+  });
+
+  it('discloses only the languages actually missing, combined into one size', async () => {
+    const { modelConsentCopy } = await import('../../src/core/ocr/runOcr');
+    const { title, body } = modelConsentCopy(['eng', 'hin']);
+    expect(title).toContain('English + Hindi');
+    // 12 MB (eng) + 2 MB (hin), from the OCR_LANGUAGES catalogue.
+    expect(body).toMatch(/14 MB/);
+  });
+});
+
+/*
+ * A combined `eng+hin` run cannot lean on tesseract's own loader — it fetches
+ * every plain-string language in one run from the *same* `langPath`, and
+ * `eng`/`hin` each live at a different `resolveModelBase`. So `runOcr` fetches
+ * each missing component itself; these tests are against that fetch, not
+ * against the worker (which is mocked exactly as above).
+ */
+describe('ocr/runOcr — combined-language download', () => {
+  const setUpWorkers = () => {
+    renderPin.lease.mockImplementation(async (fn: (api: unknown) => unknown) =>
+      fn({
+        loadDocument: async () => ({ handle: 'h' }),
+        renderPage: async () => ({ width: 10, height: 10, close() {} }),
+        closeDocument: async () => {}
+      })
+    );
+    cvLease.mockImplementation(async (fn: (api: unknown) => unknown) =>
+      fn({ cleanupForOcr: async (bitmap: unknown) => bitmap })
+    );
+    ocrLease.mockResolvedValue({ words: [], text: '' });
+    processLease.mockResolvedValue({
+      bytes: new Uint8Array([9]),
+      wordsAdded: 0,
+      wordsSkipped: 0,
+      pagesTouched: 0
+    });
+  };
+
+  beforeEach(async () => {
+    settings.clear();
+    requestOcrConsent.mockReset();
+    renderPin.lease.mockReset();
+    renderPin.release.mockReset();
+    cvLease.mockReset();
+    ocrLease.mockReset();
+    processLease.mockReset();
+    // `__memoryFallback` is a module-level OPFS stand-in: without clearing it,
+    // a language "downloaded" by an earlier test in this file stays available
+    // to every test after it.
+    const { __memoryFallback } = await import('../../src/core/opfs');
+    __memoryFallback.clear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('fetches every missing component itself and caches each before recognising', async () => {
+    requestOcrConsent.mockResolvedValue('download');
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    setUpWorkers();
+
+    const { runOcr } = await import('../../src/core/ocr/runOcr');
+    const { hasModelBytes } = await import('../../src/core/opfs');
+
+    const result = await runOcr(new Uint8Array([1]), 1, { lang: 'eng+hin' });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(await hasModelBytes('eng')).toBe(true);
+    expect(await hasModelBytes('hin')).toBe(true);
+    expect(result?.downloadedModel).toBe(true);
+    expect(settings.get('ocr.modelDownloaded.eng')).toBe(true);
+    expect(settings.get('ocr.modelDownloaded.hin')).toBe(true);
+  });
+
+  it('only fetches and discloses the component not already downloaded', async () => {
+    settings.set('ocr.modelDownloaded.eng', true);
+    requestOcrConsent.mockResolvedValue('download');
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([1]).buffer
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    setUpWorkers();
+
+    const { runOcr } = await import('../../src/core/ocr/runOcr');
+
+    await runOcr(new Uint8Array([1]), 1, { lang: 'eng+hin' });
+
+    expect(requestOcrConsent).toHaveBeenCalledWith(['hin'], expect.any(String), expect.any(String));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks for nothing and fetches nothing once every component is cached', async () => {
+    settings.set('ocr.modelDownloaded.eng', true);
+    settings.set('ocr.modelDownloaded.hin', true);
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    setUpWorkers();
+
+    const { runOcr } = await import('../../src/core/ocr/runOcr');
+
+    const result = await runOcr(new Uint8Array([1]), 1, { lang: 'eng+hin' });
+
+    expect(requestOcrConsent).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result?.downloadedModel).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * devanagariFont.ts — the vendored font that makes Hindi words encodable
+ * ------------------------------------------------------------------ */
+
+describe('ocr/devanagariFont — the vendored subset font', () => {
+  it('encodes real Devanagari text via fontkit, once registered on a document', async () => {
+    const fontkitModule = await import('fontkit');
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+
+    const fontPath = path.resolve(__dirname, '../../src/core/ocr/assets/NotoSansDevanagari.ttf');
+    const bytes = fs.readFileSync(fontPath);
+
+    const doc = await PDFDocument.create();
+    doc.registerFontkit((fontkitModule as { default?: unknown }).default ?? fontkitModule);
+    const font = await doc.embedFont(bytes, { subset: true });
+
+    // "Secretariat" — the word this feature exists for (see the Adobe Scan
+    // fixture that prompted it), not an arbitrary test string.
+    const text = 'सचिवालय';
+    expect(() => font.encodeText(text)).not.toThrow();
+    expect(font.widthOfTextAtSize(text, 12)).toBeGreaterThan(0);
+
+    // The subset is Basic Latin + Devanagari only — this proves the range was
+    // actually kept, not just that *some* glyph exists for U+0000.
+    expect(() => font.encodeText('Ashwani Kumar Verma 2026')).not.toThrow();
   });
 });
 
@@ -293,7 +440,12 @@ describe('ocr/textLayer — writing into a document', () => {
     expect(appended).toContain('Tj');
   });
 
-  it('skips a word the standard font cannot encode instead of mangling it', async () => {
+  it('skips a word no available font can encode instead of mangling it', async () => {
+    // No fallback font asset is reachable in this test environment (`fetch`
+    // against the bundled font's `file://` URL is unsupported under Node — see
+    // the mocked-fetch test below for the case where it is reachable), so this
+    // exercises the "no fallback available" path: CJK is outside both WinAnsi
+    // and the Devanagari fallback's range, so it is skipped either way.
     const { addOcrTextLayerToDocument } = await import('../../src/core/ocr/textLayer');
     const doc = await fixtureWithVisibleText();
 
@@ -305,7 +457,7 @@ describe('ocr/textLayer — writing into a document', () => {
         dpi: 72,
         words: [
           { text: 'ok', bbox: { x0: 10, y0: 10, x1: 30, y1: 22 }, confidence: 90 },
-          // CJK is outside WinAnsi; Helvetica has no glyph and pdf-lib throws.
+          // CJK is outside WinAnsi, and no fallback is available here.
           { text: '文字', bbox: { x0: 40, y0: 10, x1: 60, y1: 22 }, confidence: 90 },
           // A degenerate box is nonsense geometry, not text.
           { text: 'zero', bbox: { x0: 10, y0: 30, x1: 10, y1: 30 }, confidence: 90 }
@@ -313,8 +465,60 @@ describe('ocr/textLayer — writing into a document', () => {
       }
     ]);
 
+    expect(report.wordsAdded).toBe(1);
+    expect(report.wordsSkipped).toBe(2);
+  });
+
+  /**
+   * The bug this feature exists to fix: before the Devanagari fallback font,
+   * every Hindi word here would have hit the same Helvetica-can't-encode-it
+   * path as the CJK word above and been silently dropped from the text layer —
+   * recognised by Tesseract, then discarded before ever reaching the export.
+   */
+  it('keeps a Devanagari word instead of skipping it, via the fallback font', async () => {
+    // `embedDevanagariFont` fetches the bundled font by URL — real in a browser
+    // (a same-origin asset), unsupported for a `file://` URL under Node. This
+    // stubs `fetch` to read the actual vendored file straight off disk, so the
+    // test still exercises the real bytes and the real fontkit/pdf-lib embed,
+    // just without relying on Node's `fetch` supporting `file://`.
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const fontPath = path.resolve(__dirname, '../../src/core/ocr/assets/NotoSansDevanagari.ttf');
+    const fontBytes = fs.readFileSync(fontPath);
+    vi.stubGlobal('fetch', async (url: string | URL) => {
+      if (String(url).endsWith('NotoSansDevanagari.ttf')) {
+        return { ok: true, arrayBuffer: async () => fontBytes.buffer } as Response;
+      }
+      throw new Error(`Unexpected fetch in test: ${url}`);
+    });
+
+    const { addOcrTextLayerToDocument } = await import('../../src/core/ocr/textLayer');
+    const doc = await fixtureWithVisibleText();
+
+    const report = await addOcrTextLayerToDocument(doc, [
+      {
+        pageIndex: 0,
+        bitmapWidth: 200,
+        bitmapHeight: 400,
+        dpi: 72,
+        words: [
+          { text: 'ok', bbox: { x0: 10, y0: 10, x1: 30, y1: 22 }, confidence: 90 },
+          { text: 'सचिवालय', bbox: { x0: 40, y0: 10, x1: 90, y1: 22 }, confidence: 90 }
+        ]
+      }
+    ]);
+
     expect(report.wordsAdded).toBe(2);
-    expect(report.wordsSkipped).toBe(1);
+    expect(report.wordsSkipped).toBe(0);
+
+    const bytes = await doc.save();
+    const lib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+    const pdf = await lib.getDocument({ data: bytes.slice(), useSystemFonts: false }).promise;
+    const content = await (await pdf.getPage(1)).getTextContent();
+    const text = content.items.map(item => ('str' in item ? item.str : '')).join(' ');
+    expect(text).toContain('सचिवालय');
+
+    vi.unstubAllGlobals();
   });
 
   /**

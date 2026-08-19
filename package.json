@@ -42,8 +42,10 @@
   },
   "dependencies": {
     "@preact/signals": "^2.10.1",
+    "@pdf-lib/standard-fonts": "^1.0.0",
     "comlink": "^4.4.2",
     "fflate": "^0.8.3",
+    "fontkit": "^2.0.4",
     "heic2any": "^0.0.4",
     "idb": "^8.0.3",
     "lucide-preact": "^1.28.0",

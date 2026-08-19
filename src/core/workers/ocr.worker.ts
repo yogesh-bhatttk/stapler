@@ -29,6 +29,7 @@
 import * as Comlink from 'comlink';
 import { checkpoint, type JobHandle } from './protocol';
 import { cancelled as cancelledError, internal } from '../errors';
+import { splitLangCodes } from '../ocr/model';
 import type { OcrPageResult, OcrWord } from '../ocr/types';
 // Type-only, so it is erased: the runtime import stays dynamic (see the header).
 import type * as Tesseract from 'tesseract.js';
@@ -45,12 +46,18 @@ const WORKER_PATH = `${ASSETS}worker.min.js`;
 const CORE_PATH = `${ASSETS}tesseract-core-simd-lstm.wasm.js`;
 
 export interface RecognizeOptions {
-  /** tesseract language code, e.g. `eng`. */
+  /**
+   * tesseract language code, e.g. `eng`, or several joined with `+` (e.g.
+   * `eng+hin`) for a single mixed-script recognition pass.
+   */
   lang: string;
   /**
    * Directory the traineddata is resolved against — `langPath` in tesseract's
    * terms, which appends `<lang>.traineddata.gz` itself. Supplied by the caller so
    * the *only* place a network destination is decided is `core/ocr/model.ts`.
+   * Only meaningful for a single-language `lang`: a multi-language `lang`
+   * always supplies every component's bytes explicitly (see `recognizePage`
+   * below), because each language's package lives at its own base URL.
    */
   modelBase: string;
 }
@@ -160,8 +167,29 @@ const api: OCRJob = {
 
     try {
       const { readModelBytes } = await import('../opfs');
-      const modelBytes = await readModelBytes(options.lang);
-      const langsParam = modelBytes ? [{ code: options.lang, data: modelBytes }] : options.lang;
+      const codes = splitLangCodes(options.lang);
+
+      let langsParam: string | Array<{ code: string; data: Uint8Array }>;
+      if (codes.length === 1) {
+        const modelBytes = await readModelBytes(codes[0]);
+        langsParam = modelBytes ? [{ code: codes[0], data: modelBytes }] : options.lang;
+      } else {
+        // A combined run cannot fall back to a plain-string language: tesseract
+        // fetches every plain-string entry in a run from the *same* `langPath`,
+        // and each language here lives at its own base URL. `runOcr` guarantees
+        // every component's bytes are in OPFS before this call is ever made.
+        const withBytes = await Promise.all(
+          codes.map(async code => ({ code, data: await readModelBytes(code) }))
+        );
+        const notCached = withBytes.find(entry => !entry.data);
+        if (notCached) {
+          throw internal(
+            `No cached OCR model for "${notCached.code}" — a combined run must have every ` +
+              `language's model fetched before recognition starts.`
+          );
+        }
+        langsParam = withBytes as Array<{ code: string; data: Uint8Array }>;
+      }
 
       engine = await createWorker(langsParam, OEM.LSTM_ONLY, {
         workerPath: WORKER_PATH,

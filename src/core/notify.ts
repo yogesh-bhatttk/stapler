@@ -126,7 +126,13 @@ export function confirmAction(options: {
  * ------------------------------------------------------------------ */
 
 export interface OcrConsentRequest {
-  lang: string;
+  /**
+   * The language codes not yet downloaded. Length 1 for a solo run, or for a
+   * combined run where every other component is already cached; length 2+ only
+   * for a combined run that needs more than one model. "Upload offline model"
+   * is only offered at length 1 — one file cannot cover two languages.
+   */
+  langs: string[];
   title: string;
   body: string;
   resolve: (result: 'download' | 'upload' | 'cancel') => void;
@@ -134,10 +140,14 @@ export interface OcrConsentRequest {
 
 export const ocrConsentRequest = signal<OcrConsentRequest | null>(null);
 
-export function requestOcrConsent(lang: string, title: string, body: string): Promise<'download' | 'upload' | 'cancel'> {
+export function requestOcrConsent(
+  langs: string[],
+  title: string,
+  body: string
+): Promise<'download' | 'upload' | 'cancel'> {
   return new Promise(resolve => {
     ocrConsentRequest.value = {
-      lang,
+      langs,
       title,
       body,
       resolve: result => {

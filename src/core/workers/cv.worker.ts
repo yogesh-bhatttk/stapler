@@ -20,6 +20,7 @@ import {
   type Preset
 } from '../cv/enhance';
 import { checkpoint, type JobHandle } from './protocol';
+import { internal } from '../errors';
 
 export interface ScanSettings {
   preset: Preset;
@@ -37,6 +38,16 @@ export interface CVJob {
   detectCorners(imageData: ImageData): CornerDetection;
   processScan(imageData: ImageData, settings: ScanSettings, job?: JobHandle): Promise<ImageData>;
   trimBox(imageData: ImageData): { x: number; y: number; width: number; height: number } | null;
+  cleanupForOcr(bitmap: ImageBitmap, job?: JobHandle): Promise<ImageBitmap>;
+}
+
+function bitmapToImageData(bitmap: ImageBitmap): ImageData {
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw internal('Could not create a canvas to clean up the scan for OCR.');
+  ctx.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  return ctx.getImageData(0, 0, bitmap.width, bitmap.height);
 }
 
 const api: CVJob = {
@@ -135,6 +146,43 @@ const api: CVJob = {
 
     await checkpoint(job, 1, 'Done');
     return Comlink.transfer(current, [current.data.buffer]);
+  },
+
+  /**
+   * OCR-04 — cleans up a phone-camera scan before recognition, without
+   * changing the bitmap's dimensions or introducing any rotation.
+   *
+   * That restriction is deliberate, not an oversight: `textLayer.ts` places
+   * each recognised word by mapping its bitmap pixel coordinates back to a
+   * page point using a plain DPI scale and the page's own `/Rotate` (one of
+   * four fixed angles). A perspective dewarp or a skew-correcting rotate — the
+   * other half of `processScan`'s pipeline — moves pixels to different
+   * coordinates and would need its own inverse transform fed back through
+   * `OcrPageLayer` to keep every word's invisible box over the ink it was
+   * recognised from; that is future work (docs/TICKETS.md OCR-04's known
+   * limitation), not something to fake here. Adaptive thresholding and
+   * despeckling recolour pixels in place — same grid, same size — so they
+   * carry no such risk while still doing most of the work a "fucked up" phone
+   * photo needs: cancelling the uneven lighting/shadow gradient a flash or
+   * angled light leaves behind, and removing the speckle noise a compressed
+   * phone JPEG accumulates. Same parameters as `processScan`'s Auto preset
+   * (SCN-02) — the one already tuned to keep faint strokes legible rather than
+   * thresholding them away.
+   */
+  async cleanupForOcr(bitmap, job) {
+    await checkpoint(job, 0, 'Preparing the scan');
+    let current = bitmapToImageData(bitmap);
+
+    await checkpoint(job, 0.3, 'Correcting for lighting and shadow');
+    current = applyAdaptiveThreshold(current, 25, 10);
+
+    await checkpoint(job, 0.7, 'Removing noise');
+    current = applyDespeckle(current);
+
+    await checkpoint(job, 0.9, 'Finalising');
+    const cleaned = await createImageBitmap(current);
+    await checkpoint(job, 1, 'Done');
+    return Comlink.transfer(cleaned, [cleaned]);
   }
 };
 

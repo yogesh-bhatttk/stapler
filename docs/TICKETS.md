@@ -804,6 +804,72 @@ mandatory editable preview grid before any download. Clearly labelled beta in th
 - **AC:** Bank-statement fixture extracts with correct row/column alignment; preview cannot
   be bypassed.
 
+### OCR-04 · Hindi + mixed-language OCR with a non-Latin text layer — `M` `P2`
+
+**Status: Done** — `hin` and `eng+hin` added to `OCR_LANGUAGES`
+(`src/core/ocr/model.ts`); a combined run pre-fetches each missing component's
+model into OPFS itself (`fetchModelBytes`), since each language lives at its
+own `resolveModelBase` and tesseract's own loader can only serve one shared
+path per run. `ocr.worker.ts` hands tesseract every component's bytes
+explicitly for a combined run. A vendored, OFL-licensed Devanagari font
+(`src/core/ocr/assets/NotoSansDevanagari.ttf`, subset to Basic Latin +
+Devanagari, ~180 KB) is embedded via `fontkit` as a fallback whenever a word
+Helvetica cannot show appears, so a Hindi or Hinglish word is no longer
+silently dropped from the invisible text layer.
+
+- **The bug this closes, not just the gap:** `@cantoo/pdf-lib`'s standard-font
+  encoder does not throw on a codepoint outside WinAnsi the way upstream
+  pdf-lib does — it silently substitutes `?` and reports success. The
+  pre-existing `encodable()` check in `textLayer.ts` trusted `encodeText` to
+  throw as its capability test, so it never actually detected an unencodable
+  word; any non-Latin OCR text (not just Hindi) was being written into the
+  text layer as literal question marks while being counted as *added*, not
+  skipped. Fixed by checking `Encodings.WinAnsi.canEncodeUnicodeCodePoint`
+  directly instead of relying on a throw (`winAnsiEncodable` in
+  `textLayer.ts`).
+- **A second, subtler bug on the way to fixing the first:** encoding a whole
+  word through a shaping-aware custom font (`fontkit`'s `layout`, which
+  `CustomFontEmbedder.encodeText` calls) reorders combining marks for correct
+  *visual* placement — e.g. a Devanagari vowel sign is stored after its
+  consonant in Unicode but drawn before it. This text is never painted, only
+  indexed, so that reordering corrupted the extracted string ("सचिवालय" came
+  back as "सिचवालय"). Fixed by encoding one character at a time
+  (`encodeInLogicalOrder`), which gives the shaper nothing to reorder against.
+- **Evidence:** `pnpm test` — 56 test files, 623 tests, 0 failures, including a
+  fixture round-tripping a real Devanagari word through
+  `addOcrTextLayerToDocument` → `save()` → pdf.js `getTextContent()` and
+  asserting the exact string comes back. `pnpm run check:type`,
+  `check:lint`, `check:format`, `check:invariants`, `check:tokens` all pass.
+  `BUILD_TARGET=ext vite build` succeeds; the font asset is emitted as an
+  ordinary bundled file (`dist/ext/assets/NotoSansDevanagari-*.ttf`), not
+  fetched from a remote host.
+- **Requirements:** Hindi selectable as its own OCR language; a combined
+  English+Hindi run recognises mixed-script ("Hinglish") pages in one pass;
+  recognised Devanagari text survives into the exported PDF's searchable text
+  layer.
+- **AC:** `hin` and `eng+hin` appear in the language picker. A combined run
+  discloses only the language(s) not yet downloaded, in one consent dialog,
+  and cannot re-fetch a language already cached. A page containing Devanagari
+  text produces an exported PDF whose text layer contains that exact text
+  when re-extracted — not skipped, not garbled into `?`, not reordered.
+- **Robustness for a phone-camera scan:** every OCR run now passes each
+  rasterised page through `cv.worker.ts`'s new `cleanupForOcr` — adaptive
+  thresholding (SCN-02's Auto-preset parameters) to cancel the lighting/shadow
+  gradient a flash or angled light leaves, plus despeckle for JPEG noise —
+  before handing the bitmap to tesseract. Reuses the exact, already-shipped
+  SCN-02 pipeline rather than new heuristics. Deliberately excludes deskew and
+  perspective dewarp: both move pixels to different coordinates, and
+  `textLayer.ts` places recognised words by mapping bitmap pixels back to page
+  points via a plain DPI scale plus the page's own `/Rotate` (one of four
+  fixed angles) — feeding it a dewarped or arbitrarily-rotated bitmap would
+  place every word's invisible box in the wrong spot without a general
+  affine/perspective inverse fed back through `OcrPageLayer`, which is a
+  separate, larger project.
+- **Known limitation, not addressed here:** the above — deskew/dewarp for OCR
+  specifically requires generalizing `textLayer.ts`'s placement math beyond
+  the four fixed rotations, and no low-confidence-word filtering exists yet.
+  Both are orthogonal to language support and the lighting/noise cleanup above.
+
 ---
 
 ## EPIC-12 · Accessibility, i18n, performance

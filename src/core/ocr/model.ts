@@ -12,6 +12,7 @@
  * out of its `REMOTE_HOSTS` check as well as its network-API check, so the host
  * can be named in full here instead of assembled to dodge the scanner.
  */
+import { internal } from '../errors';
 
 /** Host the model is fetched from. Named out loud in the confirmation dialog. */
 export const MODEL_HOST = 'cdn.jsdelivr.net';
@@ -46,18 +47,28 @@ export interface OcrLanguage {
 }
 
 /**
- * English only, on purpose. OCR-02 (folder index) is where more languages earn
- * their place; shipping a picker of thirty entries now would mean thirty
- * undisclosed download sizes and no fixture proving any of them.
+ * English and Hindi, each individually selectable, plus one composite entry for
+ * a mixed Hindi/English ("Hinglish") page — the common case for a document
+ * photographed on a phone rather than produced digitally. Composite codes are
+ * the component codes joined with `+`, which is also the separator tesseract.js
+ * itself uses for multi-language recognition, so `splitLangCodes` and the
+ * library's own convention never disagree.
  */
 export const OCR_LANGUAGES: readonly OcrLanguage[] = [
-  { code: 'eng', label: 'English', approxSizeMb: 12 }
+  { code: 'eng', label: 'English', approxSizeMb: 12 },
+  { code: 'hin', label: 'Hindi', approxSizeMb: 2 },
+  { code: 'eng+hin', label: 'English + Hindi (mixed)', approxSizeMb: 14 }
 ];
 
 export const DEFAULT_OCR_LANGUAGE = 'eng';
 
 export function findLanguage(code: string): OcrLanguage | undefined {
   return OCR_LANGUAGES.find(lang => lang.code === code);
+}
+
+/** `'eng+hin'` → `['eng', 'hin']`. A plain code splits to itself, one element. */
+export function splitLangCodes(code: string): string[] {
+  return code.split('+');
 }
 
 /**
@@ -95,4 +106,22 @@ export function resolveModelBase(lang: string): string {
  */
 export function resolveModelUrl(lang: string): string {
   return `${resolveModelBase(lang)}/${lang}.traineddata.gz`;
+}
+
+/**
+ * Fetches one language's gzipped model file directly. Used only for a combined
+ * run (e.g. `eng+hin`): each language's package lives at a different
+ * `resolveModelBase`, so tesseract.js's own loader — which fetches every
+ * plain-string language in a run from the *same* `langPath` — cannot serve two
+ * languages in one pass. Fetching here instead and caching the bytes in OPFS
+ * (`writeModelBytes`) lets the OCR worker hand tesseract ready data per language
+ * instead of a shared path. A solo-language run is unaffected: it still goes
+ * through tesseract's own fetch, exactly as OCR-01 shipped it.
+ */
+export async function fetchModelBytes(lang: string): Promise<Uint8Array> {
+  const response = await fetch(resolveModelUrl(lang));
+  if (!response.ok) {
+    throw internal(`Could not download the ${lang} OCR model (HTTP ${response.status}).`);
+  }
+  return new Uint8Array(await response.arrayBuffer());
 }

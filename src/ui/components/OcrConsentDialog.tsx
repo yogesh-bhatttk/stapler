@@ -13,6 +13,10 @@ export const OcrConsentDialog = forwardRef<HTMLDivElement, Record<string, never>
 
     if (!request) return null;
 
+    // One uploaded file can only cover one language, so the affordance is
+    // hidden for a combined run that still needs more than one model.
+    const allowUpload = request.langs.length === 1;
+
     const handleUploadClick = () => {
       fileInputRef.current?.click();
     };
@@ -32,7 +36,7 @@ export const OcrConsentDialog = forwardRef<HTMLDivElement, Record<string, never>
           bytes = gzipSync(bytes);
         }
 
-        await writeModelBytes(request.lang, bytes);
+        await writeModelBytes(request.langs[0], bytes);
         notify('success', 'Model uploaded', {
           detail: 'The offline language model was saved successfully.'
         });
@@ -51,14 +55,24 @@ export const OcrConsentDialog = forwardRef<HTMLDivElement, Record<string, never>
         onClose={() => request.resolve('cancel')}
         footer={
           <>
-            <Button variant="tertiary" onClick={() => request.resolve('cancel')} disabled={uploading}>
+            <Button
+              variant="tertiary"
+              onClick={() => request.resolve('cancel')}
+              disabled={uploading}
+            >
               Cancel
             </Button>
             <div style={{ flex: 1 }} />
-            <Button variant="secondary" onClick={handleUploadClick} disabled={uploading}>
-              {uploading ? 'Uploading...' : 'Upload offline model'}
-            </Button>
-            <Button variant="primary" onClick={() => request.resolve('download')} disabled={uploading}>
+            {allowUpload && (
+              <Button variant="secondary" onClick={handleUploadClick} disabled={uploading}>
+                {uploading ? 'Uploading...' : 'Upload offline model'}
+              </Button>
+            )}
+            <Button
+              variant="primary"
+              onClick={() => request.resolve('download')}
+              disabled={uploading}
+            >
               Download
             </Button>
           </>
