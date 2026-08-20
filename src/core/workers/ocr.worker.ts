@@ -200,6 +200,16 @@ const api: OCRJob = {
         workerPath: WORKER_PATH,
         corePath: CORE_PATH,
         langPath: modelBase,
+        // tesseract.js defaults to spawning its worker from a `blob:` URL that
+        // does nothing but `importScripts(workerPath)` — a level of
+        // indirection meant to dodge CORS on a cross-origin `workerPath` in a
+        // plain website. Inside a Chrome extension, a `blob:`-sourced worker
+        // is refused permission to `importScripts` an extension-hosted file
+        // at all ("Failed to execute 'importScripts' ... failed to load"),
+        // even though `WORKER_PATH` is same-origin and `script-src 'self'`
+        // already allows it directly. Disabling the wrapper makes tesseract
+        // spawn `new Worker(WORKER_PATH)` itself, with no blob in between.
+        workerBlobURL: false,
         logger: message => {
           // `progress` is 0..1 per phase, not across the whole run; the caller
           // scales it into the document-wide fraction it is reporting.
