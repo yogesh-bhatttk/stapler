@@ -42,12 +42,17 @@ export interface CVJob {
 }
 
 function bitmapToImageData(bitmap: ImageBitmap): ImageData {
-  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  // Captured before `close()`: an ImageBitmap's `width`/`height` reset to 0
+  // once closed, and reading them afterwards for `getImageData` throws
+  // "source width is 0" — which used to fail every OCR run, not just this
+  // cleanup step.
+  const { width, height } = bitmap;
+  const canvas = new OffscreenCanvas(width, height);
   const ctx = canvas.getContext('2d');
   if (!ctx) throw internal('Could not create a canvas to clean up the scan for OCR.');
   ctx.drawImage(bitmap, 0, 0);
   bitmap.close();
-  return ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+  return ctx.getImageData(0, 0, width, height);
 }
 
 const api: CVJob = {

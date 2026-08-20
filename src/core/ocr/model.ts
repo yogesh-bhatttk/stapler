@@ -12,7 +12,6 @@
  * out of its `REMOTE_HOSTS` check as well as its network-API check, so the host
  * can be named in full here instead of assembled to dodge the scanner.
  */
-import { internal } from '../errors';
 
 /** Host the model is fetched from. Named out loud in the confirmation dialog. */
 export const MODEL_HOST = 'cdn.jsdelivr.net';
@@ -106,22 +105,4 @@ export function resolveModelBase(lang: string): string {
  */
 export function resolveModelUrl(lang: string): string {
   return `${resolveModelBase(lang)}/${lang}.traineddata.gz`;
-}
-
-/**
- * Fetches one language's gzipped model file directly. Used only for a combined
- * run (e.g. `eng+hin`): each language's package lives at a different
- * `resolveModelBase`, so tesseract.js's own loader — which fetches every
- * plain-string language in a run from the *same* `langPath` — cannot serve two
- * languages in one pass. Fetching here instead and caching the bytes in OPFS
- * (`writeModelBytes`) lets the OCR worker hand tesseract ready data per language
- * instead of a shared path. A solo-language run is unaffected: it still goes
- * through tesseract's own fetch, exactly as OCR-01 shipped it.
- */
-export async function fetchModelBytes(lang: string): Promise<Uint8Array> {
-  const response = await fetch(resolveModelUrl(lang));
-  if (!response.ok) {
-    throw internal(`Could not download the ${lang} OCR model (HTTP ${response.status}).`);
-  }
-  return new Uint8Array(await response.arrayBuffer());
 }

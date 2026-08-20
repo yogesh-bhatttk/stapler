@@ -246,36 +246,37 @@ describe('ocr/runOcr — combined-language download', () => {
     vi.unstubAllGlobals();
   });
 
-  it('fetches every missing component itself and caches each before recognising', async () => {
+  // `runOcr` no longer fetches a combined run's models itself — see
+  // `ocr.worker.ts`'s comment on tesseract.js's `initialize()` bug: passing it
+  // an array of `{code, data}` objects (which is what pre-fetching into OPFS
+  // and handing over was building) makes it call `TessBaseAPI.Init` with the
+  // *bytes* stringified instead of the language codes, and recognition fails
+  // outright. A combined run now always reaches the worker as a plain string,
+  // and tesseract's own loader — left to compute each language's default URL
+  // itself — fetches and caches each one independently. These tests are
+  // against the *consent* gate only: what's disclosed and when, not who ends
+  // up doing the fetching.
+  it('discloses every missing component and proceeds once download is chosen', async () => {
     requestOcrConsent.mockResolvedValue('download');
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer
-    }));
-    vi.stubGlobal('fetch', fetchMock);
     setUpWorkers();
 
     const { runOcr } = await import('../../src/core/ocr/runOcr');
-    const { hasModelBytes } = await import('../../src/core/opfs');
 
     const result = await runOcr(new Uint8Array([1]), 1, { lang: 'eng+hin' });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(await hasModelBytes('eng')).toBe(true);
-    expect(await hasModelBytes('hin')).toBe(true);
+    expect(requestOcrConsent).toHaveBeenCalledWith(
+      ['eng', 'hin'],
+      expect.any(String),
+      expect.any(String)
+    );
     expect(result?.downloadedModel).toBe(true);
     expect(settings.get('ocr.modelDownloaded.eng')).toBe(true);
     expect(settings.get('ocr.modelDownloaded.hin')).toBe(true);
   });
 
-  it('only fetches and discloses the component not already downloaded', async () => {
+  it('only discloses the component not already downloaded', async () => {
     settings.set('ocr.modelDownloaded.eng', true);
     requestOcrConsent.mockResolvedValue('download');
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      arrayBuffer: async () => new Uint8Array([1]).buffer
-    }));
-    vi.stubGlobal('fetch', fetchMock);
     setUpWorkers();
 
     const { runOcr } = await import('../../src/core/ocr/runOcr');
@@ -283,14 +284,11 @@ describe('ocr/runOcr — combined-language download', () => {
     await runOcr(new Uint8Array([1]), 1, { lang: 'eng+hin' });
 
     expect(requestOcrConsent).toHaveBeenCalledWith(['hin'], expect.any(String), expect.any(String));
-    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('asks for nothing and fetches nothing once every component is cached', async () => {
+  it('asks for nothing once every component is already downloaded', async () => {
     settings.set('ocr.modelDownloaded.eng', true);
     settings.set('ocr.modelDownloaded.hin', true);
-    const fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
     setUpWorkers();
 
     const { runOcr } = await import('../../src/core/ocr/runOcr');
@@ -298,7 +296,6 @@ describe('ocr/runOcr — combined-language download', () => {
     const result = await runOcr(new Uint8Array([1]), 1, { lang: 'eng+hin' });
 
     expect(requestOcrConsent).not.toHaveBeenCalled();
-    expect(fetchMock).not.toHaveBeenCalled();
     expect(result?.downloadedModel).toBe(false);
   });
 });

@@ -806,12 +806,12 @@ mandatory editable preview grid before any download. Clearly labelled beta in th
 
 ### OCR-04 · Hindi + mixed-language OCR with a non-Latin text layer — `M` `P2`
 
-**Status: Done** — `hin` and `eng+hin` added to `OCR_LANGUAGES`
-(`src/core/ocr/model.ts`); a combined run pre-fetches each missing component's
-model into OPFS itself (`fetchModelBytes`), since each language lives at its
-own `resolveModelBase` and tesseract's own loader can only serve one shared
-path per run. `ocr.worker.ts` hands tesseract every component's bytes
-explicitly for a combined run. A vendored, OFL-licensed Devanagari font
+**Status: Done, verified against a real browser run** — `hin` and `eng+hin`
+added to `OCR_LANGUAGES` (`src/core/ocr/model.ts`). A combined run is left
+entirely to tesseract's own loader: `langPath` is left unset, so it computes
+each language's own default URL (the exact pinned package/version
+`resolveModelBase` uses) and caches each independently — no pre-fetching into
+OPFS is needed or done. A vendored, OFL-licensed Devanagari font
 (`src/core/ocr/assets/NotoSansDevanagari.ttf`, subset to Basic Latin +
 Devanagari, ~180 KB) is embedded via `fontkit` as a fallback whenever a word
 Helvetica cannot show appears, so a Hindi or Hinglish word is no longer
@@ -835,14 +835,39 @@ silently dropped from the invisible text layer.
   indexed, so that reordering corrupted the extracted string ("सचिवालय" came
   back as "सिचवालय"). Fixed by encoding one character at a time
   (`encodeInLogicalOrder`), which gives the shaper nothing to reorder against.
-- **Evidence:** `pnpm test` — 56 test files, 623 tests, 0 failures, including a
+- **Two more bugs found only by actually running OCR in a real browser**
+  (unit tests mock the worker boundary, so neither surfaced until a live
+  Playwright run against the real Adobe Scan fixture that motivated this
+  ticket):
+  - `cv.worker.ts`'s `cleanupForOcr` read `bitmap.width`/`bitmap.height`
+    *after* `bitmap.close()` — an `ImageBitmap`'s dimensions reset to 0 once
+    closed, so `getImageData` was asked for a zero-width image and threw on
+    **every** OCR run, any language, from the moment the phone-scan cleanup
+    step (above) was added. Fixed by capturing the dimensions before closing.
+  - `tesseract.js@7.0.0` has a genuine bug in its own `initialize()`: given an
+    array of `{code, data}` objects (what a combined run's original design
+    built, to hand tesseract pre-fetched bytes directly), it derives the
+    language string for `TessBaseAPI.Init` via `langs.map(l => l.data).join
+    ('+')` — the *bytes*, not `l.code` — so recognition failed outright
+    ("Tesseract couldn't load any languages!"). Fixed by never building that
+    array for a combined run (see the loader-is-sufficient-alone note above);
+    the single-language "uploaded a custom model" path still uses a
+    one-element version of the same array shape and carries the same bug,
+    tracked separately since it is untouched by, and not exercised by, this fix.
+- **Evidence:** `pnpm test` — 56 test files, 633 tests, 0 failures, including a
   fixture round-tripping a real Devanagari word through
   `addOcrTextLayerToDocument` → `save()` → pdf.js `getTextContent()` and
   asserting the exact string comes back. `pnpm run check:type`,
-  `check:lint`, `check:format`, `check:invariants`, `check:tokens` all pass.
+  `check:lint`, `check:format`, `check:invariants` all pass.
   `BUILD_TARGET=ext vite build` succeeds; the font asset is emitted as an
   ordinary bundled file (`dist/ext/assets/NotoSansDevanagari-*.ttf`), not
-  fetched from a remote host.
+  fetched from a remote host. Additionally verified end-to-end against a real
+  browser: a Playwright run imported the actual Adobe Scan fixture that
+  prompted this ticket, ran OCR with English + Hindi (mixed) — real consent
+  dialog, real 14 MB model download, real tesseract recognition — and
+  re-extracted correctly-formed Hindi ("सचिवालय", "उत्तराखण्ड", "अधिकारी", full
+  sentences) from the result, with the report reading "234 words added across
+  1 page. Replaced an existing, broken text layer on 1 page."
 - **Requirements:** Hindi selectable as its own OCR language; a combined
   English+Hindi run recognises mixed-script ("Hinglish") pages in one pass;
   recognised Devanagari text survives into the exported PDF's searchable text

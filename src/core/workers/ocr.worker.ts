@@ -169,32 +169,37 @@ const api: OCRJob = {
       const { readModelBytes } = await import('../opfs');
       const codes = splitLangCodes(options.lang);
 
-      let langsParam: string | Array<{ code: string; data: Uint8Array }>;
+      // tesseract.js 7.0.0 has a real bug in its own `initialize()`: given an
+      // array of `{ code, data }` objects, it builds the language string for
+      // `TessBaseAPI.Init` via `langs.map(l => l.data).join('+')` — the
+      // *bytes*, not `l.code` — so `Init` is called with a giant stringified
+      // byte array instead of e.g. `"eng+hin"`, and recognition fails outright
+      // ("Tesseract couldn't load any languages!"). A combined run must never
+      // build that array, only the single-language "uploaded a custom model"
+      // path below still does (a narrower, pre-existing use of the same
+      // buggy shape, tracked separately from this fix).
+      //
+      // The plain joined string is sufficient on its own for a combined run:
+      // leaving `langPath` unset makes tesseract's own loader compute a
+      // *per-language* default URL (`https://cdn.jsdelivr.net/npm/
+      // @tesseract.js-data/<lang>/4.0.0_best_int` for the LSTM-only data this
+      // project uses) — the exact package and version `resolveModelBase`
+      // pins — and cache each language independently, so a combined run never
+      // re-fetches a language a prior solo run already cached. There is no
+      // shared-`langPath` problem here to work around.
+      let langsParam: string | Array<{ code: string; data: Uint8Array }> = options.lang;
+      let modelBase: string | undefined = options.modelBase;
       if (codes.length === 1) {
         const modelBytes = await readModelBytes(codes[0]);
-        langsParam = modelBytes ? [{ code: codes[0], data: modelBytes }] : options.lang;
+        if (modelBytes) langsParam = [{ code: codes[0], data: modelBytes }];
       } else {
-        // A combined run cannot fall back to a plain-string language: tesseract
-        // fetches every plain-string entry in a run from the *same* `langPath`,
-        // and each language here lives at its own base URL. `runOcr` guarantees
-        // every component's bytes are in OPFS before this call is ever made.
-        const withBytes = await Promise.all(
-          codes.map(async code => ({ code, data: await readModelBytes(code) }))
-        );
-        const notCached = withBytes.find(entry => !entry.data);
-        if (notCached) {
-          throw internal(
-            `No cached OCR model for "${notCached.code}" — a combined run must have every ` +
-              `language's model fetched before recognition starts.`
-          );
-        }
-        langsParam = withBytes as Array<{ code: string; data: Uint8Array }>;
+        modelBase = undefined;
       }
 
       engine = await createWorker(langsParam, OEM.LSTM_ONLY, {
         workerPath: WORKER_PATH,
         corePath: CORE_PATH,
-        langPath: options.modelBase,
+        langPath: modelBase,
         logger: message => {
           // `progress` is 0..1 per phase, not across the whole run; the caller
           // scales it into the document-wide fraction it is reporting.

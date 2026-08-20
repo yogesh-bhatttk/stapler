@@ -17,11 +17,10 @@ import { createJobHandle, type JobOptions } from '../workers/protocol';
 import { requestOcrConsent } from '../notify';
 import { cancelled, internal } from '../errors';
 import { isModelDownloaded, markModelDownloaded } from './modelState';
-import { hasModelBytes, writeModelBytes } from '../opfs';
+import { hasModelBytes } from '../opfs';
 import {
   DEFAULT_OCR_LANGUAGE,
   MODEL_HOST,
-  fetchModelBytes,
   findLanguage,
   resolveModelBase,
   splitLangCodes
@@ -129,22 +128,17 @@ export async function runOcr(
     // Nothing has been spawned, opened, or requested at this point. Declining is
     // a clean no-op by construction, not by cleanup.
     if (!choice) return null;
-
-    if (choice === 'download' && components.length > 1) {
-      // Each language's package lives at its own `resolveModelBase`, so a
-      // combined run cannot rely on tesseract's own loader — it fetches every
-      // plain-string language in one run from the *same* `langPath`. Fetching
-      // here instead and caching into OPFS lets the worker hand tesseract each
-      // language's bytes directly (see `ocr.worker.ts`). A solo-language
-      // 'download' skips this and is handled exactly as OCR-01 shipped it,
-      // below.
-      for (const code of missing) {
-        const modelBytes = await fetchModelBytes(code);
-        await writeModelBytes(code, modelBytes);
-      }
-    }
-    // 'upload' has already written its one OPFS file via the consent dialog —
-    // the dialog only offers that choice when `missing.length === 1`.
+    // Nothing further to do here: a solo language's 'download' is fetched by
+    // tesseract itself inside the worker (as OCR-01 shipped it), and a
+    // combined run is *also* left to tesseract — leaving `langPath` unset
+    // there makes it compute each language's own default URL (the exact
+    // package/version `resolveModelBase` pins) and cache each independently,
+    // so it never re-fetches a language a prior solo run already has. Fetching
+    // here too, into OPFS, would just be a second, unused download — the OCR
+    // worker only ever reads OPFS bytes back for a single-language run (see
+    // `ocr.worker.ts`). 'upload' has already written its one OPFS file via the
+    // consent dialog — the dialog only offers that choice when
+    // `missing.length === 1`.
   }
 
   const modelBase = resolveModelBase(components[0]);
