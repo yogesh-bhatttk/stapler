@@ -23,6 +23,8 @@ import { useJob } from '../../useJob';
 import { Checkbox } from '../../components/Field';
 import { scrubSettings, type ExtendedScrubSettings } from './state';
 import { ProtectSection } from '../protect/ProtectSection';
+import { FontEmbeddingSection } from './FontEmbeddingSection';
+import { BarcodeScanSection } from './BarcodeScanSection';
 import { useTranslation } from '../../../core/i18n';
 
 const FLAGS: { key: keyof MetadataFindings; label: string }[] = [
@@ -183,6 +185,12 @@ export function MetadataPanel() {
           </p>
         </div>
       )}
+
+      <hr className={panelStyles.divider} />
+      <FontEmbeddingSection />
+
+      <hr className={panelStyles.divider} />
+      <BarcodeScanSection />
 
       <hr className={panelStyles.divider} />
       <ProtectSection />
