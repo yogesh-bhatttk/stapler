@@ -1,4 +1,5 @@
-import { formFields, formValues } from './state';
+import { formFields, formValues, formulas } from './state';
+import { applyFormulas } from '../../../core/formula';
 
 import styles from './AcroFormOverlay.module.css';
 import { useTranslation } from '../../../core/i18n';
@@ -13,6 +14,16 @@ export function AcroFormOverlay({ pageIndex, width, height }: AcroFormOverlayPro
   const t = useTranslation();
   const data = formFields.value;
   if (!data || data.isXfa || data.fields.length === 0) return null;
+
+  // SGN-07 — a calculated field's value is derived, never typed directly: the
+  // panel and the on-page overlay both render `applyFormulas` of the same
+  // inputs, so what is shown here is exactly what export will write.
+  const { values: calculated, errors: calculatedErrors } = applyFormulas(
+    formulas.value,
+    data.fields,
+    formValues.value
+  );
+  const calculatedTargets = new Set(formulas.value.map(f => f.target));
 
   // Find fields that have a rect on this page. `widgetIndex` is the widget's
   // position within the *unfiltered* `field.rects` — the same order pdf-lib
@@ -29,7 +40,10 @@ export function AcroFormOverlay({ pageIndex, width, height }: AcroFormOverlayPro
   return (
     <div className={styles.layer} style={{ width: `${width}px`, height: `${height}px` }}>
       {visibleFields.map(({ field, rect, widgetIndex }, index) => {
-        const value = formValues.value[field.name] ?? field.value;
+        const isCalculated = calculatedTargets.has(field.name);
+        const value = isCalculated
+          ? (calculated[field.name] ?? '')
+          : (formValues.value[field.name] ?? field.value);
         const style = {
           left: `${rect.x * 100}%`,
           top: `${rect.y * 100}%`,
@@ -47,8 +61,12 @@ export function AcroFormOverlay({ pageIndex, width, height }: AcroFormOverlayPro
             <textarea
               className={styles.input}
               value={value as string}
-              readOnly={field.isReadOnly}
-              onInput={e => onChange((e.target as HTMLTextAreaElement).value)}
+              readOnly={field.isReadOnly || isCalculated}
+              title={isCalculated ? calculatedErrors[field.name] : undefined}
+              onInput={e => {
+                if (isCalculated) return;
+                onChange((e.target as HTMLTextAreaElement).value);
+              }}
             />
           );
         } else if (field.type === 'CheckBox') {

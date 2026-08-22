@@ -461,6 +461,47 @@ export async function acroformPdf(): Promise<Uint8Array> {
   return doc.save();
 }
 
+/**
+ * SGN-07's fixture: three numeric input fields and one empty field meant to hold
+ * their total.
+ *
+ * `Line Total` carries a space on purpose. PDF field names commonly contain
+ * spaces, and a formula language whose references are an identifier regex cannot
+ * address them at all — this is the fixture that proves the document's own field
+ * list drives the tokenizer.
+ */
+export async function calculatedFormPdf(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([595.28, 841.89]);
+  const form = doc.getForm();
+
+  const rows: [string, string][] = [
+    ['subtotal', '100'],
+    ['tax', '7.5'],
+    ['shipping', '12.25']
+  ];
+  let y = 700;
+  for (const [name, value] of rows) {
+    const field = form.createTextField(name);
+    field.setText(value);
+    field.addToPage(page, { x: 50, y, width: 200, height: 30 });
+    y -= 50;
+  }
+
+  // The calculated target: an ordinary, empty text field. Nothing about it is
+  // special in the document — the formula lives in Stapler, not in the PDF.
+  const total = form.createTextField('Line Total');
+  total.addToPage(page, { x: 50, y, width: 200, height: 30 });
+
+  // A non-numeric field, so a test can prove a bad reference is an error rather
+  // than a silent zero.
+  const note = form.createTextField('note');
+  note.setText('paid in cash');
+  note.addToPage(page, { x: 50, y: y - 50, width: 200, height: 30 });
+
+  return doc.save();
+}
+
 /** The string baked in by the annotated fixture's `/FreeText` appearance. */
 export const ANNOTATION_TEXT = 'Reviewed by QA';
 

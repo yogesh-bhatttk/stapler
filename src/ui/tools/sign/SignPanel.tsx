@@ -18,6 +18,7 @@ import {
 import { useState } from 'preact/hooks';
 import { activeDoc } from '../../../core/store';
 import {
+  checkSignatureIntegrity,
   currentDocumentBytes,
   detectSignatureLines,
   getFormFields
@@ -29,12 +30,22 @@ import {
   signatures
 } from '../../../core/signatures';
 import { notify } from '../../../core/notify';
+import { parseFormula } from '../../../core/formula';
 import { Button } from '../../components/Button';
 import { IconButton } from '../../components/IconButton';
+import { Checkbox, TextInput } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
 import { FlattenOption } from '../FlattenOption';
 import { SignatureModal } from './SignatureModal';
-import { activeStamp, signatureSuggestions, formFields, formValues, type StampType } from './state';
+import {
+  activeStamp,
+  signatureSuggestions,
+  formFields,
+  formValues,
+  formulas,
+  signatureIntegrity,
+  type StampType
+} from './state';
 import { useJob } from '../../useJob';
 import styles from './SignPanel.module.css';
 import { useTranslation } from '../../../core/i18n';
@@ -65,6 +76,7 @@ export function SignPanel() {
   useEffect(() => {
     if (!doc) {
       formFields.value = null;
+      signatureIntegrity.value = null;
       return;
     }
     // Only query fields if the document properties imply they exist
@@ -76,11 +88,22 @@ export function SignPanel() {
         .catch(() => {
           formFields.value = null;
         });
+      // SGN-09 — a structural check only, independent of whether the document
+      // has *fillable* fields, so it runs alongside rather than inside the
+      // form-fields fetch above.
+      checkSignatureIntegrity(bytes)
+        .then(report => {
+          signatureIntegrity.value = report;
+        })
+        .catch(() => {
+          signatureIntegrity.value = null;
+        });
     });
   }, [doc]);
 
   useEffect(() => {
     formValues.value = {};
+    formulas.value = [];
   }, [doc?.id]);
 
   const detect = () =>
@@ -116,6 +139,24 @@ export function SignPanel() {
           {t(
             'This document contains interactive form fields. You can click on them in the page to type and fill them out.'
           )}
+        </p>
+      )}
+
+      {signatureIntegrity.value?.hasSignature && (
+        <p
+          className={
+            signatureIntegrity.value.intact
+              ? `${panelStyles.note} ${panelStyles.noteInfo}`
+              : panelStyles.note
+          }
+        >
+          {signatureIntegrity.value.intact
+            ? t(
+                'This document has a digital signature, and nothing was appended to the file after it was signed.'
+              )
+            : t(
+                'This document has a digital signature, but bytes were appended to the file after it was signed — it may have been modified since.'
+              )}
         </p>
       )}
 
@@ -258,6 +299,68 @@ export function SignPanel() {
           })}
         </div>
       </div>
+
+      {!formFields.value?.isXfa &&
+        (formFields.value?.fields.filter(f => f.type === 'TextField').length ?? 0) > 0 && (
+          <div className={panelStyles.section}>
+            <h2 className={panelStyles.title}>{t('Calculated fields')}</h2>
+            <p className={panelStyles.description}>
+              {t(
+                'Make a text field show the sum, difference, product, or quotient of other fields — e.g. "subtotal + tax".'
+              )}
+            </p>
+            {(formFields.value?.fields ?? [])
+              .filter(field => field.type === 'TextField')
+              .map(field => {
+                const existing = formulas.value.find(f => f.target === field.name);
+                const fieldNames = (formFields.value?.fields ?? []).map(f => f.name);
+                const parsed =
+                  existing && existing.source.trim()
+                    ? parseFormula(existing.source, fieldNames)
+                    : null;
+                return (
+                  <div
+                    key={field.name}
+                    className={panelStyles.section}
+                    style={{ paddingTop: 0, paddingBottom: 0 }}
+                  >
+                    <Checkbox
+                      label={t('Calculate "{name}"', { name: field.name })}
+                      checked={!!existing}
+                      onChange={checked => {
+                        formulas.value = checked
+                          ? [
+                              ...formulas.value.filter(f => f.target !== field.name),
+                              { target: field.name, source: '' }
+                            ]
+                          : formulas.value.filter(f => f.target !== field.name);
+                      }}
+                    />
+                    {existing && (
+                      <>
+                        <TextInput
+                          value={existing.source}
+                          placeholder={t('e.g. subtotal + tax')}
+                          aria-label={t('Formula for "{name}"', { name: field.name })}
+                          onInput={e => {
+                            const source = (e.target as HTMLInputElement).value;
+                            formulas.value = formulas.value.map(f =>
+                              f.target === field.name ? { ...f, source } : f
+                            );
+                          }}
+                        />
+                        {parsed && !parsed.ok && (
+                          <p className={`${panelStyles.note} ${panelStyles.noteWarning}`}>
+                            {parsed.error}
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+          </div>
+        )}
 
       <p className={panelStyles.description}>
         {armed ? t('tool.sign.placementHintActive') : t('tool.sign.placementHintIdle')}
