@@ -116,7 +116,8 @@
   /* Decorative only — 3.25:1. Never carries text. */
   --ink-tertiary: #8a8f98;
 
-  --primary: #6b76d6;
+  /* DS-02 — darkened from #6b76d6: --on-primary (white) on this was 4.05:1, under the 4.5:1 text minimum. */
+  --primary: #626dc5;
   --primary-hover: #4c56c0;
   --primary-focus: #5e69d1;
   --on-primary: #ffffff;
@@ -141,6 +142,11 @@
   --doc-shadow: 0 1px 3px rgba(8, 9, 10, 0.14);
   --doc-select: var(--primary);
   --doc-redact: #0a0a0b;
+  /* Text drawn directly on `--doc-page` (ACC-03's reflow view) — `--doc-page`
+     never inverts, so text on it must not invert either, or dark mode pairs
+     near-white `--ink` with a white page and the text disappears. */
+  --doc-ink: #08090a;
+  --doc-ink-muted: #3c4149;
 
   /* Annotation ink swatches (ANN-01). These are content colours a user paints
      onto a page, not theme colours — a yellow highlighter must stay the same
@@ -204,8 +210,17 @@
   /* A page is always white in both themes. Never invert a document. */
   --doc-page: #ffffff;
   --doc-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
-  --doc-select: var(--primary);
+  /* DS-02 — was `var(--primary)`, which inverts to a lighter blue for
+     visibility against dark chrome. `--doc-page` never inverts (it is always
+     white paper), so a selection ring drawn on it must not invert either —
+     the same reasoning as `--doc-ink` below. Fixed at light theme's own
+     `--primary`, which already passes comfortably against white. */
+  --doc-select: #626dc5;
   --doc-redact: #0a0a0b;
+  /* Same reasoning as the light block: text on the never-inverted `--doc-page`
+     must never invert either. */
+  --doc-ink: #08090a;
+  --doc-ink-muted: #3c4149;
 
   /* In dark mode depth comes from surface steps, not shadows (§3.3). */
   --shadow-1: none;

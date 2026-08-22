@@ -1,0 +1,33 @@
+.stage {
+  flex: 1;
+  display: flex;
+  padding: var(--space-lg);
+  overflow: auto;
+  min-height: 0;
+  background: var(--doc-bg);
+}
+
+.page {
+  margin: 0 auto;
+  max-width: 42em;
+  width: 100%;
+  padding: var(--space-xl);
+  background: var(--doc-page);
+  box-shadow: var(--doc-shadow);
+  border: 1px solid var(--hairline-strong);
+  color: var(--doc-ink);
+  font-family: var(--font-sans);
+  line-height: 1.6;
+}
+
+.page p {
+  margin: 0 0 1em;
+}
+
+.page p:last-child {
+  margin-bottom: 0;
+}
+
+.status {
+  color: var(--doc-ink-muted);
+}
