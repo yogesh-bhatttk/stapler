@@ -131,17 +131,17 @@ export function renderHandleFor(
   if (existing) return existing.promise;
 
   const client = renderWorker.pin();
-  const promise = readSourceBytes(sourceId).then(bytes => 
-    client
-      .lease(api => api.loadDocument(bytes))
-      .then(info => ({ handle: info.handle, client }))
-  ).catch(err => {
-    // A failed open must not be cached, or every later thumbnail reuses the
-    // rejection and the page stays blank with no way to retry.
-    client.release();
-    handles.delete(sourceId);
-    throw err;
-  });
+  const promise = readSourceBytes(sourceId)
+    .then(bytes =>
+      client.lease(api => api.loadDocument(bytes)).then(info => ({ handle: info.handle, client }))
+    )
+    .catch(err => {
+      // A failed open must not be cached, or every later thumbnail reuses the
+      // rejection and the page stays blank with no way to retry.
+      client.release();
+      handles.delete(sourceId);
+      throw err;
+    });
 
   handles.set(sourceId, { promise });
   return promise;

@@ -9,9 +9,9 @@
  * live in core/render-cache.ts, keyed by source, and outlive this component.
  */
 import { useActiveTool } from '../useActiveTool';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useMemo, useState } from 'preact/hooks';
 
-import { activeDoc, selectedPageKeys, sources } from '../../core/store';
+import { activeDoc, makePageRefs, selectedPageKeys, sources } from '../../core/store';
 import { pruneRenderHandles } from '../../core/render-cache';
 
 import { EmptyState } from '../components/Feedback';
@@ -28,6 +28,9 @@ import { CropOverlay } from '../tools/crop/CropOverlay';
 import { CompareView } from '../tools/compare/CompareView';
 import { AnnotateOverlay } from '../tools/annotate/AnnotateOverlay';
 import { BatchView } from '../tools/batch/BatchView';
+import { ReflowView } from '../tools/reflow/ReflowView';
+import { SideBySideView } from '../tools/side-by-side/SideBySideView';
+import { sideBySideSourceId } from '../tools/side-by-side/state';
 import { useTranslation } from '../../core/i18n';
 
 export function Canvas() {
@@ -47,6 +50,18 @@ export function Canvas() {
   useEffect(() => {
     if (doc && pageIndex > doc.pages.length - 1) setPageIndex(Math.max(0, doc.pages.length - 1));
   }, [doc, pageIndex]);
+
+  // ANN-07 — `makePageRefs` mints a fresh key per page on every call, so this
+  // has to be memoised on the *source id*: recomputing it on every render
+  // would hand `SideBySideView`'s pane a page whose identity never survives a
+  // re-render, discarding its cached bitmap and any transient state for it.
+  const sideBySideSource = sideBySideSourceId.value
+    ? sources.value[sideBySideSourceId.value]
+    : undefined;
+  const sideBySidePagesB = useMemo(
+    () => (sideBySideSource ? makePageRefs(sideBySideSource.id, sideBySideSource.pageCount) : null),
+    [sideBySideSource?.id, sideBySideSource?.pageCount]
+  );
 
   if (!tool) {
     return <EmptyState title={t('Unknown tool')} body="Pick one from the rail or press ⌘K." />;
@@ -88,6 +103,28 @@ export function Canvas() {
     if (tool.id === 'compare') {
       return (
         <CompareView pages={doc.pages} pageIndex={Math.min(pageIndex, doc.pages.length - 1)} />
+      );
+    }
+
+    if (tool.id === 'reflow') {
+      return (
+        <ReflowView
+          docId={doc.id}
+          pages={doc.pages}
+          pageIndex={Math.min(pageIndex, doc.pages.length - 1)}
+          onPageIndexChange={setPageIndex}
+        />
+      );
+    }
+
+    if (tool.id === 'side-by-side') {
+      return (
+        <SideBySideView
+          pagesA={doc.pages}
+          nameA={doc.name}
+          pagesB={sideBySidePagesB}
+          nameB={sideBySideSource?.name ?? null}
+        />
       );
     }
 

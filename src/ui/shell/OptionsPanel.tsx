@@ -35,6 +35,10 @@ import { BatchPanel } from '../tools/batch/BatchPanel';
 import { MarkdownToPdfPanel } from '../tools/convert/MarkdownToPdfPanel';
 import { ContactSheetPanel } from '../tools/contact-sheet/ContactSheetPanel';
 import { ShortcutsPanel } from '../tools/shortcuts/ShortcutsPanel';
+import { ReadAloudPanel } from '../tools/read-aloud/ReadAloudPanel';
+import { ReflowPanel } from '../tools/reflow/ReflowPanel';
+import { HistoryPanel } from '../tools/history/HistoryPanel';
+import { SideBySidePanel } from '../tools/side-by-side/SideBySidePanel';
 import styles from './OptionsPanel.module.css';
 import { useTranslation } from '../../core/i18n';
 
@@ -65,7 +69,11 @@ const BODIES: Record<string, () => preact.JSX.Element | null> = {
   batch: BatchPanel,
   'md-to-pdf': MarkdownToPdfPanel,
   'contact-sheet': ContactSheetPanel,
-  shortcuts: ShortcutsPanel
+  shortcuts: ShortcutsPanel,
+  'read-aloud': ReadAloudPanel,
+  reflow: ReflowPanel,
+  history: HistoryPanel,
+  'side-by-side': SideBySidePanel
 };
 
 export function OptionsPanel() {

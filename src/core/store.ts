@@ -5,19 +5,27 @@
  * `PageRef`s pointing into source documents' bytes. Merging never copies bytes; it
  * appends refs. That is what makes reordering a 300-page merge cheap.
  *
- * Session persistence was removed here on purpose. The previous version ran a
- * debounced effect that wrote every open document — `bytes` included — into
- * IndexedDB on any change, so reordering one page structured-cloned every byte of
- * every open file. On the 100MB fixture that is a multi-second main-thread stall
- * and a quota error, in service of a feature no ticket asks for. Recents are
- * handled by persisting file *handles* (F-06/DS-05), which is what the plan
- * specifies.
+ * Session persistence of *this* module's own signals was removed here on
+ * purpose, and stayed removed: the previous version ran a debounced effect
+ * that wrote every open document — `bytes` included — into IndexedDB on any
+ * change, so reordering one page structured-cloned every byte of every open
+ * file. On the 100MB fixture that is a multi-second main-thread stall and a
+ * quota error. Recents are handled by persisting file *handles* (F-06/DS-05),
+ * which is what the plan specifies.
+ *
+ * DOC-11's session recovery (`core/session-recovery.ts`) is not that feature
+ * revived: it persists `documents`/`sources` exactly as they sit here — page
+ * lists, source ids, rotations, never a byte array — which is why it can
+ * afford to do so on every commit rather than never. Document bytes live in
+ * OPFS (`opfs.ts`), keyed by source id, and already survive a reload on their
+ * own; recovery only restores the pointers that say which OPFS files matter.
  */
 import { computed, signal } from '@preact/signals';
 import { commit, historySourceRefCount, resetHistory } from './history';
 import { normalizeRotation } from './rotation';
 import { pruneRenderHandles } from './render-cache';
 import { deleteSourceBytes, readSourceBytes } from './opfs';
+import { sideBySideSourceId } from '../ui/tools/side-by-side/state';
 export interface PageRef {
   /** Stable across reorders, so thumbnails and selection survive a move. */
   key: string;
@@ -160,6 +168,25 @@ export function sourceDocRefCount(sourceId: string): number {
   return sourceDocRefCounts.value[sourceId] ?? 0;
 }
 
+/**
+ * ANN-07 — frees a source's bytes and registry entry once nothing references
+ * it: no workspace document page, and it is no longer the side-by-side
+ * comparison source either. Meant to be called with the *previous*
+ * `sideBySideSourceId` right before it is replaced — `closeDocument` already
+ * does the equivalent check for a closed tab, but switching the side-by-side
+ * comparison file never went through `closeDocument` at all, so its old
+ * source was simply orphaned (never released) every time the user picked a
+ * different file to compare against.
+ */
+export function releaseSourceIfUnused(sourceId: string): void {
+  if (sourceRefCount(sourceId) > 0 || sideBySideSourceId.value === sourceId) return;
+  if (!(sourceId in sources.value)) return;
+  const rest = { ...sources.value };
+  delete rest[sourceId];
+  sources.value = rest;
+  deleteSourceBytes(sourceId).catch(() => {});
+}
+
 /** Every place that can still read a source's bytes after the current call. */
 export interface SourceOwners {
   /** `PageRef`s across all open documents. */
@@ -213,7 +240,13 @@ export function closeDocument(id: string): void {
     activeDocId.value = documents.value[0]?.id ?? null;
   }
   // Drop sources nothing references any more, so closing a tab frees its bytes.
+  // ANN-07's side-by-side comparison document is the one source that lives
+  // outside every `StaplerDoc.pages` array — it is never a workspace tab — so
+  // it has to be named explicitly here or closing any unrelated tab deletes
+  // its OPFS bytes and closes its render handle out from under an open
+  // side-by-side view.
   const stillUsed = new Set(documents.value.flatMap(d => d.pages.map(p => p.sourceDocId)));
+  if (sideBySideSourceId.value) stillUsed.add(sideBySideSourceId.value);
   const kept: Record<string, SourceDocument> = {};
   for (const [key, value] of Object.entries(sources.value)) {
     if (stillUsed.has(key)) {
