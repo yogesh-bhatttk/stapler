@@ -29,7 +29,7 @@ export function SplitPanel() {
   );
 
   const boundaries =
-    settings.mode === 'extract'
+    settings.mode === 'extract' || settings.mode === 'size'
       ? []
       : splitBoundaries(settings.mode, doc.pages.length, {
           every: settings.everyN,
@@ -53,6 +53,11 @@ export function SplitPanel() {
             value: 'bookmarks',
             label: 'Split at bookmarks',
             hint: 'One file per top-level bookmark, named after it'
+          },
+          {
+            value: 'size',
+            label: 'Split by target file size',
+            hint: 'Consecutive pages per file, each at or under a size limit'
           }
         ]}
       />
@@ -93,6 +98,23 @@ export function SplitPanel() {
         </Field>
       )}
 
+      {settings.mode === 'size' && (
+        <Field label={t('Target size per file (KB)')}>
+          {id => (
+            <NumberInput
+              id={id}
+              min={1}
+              value={settings.targetSizeKb}
+              onInput={event =>
+                update({
+                  targetSizeKb: Math.max(1, Number((event.target as HTMLInputElement).value) || 1)
+                })
+              }
+            />
+          )}
+        </Field>
+      )}
+
       {settings.mode === 'bookmarks' && (
         <p className={panelStyles.description}>
           {outlineLoading.value
@@ -108,10 +130,14 @@ export function SplitPanel() {
       <p className={panelStyles.description}>
         {settings.mode === 'extract'
           ? `${selectedPageKeys.value.size} page(s) selected.`
-          : `Produces ${boundaries.length + 1} file(s).` +
-            (boundaries.length > 0 && settings.outputFormat === 'zip'
-              ? ' Multiple files are delivered as a ZIP.'
-              : '')}
+          : settings.mode === 'size'
+            ? t(
+                'File count is determined when you run the split, from each page’s actual composed size.'
+              )
+            : `Produces ${boundaries.length + 1} file(s).` +
+              (boundaries.length > 0 && settings.outputFormat === 'zip'
+                ? ' Multiple files are delivered as a ZIP.'
+                : '')}
       </p>
 
       {settings.mode !== 'extract' && hasDirectoryPicker() && (

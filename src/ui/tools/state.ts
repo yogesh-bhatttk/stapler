@@ -8,20 +8,23 @@
  */
 import { signal } from '@preact/signals';
 
-export type SplitMode = 'extract' | 'individual' | 'every_n' | 'custom' | 'bookmarks';
+export type SplitMode = 'extract' | 'individual' | 'every_n' | 'custom' | 'bookmarks' | 'size';
 
 export interface SplitSettings {
   mode: SplitMode;
   everyN: number;
   customBoundaries: string;
   outputFormat: 'zip' | 'directory';
+  /** OPS-15 — target size per output file, in kilobytes. */
+  targetSizeKb: number;
 }
 
 export const splitSettings = signal<SplitSettings>({
   mode: 'extract',
   everyN: 2,
   customBoundaries: '',
-  outputFormat: 'zip'
+  outputFormat: 'zip',
+  targetSizeKb: 5000
 });
 
 export interface PdfToImageSettings {

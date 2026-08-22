@@ -10,6 +10,7 @@ import { commit } from './history';
 import * as Comlink from 'comlink';
 import { processWorker, renderWorker, cvWorker } from './workers';
 import { createJobHandle, type JobOptions } from './workers/protocol';
+import { detectHeadingOutline, type HeadingPage, type OutlineCandidate } from './outline-detect';
 import type {
   ExtractedImages,
   RedactionRegion,
@@ -54,7 +55,7 @@ import {
   type WatermarkSettings
 } from '../ui/tools/watermark/state';
 import type { WatermarkData } from './workers/process.worker';
-import { internal, unsupported, cancelled } from './errors';
+import { internal, unsupported, cancelled, isCancellation, fromUnknown } from './errors';
 
 /**
  * Maps the UI's `WatermarkSettings` onto the worker's `WatermarkData`. The two
@@ -212,6 +213,8 @@ export interface ComposeRequest {
   outline?: import('./workers/process.worker').OutlineNode[];
   /** OPS-11 — a Bates stamp for every exported page. */
   bates?: import('./workers/process.worker').BatesData;
+  /** OPS-18 — a QR/barcode stamp for every targeted page. */
+  barcodeStamp?: import('./workers/process.worker').BarcodeStampData;
   formFieldsToCreate?: NewFormField[];
   /**
    * Sign and Annotate only: compose an XFA document even though its dynamic-form
@@ -256,6 +259,7 @@ export async function composeDocument(
       {
         outline: request.outline,
         bates: request.bates,
+        barcodeStamp: request.barcodeStamp,
         allowXfaLoss: request.allowXfaLoss,
         formFieldsToCreate:
           request.formFieldsToCreate ?? extractFormFieldsToCreate(request.annotations)
@@ -302,6 +306,7 @@ export async function splitDocument(request: SplitRequest, options: JobOptions =
       job,
       {
         bates: request.bates,
+        barcodeStamp: request.barcodeStamp,
         fileNames: request.fileNames,
         formFieldsToCreate:
           request.formFieldsToCreate ?? extractFormFieldsToCreate(request.annotations)
@@ -389,9 +394,112 @@ export function splitBoundaries(
   ].sort((a, b) => a - b);
 }
 
+export interface SizeSplitPlan {
+  boundaries: number[];
+  /**
+   * Ranges that still exceed the target after being composed alone — always a
+   * single page, since anything wider would have been bisected further. The
+   * caller has to disclose these; the target was not actually honoured for them.
+   */
+  oversized: { pageIndex: number; bytes: number }[];
+}
+
+/**
+ * OPS-15 — recursively bisects `[0, pageCount)` down to ranges that either fit
+ * the target or cannot be split any further (a single page), calling `measure`
+ * (the real composed byte size of a page range) only on the ranges it actually
+ * needs to decide about.
+ *
+ * A first version of this summed each page's *individually*-composed size as a
+ * cheap stand-in for a combined slice's real size, reasoning that a single-page
+ * file re-embeds its own copy of anything a multi-page slice would share once —
+ * true, but on a document where pages share a large resource (one big image
+ * behind every page, say) that "safe" over-estimate was wrong by an order of
+ * magnitude: it split a document that fit comfortably as a single ~5MB file into
+ * ten ~5MB files, because each page's *isolated* cost included its own copy of
+ * the image the real combined file only pays for once. Measuring the actual
+ * candidate range — not a sum of isolated pages — is what a shared resource
+ * shows up correctly in either direction: this asks "does the whole document
+ * already fit?" before ever considering a cut, and only narrows when the real
+ * answer is no.
+ *
+ * Exported for unit tests with a synthetic `measure`, mirroring how
+ * `splitBoundaries` is pure and directly testable.
+ */
+export async function planRangesBySize(
+  pageCount: number,
+  targetBytes: number,
+  measure: (from: number, to: number) => Promise<number>
+): Promise<SizeSplitPlan> {
+  if (pageCount <= 1 || targetBytes <= 0) return { boundaries: [], oversized: [] };
+
+  const ranges: { from: number; to: number; bytes: number }[] = [];
+
+  async function plan(from: number, to: number): Promise<void> {
+    const bytes = await measure(from, to);
+    if (bytes <= targetBytes || to - from <= 1) {
+      ranges.push({ from, to, bytes });
+      return;
+    }
+    const mid = from + Math.floor((to - from) / 2);
+    await plan(from, mid);
+    await plan(mid, to);
+  }
+  await plan(0, pageCount);
+
+  return {
+    boundaries: ranges.slice(1).map(r => r.from),
+    oversized: ranges
+      .filter(r => r.bytes > targetBytes)
+      .map(r => ({ pageIndex: r.from, bytes: r.bytes }))
+  };
+}
+
+/**
+ * OPS-15 — `planRangesBySize` wired to real composed byte sizes: each candidate
+ * range is composed on its own (no internal boundaries, so it comes back as one
+ * file) through the same `splitDocument`/`composeSplit` path the actual split
+ * will use, so what gets measured is exactly what would be produced.
+ */
+export async function planSizeSplitBoundaries(
+  request: Omit<SplitRequest, 'boundaries' | 'baseName' | 'fileNames'>,
+  targetBytes: number,
+  options: JobOptions = {}
+): Promise<SizeSplitPlan> {
+  const pageCount = request.pages.length;
+  const measure = async (from: number, to: number): Promise<number> => {
+    const result = await splitDocument(
+      {
+        ...request,
+        pages: request.pages.slice(from, to),
+        boundaries: [],
+        baseName: 'page'
+      },
+      options
+    );
+    return result.bytes.byteLength;
+  };
+  return planRangesBySize(pageCount, targetBytes, measure);
+}
+
 export async function getFormFields(bytes: Uint8Array, options: JobOptions = {}) {
   const job = createJobHandle(options);
   return processWorker.lease(api => api.getFormFields(bytes, job));
+}
+
+/** SGN-09 — structural signature/tamper check, no progress needed (one parse pass). */
+export async function checkSignatureIntegrity(bytes: Uint8Array) {
+  return processWorker.lease(api => api.checkSignatureIntegrity(bytes));
+}
+
+/** DOC-12 — which fonts referenced by the document are not embedded. */
+export async function checkFontEmbedding(bytes: Uint8Array) {
+  return processWorker.lease(api => api.checkFontEmbedding(bytes));
+}
+
+/** DOC-12 — re-embeds every non-embedded occurrence of `baseFont`. */
+export async function embedMissingFont(bytes: Uint8Array, baseFont: string) {
+  return processWorker.lease(api => api.embedMissingFont(bytes, baseFont));
 }
 
 export async function fillFormFields(
@@ -1077,6 +1185,25 @@ async function verifyRedaction(
  * Misc operations
  * ------------------------------------------------------------------ */
 
+/**
+ * OPS-14 — reads every page's text items and proposes a heading-based outline.
+ * Read-only: nothing here writes `/Outlines` or touches the document.
+ */
+export async function proposeOutlineFromHeadings(
+  bytes: Uint8Array,
+  pageCount: number,
+  options: JobOptions = {}
+): Promise<OutlineCandidate[]> {
+  const pages: HeadingPage[] = [];
+  for (let i = 0; i < pageCount; i++) {
+    if (options.signal?.aborted) throw cancelled();
+    options.onProgress?.(i / Math.max(1, pageCount), `Reading page ${i + 1} of ${pageCount}`);
+    const items = await extractPageTextItems(bytes, i);
+    pages.push({ pageIndex: i, items });
+  }
+  return detectHeadingOutline(pages);
+}
+
 export async function extractPageTextItems(
   bytes: Uint8Array,
   pageIndex: number
@@ -1087,6 +1214,91 @@ export async function extractPageTextItems(
       return await api.extractPageTextItems(handle, pageIndex);
     } finally {
       await api.closeDocument(handle);
+    }
+  });
+}
+
+/**
+ * ACC-02/ACC-03 — one page's own reading-order text, with no per-page header.
+ * `extractDocumentText` below wraps every page in a `--- Page N ---` banner
+ * meant for a concatenated multi-page export; read-aloud and reflow view read
+ * one page at a time and would otherwise have to strip that banner back off.
+ */
+export async function extractPageText(
+  bytes: Uint8Array,
+  pageIndex: number,
+  mode: 'text' | 'markdown' = 'text'
+): Promise<string> {
+  return renderWorker.lease(async api => {
+    const { handle } = await api.loadDocument(bytes);
+    try {
+      return await api.extractText(handle, pageIndex, mode);
+    } finally {
+      await api.closeDocument(handle);
+    }
+  });
+}
+
+/** SCN-04 — resolution barcode scanning renders at. Lower than OCR's 300 DPI: a
+ * barcode's modules are far coarser than printed glyphs, and scanning every
+ * page of a long document is a per-page cost worth keeping small. */
+export const BARCODE_SCAN_DPI = 200;
+
+export interface PageBarcodes {
+  pageIndex: number;
+  barcodes: import('./barcode').DecodedBarcode[];
+  /**
+   * Set when this page could not be rendered/scanned at all (e.g. a page
+   * large enough that {@link BARCODE_SCAN_DPI} produces a canvas past the
+   * browser's own size limit). An empty `barcodes` array on its own means
+   * "checked, found nothing" — this field is what tells that apart from
+   * "not checked", so a page that could not be examined is never silently
+   * reported as barcode-free.
+   */
+  reason?: string;
+}
+
+/**
+ * SCN-04 — scans each of `pageIndices` for barcodes/QR codes, reusing the
+ * same render pipeline SCN-01/02's cleanup preview renders pages through.
+ * A page with none reports an empty array, not an absent entry — "checked,
+ * found nothing" and "not checked" are different facts a caller may need to
+ * tell apart.
+ *
+ * One page failing to render (a canvas past the browser's pixel-area limit,
+ * most likely on an oversized custom page size) does not abort the rest of
+ * the scan — the other pages are still worth checking, and the caller finds
+ * out which page was skipped and why via `reason` rather than the whole
+ * operation failing with no result at all.
+ */
+export async function scanDocumentBarcodes(
+  bytes: Uint8Array,
+  pageIndices: number[],
+  options: JobOptions = {}
+): Promise<PageBarcodes[]> {
+  return renderWorker.lease(async api => {
+    const { handle } = await api.loadDocument(bytes);
+    try {
+      const results: PageBarcodes[] = [];
+      for (let i = 0; i < pageIndices.length; i++) {
+        if (options.signal?.aborted) throw cancelled();
+        const pageIndex = pageIndices[i];
+        options.onProgress?.(i / pageIndices.length, `Scanning page ${pageIndex + 1}`);
+        try {
+          const barcodes = await api.decodePageBarcodes(handle, pageIndex, BARCODE_SCAN_DPI);
+          results.push({ pageIndex, barcodes });
+        } catch (err) {
+          if (isCancellation(err)) throw err;
+          results.push({
+            pageIndex,
+            barcodes: [],
+            reason: `Could not render this page to scan it: ${fromUnknown(err).message}`
+          });
+        }
+      }
+      return results;
+    } finally {
+      await api.closeDocument(handle).catch(() => {});
     }
   });
 }
