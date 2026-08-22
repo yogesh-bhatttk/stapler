@@ -11,7 +11,8 @@
  * document by the existing RED-02 commit path.
  */
 
-export type PatternCategory = 'email' | 'phone' | 'ssn' | 'credit-card' | 'ip';
+export type PatternCategory =
+  'email' | 'phone' | 'ssn' | 'credit-card' | 'ip' | 'iban' | 'uk-nino' | 'passport';
 
 export interface PatternHit {
   category: PatternCategory;
@@ -26,13 +27,28 @@ export const PATTERN_LABELS: Record<PatternCategory, string> = {
   phone: 'Phone number',
   ssn: 'US Social Security number',
   'credit-card': 'Credit card number',
-  ip: 'IP address'
+  ip: 'IP address',
+  iban: 'IBAN (bank account number)',
+  'uk-nino': 'UK National Insurance number',
+  passport: 'Passport number'
 };
 
 /**
  * Ordering is significant: the first category to claim a span wins, and later
  * overlapping hits are dropped. Structured identifiers come before the looser
  * phone pattern so `123-45-6789` is reported once, as an SSN.
+ *
+ * RED-10 adds three more structured identifiers. `uk-nino` and `passport` are
+ * placed ahead of `iban`: IBAN's own regex is deliberately loose (a leading
+ * two-letter-plus-two-digit country/check prefix, then one or more 1-4 char
+ * alnum groups, with the mod-97 checksum doing the real filtering — the same
+ * "regex is the cheap filter" division of labour the credit-card matcher
+ * already uses) and would otherwise be tried against — and, on the rare
+ * checksum coincidence, even claim — a UK NINO or passport-shaped span before
+ * either gets a chance to. A real IBAN's own mixed letter/digit grouping
+ * essentially never satisfies NINO's "6 *consecutive* digits" requirement or
+ * passport's separate ICAO check digit, so ordering them first costs nothing
+ * the other direction.
  */
 const MATCHERS: { category: PatternCategory; re: RegExp; accept?: (text: string) => boolean }[] = [
   {
@@ -40,6 +56,37 @@ const MATCHERS: { category: PatternCategory; re: RegExp; accept?: (text: string)
     // Deliberately not RFC 5322: quoted local parts and bare-IP domains cost far
     // more false positives on prose than they buy in recall.
     re: /[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+/g
+  },
+  {
+    category: 'uk-nino',
+    // HMRC's own structural rules: specific letters excluded from each of the
+    // first two positions, six specific prefixes reserved/never issued, and a
+    // suffix restricted to A-D. There is no arithmetic check digit for a NINO —
+    // this structural filter is the full extent of real-world validation, same
+    // as the SSN matcher's excluded-range approach just below.
+    re: /\b(?!BG|GB|NK|KN|TN|ZZ)[A-CEGHJ-PR-TW-Z][A-CEGHJ-NPR-TW-Z]\d{6}[A-D]\b/g
+  },
+  {
+    category: 'passport',
+    // A 9-character alphanumeric document number plus a single check digit,
+    // validated with the ICAO 9303 7-3-1 weighted check digit — the same
+    // algorithm printed in the machine-readable zone of most of the world's
+    // passports and national ID cards, not a US/UK-specific format (no single
+    // check-digit scheme is universal; this is the closest thing to one).
+    re: /\b[A-Z0-9]{9}\d\b/g,
+    accept: text => icaoCheckDigit(text.slice(0, 9)) === Number(text[9])
+  },
+  {
+    category: 'iban',
+    // The regex only bounds the shape loosely — a 2-letter/2-digit prefix then
+    // one or more space-separated alnum groups of up to 4 characters, which is
+    // permissive enough to match a real IBAN's conventional last group being
+    // shorter than 4 (the UK's own 4-4-4-4-2 grouping, for one). Real length
+    // (15-34 after removing spaces) and the mod-97 checksum are entirely
+    // `ibanChecksumValid`'s job, the same "regex is the cheap filter, the
+    // checksum decides" division of labour as the credit-card matcher.
+    re: /\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{1,4})+\b/g,
+    accept: text => ibanChecksumValid(text.replace(/ /g, ''))
   },
   {
     category: 'ssn',
@@ -93,6 +140,53 @@ export function luhn(digits: string): boolean {
     double = !double;
   }
   return sum % 10 === 0;
+}
+
+/**
+ * ICAO 9303's 7-3-1 weighted check digit — the same algorithm used in the
+ * machine-readable zone of passports and ID cards worldwide. `<` (the MRZ
+ * filler character) is valued at 0; letters at 10-35 (A=10); digits at face
+ * value. `nine` is the 9-character document number the check digit covers.
+ */
+export function icaoCheckDigit(nine: string): number {
+  const weights = [7, 3, 1];
+  let sum = 0;
+  for (let i = 0; i < nine.length; i++) {
+    const ch = nine[i];
+    const value =
+      ch >= '0' && ch <= '9'
+        ? ch.charCodeAt(0) - 48
+        : ch >= 'A' && ch <= 'Z'
+          ? ch.charCodeAt(0) - 65 + 10
+          : 0;
+    sum += value * weights[i % 3];
+  }
+  return sum % 10;
+}
+
+/**
+ * ISO 7064 MOD 97-10, the IBAN check: move the first 4 characters to the end,
+ * expand each letter to its two-digit value (A=10 .. Z=35), and the result is
+ * valid iff the whole numeral mod 97 is 1. Processed one *original* character
+ * at a time — multiplying the running remainder by 100 for a letter (it
+ * contributes two digits) or 10 for a digit (one digit) before adding its
+ * value and reducing — which is arithmetically identical to reducing the fully
+ * expanded digit string, without ever building a number too large for a
+ * JS number to represent exactly.
+ */
+export function ibanChecksumValid(raw: string): boolean {
+  const value = raw.toUpperCase();
+  if (value.length < 15 || value.length > 34) return false;
+  if (!/^[A-Z]{2}\d{2}[A-Z0-9]+$/.test(value)) return false;
+
+  const rearranged = value.slice(4) + value.slice(0, 4);
+  let remainder = 0;
+  for (const ch of rearranged) {
+    const isDigit = ch >= '0' && ch <= '9';
+    const digitValue = isDigit ? ch.charCodeAt(0) - 48 : ch.charCodeAt(0) - 65 + 10;
+    remainder = (remainder * (isDigit ? 10 : 100) + digitValue) % 97;
+  }
+  return remainder === 1;
 }
 
 /**
