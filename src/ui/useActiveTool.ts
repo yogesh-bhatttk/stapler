@@ -7,12 +7,21 @@
  * rendered anything for any tool*: no options, no primary action. Deriving from the
  * location works wherever the component sits.
  */
+import { useEffect } from 'preact/hooks';
 import { useLocation } from 'wouter-preact';
-import { findTool, type ToolDefinition } from '../core/tools';
+import { activeToolId, findTool, type ToolDefinition } from '../core/tools';
 
 const TOOL_ROUTE = /^\/tool\/([^/?#]+)/;
 
 export function useActiveTool(): ToolDefinition | null {
   const [location] = useLocation();
-  return findTool(location.match(TOOL_ROUTE)?.[1]);
+  const tool = findTool(location.match(TOOL_ROUTE)?.[1]);
+
+  // DOC-10's operation log needs "which tool was active" outside any component,
+  // in `core/history.ts`, which cannot call a router hook itself.
+  useEffect(() => {
+    activeToolId.value = tool?.id ?? null;
+  }, [tool?.id]);
+
+  return tool;
 }

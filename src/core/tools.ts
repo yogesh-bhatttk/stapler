@@ -9,6 +9,8 @@
  * and the action bar all read from this list.
  */
 
+import { signal } from '@preact/signals';
+
 export type ToolId =
   | 'merge'
   | 'organize'
@@ -36,7 +38,11 @@ export type ToolId =
   | 'table-extract'
   | 'acc'
   | 'contact-sheet'
-  | 'shortcuts';
+  | 'shortcuts'
+  | 'read-aloud'
+  | 'reflow'
+  | 'history'
+  | 'side-by-side';
 
 export type ToolGroup = 'Organize' | 'Convert' | 'Optimize' | 'Document' | 'Automation';
 
@@ -369,8 +375,62 @@ export const TOOLS: readonly ToolDefinition[] = [
     commitLabel: 'Export PDF',
     worksWithoutDocument: true,
     selectable: false
+  },
+  {
+    id: 'read-aloud',
+    title: 'Read aloud',
+    group: 'Document',
+    summary: 'Read the extracted text aloud, page by page.',
+    icon: 'Volume2',
+    canvasMode: 'grid',
+    needsOptionsPanel: true,
+    commitLabel: 'Done',
+    selectable: false
+  },
+  {
+    id: 'reflow',
+    title: 'Reflow view',
+    group: 'Document',
+    summary: 'Read the document as large, single-column text instead of page images.',
+    icon: 'BookOpen',
+    canvasMode: 'single',
+    needsOptionsPanel: true,
+    commitLabel: 'Done',
+    selectable: false
+  },
+  {
+    id: 'history',
+    title: 'Edit history',
+    group: 'Document',
+    summary: 'See every operation applied this session and export the log.',
+    icon: 'History',
+    canvasMode: 'grid',
+    needsOptionsPanel: true,
+    commitLabel: 'Done',
+    selectable: false,
+    worksWithoutDocument: true
+  },
+  {
+    id: 'side-by-side',
+    title: 'Side by side',
+    group: 'Document',
+    summary: 'View this document next to another one, scroll and zoom kept in sync.',
+    icon: 'Columns2',
+    canvasMode: 'single',
+    needsOptionsPanel: true,
+    commitLabel: 'Done',
+    selectable: false
   }
 ];
+
+/**
+ * DOC-10 — the route names the active tool, but that's only readable from a
+ * `wouter-preact` hook, which `core/history.ts` (a plain module, no hooks) can't
+ * call. `useActiveTool` keeps this in sync on every render of any component that
+ * calls it (the shell always has at least one mounted), so `history.ts` can read
+ * "which tool is the user in right now" as a plain signal instead.
+ */
+export const activeToolId = signal<ToolId | null>(null);
 
 const BY_ID = new Map(TOOLS.map(tool => [tool.id, tool]));
 

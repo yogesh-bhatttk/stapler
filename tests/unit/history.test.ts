@@ -19,10 +19,12 @@ import {
   canRedo,
   canUndo,
   commit,
+  operationLog,
   redo,
   resetHistory,
   undo
 } from '../../src/core/history';
+import { activeToolId } from '../../src/core/tools';
 import {
   pageAnnotations,
   addAnnotation as addOverlayAnnotation,
@@ -55,6 +57,7 @@ beforeEach(() => {
   activeDocId.value = null;
   selectedPageKeys.value = new Set();
   pageAnnotations.value = {};
+  activeToolId.value = null;
   resetHistory();
 });
 
@@ -213,6 +216,94 @@ describe('transactions', () => {
     expect(pageAnnotations.value['doc-1-0']).toHaveLength(0);
     undo();
     expect(pageAnnotations.value['doc-1-0']).toHaveLength(1);
+  });
+});
+
+describe('DOC-10: operation log', () => {
+  it('labels each entry with the tool active when the operation happened', () => {
+    const doc = seed(3);
+    activeToolId.value = 'organize';
+    rotatePages(doc.id, [doc.pages[0].key], 90);
+    activeToolId.value = 'split';
+    deletePages(doc.id, [doc.pages[1].key]);
+
+    expect(operationLog().map(e => e.label)).toEqual(['Organize', 'Split & extract']);
+  });
+
+  it('falls back to a generic label when no tool is active', () => {
+    const doc = seed(2);
+    activeToolId.value = null;
+    rotatePages(doc.id, [doc.pages[0].key], 90);
+    expect(operationLog().map(e => e.label)).toEqual(['Edit']);
+  });
+
+  it('excludes an operation that was undone, and restores it on redo unchanged', () => {
+    const doc = seed(3);
+    activeToolId.value = 'organize';
+    rotatePages(doc.id, [doc.pages[0].key], 90);
+    activeToolId.value = 'crop';
+    deletePages(doc.id, [doc.pages[1].key]);
+    expect(operationLog().map(e => e.label)).toEqual(['Organize', 'Crop']);
+
+    undo();
+    expect(operationLog().map(e => e.label)).toEqual(['Organize']);
+
+    // Switching tools between the undo and the redo must not relabel the
+    // operation being restored — it keeps the label it was recorded with.
+    activeToolId.value = 'merge';
+    redo();
+    expect(operationLog().map(e => e.label)).toEqual(['Organize', 'Crop']);
+  });
+
+  it('drops the undone entry from the log once a new operation is made', () => {
+    const doc = seed(3);
+    activeToolId.value = 'organize';
+    rotatePages(doc.id, [doc.pages[0].key], 90);
+    undo();
+    activeToolId.value = 'crop';
+    rotatePages(doc.id, [doc.pages[0].key], 90);
+    // The undone "Organize" entry is gone, not resurrected by the new push.
+    expect(operationLog().map(e => e.label)).toEqual(['Crop']);
+    expect(canRedo()).toBe(false);
+  });
+
+  it('is cleared by resetHistory', () => {
+    const doc = seed(2);
+    activeToolId.value = 'organize';
+    rotatePages(doc.id, [doc.pages[0].key], 90);
+    expect(operationLog().length).toBe(1);
+    resetHistory();
+    expect(operationLog()).toEqual([]);
+  });
+
+  it('records exactly one entry for a whole coalesced transaction', () => {
+    const doc = seed(1);
+    activeToolId.value = 'sign';
+    addAnnotation(doc.id, {
+      id: 'a1',
+      pageKey: doc.pages[0].key,
+      type: 'text',
+      x: 0.1,
+      y: 0.1,
+      width: 0.2,
+      height: 0.05,
+      data: 'hello'
+    });
+    const tx = beginTransaction('drag');
+    for (let i = 1; i <= 10; i++) updateAnnotation(doc.id, 'a1', { x: 0.1 + i * 0.001 });
+    tx.end();
+
+    // One entry for the add, one for the whole drag — not one per drag step.
+    expect(operationLog().map(e => e.label)).toEqual(['Sign & fill', 'Sign & fill']);
+  });
+
+  it('every entry has a real timestamp, in non-decreasing order', () => {
+    const doc = seed(3);
+    rotatePages(doc.id, [doc.pages[0].key], 90);
+    deletePages(doc.id, [doc.pages[1].key]);
+    const timestamps = operationLog().map(e => e.timestamp);
+    expect(timestamps.every(t => Number.isFinite(t) && t > 0)).toBe(true);
+    expect(timestamps[1]).toBeGreaterThanOrEqual(timestamps[0]);
   });
 });
 

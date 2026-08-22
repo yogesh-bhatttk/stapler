@@ -25,6 +25,7 @@ import {
   protectDocument,
   scrubDocumentMetadata,
   planCompression,
+  planSizeSplitBoundaries,
   sanitizeFileStem,
   splitBoundaries,
   splitDocument
@@ -62,9 +63,11 @@ import {
 } from './state';
 import { extractSettings } from './extract/state';
 import { extractImagesReport, summarize } from './extract-images/state';
-import { formFields, formValues } from './sign/state';
+import { formFields, formValues, formulas } from './sign/state';
+import { applyFormulas } from '../../core/formula';
 import { XFA_MESSAGE } from '../../core/pdf/xfa';
 import { pendingRedactions, redactionReport } from './redact/state';
+import { faceBlurModelDeclined } from './redact/faceblur-state';
 import { protection, protectionActive, protectionIssue } from './protect/state';
 import type { ProtectionSettings } from '../../core/pdf/encrypt';
 import { scrubSettings } from './metadata/state';
@@ -196,7 +199,12 @@ export interface CommitContext {
 type CommitHandler = (context: CommitContext) => Promise<void>;
 
 import { cropBoxes } from './crop/state';
-import { batesSettings, watermarkSettings, headerFooterSettings } from './watermark/state';
+import {
+  batesSettings,
+  watermarkSettings,
+  headerFooterSettings,
+  barcodeStampSettings
+} from './watermark/state';
 import {
   entriesToNodes,
   outlineDocId,
@@ -229,6 +237,18 @@ function getBates() {
     start: settings.start,
     position: settings.position,
     fontSize: settings.fontSize
+  };
+}
+
+/** OPS-18 — the QR/barcode stamp, or nothing when disabled or empty. */
+function getBarcodeStamp() {
+  const settings = barcodeStampSettings.value;
+  if (!settings.enabled || !settings.text.trim()) return undefined;
+  return {
+    kind: settings.kind,
+    text: settings.text,
+    position: settings.position,
+    scale: settings.scale
   };
 }
 
@@ -275,7 +295,8 @@ const exportComposed: CommitHandler = async ({ doc, job }) => {
       nup: nupSettings.value,
       layerAnnotations: getLayerAnnotations(),
       outline: getOutline(doc),
-      bates: getBates()
+      bates: getBates(),
+      barcodeStamp: getBarcodeStamp()
     },
     job
   );
@@ -362,6 +383,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         layerAnnotations: getLayerAnnotations(),
         outline: getOutline(doc),
         bates: getBates(),
+        barcodeStamp: getBarcodeStamp(),
         // Same as Sign: Annotate deliberately produces a static page.
         allowXfaLoss: true
       },
@@ -403,16 +425,61 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       return;
     }
 
-    const boundaries = splitBoundaries(settings.mode, doc.pages.length, {
-      every: settings.everyN,
-      custom: settings.customBoundaries,
-      bookmarkStarts: bookmarks?.map(bookmark => bookmark.pageIndex)
-    });
+    // OPS-15 — the boundaries depend on each page range's real composed size,
+    // which is only known after composing, so this mode gets its own async
+    // planning step instead of `splitBoundaries`' synchronous page-count-only ones.
+    let oversizedPages: { pageIndex: number; bytes: number }[] = [];
+    const boundaries =
+      settings.mode === 'size'
+        ? await (async () => {
+            const plan = await planSizeSplitBoundaries(
+              {
+                pages: doc.pages,
+                annotations: doc.annotations,
+                layerAnnotations: getLayerAnnotations(),
+                bates: getBates(),
+                barcodeStamp: getBarcodeStamp()
+              },
+              settings.targetSizeKb * 1024,
+              job
+            );
+            oversizedPages = plan.oversized;
+            return plan.boundaries;
+          })()
+        : splitBoundaries(settings.mode, doc.pages.length, {
+            every: settings.everyN,
+            custom: settings.customBoundaries,
+            bookmarkStarts: bookmarks?.map(bookmark => bookmark.pageIndex)
+          });
     if (boundaries.length === 0 && !bookmarks) {
-      notify('warning', translate('That produces a single file.'), {
-        detail: 'Choose split points inside the document, or use Extract instead.'
-      });
-      return;
+      if (settings.mode === 'size') {
+        notify('info', translate('The whole document already fits under the target size.'), {
+          detail: 'It will be exported as a single file.'
+        });
+      } else {
+        notify('warning', translate('That produces a single file.'), {
+          detail: 'Choose split points inside the document, or use Extract instead.'
+        });
+        return;
+      }
+    }
+    if (oversizedPages.length > 0) {
+      // A single page's own composed size exceeded the target — there is no
+      // further cut that could shrink it, so the target was not actually
+      // honoured for these files. Say so rather than silently handing back a
+      // larger file than the user asked for.
+      notify(
+        'warning',
+        translate('{count} page(s) exceed the target size on their own.', {
+          count: oversizedPages.length
+        }),
+        {
+          detail: `Page${oversizedPages.length === 1 ? '' : 's'} ${oversizedPages
+            .map(p => `${p.pageIndex + 1} (${formatBytes(p.bytes)})`)
+            .join(', ')} could not be shrunk further by splitting alone.`,
+          timeout: 0
+        }
+      );
     }
 
     const fileNames = bookmarks?.map((bookmark, index) =>
@@ -428,6 +495,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         annotations: doc.annotations,
         layerAnnotations: getLayerAnnotations(),
         bates: getBates(),
+        barcodeStamp: getBarcodeStamp(),
         boundaries,
         baseName: stem(doc.name),
         fileNames
@@ -683,7 +751,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
 
   sign: async ({ doc, job }) => {
     const hasValues = Object.keys(formValues.value).length > 0;
-    if (doc.annotations.length === 0 && !hasValues) {
+    if (doc.annotations.length === 0 && !hasValues && formulas.value.length === 0) {
       notify('warning', translate('Nothing has been placed yet.'), {
         detail: 'Pick a signature or stamp from the panel, or fill out a form field first.'
       });
@@ -720,10 +788,33 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       },
       job
     );
-    if (hasValues) {
+    if (hasValues || formulas.value.length > 0) {
+      // SGN-07 — the same merge the panel and the on-page overlay already
+      // render from, so what was on screen and what lands in `/V` cannot
+      // drift. A formula that cannot be computed blocks the save outright:
+      // writing the raw override instead would put a wrong or stale number
+      // in the field with no indication anything was off.
+      const { values, errors } = applyFormulas(
+        formulas.value,
+        formFields.value?.fields ?? [],
+        formValues.value
+      );
+      if (Object.keys(errors).length > 0) {
+        notify(
+          'danger',
+          translate('A calculated field could not be computed — nothing was saved.'),
+          {
+            detail: Object.entries(errors)
+              .map(([name, message]) => `"${name}": ${message}`)
+              .join(' '),
+            timeout: 0
+          }
+        );
+        return;
+      }
       // SGN-05 — the fill path's own flatten is left to `finalize`, so the two
       // are one decision. With the toggle off the values stay interactive.
-      bytes = await fillFormFields(bytes, formValues.value, false, job);
+      bytes = await fillFormFields(bytes, values, false, job);
     }
     await save(
       doc,
@@ -740,6 +831,20 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
 
   redact: async ({ doc, job }) => {
     const regions = pendingRedactions.value;
+
+    // RED-08 — a declined detector download must never become a quiet nothing
+    // at export time. The panel already says face blur is off; this makes the
+    // export say it too, so a document cannot leave carrying faces the user
+    // believed had been blurred.
+    if (faceBlurModelDeclined.value) {
+      notify('warning', translate('Faces in this document were not blurred.'), {
+        detail:
+          'The one-time face-detector download was declined, so face blur never ran. Redaction ' +
+          'marks below are unaffected and will still be applied.',
+        timeout: 0
+      });
+    }
+
     if (regions.length === 0) {
       notify('warning', translate('No regions are marked.'), {
         detail: 'Draw a rectangle on the page, or search for text to mark every occurrence.'
@@ -926,6 +1031,12 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   },
   compare: async () => {},
   batch: async () => {},
+  // ACC-02/ACC-03 — pure reading aids, same as `compare`: nothing here produces
+  // a modified document, so there is nothing to export.
+  'read-aloud': async () => {},
+  reflow: async () => {},
+  history: async () => {},
+  'side-by-side': async () => {},
   // CNV-06 — panel only configures the Markdown source (`tools/state.ts`); this is
   // the actual commit, reached the same way every other tool's is: the action
   // bar's single primary CTA (DESIGN-ADAPTATION §4.2). `worksWithoutDocument` on

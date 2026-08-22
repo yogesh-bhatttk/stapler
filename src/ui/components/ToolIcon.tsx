@@ -6,10 +6,13 @@
  * is the single place that binding happens.
  */
 import {
+  BookOpen,
+  Columns2,
   Eraser,
   FilePlus,
   FileSearch,
   FileText,
+  History,
   Image as ImageIcon,
   ImageDown,
   Layers,
@@ -20,15 +23,19 @@ import {
   ShieldAlert,
   Sparkles,
   SplitSquareHorizontal,
+  Volume2,
   type LucideIcon
 } from 'lucide-preact';
 import { forwardRef } from 'preact/compat';
 
 const ICONS: Record<string, LucideIcon> = {
+  BookOpen,
+  Columns2,
   Eraser,
   FilePlus,
   FileSearch,
   FileText,
+  History,
   Image: ImageIcon,
   ImageDown,
   Layers,
@@ -38,7 +45,8 @@ const ICONS: Record<string, LucideIcon> = {
   PenTool,
   ShieldAlert,
   Sparkles,
-  SplitSquareHorizontal
+  SplitSquareHorizontal,
+  Volume2
 };
 
 export const ToolIcon = forwardRef<SVGSVGElement, { name: string; size?: number }>(

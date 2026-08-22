@@ -17,9 +17,11 @@
  * Committed exports are not undoable and nothing in the export path calls
  * {@link commit}.
  */
+import { signal } from '@preact/signals';
 import { activeDocId, documents, selectedPageKeys, type StaplerDoc } from './store';
 import { cropBoxes, type CropBox } from '../ui/tools/crop/state';
 import { pageAnnotations, type Annotation } from '../ui/tools/annotate/state';
+import { activeToolId, findTool } from './tools';
 
 const MAX_DEPTH = 50;
 
@@ -31,11 +33,44 @@ interface Snapshot {
   pageAnnotations: Record<string, Annotation[]>;
 }
 
+/** DOC-11 — {@link Snapshot} with its one non-JSON-safe field, `selection`, as an array. */
+export interface SerializedSnapshot extends Omit<Snapshot, 'selection'> {
+  selection: string[];
+}
+
+export interface SerializedHistory {
+  undoStack: SerializedSnapshot[];
+  redoStack: SerializedSnapshot[];
+  undoLog: OperationLogEntry[];
+  redoLog: OperationLogEntry[];
+}
+
+/** DOC-10 — one operation-log entry, one per `push()`, kept in lockstep with it. */
+export interface OperationLogEntry {
+  label: string;
+  timestamp: number;
+}
+
 let undoStack: Snapshot[] = [];
 let redoStack: Snapshot[] = [];
 
+// Kept in exact lockstep with undoStack/redoStack — same push, same pop, same
+// clear — rather than folding `label`/`timestamp` into `Snapshot` itself, so
+// `historySourceRefCount`'s existing walk over raw snapshots is untouched.
+let undoLog: OperationLogEntry[] = [];
+let redoLog: OperationLogEntry[] = [];
+
 /** Non-null while a coalescing transaction is open. */
 let openTransaction: string | null = null;
+
+/**
+ * DOC-10 — `undoLog`/`redoLog` are plain arrays, not signals (matching
+ * `canUndo`/`canRedo`, which were always read imperatively, never rendered
+ * reactively, before this ticket). `HistoryPanel` needs to re-render as entries
+ * are added, so this increments on every change the log can make; reading its
+ * `.value` is what subscribes the component.
+ */
+export const historyVersion = signal(0);
 
 function snapshot(): Snapshot {
   return {
@@ -47,10 +82,25 @@ function snapshot(): Snapshot {
   };
 }
 
+/**
+ * The active tool's title, not `beginTransaction`'s own coalescing key (things
+ * like `crop-${page.key}`, which exist only to detect "is this the same open
+ * transaction" and are not fit for a user-facing log).
+ */
+function currentOperationLabel(): string {
+  return findTool(activeToolId.value ?? undefined)?.title ?? 'Edit';
+}
+
 function push() {
   undoStack.push(snapshot());
-  if (undoStack.length > MAX_DEPTH) undoStack.shift();
+  undoLog.push({ label: currentOperationLabel(), timestamp: Date.now() });
+  if (undoStack.length > MAX_DEPTH) {
+    undoStack.shift();
+    undoLog.shift();
+  }
   redoStack = [];
+  redoLog = [];
+  historyVersion.value++;
 }
 
 function restore(state: Snapshot) {
@@ -93,16 +143,34 @@ export function beginTransaction(label: string): { end: () => void } {
 
 export function undo(): void {
   const previous = undoStack.pop();
-  if (!previous) return;
+  const undoneEntry = undoLog.pop();
+  if (!previous || !undoneEntry) return;
   redoStack.push(snapshot());
+  // The operation being undone keeps its own label and timestamp, now sitting
+  // on the redo side — it reappears in the log, unchanged, if redone.
+  redoLog.push(undoneEntry);
   restore(previous);
+  historyVersion.value++;
 }
 
 export function redo(): void {
   const next = redoStack.pop();
-  if (!next) return;
+  const redoneEntry = redoLog.pop();
+  if (!next || !redoneEntry) return;
   undoStack.push(snapshot());
+  undoLog.push(redoneEntry);
   restore(next);
+  historyVersion.value++;
+}
+
+/**
+ * DOC-10 — every operation still applied, oldest first: exactly `undoLog`,
+ * which is kept in lockstep with `undoStack` by `push`/`undo`/`redo` above, so
+ * an operation undone before export is excluded by construction rather than by
+ * a separate filter that could drift from what the undo stack actually holds.
+ */
+export function operationLog(): OperationLogEntry[] {
+  return [...undoLog];
 }
 
 /**
@@ -136,5 +204,40 @@ export const canRedo = (): boolean => redoStack.length > 0;
 export function resetHistory(): void {
   undoStack = [];
   redoStack = [];
+  undoLog = [];
+  redoLog = [];
   openTransaction = null;
+  historyVersion.value++;
+}
+
+/**
+ * DOC-11 — the undo/redo stacks in a form `session-recovery.ts` can hand to
+ * `structuredClone`/IndexedDB, which cannot store a `Set`. Every snapshot here
+ * already excludes document *bytes* (see the file header), so serialising the
+ * whole stack is exactly as cheap as serialising one snapshot's `docs` array —
+ * unlike the removed feature `store.ts`'s own comment warns about, which
+ * persisted raw bytes on every mutation.
+ */
+export function serializeHistory(): SerializedHistory {
+  const toSerialized = (s: Snapshot): SerializedSnapshot => ({ ...s, selection: [...s.selection] });
+  return {
+    undoStack: undoStack.map(toSerialized),
+    redoStack: redoStack.map(toSerialized),
+    undoLog: [...undoLog],
+    redoLog: [...redoLog]
+  };
+}
+
+/** The inverse of {@link serializeHistory} — replaces the stacks wholesale. */
+export function restoreHistoryFromRecord(data: SerializedHistory): void {
+  const toSnapshot = (s: SerializedSnapshot): Snapshot => ({
+    ...s,
+    selection: new Set(s.selection)
+  });
+  undoStack = data.undoStack.map(toSnapshot);
+  redoStack = data.redoStack.map(toSnapshot);
+  undoLog = [...data.undoLog];
+  redoLog = [...data.redoLog];
+  openTransaction = null;
+  historyVersion.value++;
 }
