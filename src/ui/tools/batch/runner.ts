@@ -8,8 +8,14 @@ import {
   outputPattern,
   outputFormat,
   outputZipHandle,
+  scrubMetadataInBatch,
   type BatchNote
 } from './state';
+import {
+  stripAllMetadataSettings,
+  hasAnyMetadataFinding,
+  countMetadataFindings
+} from '../../../core/metadata-scrub';
 import { compressSettings } from '../compress/state';
 import { watermarkSettings, headerFooterSettings } from '../watermark/state';
 import { nupSettings } from '../nup/state';
@@ -232,6 +238,25 @@ export async function runBatch(signal?: AbortSignal) {
                 currentBytes = res.bytes;
               }
             }
+          }
+        }
+
+        // RED-09: scrub metadata last, from this file's own findings — never
+        // from another file's, and never from settings a recipe happened to
+        // carry, since a batch run has no per-item checkbox to consult.
+        if (scrubMetadataInBatch.value) {
+          const findings = await processWorker.lease(api => api.readMetadata(currentBytes));
+          const settings = stripAllMetadataSettings(findings);
+          if (hasAnyMetadataFinding(settings)) {
+            currentBytes = await processWorker.lease(api =>
+              api.scrubMetadata(currentBytes, settings)
+            );
+            const count = countMetadataFindings(findings);
+            addNote({
+              file: fileHandle.name,
+              kind: 'metadata-scrubbed',
+              detail: `Removed ${count} metadata finding${count === 1 ? '' : 's'}.`
+            });
           }
         }
 

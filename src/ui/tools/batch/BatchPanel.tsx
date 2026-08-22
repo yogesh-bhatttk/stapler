@@ -13,6 +13,7 @@ import {
   outputPattern,
   outputFormat,
   outputZipHandle,
+  scrubMetadataInBatch,
   Recipe,
   loadRecipes,
   addRecipe
@@ -347,6 +348,19 @@ export function BatchPanel() {
         </Field>
         <p style={{ fontSize: '0.75em', opacity: 0.7, margin: '4px 0 0' }}>
           Tokens: <code>{'{basename}'}</code>, <code>{'{index}'}</code>, <code>{'{date}'}</code>
+        </p>
+      </div>
+
+      <div className={panelStyles.section}>
+        <Checkbox
+          label={t('Scrub metadata from every file')}
+          checked={scrubMetadataInBatch.value}
+          onChange={checked => (scrubMetadataInBatch.value = checked)}
+        />
+        <p className={panelStyles.description}>
+          {t(
+            'Removes author, dates, and other hidden metadata from each file individually, the same as the Metadata tool.'
+          )}
         </p>
       </div>
 

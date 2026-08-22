@@ -68,7 +68,7 @@ export const outputFormat = signal<'directory' | 'zip'>('directory');
  */
 export interface BatchNote {
   file: string;
-  kind: 'kept-original' | 'failed';
+  kind: 'kept-original' | 'failed' | 'metadata-scrubbed';
   detail: string;
 }
 
@@ -101,4 +101,13 @@ export const outputPattern = signal<string>(
 
 outputPattern.subscribe(p => {
   localStorage.setItem('stapler:batch:outputPattern', p);
+});
+
+/** RED-09 — scrub every finding RED-04 would report, independently per file. */
+export const scrubMetadataInBatch = signal<boolean>(
+  localStorage.getItem('stapler:batch:scrubMetadata') === 'true'
+);
+
+scrubMetadataInBatch.subscribe(v => {
+  localStorage.setItem('stapler:batch:scrubMetadata', String(v));
 });

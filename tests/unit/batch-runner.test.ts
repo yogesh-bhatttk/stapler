@@ -32,13 +32,34 @@ vi.mock('../../src/core/operations', () => ({
   compressDocument: (...args: unknown[]) => compressDocument(...(args as unknown as [Uint8Array]))
 }));
 
+// RED-09: each byte array's own single byte stands in for "this file's own
+// metadata" — readMetadata reports an author only for the file whose marker
+// byte is 1, so a test can prove file B's scrub decision never leaks from
+// file A's findings.
+const readMetadata = vi.fn(async (bytes: Uint8Array) => ({
+  author: bytes[0] === 1 ? 'Leaked Name' : undefined,
+  hasXmp: false,
+  hasEmbeddedJavaScript: false,
+  hasOpenAction: false,
+  hasAdditionalActions: false,
+  hasEmbeddedFiles: false,
+  hasPageThumbnails: false,
+  hasOptionalContent: false,
+  hasCustomInfo: false,
+  customInfo: [],
+  filesystemPaths: []
+}));
+const scrubMetadata = vi.fn(async (bytes: Uint8Array) => new Uint8Array([...bytes, 0xff]));
+
 vi.mock('../../src/core/workers', () => ({
   processWorker: {
     lease: <T>(fn: (api: unknown) => Promise<T>) =>
       fn({
         inspect: async () => ({ pageCount: 1 }),
         compose: async (_pages: unknown, sources: Record<string, Uint8Array>) =>
-          Object.values(sources)[0]
+          Object.values(sources)[0],
+        readMetadata: (...args: unknown[]) => readMetadata(...(args as [Uint8Array])),
+        scrubMetadata: (...args: unknown[]) => scrubMetadata(...(args as [Uint8Array]))
       })
   }
 }));
@@ -52,13 +73,15 @@ interface Written {
   bytes: Uint8Array;
 }
 
-function fileHandle(name: string, options: { fails?: boolean } = {}) {
+function fileHandle(name: string, options: { fails?: boolean; marker?: number } = {}) {
   return {
     kind: 'file' as const,
     name,
     getFile: async () => {
       if (options.fails) throw new Error(`cannot read ${name}`);
-      return new File([new Uint8Array([1, 2, 3])], name, { type: 'application/pdf' });
+      return new File([new Uint8Array([options.marker ?? 0, 2, 3])], name, {
+        type: 'application/pdf'
+      });
     }
   };
 }
@@ -88,9 +111,12 @@ function dirs(handles: ReturnType<typeof fileHandle>[]) {
 beforeEach(() => {
   planCompression.mockClear();
   compressDocument.mockClear();
+  readMetadata.mockClear();
+  scrubMetadata.mockClear();
   state.activeRecipeId.value = null;
   state.savedRecipes.value = [];
   state.outputPattern.value = '{basename}';
+  state.scrubMetadataInBatch.value = false;
 });
 
 describe('BAT-03: output names are indexed by input position', () => {
@@ -167,5 +193,53 @@ describe('BAT-01: a recipe replays its own snapshot', () => {
 
     expect(planCompression).toHaveBeenCalledTimes(1);
     expect(planCompression.mock.calls[0][1]).toEqual(saved);
+  });
+});
+
+describe('RED-09: batch metadata scrub', () => {
+  it('is a no-op when the option is off', async () => {
+    const { inDir, outDir } = dirs([fileHandle('a.pdf', { marker: 1 })]);
+    state.inputDirHandle.value = inDir as never;
+    state.outputDirHandle.value = outDir as never;
+    state.scrubMetadataInBatch.value = false;
+
+    await runBatch();
+
+    expect(readMetadata).not.toHaveBeenCalled();
+    expect(scrubMetadata).not.toHaveBeenCalled();
+  });
+
+  it("decides each file from its own findings, not the first file's", async () => {
+    const { inDir, outDir, written } = dirs([
+      fileHandle('has-author.pdf', { marker: 1 }),
+      fileHandle('clean.pdf', { marker: 0 })
+    ]);
+    state.inputDirHandle.value = inDir as never;
+    state.outputDirHandle.value = outDir as never;
+    state.scrubMetadataInBatch.value = true;
+
+    await runBatch();
+
+    expect(readMetadata).toHaveBeenCalledTimes(2);
+    // Only the file whose own findings reported an author was scrubbed.
+    expect(scrubMetadata).toHaveBeenCalledTimes(1);
+    expect(scrubMetadata.mock.calls[0][0][0]).toBe(1);
+
+    const scrubbedNote = state.batchProgress.value.notes.find(
+      n => n.file === 'has-author.pdf' && n.kind === 'metadata-scrubbed'
+    );
+    expect(scrubbedNote).toBeDefined();
+    expect(
+      state.batchProgress.value.notes.some(
+        n => n.file === 'clean.pdf' && n.kind === 'metadata-scrubbed'
+      )
+    ).toBe(false);
+
+    // The scrubbed file's written bytes reflect the scrub call's output;
+    // the clean file's bytes are untouched.
+    expect(written.find(w => w.name === 'has-author.pdf')!.bytes).toEqual(
+      new Uint8Array([1, 2, 3, 0xff])
+    );
+    expect(written.find(w => w.name === 'clean.pdf')!.bytes).toEqual(new Uint8Array([0, 2, 3]));
   });
 });
