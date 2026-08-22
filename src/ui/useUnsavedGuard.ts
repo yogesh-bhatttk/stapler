@@ -1,10 +1,12 @@
 /**
  * Warns before a reload or close discards unexported changes.
  *
- * The workspace lives in memory only — see the note on session persistence in
- * `core/store.ts` — so a reload genuinely loses edits. That is a defensible trade
- * (persisting whole documents on every keystroke was worse), but it is only defensible
- * if the user is told, rather than finding out afterwards.
+ * DOC-11 added session recovery (`core/session-recovery.ts`), so a reload no
+ * longer *silently* loses an in-progress edit the way it once did — but
+ * recovery is an offer made on the next launch, not a guarantee: declining it,
+ * a cleared browser storage, or exporting and then editing further are all
+ * still real ways to lose work a reload interrupts. This warning stays for
+ * that gap, not because recovery doesn't exist.
  *
  * The prompt is deliberately tied to `dirty`, so simply opening a document to look at it
  * never nags.

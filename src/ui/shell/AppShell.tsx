@@ -10,6 +10,7 @@ import { translate } from '../../core/i18n';
 import type { ComponentChildren } from 'preact';
 import { lazy, Suspense } from 'preact/compat';
 import { useEffect, useState } from 'preact/hooks';
+import { useSignalEffect } from '@preact/signals';
 import { TopBar } from './TopBar';
 import { ToolRail } from './ToolRail';
 
@@ -33,21 +34,31 @@ import { ToastRegion } from '../components/Feedback';
 import { ShortcutModal } from '../components/ShortcutModal';
 import { WelcomeModal } from '../components/WelcomeModal';
 import { isCommandPaletteOpen, isShortcutSheetOpen } from '../../core/ui';
-import { canRedo, canUndo, redo, undo } from '../../core/history';
+import { canRedo, canUndo, redo, undo, historyVersion } from '../../core/history';
 import {
   activeDoc,
   selectAllPages,
   insertPages,
   selectedPageKeys,
   addDocument,
-  makePageRefs
+  makePageRefs,
+  documents,
+  sources,
+  activeDocId
 } from '../../core/store';
+import {
+  loadPendingRecovery,
+  clearSession,
+  restoreSession,
+  scheduleSessionSave,
+  sessionRecoveryChecked
+} from '../../core/session-recovery';
 import { useLocation } from 'wouter-preact';
 import { toolRoute } from '../../core/tools';
 import { useImageImportOptions } from '../useImageImportOptions';
 import { importFiles } from '../../core/import';
 import { platform } from '../../platform/current';
-import { notify } from '../../core/notify';
+import { notify, confirmAction } from '../../core/notify';
 import { readSetting, writeSetting } from '../../core/db';
 import {
   eventMatchesRedoShortcut,
@@ -84,6 +95,47 @@ export function AppShell({ children }: { children: ComponentChildren }) {
       if (!seen) setShowWelcome(true);
     });
   }, []);
+
+  // DOC-11 — offered once, on mount, before the autosave watcher below is
+  // allowed to run: reading the record and then immediately arming autosave
+  // in the same tick would let the very first (empty, pre-restore) autosave
+  // fire and overwrite it before the prompt ever resolves.
+  useEffect(() => {
+    void (async () => {
+      const record = await loadPendingRecovery();
+      if (record) {
+        const count = record.documents.length;
+        const restore = await confirmAction({
+          title: translate('Restore your previous session?'),
+          body: translate(
+            'Stapler found {count} document{plural} open from before this tab closed. Restore ' +
+              'them exactly as they were, undo history included, or start with a clean workspace.',
+            { count, plural: count === 1 ? '' : 's' }
+          ),
+          confirmLabel: translate('Restore'),
+          cancelLabel: translate('Start fresh')
+        });
+        if (restore) {
+          restoreSession(record);
+        } else {
+          await clearSession();
+        }
+      }
+      sessionRecoveryChecked.value = true;
+    })();
+  }, []);
+
+  // DOC-11 — autosaves the lightweight pointer state (never document bytes;
+  // see `session-recovery.ts`'s header) on every meaningful change, so a
+  // crash or accidental reload has something recent to offer back.
+  useSignalEffect(() => {
+    if (!sessionRecoveryChecked.value) return;
+    void documents.value;
+    void sources.value;
+    void activeDocId.value;
+    void historyVersion.value;
+    scheduleSessionSave();
+  });
 
   // Access signal to subscribe to changes
   void customShortcuts.value;
