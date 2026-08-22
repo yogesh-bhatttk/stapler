@@ -701,6 +701,15 @@ const ONE_PIXEL_PNG = Uint8Array.from(
 );
 
 function hasImageXObject(doc: PDFDocument, pageIndex: number): boolean {
+  return hasXObjectOfSubtype(doc, pageIndex, '/Image');
+}
+
+/** OPS-18's CODE128 stamp embeds as a Form XObject (vector bars), not an Image one. */
+function hasFormXObject(doc: PDFDocument, pageIndex: number): boolean {
+  return hasXObjectOfSubtype(doc, pageIndex, '/Form');
+}
+
+function hasXObjectOfSubtype(doc: PDFDocument, pageIndex: number, subtype: string): boolean {
   const xobjects = doc
     .getPage(pageIndex)
     .node.Resources()
@@ -708,7 +717,7 @@ function hasImageXObject(doc: PDFDocument, pageIndex: number): boolean {
   if (!xobjects) return false;
   return [...xobjects.entries()].some(([, ref]) => {
     const obj = doc.context.lookup(ref) as unknown as { dict?: PDFDict };
-    return String(obj?.dict?.get(PDFName.of('Subtype'))) === '/Image';
+    return String(obj?.dict?.get(PDFName.of('Subtype'))) === subtype;
   });
 }
 
@@ -751,6 +760,360 @@ describe('image watermark composition', () => {
     expect(hasImageXObject(output, 0)).toBe(false);
     expect(hasImageXObject(output, 1)).toBe(true);
     expect(hasImageXObject(output, 2)).toBe(false);
+  });
+
+  /**
+   * OPS-17's AC: position, opacity, and scale all have to land where the settings
+   * say, not just "an image XObject exists somewhere". `drawImage` at rotation 0
+   * emits its placement as three separate `cm` operators (translate, an identity
+   * rotate, then scale) rather than one combined matrix — confirmed against
+   * pdf-lib's own `drawImage` operation list — so the translate's e/f and the
+   * scale's a/d are read directly off the real content stream instead of trusting
+   * the settings were honoured.
+   */
+  it('places the image at the exact position, scale, and opacity the settings specify', async () => {
+    const { textPdf } = await import('../e2e/fixtures');
+    const source = await textPdf(1);
+    const pages = [{ key: 'p0', sourceDocId: 'source', sourceIndex: 0, rotation: 0 }];
+
+    const pageWidth = 595.28;
+    const padding = 36;
+    const imageScale = 0.3;
+    const opacity = 0.42;
+    // A 2:1 aspect ratio distinct from square, so a bug that swapped width/height
+    // would show up as a wrong boxH rather than accidentally matching.
+    const imageWidth = 40;
+    const imageHeight = 20;
+    const boxW = pageWidth * imageScale;
+    const boxH = boxW * (imageHeight / imageWidth);
+    // 'bottom-right': flush against the bottom-right margin, inset by the padding.
+    const expectedX = pageWidth - boxW - padding;
+    const expectedY = padding;
+
+    const bytes = await processWorkerImpl.compose(
+      pages,
+      { source },
+      [],
+      {
+        kind: 'image',
+        text: '',
+        image: { bytes: ONE_PIXEL_PNG, format: 'png', width: imageWidth, height: imageHeight },
+        imageScale,
+        position: 'bottom-right',
+        opacity,
+        rotation: 0,
+        fontSize: 18,
+        color: '#111111',
+        startAt: 1,
+        pageRange: 'all'
+      },
+      undefined,
+      null,
+      null,
+      undefined,
+      silentJob
+    );
+
+    const output = await PDFDocument.load(bytes);
+    const page = output.getPage(0);
+
+    const text = await pageContentText(output, 0);
+    const cms = [
+      ...text.matchAll(/(-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) cm/g)
+    ];
+    // translate, rotate (identity), scale, skew (identity) — this fixture's own
+    // content has no `cm` of its own, so all four belong to the image draw.
+    expect(cms.length).toBe(4);
+    const [, , , , translateE, translateF] = cms[0].slice(1).map(Number);
+    expect(translateE).toBeCloseTo(expectedX, 1);
+    expect(translateF).toBeCloseTo(expectedY, 1);
+    const [scaleA, , , scaleD] = cms[2].slice(1).map(Number);
+    expect(scaleA).toBeCloseTo(boxW, 1);
+    expect(scaleD).toBeCloseTo(boxH, 1);
+
+    const extGState = page.node.Resources()?.lookupMaybe(PDFName.of('ExtGState'), PDFDict);
+    expect(extGState).toBeDefined();
+    const entries = [...extGState!.entries()];
+    expect(entries).toHaveLength(1);
+    const gsDict = output.context.lookup(entries[0][1]) as unknown as PDFDict;
+    const ca = gsDict.lookup(PDFName.of('ca'));
+    expect((ca as PDFNumber).asNumber()).toBeCloseTo(opacity, 2);
+  });
+});
+
+describe('barcode stamp composition (OPS-18)', () => {
+  it('embeds the barcode image only when enabled with non-empty text', async () => {
+    const { textPdf } = await import('../e2e/fixtures');
+    const source = await textPdf(1);
+    const pages = [{ key: 'p0', sourceDocId: 'source', sourceIndex: 0, rotation: 0 }];
+
+    const bytes = await processWorkerImpl.compose(
+      pages,
+      { source },
+      [],
+      undefined,
+      undefined,
+      null,
+      null,
+      undefined,
+      silentJob,
+      { barcodeStamp: { kind: 'qr', text: 'DOC-0001', position: 'bottom-right', scale: 0.15 } }
+    );
+
+    const output = await PDFDocument.load(bytes);
+    expect(hasImageXObject(output, 0)).toBe(true);
+  });
+
+  it('omits the stamp entirely when the text is blank', async () => {
+    const { textPdf } = await import('../e2e/fixtures');
+    const source = await textPdf(1);
+    const pages = [{ key: 'p0', sourceDocId: 'source', sourceIndex: 0, rotation: 0 }];
+
+    const bytes = await processWorkerImpl.compose(
+      pages,
+      { source },
+      [],
+      undefined,
+      undefined,
+      null,
+      null,
+      undefined,
+      silentJob,
+      { barcodeStamp: { kind: 'qr', text: '   ', position: 'bottom-right', scale: 0.15 } }
+    );
+
+    const output = await PDFDocument.load(bytes);
+    expect(hasImageXObject(output, 0)).toBe(false);
+  });
+
+  it('stamps the same barcode on every page (no page-range targeting, like Bates)', async () => {
+    const { textPdf } = await import('../e2e/fixtures');
+    const source = await textPdf(3);
+    const pages = Array.from({ length: 3 }, (_, i) => ({
+      key: `p${i}`,
+      sourceDocId: 'source',
+      sourceIndex: i,
+      rotation: 0
+    }));
+
+    const bytes = await processWorkerImpl.compose(
+      pages,
+      { source },
+      [],
+      undefined,
+      undefined,
+      null,
+      null,
+      undefined,
+      silentJob,
+      { barcodeStamp: { kind: 'code128', text: 'ABC123', position: 'top-left', scale: 0.2 } }
+    );
+
+    const output = await PDFDocument.load(bytes);
+    // CODE128 draws as a Form XObject (vector bars), not an Image one — see
+    // the doc comment on `encodeCode128Bars` for why a raster is not used here.
+    for (let i = 0; i < 3; i++) expect(hasFormXObject(output, i)).toBe(true);
+  });
+
+  /**
+   * CODE128 is drawn as vector bars via `drawPage` rather than `drawImage`
+   * (see `encodeCode128Bars`'s doc comment: a raster round-trip measurably
+   * broke real-decoder reads on a 1D barcode, which has no error correction
+   * to absorb the antialiasing). This proves that path is honestly still
+   * respecting the position/scale settings, the same way the image-watermark
+   * and QR geometry tests do for their own draw calls.
+   */
+  it('places a CODE128 stamp at the exact grid position, with a minimum module width independent of scale', async () => {
+    const { textPdf } = await import('../e2e/fixtures');
+    const { encodeCode128Bars } = await import('../../src/core/barcode');
+    const source = await textPdf(1);
+    const pages = [{ key: 'p0', sourceDocId: 'source', sourceIndex: 0, rotation: 0 }];
+
+    const pageWidth = 595.28;
+    const padding = 24;
+    // A real, moderate-length value (~189 CODE128 modules including
+    // start/checksum/stop) at a tiny "Size" setting: at face value 5% of an
+    // 8.27in page squeezes those modules to a fraction of a device pixel per
+    // module at ordinary print/scan resolutions — undecodable in practice,
+    // confirmed live before the width floor was added. `CODE128_QUIET_MODULES`
+    // (10 each side) and `CODE128_MIN_MODULE_WIDTH_PT` (1pt) are mirrored here
+    // from `process.worker.ts`, not re-derived, the same way this file's other
+    // geometry tests hardcode `padding`/`pageWidth` against their own constants.
+    const text = 'CODE128-XYZ-99';
+    const scale = 0.05;
+    const quiet = 10;
+    const minModuleWidthPt = 1;
+    const bars = encodeCode128Bars(text);
+    const unitWidth = bars.length + quiet * 2;
+
+    const bytes = await processWorkerImpl.compose(
+      pages,
+      { source },
+      [],
+      undefined,
+      undefined,
+      null,
+      null,
+      undefined,
+      silentJob,
+      { barcodeStamp: { kind: 'code128', text, position: 'bottom-right', scale } }
+    );
+
+    const output = await PDFDocument.load(bytes);
+    expect(hasFormXObject(output, 0)).toBe(true);
+    expect(hasImageXObject(output, 0)).toBe(false);
+
+    // The scale-derived width (595.28 * 0.05 ≈ 29.8pt) is far below the safe
+    // module-width floor (209pt) for this text, so the floor is what actually
+    // governs — proving this matters, not merely restating the scale setting.
+    const naiveBoxW = pageWidth * scale;
+    const boxW = Math.max(naiveBoxW, unitWidth * minModuleWidthPt);
+    expect(boxW).toBeGreaterThan(naiveBoxW * 5);
+    const expectedX = pageWidth - boxW - padding;
+
+    // `pageContentText` also walks into XObject content, which here would
+    // include the embedded form's own per-bar `cm`+`re` fills — this stamp's
+    // *placement* on the page is only in the page's own content stream, so
+    // this reads that stream directly rather than the combined text.
+    const page = output.getPage(0);
+    const { decodeStream } = await import('../../src/core/pdf/interpreter');
+    const contentsRef = page.node.Contents();
+    const streamRefs = contentsRef instanceof PDFArray ? contentsRef.asArray() : [contentsRef];
+    let pageText = '';
+    for (const ref of streamRefs) {
+      const streamObj = output.context.lookup(ref) as unknown as {
+        getContents(): Uint8Array;
+        dict?: PDFDict;
+      };
+      const isFlate = String(streamObj.dict?.get(PDFName.of('Filter'))) === '/FlateDecode';
+      const raw = streamObj.getContents();
+      pageText += new TextDecoder('latin1').decode(isFlate ? await decodeStream(raw) : raw);
+    }
+
+    const cms = [
+      ...pageText.matchAll(/(-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) cm/g)
+    ];
+    expect(cms.length).toBe(4);
+    const [, , , , translateE, translateF] = cms[0].slice(1).map(Number);
+    expect(translateE).toBeCloseTo(expectedX, 1);
+    expect(translateF).toBeCloseTo(padding, 1);
+
+    // `drawPage` scales *relative to the embedded form's own BBox*, unlike
+    // `drawImage` (which scales relative to an implicit unit square) — reading
+    // the form's real BBox back out of the PDF turns that ratio into the
+    // absolute height actually rendered, with no production constant hardcoded.
+    const xobjects = page.node.Resources()?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+    const formRef = [...(xobjects?.entries() ?? [])].find(([, ref]) => {
+      const obj = output.context.lookup(ref) as unknown as { dict?: PDFDict };
+      return String(obj?.dict?.get(PDFName.of('Subtype'))) === '/Form';
+    })?.[1];
+    const formDict = (output.context.lookup(formRef) as unknown as { dict: PDFDict }).dict;
+    const bbox = formDict.lookup(PDFName.of('BBox')) as unknown as {
+      asArray(): { asNumber(): number }[];
+    };
+    const [, y0, , y1] = bbox.asArray().map(n => n.asNumber());
+    const nativeHeight = y1 - y0;
+
+    const [, , , scaleD] = cms[2].slice(1).map(Number);
+    const renderedHeight = scaleD * nativeHeight;
+    // With the module-width floor active, height rises with it (same aspect
+    // ratio, wider box) and lands well clear of the 20pt height floor on its
+    // own — this asserts it stays legible, not that this specific floor fired.
+    expect(renderedHeight).toBeGreaterThanOrEqual(20 - 0.5); // CODE128_MIN_STAMP_HEIGHT_PT
+  });
+
+  it('never draws a CODE128 stamp wider than the page, even for a long value', async () => {
+    const { textPdf } = await import('../e2e/fixtures');
+    const source = await textPdf(1);
+    const pages = [{ key: 'p0', sourceDocId: 'source', sourceIndex: 0, rotation: 0 }];
+
+    const pageWidth = 595.28;
+    // Long enough (585 CODE128 modules) that the safe module-width floor alone
+    // — with no ceiling — would draw past the right edge of an A4/Letter page.
+    const text = 'HTTPS://EXAMPLE.COM/DOCS/2026/CONTRACT-00483-REVISION-C-FINAL';
+
+    const bytes = await processWorkerImpl.compose(
+      pages,
+      { source },
+      [],
+      undefined,
+      undefined,
+      null,
+      null,
+      undefined,
+      silentJob,
+      { barcodeStamp: { kind: 'code128', text, position: 'bottom-left', scale: 0.05 } }
+    );
+
+    const output = await PDFDocument.load(bytes);
+    const page = output.getPage(0);
+
+    const { decodeStream } = await import('../../src/core/pdf/interpreter');
+    const contentsRef = page.node.Contents();
+    const streamRefs = contentsRef instanceof PDFArray ? contentsRef.asArray() : [contentsRef];
+    let pageText = '';
+    for (const ref of streamRefs) {
+      const streamObj = output.context.lookup(ref) as unknown as {
+        getContents(): Uint8Array;
+        dict?: PDFDict;
+      };
+      const isFlate = String(streamObj.dict?.get(PDFName.of('Filter'))) === '/FlateDecode';
+      const raw = streamObj.getContents();
+      pageText += new TextDecoder('latin1').decode(isFlate ? await decodeStream(raw) : raw);
+    }
+
+    const cms = [
+      ...pageText.matchAll(/(-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) cm/g)
+    ];
+    const [, , , , translateE] = cms[0].slice(1).map(Number);
+    const [scaleA] = cms[2].slice(1).map(Number);
+
+    expect(translateE).toBeGreaterThanOrEqual(0);
+    expect(translateE + scaleA).toBeLessThanOrEqual(pageWidth + 0.5);
+  });
+
+  /**
+   * Mirrors the image-watermark geometry test above: the drawn `cm` translate
+   * and scale are read directly off the content stream rather than trusting
+   * that "an image exists somewhere" means the position/size settings landed.
+   */
+  it('places the stamp at the exact grid position and scale', async () => {
+    const { textPdf } = await import('../e2e/fixtures');
+    const source = await textPdf(1);
+    const pages = [{ key: 'p0', sourceDocId: 'source', sourceIndex: 0, rotation: 0 }];
+
+    const pageWidth = 595.28;
+    const padding = 24;
+    const scale = 0.2;
+
+    const bytes = await processWorkerImpl.compose(
+      pages,
+      { source },
+      [],
+      undefined,
+      undefined,
+      null,
+      null,
+      undefined,
+      silentJob,
+      { barcodeStamp: { kind: 'qr', text: 'GEOMETRY-CHECK', position: 'bottom-right', scale } }
+    );
+
+    const output = await PDFDocument.load(bytes);
+    const boxW = pageWidth * scale;
+    const expectedX = pageWidth - boxW - padding;
+    const expectedY = padding;
+
+    const text = await pageContentText(output, 0);
+    const cms = [
+      ...text.matchAll(/(-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) cm/g)
+    ];
+    expect(cms.length).toBe(4);
+    const [, , , , translateE, translateF] = cms[0].slice(1).map(Number);
+    expect(translateE).toBeCloseTo(expectedX, 1);
+    expect(translateF).toBeCloseTo(expectedY, 1);
+    const [scaleA] = cms[2].slice(1).map(Number);
+    expect(scaleA).toBeCloseTo(boxW, 1);
   });
 });
 

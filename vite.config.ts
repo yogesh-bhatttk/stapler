@@ -123,6 +123,36 @@ function copyTesseractAssets(): Plugin {
 }
 
 /**
+ * SCN-04 — `zxing-wasm`'s reader glue resolves its `.wasm` binary itself, at
+ * runtime, as `new URL('.', import.meta.url) + 'zxing_reader.wasm'` — i.e.
+ * relative to wherever its own JS chunk ends up, with no build-time `import`
+ * or `new URL(..., import.meta.url)` for Vite to detect and copy the way it
+ * does for statically-referenced assets. Left alone, the binary is simply
+ * absent from the build (confirmed: a full `build:ext` produced every other
+ * vendored WASM file — tesseract's, pdf.js's — but not this one), and the
+ * fetch 404s the first time a real barcode scan runs. This chunk's own
+ * filename is hashed per build, but `chunkFileNames` in this config always
+ * lands it in `assets/`, so copying the binary there under its expected
+ * unhashed name is enough for the relative resolution to find it regardless
+ * of the hash.
+ */
+function copyZxingAssets(): Plugin {
+  return {
+    name: 'stapler:zxing-assets',
+    apply: 'build',
+    writeBundle(options) {
+      const source = resolve(root, 'node_modules/zxing-wasm/dist/reader/zxing_reader.wasm');
+      if (!existsSync(source)) {
+        throw new Error('stapler:zxing-assets — expected zxing_reader.wasm to exist; run install');
+      }
+      const outDir = resolve(root, options.dir ?? 'dist', 'assets');
+      mkdirSync(outDir, { recursive: true });
+      cpSync(source, resolve(outDir, 'zxing_reader.wasm'));
+    }
+  };
+}
+
+/**
  * The website twin has to answer at `/`, but the shared entry point is `editor.html`
  * because that is the page the extension's service worker opens. Emitting an
  * `index.html` copy for the web target is what makes `pnpm build:web` deployable
@@ -177,6 +207,7 @@ export default defineConfig(() => {
       preact(),
       copyPdfJsAssets(),
       copyTesseractAssets(),
+      copyZxingAssets(),
       ...(isFirefox ? [firefoxManifest()] : []),
       ...(isAnyExt ? [] : [emitWebIndex()])
     ],

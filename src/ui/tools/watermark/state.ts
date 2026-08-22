@@ -86,6 +86,31 @@ export const batesSettings = signal<BatesSettings>({
   fontSize: 10
 });
 
+/**
+ * OPS-18 — a QR/barcode stamp, configured alongside the other stamps for the
+ * same reason Bates is: drawn by the same OPS-08 grid engine, but distinct
+ * settings since a document can carry a barcode, a Bates number, and a
+ * watermark all at once.
+ */
+export type BarcodeKind = 'qr' | 'code128';
+
+export interface BarcodeStampSettings {
+  enabled: boolean;
+  kind: BarcodeKind;
+  text: string;
+  position: WatermarkPosition;
+  /** Fraction of the page width the stamp should occupy. */
+  scale: number;
+}
+
+export const barcodeStampSettings = signal<BarcodeStampSettings>({
+  enabled: false,
+  kind: 'qr',
+  text: '',
+  position: 'bottom-left',
+  scale: 0.12
+});
+
 export type HeaderFooterAlign = 'left' | 'center' | 'right';
 
 export interface HeaderFooterSettings {

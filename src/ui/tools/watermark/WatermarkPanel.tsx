@@ -3,9 +3,11 @@ import {
   batesSettings,
   watermarkSettings,
   headerFooterSettings,
+  barcodeStampSettings,
   readWatermarkImage,
   type WatermarkPosition,
-  type HeaderFooterAlign
+  type HeaderFooterAlign,
+  type BarcodeKind
 } from './state';
 import { batesLabel, MAX_BATES_DIGITS } from '../../../core/bates';
 import { Checkbox } from '../../components/Field';
@@ -38,9 +40,14 @@ export function WatermarkPanel() {
   const settings = watermarkSettings.value;
   const headerFooter = headerFooterSettings.value;
   const bates = batesSettings.value;
+  const barcodeStamp = barcodeStampSettings.value;
 
   const updateBates = (updates: Partial<typeof bates>) => {
     batesSettings.value = { ...bates, ...updates };
+  };
+
+  const updateBarcodeStamp = (updates: Partial<typeof barcodeStamp>) => {
+    barcodeStampSettings.value = { ...barcodeStamp, ...updates };
   };
 
   const update = (updates: Partial<typeof settings>) => {
@@ -336,6 +343,79 @@ export function WatermarkPanel() {
           <p className={styles.hint}>
             {t('First page')}: {batesLabel(bates, 0)}
           </p>
+        </>
+      )}
+
+      <div className={styles.sectionDivider} />
+      <h2 className={styles.sectionHeading}>{t('QR / barcode stamp')}</h2>
+      <p className={styles.hint}>
+        {t('Encodes the text below into a QR code or barcode, stamped on every targeted page.')}
+      </p>
+
+      <Checkbox
+        label={t('Stamp a QR code or barcode')}
+        checked={barcodeStamp.enabled}
+        onChange={enabled => updateBarcodeStamp({ enabled })}
+      />
+
+      {barcodeStamp.enabled && (
+        <>
+          <SegmentedControl
+            legend={t('Symbology')}
+            name="barcode-kind"
+            value={barcodeStamp.kind}
+            options={[
+              { value: 'qr', label: 'QR code' },
+              { value: 'code128', label: 'Barcode (CODE128)' }
+            ]}
+            onChange={kind => updateBarcodeStamp({ kind: kind as BarcodeKind })}
+          />
+
+          <Field label={t('Text to encode')}>
+            {id => (
+              <input
+                id={id}
+                type="text"
+                value={barcodeStamp.text}
+                onInput={e => updateBarcodeStamp({ text: e.currentTarget.value })}
+                placeholder={t('e.g. a document ID or URL')}
+                className={styles.input}
+              />
+            )}
+          </Field>
+
+          <Field label={t('Position')}>
+            {id => (
+              <select
+                id={id}
+                value={barcodeStamp.position}
+                onChange={e =>
+                  updateBarcodeStamp({ position: e.currentTarget.value as WatermarkPosition })
+                }
+                className={styles.select}
+              >
+                {POSITIONS.map(p => (
+                  <option key={p.value} value={p.value}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            )}
+          </Field>
+
+          <Field label={t('Size')} value={`${Math.round(barcodeStamp.scale * 100)}%`}>
+            {id => (
+              <input
+                id={id}
+                type="range"
+                min="5"
+                max="40"
+                step="1"
+                value={Math.round(barcodeStamp.scale * 100)}
+                onInput={e => updateBarcodeStamp({ scale: Number(e.currentTarget.value) / 100 })}
+              />
+            )}
+          </Field>
         </>
       )}
 
