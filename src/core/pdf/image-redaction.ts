@@ -5,6 +5,7 @@
  * without a canvas: a y-flip error here does not fail loudly, it blacks out the
  * wrong band of the image and leaves the secret one visible.
  */
+import { fillPolygonMask, growMask, type Point } from '../geometry';
 
 /** A rectangle in an image's own unit square, y upwards from the bottom-left. */
 export interface UnitRect {
@@ -12,6 +13,12 @@ export interface UnitRect {
   y: number;
   width: number;
   height: number;
+  /**
+   * RED-07 — a shaped mark's polygon, in the same unit space. When present the
+   * rectangle is only its bounding box and the polygon decides which pixels go,
+   * so a shape covers what the user drew rather than the box around it.
+   */
+  polygon?: Point[];
 }
 
 export interface RedactableImage {
@@ -43,9 +50,27 @@ export function paintRectsBlack(image: RedactableImage, rects: UnitRect[]): void
     const x1 = Math.min(width, Math.ceil((rect.x + rect.width) * width));
     const y0 = Math.max(0, Math.floor((1 - rect.y - rect.height) * height));
     const y1 = Math.min(height, Math.ceil((1 - rect.y) * height));
+    // RED-07 — a shaped mark rasterises its polygon into this image's own pixel
+    // grid instead of filling the box. Dilated by one pixel so a partly-covered
+    // pixel is still destroyed, keeping the same over-removal bias the box
+    // rounding above has.
+    const shape = rect.polygon
+      ? growMask(
+          fillPolygonMask(
+            // Unit space is y-up, pixel rows run down.
+            rect.polygon.map(p => ({ x: p.x * width, y: (1 - p.y) * height })),
+            width,
+            height
+          ),
+          width,
+          height,
+          1
+        )
+      : undefined;
     for (let y = y0; y < y1; y++) {
       for (let x = x0; x < x1; x++) {
         const p = y * width + x;
+        if (shape && shape[p] === 0) continue;
         rgba[p * 4] = 0;
         rgba[p * 4 + 1] = 0;
         rgba[p * 4 + 2] = 0;

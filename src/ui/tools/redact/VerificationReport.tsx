@@ -54,7 +54,13 @@ export function VerificationReport() {
           {report.verdicts.map((verdict, index) => (
             <tr key={index}>
               <td>{verdict.region.pageIndex + 1}</td>
-              <td>{verdict.region.text ? `"${verdict.region.text}"` : 'Drawn region'}</td>
+              <td>
+                {verdict.region.text
+                  ? `"${verdict.region.text}"`
+                  : verdict.region.points
+                    ? 'Drawn shape'
+                    : 'Drawn region'}
+              </td>
               <td>
                 <span className={verdict.pass ? styles.pass : styles.fail}>
                   {verdict.pass ? (

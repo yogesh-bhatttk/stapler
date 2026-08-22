@@ -1,4 +1,5 @@
 import { unsupported } from '../errors';
+import { polygonContainsBox, polygonOverlapsBox, type Point } from '../geometry';
 
 export type TokenType =
   | 'string'
@@ -339,6 +340,40 @@ export function contains(container: Rect, target: Rect): boolean {
   );
 }
 
+/**
+ * One redaction mark, in whatever space the caller is working in (content space
+ * here, an image's unit square in `redactionAreaInUnitSpace`).
+ *
+ * RED-07 added shaped marks as an **optional polygon on the existing rectangle**
+ * rather than a second kind of mark: `x`/`y`/`width`/`height` always hold the
+ * bounding box, so every consumer that only knows about rectangles — annotation
+ * overlap, the drawn cover's fallback, the pixel verifier's render window — keeps
+ * working unchanged, and only the two predicates below learn about shapes.
+ */
+export interface RedactionArea extends Rect {
+  /** Closed polygon in the same space as the box, or absent for a plain rectangle. */
+  polygon?: Point[];
+}
+
+/**
+ * Does this mark touch `box` at all? The bounding box is tested first because it
+ * is cheap and, for a plain rectangle mark, it is the whole answer — a shaped
+ * mark then has to actually enclose part of the box.
+ *
+ * Without the second half, a shaped mark would remove everything in the corners
+ * of its bounding box that the shape itself never covered.
+ */
+export function areaTouches(area: RedactionArea, box: Rect): boolean {
+  if (!intersects(box, area)) return false;
+  return area.polygon ? polygonOverlapsBox(area.polygon, box) : true;
+}
+
+/** Does this mark cover every part of `box`? */
+export function areaCovers(area: RedactionArea, box: Rect): boolean {
+  if (!contains(area, box)) return false;
+  return area.polygon ? polygonContainsBox(area.polygon, box) : true;
+}
+
 export interface FilterContentStreamResult {
   filtered: Statement[];
   /** Graphics state at the end of this stream, to carry into the next chunk of a `/Contents` array. */
@@ -377,7 +412,11 @@ export interface FilterContentStreamResult {
 export interface PartialImageCoverage {
   /** The `/XObject` resource name from the `Do` operand, without the slash. */
   name: string;
-  rects: Rect[];
+  /**
+   * Each covered area, as a box and — for a shaped mark (RED-07) — the polygon
+   * inside it, both already mapped into the image's unit space.
+   */
+  rects: RedactionArea[];
 }
 
 /**
@@ -405,6 +444,28 @@ export function redactionRectInUnitSpace(ctm: Matrix, rect: Rect): Rect | null {
   const y1 = Math.min(1, Math.max(...corners.map(c => c.y)));
   if (!(x1 > x0) || !(y1 > y0)) return null;
   return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+}
+
+/**
+ * The same mapping for a whole mark: the box exactly as above, plus a shaped
+ * mark's polygon carried through the same inverse CTM.
+ *
+ * The polygon is *not* clipped to the unit square — the caller rasterises it
+ * against the image's own pixel grid, where anything outside is simply never
+ * visited, and clipping a concave shape here would need real polygon clipping to
+ * avoid inventing edges the user never drew. The box stays clipped, so it remains
+ * the tight bound the pixel loop iterates.
+ */
+export function redactionAreaInUnitSpace(ctm: Matrix, area: RedactionArea): RedactionArea | null {
+  const box = redactionRectInUnitSpace(ctm, area);
+  if (!box) return null;
+  if (!area.polygon) return box;
+  const inverse = invertMatrix(ctm);
+  if (!inverse) return box;
+  return {
+    ...box,
+    polygon: area.polygon.map(p => transformPoint(inverse, p.x, p.y))
+  };
 }
 
 /**
@@ -564,7 +625,7 @@ function showStringWidth(bytes: Uint8Array, state: GraphicsState, font?: FontInf
 
 export function filterContentStream(
   statements: Statement[],
-  redactionBoxes: Rect[],
+  redactionBoxes: RedactionArea[],
   initialState?: GraphicsState,
   resolveXObject?: (name: string) => XObjectInfo | undefined,
   resolveFont?: (name: string) => FontInfo | undefined
@@ -596,7 +657,7 @@ export function filterContentStream(
     let overlaps = false;
     if (isPainting && pathBox) {
       for (const r of redactionBoxes) {
-        if (intersects(pathBox, r)) {
+        if (areaTouches(r, pathBox)) {
           overlaps = true;
           break;
         }
@@ -785,7 +846,7 @@ export function filterContentStream(
 
       let overlaps = false;
       for (const r of redactionBoxes) {
-        if (intersects(box, r)) {
+        if (areaTouches(r, box)) {
           overlaps = true;
           break;
         }
@@ -838,11 +899,11 @@ export function filterContentStream(
       let shouldStrip = false;
       if (info?.subtype === 'Form') {
         for (const r of redactionBoxes) {
-          if (contains(r, box)) {
+          if (areaCovers(r, box)) {
             shouldStrip = true;
             break;
           }
-          if (intersects(box, r)) {
+          if (areaTouches(r, box)) {
             throw unsupported(
               'A redaction mark only partly covers a Form XObject. Removing the entire form ' +
                 'would delete content outside the marked region, and Stapler does not yet ' +
@@ -861,7 +922,7 @@ export function filterContentStream(
         // being quietly left as a black rectangle drawn over intact pixels.
         let covered = false;
         for (const r of redactionBoxes) {
-          if (contains(r, box)) {
+          if (areaCovers(r, box)) {
             covered = true;
             break;
           }
@@ -869,10 +930,10 @@ export function filterContentStream(
         shouldStrip = covered;
 
         if (!covered && xObjectName) {
-          const unitRects: Rect[] = [];
+          const unitRects: RedactionArea[] = [];
           for (const r of redactionBoxes) {
-            if (!intersects(box, r)) continue;
-            const unit = redactionRectInUnitSpace(state.ctm, r);
+            if (!areaTouches(r, box)) continue;
+            const unit = redactionAreaInUnitSpace(state.ctm, r);
             // A singular CTM cannot be inverted, so the covered area is
             // unknowable. Cover the whole image rather than none of it: the
             // placement is degenerate, and an image squashed to a line carries

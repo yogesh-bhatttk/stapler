@@ -7,6 +7,13 @@ import type { PatternSuggestion } from '../../../core/workers/render.worker';
 export const pendingRedactions = signal<RedactionRegion[]>([]);
 
 /**
+ * RED-07 — which shape the pointer draws: a dragged rectangle or a traced
+ * freehand outline. Not cleared on document change: it is a tool preference, not
+ * a mark, and resetting it under the user mid-document would be surprising.
+ */
+export const redactShapeMode = signal<'rect' | 'polygon'>('rect');
+
+/**
  * RED-05's proposals. Deliberately a separate signal from `pendingRedactions`:
  * nothing in this list is marked for removal, and the only way into that list is
  * a click on Accept. Clearing it on document change follows the same reasoning as
