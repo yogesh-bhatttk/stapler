@@ -59,9 +59,7 @@ export function CompareView({ pages, pageIndex }: CompareViewProps) {
         const baseHandleInfo = await baseClient.lease(api => api.loadDocument(baseBytes));
         baseHandle = baseHandleInfo.handle;
 
-        const compareHandleInfo = await compareClient.lease(api =>
-          api.loadDocument(compareBytes)
-        );
+        const compareHandleInfo = await compareClient.lease(api => api.loadDocument(compareBytes));
         compareHandle = compareHandleInfo.handle;
 
         if (cancelled) return;

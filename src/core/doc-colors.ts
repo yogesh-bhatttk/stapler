@@ -86,3 +86,22 @@ export const SUMMARY_HEADER_RGB: readonly [number, number, number] = [
   102 / 255
 ];
 export const SUMMARY_TEXT_RGB: readonly [number, number, number] = [25 / 255, 25 / 255, 25 / 255];
+
+/** ANN-06 redline export: the "UNCHANGED" banner background and its text. */
+export const REDLINE_BANNER_BG_RGB: readonly [number, number, number] = [
+  217 / 255,
+  217 / 255,
+  217 / 255
+];
+export const REDLINE_BANNER_TEXT_RGB: readonly [number, number, number] = [
+  77 / 255,
+  77 / 255,
+  77 / 255
+];
+
+/** ANN-06 redline export: border drawn where a page has no counterpart to show. */
+export const REDLINE_PLACEHOLDER_BORDER_RGB: readonly [number, number, number] = [
+  153 / 255,
+  153 / 255,
+  153 / 255
+];

@@ -38,10 +38,17 @@ export function ComparePanel() {
     }
   };
 
+  const exportLabel =
+    settings.diffMode === 'text'
+      ? 'Exporting text diff'
+      : settings.diffMode === 'redline'
+        ? 'Exporting redline PDF'
+        : 'Exporting visual diff';
+
   const handleExportDiff = () =>
     run(
       {
-        label: t(settings.diffMode === 'text' ? 'Exporting text diff' : 'Exporting visual diff'),
+        label: t(exportLabel),
         scope: 'compare'
       },
       async job => {
@@ -62,11 +69,13 @@ export function ComparePanel() {
         const outBytes = await exportComparePdf(docA, docB, {
           diffMode: settings.diffMode,
           sensitivity: settings.sensitivity,
+          unchangedPages: settings.unchangedPages,
           signal: job.signal
         });
 
         const stem = docA.name.replace(/\.[^.]+$/, '');
-        await platform.saveFileAs(outBytes, `${stem}-diff.pdf`);
+        const suffix = settings.diffMode === 'redline' ? 'redline' : 'diff';
+        await platform.saveFileAs(outBytes, `${stem}-${suffix}.pdf`);
       }
     );
 
@@ -86,14 +95,19 @@ export function ComparePanel() {
         legend={t('Compare Mode')}
         name="diffMode"
         value={settings.diffMode}
-        onChange={mode => update({ diffMode: mode as 'visual' | 'text' })}
+        onChange={mode => update({ diffMode: mode as 'visual' | 'text' | 'redline' })}
         options={[
           { value: 'visual', label: 'Visual Pixel Diff', hint: 'Highlights modified pixels' },
-          { value: 'text', label: 'Text Diff', hint: 'Highlights added and removed text' }
+          { value: 'text', label: 'Text Diff', hint: 'Highlights added and removed text' },
+          {
+            value: 'redline',
+            label: 'Redline (side by side)',
+            hint: 'Before and after pages placed next to each other, print-ready'
+          }
         ]}
       />
 
-      {settings.diffMode === 'visual' && (
+      {(settings.diffMode === 'visual' || settings.diffMode === 'redline') && (
         <Field label={t('Sensitivity')} value={`${settings.sensitivity}%`}>
           {id => (
             <Slider
@@ -111,6 +125,23 @@ export function ComparePanel() {
         <p className={`${panelStyles.note} ${panelStyles.noteInfo}`}>
           {t('Text diff shows structural text changes. Additions are green, deletions are red.')}
         </p>
+      )}
+
+      {settings.diffMode === 'redline' && (
+        <RadioGroup
+          legend={t('Unchanged pages')}
+          name="unchangedPages"
+          value={settings.unchangedPages}
+          onChange={mode => update({ unchangedPages: mode as 'skip' | 'mark' })}
+          options={[
+            {
+              value: 'mark',
+              label: 'Keep, marked "Unchanged"',
+              hint: 'Every page appears in order'
+            },
+            { value: 'skip', label: 'Skip', hint: 'Only pages that changed are included' }
+          ]}
+        />
       )}
 
       {settings.compareSourceId && (

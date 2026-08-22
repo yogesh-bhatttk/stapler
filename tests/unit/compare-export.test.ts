@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
-const { exportTextDiff, exportVisualDiff } = vi.hoisted(() => ({
+const { exportTextDiff, exportVisualDiff, exportRedlinePdf } = vi.hoisted(() => ({
   exportTextDiff: vi.fn(async () => new Uint8Array([1, 2, 3])),
-  exportVisualDiff: vi.fn(async () => new Uint8Array([4, 5, 6]))
+  exportVisualDiff: vi.fn(async () => new Uint8Array([4, 5, 6])),
+  exportRedlinePdf: vi.fn(async () => new Uint8Array([7, 8, 9]))
 }));
 
 vi.mock('../../src/core/text-diff-export', () => ({
@@ -11,6 +12,10 @@ vi.mock('../../src/core/text-diff-export', () => ({
 
 vi.mock('../../src/core/visual-diff-export', () => ({
   exportVisualDiff
+}));
+
+vi.mock('../../src/core/redline-export', () => ({
+  exportRedlinePdf
 }));
 
 import { exportComparePdf } from '../../src/core/compare-export';
@@ -44,6 +49,20 @@ describe('exportComparePdf', () => {
     expect(exportVisualDiff).toHaveBeenCalledWith(docA, docB, undefined, {
       diffMode: 'visual',
       sensitivity: 42
+    });
+  });
+
+  it('routes redline mode to the redline exporter', async () => {
+    const out = await exportComparePdf(docA, docB, {
+      diffMode: 'redline',
+      sensitivity: 42,
+      unchangedPages: 'skip'
+    });
+    expect(out).toEqual(new Uint8Array([7, 8, 9]));
+    expect(exportRedlinePdf).toHaveBeenCalledWith(docA, docB, {
+      diffMode: 'redline',
+      sensitivity: 42,
+      unchangedPages: 'skip'
     });
   });
 });
