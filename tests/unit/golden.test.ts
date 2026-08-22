@@ -46,8 +46,6 @@ import {
 } from '../../src/core/store';
 import { resetHistory } from '../../src/core/history';
 import { __memoryFallback } from '../../src/core/opfs';
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
 
 /** Every page's visible text, in document order — enough to prove order and content. */
 async function pageTexts(bytes: Uint8Array): Promise<string[]> {
@@ -208,7 +206,7 @@ describe('golden: OPS-01 merge', () => {
 
     const srcBytes = await src.save();
 
-    const { textPdf, FIXTURES_DIR } = await import('../e2e/fixtures');
+    const { textPdf } = await import('../e2e/fixtures');
     const a = seedDoc('bookmarked', 2, srcBytes);
     appendPages(a.id, makePageRefs('plain', 1));
     const plainBytes = await textPdf(1);
@@ -242,6 +240,89 @@ describe('golden: OPS-01 merge', () => {
 
     // The plain (bookmark-less) third source contributes no outline entries.
     expect(second.lookupMaybe(PDFName.of('Next'), PDFDict)).toBeUndefined();
+  });
+});
+
+describe('golden: OPS-16 cross-document page reordering before merge', () => {
+  /**
+   * OPS-01's "add files" appends each new source's pages to the end
+   * (`appendPages`), so before this ticket the only orderings reachable were
+   * whole documents end-to-end. `movePages` is source-agnostic — it only knows
+   * about page keys, never which source a key came from — so the existing
+   * page-grid drag/keyboard reorder (OPS-02) already lets a user freely
+   * interleave pages across documents; this proves that capability survives
+   * all the way through to the merged export, not just in the in-memory list.
+   */
+  it('interleaves pages from three sources and the export matches exactly, not just concatenates them', async () => {
+    const { textPdf } = await import('../e2e/fixtures');
+    // Deliberately unequal page counts, like OPS-01's own merge test, so a page's
+    // rendered "page N" text pins down its position within its own source even
+    // though the sources share the same fixture generator.
+    const a = seedDoc('interleave-a', 2, await textPdf(2));
+    appendPages(a.id, makePageRefs('interleave-b', 2));
+    const bBytes = await textPdf(2);
+    __memoryFallback.set('interleave-b', bBytes);
+    registerSource({
+      id: 'interleave-b',
+      name: 'interleave-b.pdf',
+      pageCount: 2,
+      pageSizes: Array.from({ length: 2 }, () => ({ width: 595.28, height: 841.89 }))
+    } as any);
+    appendPages(a.id, makePageRefs('interleave-c', 1));
+    const cBytes = await textPdf(1);
+    __memoryFallback.set('interleave-c', cBytes);
+    registerSource({
+      id: 'interleave-c',
+      name: 'interleave-c.pdf',
+      pageCount: 1,
+      pageSizes: [{ width: 595.28, height: 841.89 }]
+    } as any);
+
+    // Starting order is purely by source, end-to-end: [a0, a1, b0, b1, c0].
+    let doc = currentDoc(a.id);
+    expect(doc.pages.map(p => p.sourceDocId)).toEqual([
+      'interleave-a',
+      'interleave-a',
+      'interleave-b',
+      'interleave-b',
+      'interleave-c'
+    ]);
+    const [a0, a1, b0, b1, c0] = doc.pages;
+
+    // Interleave into [a0, b0, c0, a1, b1] — a document- and page-level
+    // rearrangement no whole-file reorder could produce, using the same
+    // `movePages` the page grid's drag-and-drop and arrow-key reorder call.
+    movePages(a.id, [b0.key], 1);
+    doc = currentDoc(a.id);
+    expect(doc.pages.map(p => p.key)).toEqual([a0.key, b0.key, a1.key, b1.key, c0.key]);
+    movePages(a.id, [c0.key], 2);
+    doc = currentDoc(a.id);
+    expect(doc.pages.map(p => p.key)).toEqual([a0.key, b0.key, c0.key, a1.key, b1.key]);
+
+    const output = await composeCurrent(doc);
+    const out = await PDFDocument.load(output);
+    expect(out.getPageCount()).toBe(5);
+
+    const texts = await pageTexts(output);
+    // Each source's own 1-based numbering, read back in the interleaved order:
+    // a's page 1, b's page 1, c's page 1, a's page 2, b's page 2.
+    expect(texts[0]).toContain('fixture page 1');
+    expect(texts[1]).toContain('fixture page 1');
+    expect(texts[2]).toContain('fixture page 1');
+    expect(texts[3]).toContain('fixture page 2');
+    expect(texts[4]).toContain('fixture page 2');
+
+    // Every page contributed exactly once — no page from any source dropped
+    // or duplicated by the interleave.
+    expect(doc.pages.map(p => `${p.sourceDocId}:${p.sourceIndex}`).sort()).toEqual(
+      [
+        'interleave-a:0',
+        'interleave-a:1',
+        'interleave-b:0',
+        'interleave-b:1',
+        'interleave-c:0'
+      ].sort()
+    );
   });
 });
 
