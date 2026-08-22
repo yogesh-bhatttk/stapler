@@ -12,19 +12,25 @@ import {
   ListIndentDecrease,
   ListIndentIncrease,
   Plus,
-  Trash2
+  Trash2,
+  Wand2
 } from 'lucide-preact';
 import { activeDoc, activePageIndex } from '../../../core/store';
+import { currentDocumentBytes, proposeOutlineFromHeadings } from '../../../core/operations';
+import { countCandidates } from '../../../core/outline-detect';
+import { confirmAction, notify } from '../../../core/notify';
 import { IconButton } from '../../components/IconButton';
 import { Button } from '../../components/Button';
 import { panelStyles } from '../../shell/panelStyles';
 import { useTranslation } from '../../../core/i18n';
+import { useJob } from '../../useJob';
 import styles from './OutlinePanel.module.css';
 import { useDocumentOutline } from './useOutline';
 import {
   appendEntry,
   deleteEntry,
   editTree,
+  entriesFromHeadingCandidates,
   flattenEntries,
   indentEntry,
   moveEntry,
@@ -40,6 +46,7 @@ import {
 export function OutlinePanel() {
   const t = useTranslation();
   useDocumentOutline();
+  const { run, isRunning } = useJob();
 
   const doc = activeDoc.value;
   if (!doc) return null;
@@ -54,6 +61,42 @@ export function OutlinePanel() {
 
   const currentIndex = Math.min(Math.max(0, activePageIndex.value), doc.pages.length - 1);
   const currentPage = doc.pages[currentIndex];
+
+  /**
+   * OPS-14 — proposes a tree, then hands it to `editTree` exactly like a
+   * manual edit: nothing is written to the document by this call. The user
+   * still has to review the seeded tree here and export for anything to
+   * reach `/Outlines`, same as every other edit in this editor.
+   */
+  const detectHeadings = () =>
+    run({ label: 'Scanning for headings', scope: 'outline.detect' }, async job => {
+      if (
+        tree.length > 0 &&
+        !(await confirmAction({
+          title: t('Replace the current outline?'),
+          body: t(
+            'Detecting headings replaces every bookmark below with what was found. This can be undone with the app’s regular undo.'
+          ),
+          confirmLabel: t('Replace'),
+          tone: 'danger'
+        }))
+      ) {
+        return;
+      }
+      const bytes = await currentDocumentBytes(job);
+      const candidates = await proposeOutlineFromHeadings(bytes, doc.pages.length, job);
+      if (candidates.length === 0) {
+        notify('info', t('No heading-sized text was found.'), {
+          detail: 'Headings are detected by font size standing out from the body text.'
+        });
+        return;
+      }
+      const pageKeys = doc.pages.map(page => page.key);
+      editTree(() => entriesFromHeadingCandidates(candidates, pageKeys));
+      notify('success', t('Found {count} heading(s).', { count: countCandidates(candidates) }), {
+        detail: 'Review the outline below, then export to save it.'
+      });
+    });
 
   return (
     <div className={styles.panel}>
@@ -72,6 +115,10 @@ export function OutlinePanel() {
         }}
       >
         {t('Add bookmark for page')} {currentIndex + 1}
+      </Button>
+
+      <Button variant="secondary" icon={Wand2} onClick={detectHeadings} disabled={isRunning()}>
+        {t('Detect headings from font size')}
       </Button>
 
       {outlineLoading.value && <p className={styles.hint}>{t('Reading bookmarks…')}</p>}

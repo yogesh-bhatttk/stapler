@@ -11,6 +11,7 @@
  */
 import { signal } from '@preact/signals';
 import type { OutlineNode } from '../../../core/workers/process.worker';
+import type { OutlineCandidate } from '../../../core/outline-detect';
 
 export interface OutlineEntry {
   /** Stable identity for keying rows and addressing edits. Not written to the PDF. */
@@ -76,6 +77,24 @@ export function entriesFromNodes(
     title: node.title,
     pageKey: node.pageIndex >= 0 ? (pageKeys[node.pageIndex] ?? null) : null,
     children: entriesFromNodes(node.children, pageKeys)
+  }));
+}
+
+/**
+ * OPS-14 — turns detected heading candidates (page-index based, from
+ * `detectHeadingOutline`) into editable entries (page-key based, like every
+ * other entry in this tree) so a detected heading survives a reorder exactly
+ * as well as a manually-added bookmark does.
+ */
+export function entriesFromHeadingCandidates(
+  candidates: readonly OutlineCandidate[],
+  pageKeys: readonly string[]
+): OutlineEntry[] {
+  return candidates.map(candidate => ({
+    id: nextId(),
+    title: candidate.title,
+    pageKey: pageKeys[candidate.pageIndex] ?? null,
+    children: entriesFromHeadingCandidates(candidate.children, pageKeys)
   }));
 }
 
