@@ -43,6 +43,17 @@ the application. `.gitignore` allow-lists exactly these files inside `tests/fixt
 - `tiny.jpg` — a 10×210 grayscale JPEG. The extreme aspect ratio is the point: it is what
   the images-to-PDF orientation and page-fit assertions measure against (`CNV-01`). Node
   has no JPEG encoder, so unlike the PNG fixtures it cannot be built inside a test.
+- `face-chip.png` — a 240×240 photograph of a single human face, for `RED-08`'s
+  face-detector tests. Cropped (`-crop 594x599+1278+42`, resized to 240×240) from
+  `demo/sample1.jpg` inside the installed, MIT-licensed `@vladmandic/face-api` package —
+  the same library whose detector the test runs — so the fixture comes from the
+  dependency tree rather than from an unrelated third party. **Must not regress:** the
+  face occupies `x 62, y 63, 113×112` in this image, measured by eye and hard-coded in
+  `tests/unit/faceblur.test.ts` as the "known face position" RED-08's first acceptance
+  criterion is stated against. Regenerating with a different crop moves the face and
+  invalidates that constant, so the crop rectangle in `scripts/generate-static-fixtures.mjs`
+  is fixed rather than approximate. A drawn shape would not do: the test's whole point is
+  that a real detector finds a real face, and no detector finds a circle.
 - `sample.png` / `sample.webp` / `sample.tiff` — one 240×160 gradient in three encodings,
   so `DOC-02`'s "accept PNG, JPEG, WebP, TIFF, HEIC" is exercised through the real import
   pipeline (`tests/e2e/import.spec.ts`) rather than asserted. Built with ImageMagick.

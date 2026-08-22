@@ -245,8 +245,16 @@ These are hard constraints, enforced by tests, not aspirations:
 3. No permissions in `manifest.json` at v1.0. Any later addition must go in
    `optional_permissions` behind explicit user opt-in, to preserve the clean install prompt.
 4. Document bytes never leave a worker except to the user's chosen save location.
-5. The OCR language model is the single exception: fetched once on explicit user action,
-   cached forever, clearly disclosed. Ships behind a "download once" confirmation.
+5. Exactly two model downloads are exceptions, each fetched once on explicit user action,
+   cached forever, clearly disclosed, and shipped behind a "download once" confirmation
+   that names the host and the size:
+   - the OCR language model (OCR-01, `src/core/ocr/`);
+   - the face-detector weights for on-device face blur (RED-08, `src/core/faceblur/`).
+
+   Both are *weights only*. The engines that run them (tesseract's WASM core, the tfjs
+   runtime and face-api's own JS) are bundled, because item 2 forbids remote code no
+   matter what the user consents to. No other fetch of any kind is permitted, and the
+   invariant hook enforces that by carving out only these two directories.
 
 ### 5.5 Legal / claims discipline
 

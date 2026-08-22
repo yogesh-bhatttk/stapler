@@ -2,15 +2,18 @@
  * OCR-01 — the language-model catalogue and the one URL Stapler is ever allowed
  * to fetch at runtime.
  *
- * PLAN §5.4 item 5 makes the OCR *language model* the single documented exception
- * to the zero-network invariant. Everything else OCR needs — the tesseract.js
- * worker script and the WASM engine — is vendored into the bundle by the
- * `stapler:tesseract-assets` Vite plugin, because engine code is remote code
- * execution and no amount of user consent makes that acceptable (PLAN §5.4 item 2).
+ * PLAN §5.4 item 5 makes the OCR *language model* one of two documented exceptions
+ * to the zero-network invariant — the other is RED-08's face-detector weights in
+ * `src/core/faceblur/model.ts`, which follows this file's shape deliberately.
+ * Everything else OCR needs — the tesseract.js worker script and the WASM engine —
+ * is vendored into the bundle by the `stapler:tesseract-assets` Vite plugin,
+ * because engine code is remote code execution and no amount of user consent makes
+ * that acceptable (PLAN §5.4 item 2).
  *
  * The invariant hook (`.claude/hooks/check-invariants.mjs`) carves `src/core/ocr/`
- * out of its `REMOTE_HOSTS` check as well as its network-API check, so the host
- * can be named in full here instead of assembled to dodge the scanner.
+ * (and, identically, `src/core/faceblur/`) out of its `REMOTE_HOSTS` check as well
+ * as its network-API check, so the host can be named in full here instead of
+ * assembled to dodge the scanner.
  */
 
 /** Host the model is fetched from. Named out loud in the confirmation dialog. */

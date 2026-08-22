@@ -15,10 +15,17 @@ import type { PatternSuggestion } from '../../../core/workers/render.worker';
 import { notify } from '../../../core/notify';
 import { Button } from '../../components/Button';
 import { IconButton } from '../../components/IconButton';
-import { Checkbox, Field, TextInput } from '../../components/Field';
+import { Checkbox, Field, RadioGroup, TextInput } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
 import { VerificationReport } from './VerificationReport';
-import { patternScanRan, patternSuggestions, pendingRedactions, redactionReport } from './state';
+import { FaceBlurSection } from './FaceBlurSection';
+import {
+  patternScanRan,
+  patternSuggestions,
+  pendingRedactions,
+  redactShapeMode,
+  redactionReport
+} from './state';
 import { useJob } from '../../useJob';
 import { useTranslation } from '../../../core/i18n';
 
@@ -110,6 +117,25 @@ export function RedactPanel() {
 
       <hr className={panelStyles.divider} />
 
+      <RadioGroup<'rect' | 'polygon'>
+        legend={t('Draw shape')}
+        name="redactShape"
+        value={redactShapeMode.value}
+        onChange={value => (redactShapeMode.value = value)}
+        options={[
+          { value: 'rect', label: t('Rectangle'), hint: t('Drag a box over the content.') },
+          {
+            value: 'polygon',
+            label: t('Freehand'),
+            hint: t(
+              'Trace an outline; it closes when you let go. Only what it encloses is removed.'
+            )
+          }
+        ]}
+      />
+
+      <hr className={panelStyles.divider} />
+
       <div className={panelStyles.section}>
         <h2 className={panelStyles.title}>{t('Suggested marks')}</h2>
         <p className={panelStyles.description}>
@@ -166,6 +192,10 @@ export function RedactPanel() {
 
       <hr className={panelStyles.divider} />
 
+      <FaceBlurSection />
+
+      <hr className={panelStyles.divider} />
+
       <div className={panelStyles.section}>
         <h2 className={panelStyles.title}>
           {t('Marks (')}
@@ -174,7 +204,7 @@ export function RedactPanel() {
         {regions.length === 0 ? (
           <p className={panelStyles.description}>
             {t(
-              'Draw a rectangle on the page, or search above. Nothing is changed until you apply.'
+              'Draw a rectangle or a freehand shape on the page, or search above. Nothing is changed until you apply.'
             )}
           </p>
         ) : (
@@ -182,8 +212,12 @@ export function RedactPanel() {
             {regions.map((region, index) => (
               <li className={panelStyles.listRow} key={`${region.pageIndex}-${index}`}>
                 <span className={panelStyles.listRowText}>
-                  {region.text ? `"${region.text}"` : 'Drawn region'} {t('· page')}{' '}
-                  {region.pageIndex + 1}
+                  {region.text
+                    ? `"${region.text}"`
+                    : region.points
+                      ? t('Drawn shape')
+                      : t('Drawn region')}{' '}
+                  {t('· page')} {region.pageIndex + 1}
                 </span>
                 <IconButton
                   icon={Trash2}
@@ -199,7 +233,7 @@ export function RedactPanel() {
 
       <p className={panelStyles.note}>
         {t(
-          'Applying removes text operators, image references, and annotations inside each marked region at the PDF operator level, then draws an opaque block on top. Stapler verifies removal and refuses to save if any content survives.'
+          'Applying removes text operators, image references, and annotations inside each mark at the PDF operator level, then draws an opaque block — or, for a freehand mark, the shape you traced — on top. A freehand mark only removes what its outline encloses, not the box around it. Stapler verifies removal and refuses to save if any content survives.'
         )}
       </p>
 

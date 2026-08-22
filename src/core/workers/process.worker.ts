@@ -1,4 +1,16 @@
 import { pseudoLinearize } from '../pdf/linearize';
+/**
+ * DOC-12 — vendored, not fetched: `?inline` forces Vite to bundle this as a
+ * base64 data URI at build time, so there is no `fetch()`/network call of any
+ * kind to load it (the OCR font asset's own `fetch()` of a bundled file is
+ * only permitted because `src/core/ocr/` is explicitly carved out of the
+ * invariant hook's network-API ban — this avoids needing that exemption at
+ * all). Liberation Sans Regular, metric-compatible with Arial and already
+ * vendored via `pdfjs-dist` for pdf.js's own non-embedded-font rendering path
+ * (see `pdfjs-setup.ts`) — copied into `src/core/pdf/assets/` alongside its
+ * license text rather than imported across the `node_modules` boundary.
+ */
+import liberationSansRegularDataUrl from '../pdf/assets/LiberationSans-Regular.ttf?inline';
 /** A user-supplied raster for an image watermark, resolved to bytes by the caller. */
 export interface WatermarkImageData {
   bytes: Uint8Array;
@@ -82,7 +94,7 @@ import {
   popGraphicsState,
   pushGraphicsState
 } from 'pdf-lib';
-import type { PDFField, PDFImage, PDFContext } from 'pdf-lib';
+import type { PDFField, PDFImage, PDFContext, PDFEmbeddedPage } from 'pdf-lib';
 import { zipSync } from 'fflate';
 import type { JobHandle } from './protocol';
 import { checkpoint, subJob } from './protocol';
@@ -92,6 +104,7 @@ import type { ImageResultStat } from '../compress-report';
 import { DOC_HAIRLINE_RGB, DOC_INK_RGB, DOC_REDACT_RGB } from '../doc-colors';
 import { markdownToPdfBytes, hadUnsupportedCharacter } from '../markdown-to-pdf';
 import { batesLabel } from '../bates';
+import { generateQrRaster, encodeCode128Bars } from '../barcode';
 import { encodePng } from '../png';
 import { addOcrTextLayerToDocument } from '../ocr/textLayer';
 import type { OcrLayerReport, OcrPageLayer } from '../ocr/types';
@@ -108,9 +121,9 @@ import {
   filterContentStream,
   serializeStatements,
   decodeStream,
-  intersects
+  areaTouches
 } from '../pdf/interpreter';
-import type { Rect, GraphicsState, Matrix } from '../pdf/interpreter';
+import type { Rect, RedactionArea, GraphicsState, Matrix } from '../pdf/interpreter';
 import { hasXfaMarker, XFA_COMPOSE_MESSAGE, XFA_MESSAGE } from '../pdf/xfa';
 import { encryptPdf, type ProtectionSettings } from '../pdf/encrypt';
 import { applyAltTextToDoc } from '../pdf/accessibility';
@@ -227,6 +240,54 @@ export interface FormFieldData {
 }
 
 /**
+ * SGN-09 — one `/Sig` field's own `/ByteRange` and whether it reaches the
+ * current end of file. A structural check, not PAdES/CMS cryptographic
+ * validation: it answers "were bytes appended after this signature was
+ * applied", not "is the signature's cryptographic hash valid".
+ */
+export interface SignatureFieldIntegrity {
+  fieldName: string;
+  byteRange: [number, number, number, number];
+  reachesEndOfFile: boolean;
+}
+
+/**
+ * DOC-12 — one non-embedded font, with a subset tag (`ABCDEF+`) already stripped
+ * from `baseFont` so `Arial` reads as `Arial`, not `EOODIA+Arial`.
+ */
+export interface FontEmbeddingFinding {
+  baseFont: string;
+  /** 0-based pages where this font appears without being embedded. */
+  pages: number[];
+  /**
+   * A pdf-lib standard-14 font name this can be safely re-embedded as, or
+   * `null` when there is none. Only the standard 14 are offered: substituting
+   * an arbitrary font program risks a glyph-mapping mismatch this codebase's
+   * "never silently corrupt a document" rule cannot allow — see the ticket
+   * writeup for why a real local-font-file match is deliberately not attempted.
+   */
+  standardFontMatch: string | null;
+}
+
+export interface FontEmbeddingReport {
+  findings: FontEmbeddingFinding[];
+}
+
+export interface SignatureIntegrityReport {
+  hasSignature: boolean;
+  /**
+   * Whether the *outermost* signature (the one whose `/ByteRange` covers the
+   * most of the file — the last one applied, for a document signed more than
+   * once) reaches the file's current end. `null` when there is no signature to
+   * judge. An earlier signature's own range legitimately stops short once a
+   * later signature adds more bytes after it, so only the outermost one's
+   * reach matters for "was anything appended after signing".
+   */
+  intact: boolean | null;
+  signatures: SignatureFieldIntegrity[];
+}
+
+/**
  * A filesystem path found in the document, with the scrub category that removes it.
  * A Windows user path (`C:\Users\…`) is the single most common accidental disclosure
  * in a PDF and it hides in several places at once — the Producer string, a custom
@@ -290,6 +351,18 @@ export interface RedactionRegion {
   width: number;
   height: number;
   text?: string;
+  /**
+   * RED-07 — a freehand/polygon mark's outline, in the same normalised
+   * page-fraction space (origin top-left) as `x`/`y`/`width`/`height`, which
+   * continue to hold its bounding box.
+   *
+   * Deliberately an optional field on the one region shape rather than a second
+   * kind of mark: everything that only understands rectangles — `groupRegionsByPage`,
+   * the pixel verifier's render window, the annotation sweep's box test, the UI's
+   * mark list and arrow-key nudging — keeps working on the bounding box, and only
+   * the three predicates that decide what is *inside* a mark learn about shapes.
+   */
+  points?: { x: number; y: number }[];
 }
 
 /**
@@ -306,8 +379,11 @@ export interface ImageRedactionRequest {
   pageIndex: number;
   name: string;
   objectNumber: number;
-  /** Covered areas in the image's own unit square, y upwards from bottom-left. */
-  rects: Rect[];
+  /**
+   * Covered areas in the image's own unit square, y upwards from bottom-left.
+   * A shaped mark (RED-07) carries its polygon alongside the bounding box.
+   */
+  rects: RedactionArea[];
 }
 
 /** A re-encoded image with the covered pixels painted opaque black. */
@@ -320,6 +396,21 @@ export interface RedactedImage {
 
 /** `pageIndex → /XObject resource name → replacement`. */
 export type RedactedImageReplacements = Record<number, Record<string, RedactedImage>>;
+
+/**
+ * RED-08 — one image XObject a page draws, addressed both ways.
+ *
+ * Same two-identifier problem `ImageRedactionRequest` has: `name` addresses it
+ * from the page for pdf-lib, `objectNumber` addresses the same stream for
+ * pdf.js. An image reused on twenty pages appears once per page here, with the
+ * same `objectNumber` every time — which is what lets the caller decode and
+ * encode it exactly once.
+ */
+export interface PageImageRef {
+  pageIndex: number;
+  name: string;
+  objectNumber: number;
+}
 
 export interface TextLayerParams {
   scale: number;
@@ -375,6 +466,19 @@ export interface BatesData {
 }
 
 /**
+ * OPS-18 — a QR/barcode stamp, drawn by the same OPS-08 grid engine as Bates,
+ * and like Bates applied to every exported page — no page-range targeting.
+ */
+export interface BarcodeStampData {
+  kind: 'qr' | 'code128';
+  text: string;
+  /** One of the nine `positionOrigin` grid points, e.g. `bottom-right`. */
+  position: string;
+  /** Fraction of the page width the stamp should occupy. */
+  scale: number;
+}
+
+/**
  * Late-added, optional composition inputs.
  *
  * A bag rather than four more positional parameters: `compose` already takes nine,
@@ -390,6 +494,8 @@ export interface ComposeExtras {
   outline?: OutlineNode[];
   /** OPS-11. Stamped on every page, numbered from `start` in output page order. */
   bates?: BatesData;
+  /** OPS-18. A QR/barcode stamp, encoding `barcodeStamp.text` on every targeted page. */
+  barcodeStamp?: BarcodeStampData;
   /**
    * OPS-12. One filename per output slice, used instead of `${baseName}-NN.pdf`.
    * Split only; ignored by `compose`.
@@ -412,6 +518,12 @@ export interface ProcessJob {
     bytes: Uint8Array,
     job?: JobHandle
   ): Promise<{ isXfa: boolean; fields: FormFieldData[] }>;
+  /** SGN-09 — structural signature/tamper check. See `SignatureIntegrityReport`. */
+  checkSignatureIntegrity(bytes: Uint8Array): Promise<SignatureIntegrityReport>;
+  /** DOC-12 — which fonts are not embedded. See `FontEmbeddingReport`. */
+  checkFontEmbedding(bytes: Uint8Array): Promise<FontEmbeddingReport>;
+  /** DOC-12 — re-embeds every non-embedded occurrence of `baseFont` as its standard-14 match. */
+  embedMissingFont(bytes: Uint8Array, baseFont: string): Promise<Uint8Array>;
   fillFormFields(
     bytes: Uint8Array,
     values: Record<string, string | boolean | string[]>,
@@ -549,6 +661,36 @@ export interface ProcessJob {
     regions: RedactionRegion[]
   ): Promise<ImageRedactionRequest[]>;
   /**
+   * RED-08 — every image XObject the given pages draw.
+   *
+   * Unlike {@link ProcessJob.planImageRedactions} this is not driven by marks:
+   * face blur has to look at every embedded image, because that is where a face
+   * can be. A direct (non-indirect) image XObject is skipped rather than
+   * refused — it cannot be addressed by object number, so pdf.js and pdf-lib
+   * could not agree on which stream it is, and reporting "0 faces found" for a
+   * page that has one would be the silent failure this ticket exists to avoid.
+   * The skipped names come back so the caller can say so out loud.
+   */
+  planPageImages(
+    bytes: Uint8Array,
+    pageIndices?: number[]
+  ): Promise<{ images: PageImageRef[]; unaddressablePages: number[] }>;
+  /**
+   * RED-08 — substitutes image XObjects and changes nothing else.
+   *
+   * Deliberately *not* a rebuild through `PDFDocument.create()` + `copyPages`
+   * the way {@link ProcessJob.applyRedactions} is. Face blur touches pixels
+   * only: every content stream, font, annotation and vector on the page must
+   * come out byte-identical, and the cheapest way to guarantee that is to never
+   * take them apart. The old image streams are purged once nothing names them,
+   * so the unblurred original does not stay in the file.
+   */
+  replacePageImages(
+    bytes: Uint8Array,
+    replacements: RedactedImageReplacements,
+    job?: JobHandle
+  ): Promise<Uint8Array>;
+  /**
    * RED-03's string-level check re-extracts pdf.js *page text* only, which never
    * sees annotation `/Contents` (sticky notes, comments) or AcroForm field `/V`
    * values — so a copy of a redacted string quoted in a comment on another page
@@ -611,6 +753,23 @@ async function load(bytes: Uint8Array, allowEncrypted = false): Promise<PDFDocum
 /** pdf-lib Colors built from the document-colour tuples, made once. */
 const DOC_INK = rgb(...DOC_INK_RGB);
 const DOC_REDACT = rgb(...DOC_REDACT_RGB);
+
+/** OPS-18 — a CODE128 stamp never draws shorter than this, in points (~0.28in). */
+const CODE128_MIN_STAMP_HEIGHT_PT = 20;
+
+/**
+ * OPS-18 — a CODE128 stamp never draws a single module (bar or space)
+ * narrower than this, in points (~0.014in, inside the usual 10-20 mil
+ * "X-dimension" quality guidance for general-purpose barcode scanning).
+ * Below this, a moderate-length value squeezed into a small "Size" setting
+ * degrades to a fraction of a device pixel per module at ordinary print/scan
+ * resolutions and a real decoder cannot tell one bar width from another —
+ * confirmed live: the same "Size" slider that gives a QR code a clean,
+ * decodable stamp produced an undecodable CODE128 at its default and even
+ * its 20%-of-page-width settings for a 14-character value, purely from module
+ * width, not from anything wrong in how the bars were drawn.
+ */
+const CODE128_MIN_MODULE_WIDTH_PT = 1;
 
 function transfer(bytes: Uint8Array): Uint8Array {
   return Comlink.transfer(bytes, [bytes.buffer]);
@@ -1926,6 +2085,52 @@ async function composePages(
   const bates = extras.bates;
   const batesFont = bates ? await outDoc.embedStandardFont(StandardFonts.HelveticaBold) : undefined;
 
+  // OPS-18 — built once here rather than once per page, the same way the image
+  // watermark's `imageCache` avoids re-embedding an identical image.
+  //
+  // QR embeds as a raster (`generateQrRaster`): its Reed-Solomon error
+  // correction tolerates the antialiasing a raster picks up between here and
+  // whatever DPI a viewer/printer/scanner finally renders the page at.
+  // CODE128 does not get that tolerance — a 1D barcode decodes by comparing
+  // *relative bar widths*, and rasterising it the same way measurably broke
+  // real-decoder round-trips in testing (the two widened/narrowed just enough
+  // under antialiasing + resampling to misread as different bar codes). It is
+  // built instead as a tiny one-page PDF of vector bars — geometrically exact
+  // at any render resolution — and embedded as a reusable form the same way
+  // `embedPng` makes a reusable image.
+  const barcodeStamp = extras.barcodeStamp;
+  let barcodeImage: { image: PDFImage; aspect: number } | undefined;
+  let barcodeForm: { form: PDFEmbeddedPage; aspect: number; unitWidth: number } | undefined;
+  if (barcodeStamp && barcodeStamp.text.trim()) {
+    if (barcodeStamp.kind === 'qr') {
+      const raster = generateQrRaster(barcodeStamp.text);
+      const image = await outDoc.embedPng(raster.pngBytes);
+      barcodeImage = { image, aspect: raster.height / raster.width };
+    } else {
+      const bars = encodeCode128Bars(barcodeStamp.text);
+      const quiet = 10;
+      const barsDoc = await PDFDocument.create();
+      // Height is an arbitrary internal unit — `drawPage` below stretches it
+      // to whatever `boxH` the grid places it at, uniformly, so it carries no
+      // meaning of its own beyond giving the bars something to span.
+      const unitHeight = 100;
+      const unitWidth = bars.length + quiet * 2;
+      const barsPage = barsDoc.addPage([unitWidth, unitHeight]);
+      for (let i = 0; i < bars.length; i++) {
+        if (bars[i] !== '1') continue;
+        barsPage.drawRectangle({
+          x: quiet + i,
+          y: 0,
+          width: 1,
+          height: unitHeight,
+          color: DOC_INK
+        });
+      }
+      const [form] = await outDoc.embedPdf(barsDoc);
+      barcodeForm = { form, aspect: unitHeight / unitWidth, unitWidth };
+    }
+  }
+
   // Page ranges are the user's *document* page numbers, so they are parsed and
   // matched against the whole export (`pageOffset + i`), never against a slice's
   // own indexes. Matching on the slice-local index meant "pages 1-3" watermarked
@@ -2222,6 +2427,54 @@ async function composePages(
         size: bates.fontSize,
         font: batesFont,
         color: DOC_INK,
+        rotate: degrees(placed.rotate)
+      });
+    }
+
+    if (barcodeImage && barcodeStamp) {
+      const { displayWidth: width, displayHeight: height } = marginFrame;
+      const boxW = Math.min(width * barcodeStamp.scale, Math.max(0, width - 48));
+      const boxH = boxW * barcodeImage.aspect;
+      const { x, y } = positionOrigin(barcodeStamp.position, width, height, boxW, boxH, 24);
+      const placed = placeDisplayBox(marginFrame, x, y, boxW, boxH);
+      copied.drawImage(barcodeImage.image, {
+        x: placed.x,
+        y: placed.y,
+        width: boxW,
+        height: boxH,
+        rotate: degrees(placed.rotate)
+      });
+    }
+
+    if (barcodeForm && barcodeStamp) {
+      const { displayWidth: width, displayHeight: height } = marginFrame;
+      // Width floors at a safe module width — see `CODE128_MIN_MODULE_WIDTH_PT`
+      // — before the "Size" fraction is even considered, so a long value at a
+      // small setting still scans; the setting can only make it *bigger*.
+      // Then ceilinged to the page's own margin frame: a long enough value
+      // (e.g. a full URL) needs more width than the floor guarantees to stay
+      // scannable, and without this a barcode comfortably wider than the page
+      // was clipped at the edge — invisible past the crop, not merely small.
+      // Fitting on the page wins over the scannability floor when the two
+      // genuinely conflict; a barcode that runs off the page scans as nothing
+      // regardless of its module width.
+      const boxW = Math.min(
+        Math.max(width * barcodeStamp.scale, barcodeForm.unitWidth * CODE128_MIN_MODULE_WIDTH_PT),
+        Math.max(0, width - 48)
+      );
+      // A 1D barcode's scannable height has nothing to do with how many
+      // characters it encodes, unlike a QR code, which must stay square: a
+      // long value at a modest width slider would otherwise scale down to a
+      // sliver under a scanner's reliable read height. A fixed floor keeps it
+      // legible regardless of scale or text length.
+      const boxH = Math.max(boxW * barcodeForm.aspect, CODE128_MIN_STAMP_HEIGHT_PT);
+      const { x, y } = positionOrigin(barcodeStamp.position, width, height, boxW, boxH, 24);
+      const placed = placeDisplayBox(marginFrame, x, y, boxW, boxH);
+      copied.drawPage(barcodeForm.form, {
+        x: placed.x,
+        y: placed.y,
+        width: boxW,
+        height: boxH,
         rotate: degrees(placed.rotate)
       });
     }
@@ -3436,6 +3689,164 @@ const api: ProcessJob = {
 
     await checkpoint(job, 1, 'Form read');
     return { isXfa: false, fields };
+  },
+
+  /**
+   * SGN-09 — a `/Sig` field's `/ByteRange` names the exact byte spans that were
+   * hashed at signing time; the gap between the two spans is where `/Contents`
+   * (the signature itself) sits, excluded from its own hash. Standard PDF
+   * incremental-update signing has that second span run to the end of the file
+   * *as it was when signed* — so if the file has grown since (a later edit
+   * appended without re-signing), the current length no longer matches, and
+   * that mismatch is exactly what "modified after signing" means structurally,
+   * without needing to verify the cryptographic hash itself. Reading raw
+   * dictionary values here, not pdf-lib's own signature API, which does not
+   * expose one — `/Sig` fields are typically absent from `form.getFields()`
+   * entirely on the documents this was checked against.
+   */
+  async checkSignatureIntegrity(bytes) {
+    const doc = await load(bytes, true);
+    const acroFormDict = doc.catalog.lookupMaybe(PDFName.of('AcroForm'), PDFDict);
+    const signatures: SignatureFieldIntegrity[] = [];
+
+    const qualifiedName = (field: PDFDict): string => {
+      const parts: string[] = [];
+      let current: PDFDict | undefined = field;
+      const seen = new Set<PDFDict>();
+      while (current && !seen.has(current)) {
+        seen.add(current);
+        const t = current.get(PDFName.of('T'));
+        if (t instanceof PDFString || t instanceof PDFHexString) parts.unshift(t.decodeText());
+        const parent = current.get(PDFName.of('Parent'));
+        current = parent instanceof PDFRef ? doc.context.lookupMaybe(parent, PDFDict) : undefined;
+      }
+      return parts.join('.') || '(unnamed)';
+    };
+
+    const walk = (fieldsArray: PDFArray | undefined): void => {
+      if (!fieldsArray) return;
+      for (let i = 0; i < fieldsArray.size(); i++) {
+        const ref = fieldsArray.get(i);
+        const field = ref instanceof PDFRef ? doc.context.lookupMaybe(ref, PDFDict) : undefined;
+        if (!field) continue;
+
+        const ft = field.get(PDFName.of('FT'));
+        if (ft instanceof PDFName && ft === PDFName.of('Sig')) {
+          const vRef = field.get(PDFName.of('V'));
+          const sigDict =
+            vRef instanceof PDFRef ? doc.context.lookupMaybe(vRef, PDFDict) : undefined;
+          const byteRangeArr = sigDict?.lookupMaybe(PDFName.of('ByteRange'), PDFArray);
+          if (sigDict && byteRangeArr && byteRangeArr.size() === 4) {
+            const nums = [0, 1, 2, 3].map(i => {
+              const n = byteRangeArr.lookup(i, PDFNumber);
+              return n.asNumber();
+            }) as [number, number, number, number];
+            signatures.push({
+              fieldName: qualifiedName(field),
+              byteRange: nums,
+              reachesEndOfFile: nums[2] + nums[3] === bytes.length
+            });
+          }
+        }
+
+        const kids = field.lookupMaybe(PDFName.of('Kids'), PDFArray);
+        if (kids) walk(kids);
+      }
+    };
+
+    walk(acroFormDict?.lookupMaybe(PDFName.of('Fields'), PDFArray));
+
+    if (signatures.length === 0) return { hasSignature: false, intact: null, signatures: [] };
+
+    const outermost = signatures.reduce((a, b) =>
+      a.byteRange[2] + a.byteRange[3] >= b.byteRange[2] + b.byteRange[3] ? a : b
+    );
+    return { hasSignature: true, intact: outermost.reachesEndOfFile, signatures };
+  },
+
+  /**
+   * DOC-12 — walks every page's `/Resources/Font`, grouping by `/BaseFont`
+   * (subset tag stripped) across the whole document: the same font is
+   * typically referenced by every page, and a document can also legitimately
+   * carry two different font *objects* under one family name, one embedded on
+   * some pages, one not — a finding's `pages` names exactly the pages where
+   * *this* font is not embedded, not everywhere the name appears.
+   */
+  async checkFontEmbedding(bytes) {
+    const doc = await load(bytes, true);
+    const pages = doc.getPages();
+    const byFont = new Map<string, { embedded: Set<number>; missing: Set<number> }>();
+
+    for (let i = 0; i < pages.length; i++) {
+      const fontsDict = pageFontDictOf(pages[i], doc.context);
+      if (!fontsDict) continue;
+      for (const [, ref] of fontsDict.entries()) {
+        const fontDict = asDict(ref, doc.context);
+        if (!fontDict) continue;
+        const baseFont = baseFontNameOf(fontDict);
+        const entry = byFont.get(baseFont) ?? { embedded: new Set(), missing: new Set() };
+        (isFontEmbedded(fontDict, doc.context) ? entry.embedded : entry.missing).add(i);
+        byFont.set(baseFont, entry);
+      }
+    }
+
+    const findings: FontEmbeddingFinding[] = [];
+    for (const [baseFont, { missing }] of byFont) {
+      if (missing.size === 0) continue;
+      findings.push({
+        baseFont,
+        pages: [...missing].sort((a, b) => a - b),
+        standardFontMatch: standardFontFor(baseFont)
+      });
+    }
+    findings.sort((a, b) => a.baseFont.localeCompare(b.baseFont));
+    return { findings };
+  },
+
+  /**
+   * DOC-12 — re-embeds `baseFont` as its standard-14 match and repoints every
+   * non-embedded occurrence's resource-name entry at it. The resource *names*
+   * (`/F1`, `/F2`, …) are untouched, so no content-stream operator changes —
+   * only what each name resolves to.
+   */
+  async embedMissingFont(bytes, baseFont) {
+    const doc = await load(bytes);
+    const substitute = standardFontFor(baseFont);
+    if (!substitute) {
+      throw unsupported(
+        `"${baseFont}" has no safe standard-font substitute — nothing was changed.`
+      );
+    }
+    // CJS interop matches `embedDevanagariFont`'s own reasoning: bundled, this
+    // resolves to the module's default export; a bare dynamic `import()` of a
+    // CJS package carries it on `.default` and not on the namespace itself.
+    const fontkitModule = (await import('fontkit')) as unknown as {
+      default?: Parameters<PDFDocument['registerFontkit']>[0];
+    } & Parameters<PDFDocument['registerFontkit']>[0];
+    doc.registerFontkit(fontkitModule.default ?? fontkitModule);
+    const fontBytes = dataUrlToBytes(liberationSansRegularDataUrl);
+    // No subsetting: which glyphs are used would mean parsing every content
+    // stream that references this font first, and the whole point here is a
+    // small, safe fix — not a second content-stream analysis pass.
+    const embedded = await doc.embedFont(fontBytes, { subset: false });
+
+    let replaced = 0;
+    for (const page of doc.getPages()) {
+      const fontsDict = pageFontDictOf(page, doc.context);
+      if (!fontsDict) continue;
+      for (const [name, ref] of fontsDict.entries()) {
+        const fontDict = asDict(ref, doc.context);
+        if (!fontDict) continue;
+        if (baseFontNameOf(fontDict) !== baseFont) continue;
+        if (isFontEmbedded(fontDict, doc.context)) continue;
+        fontsDict.set(name, embedded.ref);
+        replaced++;
+      }
+    }
+    if (replaced === 0) {
+      throw internal(`"${baseFont}" is not a non-embedded font in this document.`);
+    }
+    return transfer(await pseudoLinearize(doc).save({ useObjectStreams: true }));
   },
 
   async fillFormFields(bytes, values, flatten, job) {
@@ -4770,6 +5181,107 @@ Q
     return requests;
   },
 
+  async planPageImages(bytes, pageIndices) {
+    const source = await load(bytes);
+    const pages = source.getPages();
+    const wanted =
+      pageIndices && pageIndices.length > 0
+        ? pageIndices.filter(index => index >= 0 && index < pages.length)
+        : pages.map((_, index) => index);
+
+    const images: PageImageRef[] = [];
+    const unaddressablePages = new Set<number>();
+
+    for (const pageIndex of wanted) {
+      const page = pages[pageIndex];
+      if (!page) continue;
+      const xObjects = pageXObjectDictOf(page, source.context);
+      if (!xObjects) continue;
+      for (const [key, value] of xObjects.entries()) {
+        // `/Subtype /Image` is the only thing that can hold a face; a `/Form`
+        // XObject is a nested content stream, and its own images are reached
+        // through the page that draws it in the normal way.
+        const stream = value instanceof PDFRef ? source.context.lookup(value) : value;
+        if (!(stream instanceof PDFStream)) continue;
+        if (stream.dict.get(PDFName.of('Subtype')) !== PDFName.of('Image')) continue;
+        if (!(value instanceof PDFRef)) {
+          unaddressablePages.add(pageIndex);
+          continue;
+        }
+        images.push({
+          pageIndex,
+          name: key.asString().replace(/^\//, ''),
+          objectNumber: value.objectNumber
+        });
+      }
+    }
+
+    return { images, unaddressablePages: [...unaddressablePages] };
+  },
+
+  async replacePageImages(bytes, replacements, job) {
+    const doc = await load(bytes);
+    const pages = doc.getPages();
+    const pageIndices = Object.keys(replacements)
+      .map(Number)
+      .filter(index => Number.isInteger(index) && index >= 0 && index < pages.length)
+      .sort((a, b) => a - b);
+    if (pageIndices.length === 0) return transfer(bytes);
+
+    // Each distinct replacement is embedded once and its ref reused, so an
+    // image drawn on twenty pages produces one new stream rather than twenty
+    // copies of the same blurred raster. Keyed on the byte buffer itself: the
+    // caller already de-duplicated by object number, and identity is exactly
+    // the question being asked.
+    const embedded = new Map<Uint8Array, PDFRef>();
+    const retired = new Set<PDFRef>();
+
+    for (let i = 0; i < pageIndices.length; i++) {
+      const pageIndex = pageIndices[i];
+      await checkpoint(job, i / pageIndices.length, `Updating page ${pageIndex + 1}`);
+      const page = pages[pageIndex];
+      const xObjects = localizePageResources(page, doc.context);
+      // Reachable only if the caller's plan disagrees with what this page
+      // actually has — `planPageImages` uses the same resource lookup, so a
+      // page it found images on always has one here too. Continuing quietly
+      // would let the caller believe this page's image was replaced (it
+      // counts toward `pagesTouched`) when nothing was written at all.
+      if (!xObjects) {
+        throw internal(
+          `Page ${pageIndex + 1} has an image replacement queued, but no image resources to apply it to.`
+        );
+      }
+
+      for (const [name, replacement] of Object.entries(replacements[pageIndex])) {
+        const pdfName = PDFName.of(name);
+        const previous = xObjects.get(pdfName);
+        let ref = embedded.get(replacement.bytes);
+        if (!ref) {
+          const image =
+            replacement.format === 'png'
+              ? await doc.embedPng(replacement.bytes)
+              : await doc.embedJpg(replacement.bytes);
+          // `embedPng`/`embedJpg` only reserve a reference; the stream is
+          // written on save. Forcing it now is what makes the object exist to
+          // point at.
+          await image.embed();
+          ref = image.ref;
+          embedded.set(replacement.bytes, ref);
+        }
+        xObjects.set(pdfName, ref);
+        if (previous instanceof PDFRef) retired.add(previous);
+      }
+    }
+
+    // Purged after every page has been rewritten, not during: an image shared
+    // between two pages is still named by the second one while the first is
+    // being processed, and purging then would leave a dangling reference.
+    for (const ref of retired) purgeXObjectIfUnreferenced(doc, ref);
+
+    await checkpoint(job, 0.95, 'Writing file');
+    return transfer(await doc.save({ useObjectStreams: true }));
+  },
+
   async applyRedactions(bytes, regions, imageReplacements, job) {
     const source = await load(bytes);
     const sourcePages = source.getPages();
@@ -4851,8 +5363,22 @@ Q
       // extraction tool reads, so they are removed from /Annots *and* deleted.
       stripOverlappingAnnotations(out, copied, rects);
 
-      // 5. The opaque mark itself, drawn on top of what is left.
+      // 5. The opaque mark itself, drawn on top of what is left. A shaped mark
+      // (RED-07) is filled as its own path: drawing its bounding rectangle
+      // instead would black out the corners the shape deliberately left alone,
+      // which is content the user chose to keep — and the pixel verifier, which
+      // now samples inside the shape, would still pass it, so the difference
+      // would be silent.
       for (const rect of rects) {
+        if (rect.polygon) {
+          copied.drawSvgPath(polygonSvgPath(rect.polygon), {
+            x: 0,
+            y: 0,
+            color: DOC_REDACT,
+            borderWidth: 0
+          });
+          continue;
+        }
         copied.drawRectangle({
           x: rect.x,
           y: rect.y,
@@ -5040,15 +5566,63 @@ async function decodeContentStreamBytes(
 }
 
 /**
+ * A closed polygon in PDF user space as an SVG path for `drawSvgPath`.
+ *
+ * pdf-lib emits `translate(x, y)` then `scale(1, -1)` before the path, so path
+ * coordinates are read with y running *down* from the anchor — hence the negated
+ * y against an anchor of (0, 0), which leaves the path in page space. Fixed
+ * notation, never exponential: pdf-lib's path parser would read `1e-7` as a
+ * number followed by a command letter.
+ */
+function polygonSvgPath(points: { x: number; y: number }[]): string {
+  const at = (p: { x: number; y: number }) => `${p.x.toFixed(4)},${(-p.y).toFixed(4)}`;
+  return `M ${at(points[0])} ${points
+    .slice(1)
+    .map(p => `L ${at(p)}`)
+    .join(' ')} Z`;
+}
+
+/**
  * The redaction regions for one page, in that page's unrotated content space.
  *
  * pdf.js applies `/Rotate` when building the viewport, so the normalised
  * coordinates the UI produced are in the *rotated* frame. The inverse rotation
  * maps them back to the space `filterContentStream` and `drawRectangle` work in.
+ *
+ * A shaped mark (RED-07) carries its polygon through the same mapping, so the box
+ * and the shape can never end up in different frames.
  */
-function redactionRectsForPage(page: PDFPage, regions: RedactionRegion[]): Rect[] {
+function redactionRectsForPage(page: PDFPage, regions: RedactionRegion[]): RedactionArea[] {
   const cropBox = page.getCropBox();
   const rotateDeg = normalizeRotation(page.getRotation().angle);
+
+  /**
+   * One normalised mark corner → PDF user space, by the same four cases as the
+   * box below. A rect is `{rx, ry, rw, rh}` with `rh = 0` at a single point, so
+   * this is that arithmetic with the extents dropped — which is why a polygon
+   * built from a rect's own four corners maps to exactly the rect's own box (the
+   * property `redact-polygon.test.ts` pins down for all four rotations).
+   */
+  const pointToPage = (x: number, y: number) => {
+    let nx: number, ny: number;
+    if (rotateDeg === 0) {
+      nx = x;
+      ny = y;
+    } else if (rotateDeg === 90) {
+      nx = y;
+      ny = 1 - x;
+    } else if (rotateDeg === 180) {
+      nx = 1 - x;
+      ny = 1 - y;
+    } else {
+      nx = 1 - y;
+      ny = x;
+    }
+    return {
+      x: cropBox.x + nx * cropBox.width,
+      y: cropBox.y + cropBox.height * (1 - ny)
+    };
+  };
 
   return regions.map(r => {
     let rx: number, ry: number, rw: number, rh: number;
@@ -5076,12 +5650,18 @@ function redactionRectsForPage(page: PDFPage, regions: RedactionRegion[]): Rect[
       rh = r.width;
     }
     // Normalised fractions (top-left origin) → PDF user space (bottom-left origin).
-    return {
+    const box: RedactionArea = {
       x: cropBox.x + rx * cropBox.width,
       y: cropBox.y + cropBox.height * (1 - ry - rh),
       width: rw * cropBox.width,
       height: rh * cropBox.height
     };
+    // A shape needs at least a triangle to enclose anything; anything less falls
+    // back to its bounding box rather than silently redacting nothing.
+    if (r.points && r.points.length >= 3) {
+      box.polygon = r.points.map(p => pointToPage(p.x, p.y));
+    }
+    return box;
   });
 }
 
@@ -5097,13 +5677,14 @@ function groupRegionsByPage(regions: RedactionRegion[]): Map<number, RedactionRe
 
 /** The page's `/Resources/XObject` dictionary, through however many refs. */
 function pageXObjectDictOf(page: PDFPage, context: PDFContext): PDFDict | undefined {
-  const resourcesRaw = page.node.get(PDFName.of('Resources'));
-  const resources =
-    resourcesRaw instanceof PDFDict
-      ? resourcesRaw
-      : resourcesRaw instanceof PDFRef
-        ? (context.lookup(resourcesRaw) as PDFDict | undefined)
-        : undefined;
+  // `page.node.Resources()` (not a raw `.get('Resources')`) walks up to the
+  // nearest `/Pages` ancestor that declares one, per spec — a page is free to
+  // have no `/Resources` of its own and inherit the tree's. A direct get
+  // here made every caller of this helper (image-redaction planning as well
+  // as RED-08's face-blur planning) silently see "no images" on such a page
+  // — indistinguishable from a page that genuinely has none, so a face or a
+  // redaction target on it was never even offered, with no error to say why.
+  const resources = page.node.Resources();
   const xObjectRaw = resources?.get(PDFName.of('XObject'));
   return xObjectRaw instanceof PDFDict
     ? xObjectRaw
@@ -5159,6 +5740,79 @@ function pageFontDictOf(page: PDFPage, context: PDFContext): PDFDict | undefined
 function asDict(value: unknown, context: PDFContext): PDFDict | undefined {
   const resolved = value instanceof PDFRef ? context.lookup(value) : value;
   return resolved instanceof PDFDict ? resolved : undefined;
+}
+
+/**
+ * DOC-12 — a `/Type0` (composite) font's own dict never carries a
+ * `/FontDescriptor` itself; both the embedding question and the display name
+ * live one level down, in `/DescendantFonts[0]`. Everything else (Type1,
+ * TrueType) carries both directly.
+ */
+function descriptorHostOf(fontDict: PDFDict, context: PDFContext): PDFDict {
+  if (fontDict.get(PDFName.of('Subtype')) === PDFName.of('Type0')) {
+    const descendants = asArray(fontDict.get(PDFName.of('DescendantFonts')), context);
+    const descendant = descendants ? asDict(descendants.get(0), context) : undefined;
+    if (descendant) return descendant;
+  }
+  return fontDict;
+}
+
+function isFontEmbedded(fontDict: PDFDict, context: PDFContext): boolean {
+  const descriptor = asDict(
+    descriptorHostOf(fontDict, context).get(PDFName.of('FontDescriptor')),
+    context
+  );
+  if (!descriptor) return false;
+  return (
+    descriptor.get(PDFName.of('FontFile')) !== undefined ||
+    descriptor.get(PDFName.of('FontFile2')) !== undefined ||
+    descriptor.get(PDFName.of('FontFile3')) !== undefined
+  );
+}
+
+/** `/BaseFont`, with a subset tag (`ABCDEF+`) stripped so `Arial` reads as `Arial`. */
+function baseFontNameOf(fontDict: PDFDict): string {
+  const raw = fontDict.get(PDFName.of('BaseFont'));
+  const name = raw instanceof PDFName ? raw.asString().replace(/^\//, '') : 'Unknown';
+  return name.replace(/^[A-Z]{6}\+/, '');
+}
+
+/**
+ * The only substitution DOC-12 will ever offer: an exact name match to
+ * regular-weight Arial/Helvetica, re-embedded with the *real*, vendored
+ * Liberation Sans Regular font program (metric-compatible with Arial — the
+ * same substitute pdf.js's own renderer already uses when a PDF references
+ * Arial without embedding it, per `pdfjs-setup.ts`).
+ *
+ * Deliberately narrow, for two reasons stated rather than glossed over:
+ *
+ *  1. pdf-lib's own 14 "standard" fonts (`StandardFonts.Helvetica` etc.) are
+ *     *not* a real substitution — the PDF spec assumes viewers already have
+ *     them, so pdf-lib writes no `/FontFile` for them at all. Answering this
+ *     ticket's AC ("finding the font's `/FontFile*` present") needs a real,
+ *     bundled font program, and Liberation Sans is the only one already
+ *     vendored in this codebase in a format (`.ttf`) fontkit can embed — the
+ *     Foxit serif/fixed fallbacks alongside it are legacy Type 1 (`.pfb`).
+ *  2. Only the regular weight is vendored here, so only names that mean
+ *     "plain Arial/Helvetica" are matched. Reporting a bold or italic font as
+ *     safely substitutable by a *regular*-weight program would change how the
+ *     text actually looks — exactly the silent corruption this codebase's
+ *     "never silently corrupt a document" rule exists to rule out — so a
+ *     bold/italic reference reports no match rather than a wrong one.
+ */
+const SUBSTITUTABLE_FONT_NAMES = new Set(['Arial', 'ArialMT', 'Helvetica']);
+const SUBSTITUTE_FONT_LABEL = 'Liberation Sans Regular (Arial-compatible)';
+
+function standardFontFor(baseFont: string): string | null {
+  return SUBSTITUTABLE_FONT_NAMES.has(baseFont) ? SUBSTITUTE_FONT_LABEL : null;
+}
+
+function dataUrlToBytes(dataUrl: string): Uint8Array {
+  const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
 }
 
 function asArray(value: unknown, context: PDFContext): PDFArray | undefined {
@@ -5243,7 +5897,7 @@ interface PageRedactionFilter {
   content: Uint8Array | null;
   strippedXObjectNames: string[];
   /** Name → the union of every unit-space rect that covers part of that image. */
-  partialImages: Map<string, Rect[]>;
+  partialImages: Map<string, RedactionArea[]>;
 }
 
 /**
@@ -5256,7 +5910,7 @@ interface PageRedactionFilter {
 async function filterPageForRedaction(
   page: PDFPage,
   context: PDFContext,
-  rects: Rect[]
+  rects: RedactionArea[]
 ): Promise<PageRedactionFilter> {
   const rawContents = page.node.Contents();
   const streamRefs: unknown[] = [];
@@ -5269,7 +5923,7 @@ async function filterPageForRedaction(
   }
 
   const strippedXObjectNames: string[] = [];
-  const partialImages = new Map<string, Rect[]>();
+  const partialImages = new Map<string, RedactionArea[]>();
   if (streamRefs.length === 0) return { content: null, strippedXObjectNames, partialImages };
 
   const xObjects = pageXObjectDictOf(page, context);
@@ -5384,15 +6038,47 @@ async function filterPageForRedaction(
 function purgeXObjectIfUnreferenced(doc: PDFDocument, ref: PDFRef): void {
   for (const page of doc.getPages()) {
     const xObjects = pageXObjectDictOf(page, doc.context);
-    if (!xObjects) continue;
-    for (const key of xObjects.keys()) {
-      if (xObjects.get(key) === ref) return;
-    }
+    if (xObjects && xObjectDictReferences(xObjects, doc.context, ref, new Set())) return;
   }
   // `indirectObjects` is private on PDFContext, but the underlying Map is the
   // only way to surgically remove one object without rebuilding the context.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (doc.context as any).indirectObjects.delete(ref);
+}
+
+/**
+ * True if `ref` is one of this dict's own entries, or is reachable through a
+ * Form XObject entry's own nested `/Resources /XObject` dict. A page's
+ * `/XObject` dict lists reusable content it *paints* — a stamp, a watermark,
+ * a repeated letterhead — as a Form XObject, and that form's own resources
+ * are where the real reference to a shared image can live. Without recursing
+ * into it, an image still painted (indirectly, via the form) on some other
+ * page looked unreferenced from every page's top-level dict and was deleted
+ * — leaving that form pointing at a purged object the next time it was drawn.
+ */
+function xObjectDictReferences(
+  xObjects: PDFDict,
+  context: PDFContext,
+  ref: PDFRef,
+  visitedForms: Set<PDFDict>
+): boolean {
+  if (visitedForms.has(xObjects)) return false;
+  visitedForms.add(xObjects);
+  for (const key of xObjects.keys()) {
+    const entry = xObjects.get(key);
+    if (entry === ref) return true;
+    const resolved = entry instanceof PDFRef ? context.lookup(entry) : entry;
+    if (!(resolved instanceof PDFStream)) continue;
+    if (resolved.dict.get(PDFName.of('Subtype')) !== PDFName.of('Form')) continue;
+    const resourcesRaw = resolved.dict.get(PDFName.of('Resources'));
+    const resources = resourcesRaw instanceof PDFRef ? context.lookup(resourcesRaw) : resourcesRaw;
+    if (!(resources instanceof PDFDict)) continue;
+    const nestedRaw = resources.get(PDFName.of('XObject'));
+    const nested = nestedRaw instanceof PDFRef ? context.lookup(nestedRaw) : nestedRaw;
+    if (nested instanceof PDFDict && xObjectDictReferences(nested, context, ref, visitedForms))
+      return true;
+  }
+  return false;
 }
 
 /**
@@ -5410,7 +6096,11 @@ function purgeXObjectIfUnreferenced(doc: PDFDocument, ref: PDFRef): void {
  * deliberate: a redacted value is secret everywhere, and over-removal is the
  * only safe direction to be wrong in.
  */
-function stripOverlappingAnnotations(doc: PDFDocument, page: PDFPage, rects: Rect[]): void {
+function stripOverlappingAnnotations(
+  doc: PDFDocument,
+  page: PDFPage,
+  rects: RedactionArea[]
+): void {
   const annotsRaw = page.node.get(PDFName.of('Annots'));
   const annots =
     annotsRaw instanceof PDFArray
@@ -5453,7 +6143,9 @@ function stripOverlappingAnnotations(doc: PDFDocument, page: PDFPage, rects: Rec
       height: Math.abs(ury - lly)
     };
 
-    if (!rects.some(r => intersects(annotBox, r))) {
+    // A shaped mark only takes the annotations it actually encloses — the same
+    // rule the content filter applies to a text run (RED-07).
+    if (!rects.some(r => areaTouches(r, annotBox))) {
       kept.push(annotRef);
       continue;
     }

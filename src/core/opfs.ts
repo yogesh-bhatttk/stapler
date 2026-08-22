@@ -69,6 +69,47 @@ export async function readModelBytes(lang: string): Promise<Uint8Array | null> {
   }
 }
 
+/**
+ * RED-08 — the face-detector weight cache.
+ *
+ * A separate pair from `writeModelBytes`/`readModelBytes` rather than a
+ * parameterised one, because those hard-code the `.traineddata.gz` suffix
+ * tesseract's loader expects and this model is two files with names of its own.
+ * The `faceblur-` prefix keeps a weight shard from ever colliding with a
+ * document id (`<uuid>.pdf`) in the same flat OPFS root.
+ */
+function faceModelFileName(name: string): string {
+  return `faceblur-${name}`;
+}
+
+export async function writeFaceModelFile(name: string, bytes: Uint8Array): Promise<void> {
+  const fileName = faceModelFileName(name);
+  if (!navigator.storage?.getDirectory) {
+    __memoryFallback.set(fileName, bytes);
+    return;
+  }
+  const root = await navigator.storage.getDirectory();
+  const fileHandle = await root.getFileHandle(fileName, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(bytes);
+  await writable.close();
+}
+
+export async function readFaceModelFile(name: string): Promise<Uint8Array | null> {
+  const fileName = faceModelFileName(name);
+  if (!navigator.storage?.getDirectory) {
+    return __memoryFallback.get(fileName) ?? null;
+  }
+  try {
+    const root = await navigator.storage.getDirectory();
+    const fileHandle = await root.getFileHandle(fileName);
+    const file = await fileHandle.getFile();
+    return new Uint8Array(await file.arrayBuffer());
+  } catch {
+    return null;
+  }
+}
+
 export async function hasModelBytes(lang: string): Promise<boolean> {
   if (!navigator.storage?.getDirectory) {
     return __memoryFallback.has(`model_${lang}`);

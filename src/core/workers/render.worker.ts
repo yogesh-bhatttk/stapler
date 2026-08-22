@@ -18,6 +18,16 @@ import type { RedactionRegion } from './process.worker';
 import { locatePatterns, type PatternCategory } from '../patterns';
 import { paintRectsBlack, type UnitRect } from '../pdf/image-redaction';
 import { findAcrossRuns } from '../pdf/text-search';
+import { pixelateRects, type BlurStrength } from '../faceblur/blur';
+import {
+  detectFaces,
+  loadFaceModel,
+  type DetectedRegion,
+  type FaceModelWeights
+} from '../faceblur/detect';
+import { cropUnitRect, intersectionOverUnion, matchTemplate } from '../faceblur/logoMatch';
+import { decodeBarcodesFromImage, type DecodedBarcode } from '../barcode';
+import { fillPolygonMask, polygonOverlapsBox, shrinkMask } from '../geometry';
 
 export interface DocumentInfo {
   handle: string;
@@ -128,6 +138,13 @@ export interface RenderJob {
     dpi: number,
     quality?: number
   ): Promise<Uint8Array>;
+  /**
+   * SCN-04 — renders one page and scans the bitmap for any barcode/QR code.
+   * Reuses the exact rendering path {@link RenderJob.renderPage} does (same
+   * viewport/render call), rather than a second one, so this is the same
+   * pixels a person looking at the page preview would see.
+   */
+  decodePageBarcodes(handle: string, pageIndex: number, dpi: number): Promise<DecodedBarcode[]>;
   renderRegionPng(
     handle: string,
     pageIndex: number,
@@ -211,6 +228,72 @@ export interface RenderJob {
     pageIndex: number,
     requests: { objectNumber: number; rects: UnitRect[] }[]
   ): Promise<RedactedImageResult[]>;
+  /**
+   * RED-08 — loads the face-detector weights into this worker, once.
+   *
+   * Separate from {@link RenderJob.blurPageImages} so 196 KB of weights crosses
+   * the worker boundary a single time per session instead of once per page, and
+   * so the caller can prove ordering: the weights only ever arrive here after
+   * the consent dialog resolved. Idempotent.
+   */
+  loadFaceDetector(weights: FaceModelWeights): Promise<void>;
+  /**
+   * RED-08 — the pixels of one image, cropped to a unit-space rect.
+   *
+   * This is how "the logo the user marked" becomes a template: the mark is
+   * mapped onto the image it covers, and the pixels underneath come back here
+   * to be correlated against every other image in the document.
+   */
+  extractImageRegion(
+    handle: string,
+    pageIndex: number,
+    objectNumber: number,
+    rect: UnitRect
+  ): Promise<{ rgba: Uint8ClampedArray; width: number; height: number } | null>;
+  /**
+   * RED-08 — detects faces and/or a marked logo in the named images on one
+   * page, mosaics what it finds, and hands back the re-encoded images.
+   *
+   * An image pdf.js cannot decode (JBIG2, JPEG 2000, a broken stream) is
+   * reported as a `reason` rather than silently reported as "no faces here" —
+   * the two are indistinguishable from the outside, and only one of them is
+   * safe to believe.
+   */
+  blurPageImages(
+    handle: string,
+    pageIndex: number,
+    requests: BlurImageRequest[],
+    settings: BlurSettings,
+    job?: JobHandle
+  ): Promise<BlurredImageResult[]>;
+}
+
+/** One image on a page to look at, plus any region already known to need blurring. */
+export interface BlurImageRequest {
+  objectNumber: number;
+  /**
+   * Regions in this image's unit space that are blurred regardless of what the
+   * detector finds — the logo the user marked, in the image it was marked on.
+   */
+  forcedRects?: UnitRect[];
+}
+
+export interface BlurSettings {
+  detectFaces: boolean;
+  minScore?: number;
+  strength?: BlurStrength;
+  /** The marked logo's pixels, correlated against every requested image. */
+  logoTemplate?: { rgba: Uint8ClampedArray; width: number; height: number };
+  logoMinScore?: number;
+}
+
+export interface BlurredImageResult {
+  objectNumber: number;
+  /** Absent when nothing was found, or when `reason` says why nothing could be. */
+  image?: { bytes: Uint8Array; format: 'png' | 'jpeg'; width: number; height: number };
+  /** What was blurred, in the image's unit space. Empty when nothing matched. */
+  regions: DetectedRegion[];
+  reason?: string;
 }
 
 export interface RedactedImageResult {
@@ -669,7 +752,8 @@ function regionInset(width: number, height: number): number {
 export function regionPixelResidue(
   data: Uint8ClampedArray,
   width: number,
-  height: number
+  height: number,
+  polygon?: { x: number; y: number }[]
 ): RegionPixelResidue {
   const [fr, fg, fb] = DOC_REDACT_RGB;
   const fill = [Math.round(fr * 255), Math.round(fg * 255), Math.round(fb * 255)];
@@ -679,23 +763,55 @@ export function regionPixelResidue(
   let offFill = 0;
   let maxDeviation = 0;
 
-  for (let y = inset; y < height - inset; y++) {
-    for (let x = inset; x < width - inset; x++) {
-      const at = (y * width + x) * 4;
-      const alpha = data[at + 3];
-      // A transparent pixel is *not* fill: nothing was painted there, so
-      // whatever is underneath in a viewer shows through.
-      const deviation =
-        alpha < 255 - FILL_CHANNEL_TOLERANCE
-          ? 255
-          : Math.max(
-              Math.abs(data[at] - fill[0]),
-              Math.abs(data[at + 1] - fill[1]),
-              Math.abs(data[at + 2] - fill[2])
-            );
-      sampled++;
-      if (deviation > FILL_CHANNEL_TOLERANCE) offFill++;
-      if (deviation > maxDeviation) maxDeviation = deviation;
+  /**
+   * RED-07 — a shaped mark is only obliged to fill the shape, so grading its
+   * whole bounding box would fail every correct polygon redaction: the corners
+   * the shape left alone hold the content the user *kept*. The shape is
+   * rasterised into this region's own pixel grid and eroded by the same inset the
+   * rectangle path trims from its edges, so the mark's own anti-aliased outline
+   * is forgiven exactly as a rectangle's is. A mask of all ones eroded by `inset`
+   * is precisely the rectangle loop below, which is why that path is untouched.
+   */
+  const shape =
+    polygon && polygon.length >= 3
+      ? shrinkMask(
+          fillPolygonMask(
+            polygon.map(p => ({ x: p.x * width, y: p.y * height })),
+            width,
+            height
+          ),
+          width,
+          height,
+          inset
+        )
+      : undefined;
+
+  const grade = (at: number) => {
+    const alpha = data[at + 3];
+    // A transparent pixel is *not* fill: nothing was painted there, so
+    // whatever is underneath in a viewer shows through.
+    const deviation =
+      alpha < 255 - FILL_CHANNEL_TOLERANCE
+        ? 255
+        : Math.max(
+            Math.abs(data[at] - fill[0]),
+            Math.abs(data[at + 1] - fill[1]),
+            Math.abs(data[at + 2] - fill[2])
+          );
+    sampled++;
+    if (deviation > FILL_CHANNEL_TOLERANCE) offFill++;
+    if (deviation > maxDeviation) maxDeviation = deviation;
+  };
+
+  if (shape) {
+    for (let p = 0; p < width * height; p++) {
+      if (shape[p] === 1) grade(p * 4);
+    }
+  } else {
+    for (let y = inset; y < height - inset; y++) {
+      for (let x = inset; x < width - inset; x++) {
+        grade((y * width + x) * 4);
+      }
     }
   }
 
@@ -705,6 +821,21 @@ export function regionPixelResidue(
     fraction: sampled > 0 ? offFill / sampled : 0,
     maxDeviation
   };
+}
+
+/**
+ * A mark's polygon expressed as fractions of its own bounding box — the space
+ * `regionPixelResidue` grades in, because that is the window `renderRegion`
+ * rasterised. Returns undefined for a plain rectangle mark and for a degenerate
+ * box, where the whole render window is the mark.
+ */
+function regionLocalPolygon(region: RedactionRegion): { x: number; y: number }[] | undefined {
+  if (!region.points || region.points.length < 3) return undefined;
+  if (!(region.width > 0) || !(region.height > 0)) return undefined;
+  return region.points.map(p => ({
+    x: (p.x - region.x) / region.width,
+    y: (p.y - region.y) / region.height
+  }));
 }
 
 const api: RenderJob = {
@@ -799,6 +930,21 @@ const api: RenderJob = {
     }
   },
 
+  async decodePageBarcodes(handle, pageIndex, dpi) {
+    const page = await entry(handle).doc.getPage(pageIndex + 1);
+    try {
+      const viewport = page.getViewport({ scale: dpi / 72 });
+      const { canvas, ctx } = offscreen(viewport.width, viewport.height);
+      await page.render(renderParams(ctx, viewport)).promise;
+      const { data, width, height } = ctx.getImageData(0, 0, viewport.width, viewport.height);
+      canvas.width = 0;
+      canvas.height = 0;
+      return decodeBarcodesFromImage({ data, width, height });
+    } finally {
+      page.cleanup();
+    }
+  },
+
   async renderRegionPng(handle, pageIndex, region, dpi) {
     const page = await entry(handle).doc.getPage(pageIndex + 1);
     try {
@@ -825,7 +971,10 @@ const api: RenderJob = {
       try {
         const { canvas, ctx } = await renderRegion(page, region, regionVerifyDpi(region, page));
         const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        out.push({ region, residue: regionPixelResidue(data, canvas.width, canvas.height) });
+        out.push({
+          region,
+          residue: regionPixelResidue(data, canvas.width, canvas.height, regionLocalPolygon(region))
+        });
         canvas.width = 0;
         canvas.height = 0;
       } finally {
@@ -1325,6 +1474,123 @@ const api: RenderJob = {
     }
   },
 
+  async loadFaceDetector(weights) {
+    await loadFaceModel(weights);
+  },
+
+  async extractImageRegion(handle, pageIndex, objectNumber, rect) {
+    const page = await entry(handle).doc.getPage(pageIndex + 1);
+    try {
+      for (const placement of imagePlacements(await page.getOperatorList())) {
+        const decoded = await decodeImage(page, placement.objId);
+        if (!decoded || decoded.objectNumber !== objectNumber) continue;
+        const crop = cropUnitRect(decoded, rect);
+        if (!crop) return null;
+        return Comlink.transfer(crop, [crop.rgba.buffer]);
+      }
+      return null;
+    } finally {
+      page.cleanup();
+    }
+  },
+
+  async blurPageImages(handle, pageIndex, requests, settings, job) {
+    if (requests.length === 0) return [];
+    const page = await entry(handle).doc.getPage(pageIndex + 1);
+    try {
+      const wanted = new Map(requests.map(request => [request.objectNumber, request]));
+      const results: BlurredImageResult[] = [];
+      const seen = new Set<number>();
+      let done = 0;
+
+      for (const placement of imagePlacements(await page.getOperatorList())) {
+        if (seen.size === wanted.size) break;
+        const decoded = await decodeImage(page, placement.objId);
+        // A null decode is pdf.js saying it could not read the image. There is
+        // no safe half-measure — the caller is told which image, and says so.
+        if (!decoded) continue;
+        const request = wanted.get(decoded.objectNumber);
+        if (!request || seen.has(decoded.objectNumber)) continue;
+        seen.add(decoded.objectNumber);
+
+        await checkpoint(job, done / wanted.size, `Looking for faces on page ${pageIndex + 1}`);
+        done += 1;
+
+        const regions: DetectedRegion[] = [];
+        if (settings.detectFaces) {
+          regions.push(...(await detectFaces(decoded, { minScore: settings.minScore })));
+        }
+        if (settings.logoTemplate) {
+          for (const match of matchTemplate(decoded, settings.logoTemplate, {
+            minScore: settings.logoMinScore
+          })) {
+            regions.push({ ...match, kind: 'logo' });
+          }
+        }
+        for (const rect of request.forcedRects ?? []) {
+          // The marked instance is exactly what `logoTemplate` was cropped
+          // from, so `matchTemplate` above almost always finds it again at
+          // this same spot on this same image — without this check that one
+          // real instance was reported (and counted) twice.
+          if (
+            regions.some(
+              region => region.kind === 'logo' && intersectionOverUnion(region, rect) > 0.3
+            )
+          ) {
+            continue;
+          }
+          regions.push({ ...rect, kind: 'logo', score: 1 });
+        }
+
+        if (regions.length === 0) {
+          results.push({ objectNumber: decoded.objectNumber, regions: [] });
+          continue;
+        }
+
+        // `decodeImage` moves any /SMask or stencil into `decoded.mask` and
+        // makes the colour buffer opaque; `pixelateRects` mosaics both, so the
+        // alpha silhouette of a head does not survive the blur.
+        pixelateRects(decoded, regions, { strength: settings.strength });
+
+        const bytes = await encodeRedacted(decoded);
+        results.push({
+          objectNumber: decoded.objectNumber,
+          regions,
+          image: {
+            bytes,
+            format: decoded.mask ? 'png' : 'jpeg',
+            width: decoded.width,
+            height: decoded.height
+          }
+        });
+      }
+
+      for (const request of requests) {
+        if (seen.has(request.objectNumber)) continue;
+        // Two different things land here and cannot be told apart from this
+        // side: an image pdf.js genuinely tried to decode and failed on
+        // (JBIG2/JPEG 2000 have no decoder here), and a resource dict entry
+        // the page's content stream never actually paints (the plan lists
+        // every `/Subtype /Image` entry, painted or not) — that second case
+        // was never even attempted, so blaming a specific codec for it would
+        // be a guess stated as fact. The reason stays honest about what is
+        // actually known instead.
+        results.push({
+          objectNumber: request.objectNumber,
+          regions: [],
+          reason: 'This image could not be decoded, so it could not be checked for faces.'
+        });
+      }
+
+      return Comlink.transfer(
+        results,
+        results.flatMap(result => (result.image ? [result.image.bytes.buffer] : []))
+      );
+    } finally {
+      page.cleanup();
+    }
+  },
+
   async checkRegionText(handle, regions) {
     const { doc } = entry(handle);
     const results: { region: RedactionRegion; foundText: string }[] = [];
@@ -1335,6 +1601,14 @@ const api: RenderJob = {
         const viewport = page.getViewport({ scale: 1 });
         const runs = await textRuns(page);
         let foundText = '';
+
+        // RED-07 — a shaped mark is checked against the shape, not its bounding
+        // box. Testing the box would fail a correct polygon redaction on the text
+        // it deliberately left in the box's corners, and blocking the save on
+        // content the user asked to keep is as wrong as passing content it asked
+        // to remove. The overlap rule is the same one `filterContentStream`
+        // removed by, so verification can never demand more than removal did.
+        const shape = region.points && region.points.length >= 3 ? region.points : undefined;
 
         for (const run of runs) {
           if (!run.str.trim()) continue;
@@ -1353,7 +1627,7 @@ const api: RenderJob = {
               charY + charH <= region.y
             );
 
-            if (intersects) {
+            if (intersects && (!shape || polygonOverlapsBox(shape, charBox))) {
               foundText += run.str[i];
             }
           }

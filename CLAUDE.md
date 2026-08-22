@@ -15,8 +15,11 @@ These are the product, not preferences. A `PostToolUse` hook
 (`.claude/hooks/check-invariants.mjs`) enforces all four on every write.
 
 1. **Zero network at runtime.** No `fetch`, no XHR, no WebSocket, no CDN import, no webfont,
-   no telemetry, ever. The only exception is the OCR language model in `src/core/ocr/`,
-   downloaded once on explicit user confirmation.
+   no telemetry, ever. There are exactly two exceptions, both a model download made once on
+   explicit user confirmation from a pinned URL, and both confined to their own directory:
+   the OCR language model in `src/core/ocr/` (OCR-01), and the face-detector weights in
+   `src/core/faceblur/` (RED-08). The inference *engines* for both are bundled, never
+   fetched — remote code is forbidden outright, whatever the user consents to.
 2. **Zero permissions in the Chrome/Edge manifest.** `manifest.json` ships with empty
    `permissions` and no `host_permissions` or content scripts, so Chrome's install dialog
    shows no warning. The Firefox build is the explicit exception: it adds `tabs` so the

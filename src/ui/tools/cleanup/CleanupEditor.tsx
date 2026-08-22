@@ -230,7 +230,12 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
       if (settings.flattenBackground) {
         const sourceBytes = await readSourceBytes(source.id);
         const flattened = await processWorker.lease(api =>
-          api.flattenBackground(sourceBytes, page.sourceIndex, settings.flattenTint, createJobHandle(job))
+          api.flattenBackground(
+            sourceBytes,
+            page.sourceIndex,
+            settings.flattenTint,
+            createJobHandle(job)
+          )
         );
         if (!flattened.changed) {
           notify('info', translate('No vector background was found to flatten.'));

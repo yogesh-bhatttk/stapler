@@ -60,7 +60,10 @@ let counter = 0;
 function registerPdf(bytes: Uint8Array): string {
   const id = `src-${++counter}`;
   __memoryFallback.set(id, bytes);
-  sources.value = { ...sources.value, [id]: { id, name: `${id}.pdf`, pageCount: 1, pageSizes: [] } as any };
+  sources.value = {
+    ...sources.value,
+    [id]: { id, name: `${id}.pdf`, pageCount: 1, pageSizes: [] } as any
+  };
   return id;
 }
 

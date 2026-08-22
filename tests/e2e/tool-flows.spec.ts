@@ -1278,6 +1278,82 @@ test.describe('tool flows', () => {
     await expect(page.getByText('Marks (1)')).not.toBeVisible();
   });
 
+  /**
+   * RED-07 — a traced shape removes what it encloses and not the rest of its
+   * bounding box.
+   *
+   * The fixture puts one string inside a triangle and another in the empty corner
+   * of that triangle's bounding box, so the two possible implementations produce
+   * different exports: a bbox-only one takes both.
+   */
+  const shapeFixture = () =>
+    ensureFixture('redact-shape.pdf', async () => {
+      const doc = await PDFDocument.create();
+      const font = await doc.embedFont(StandardFonts.Helvetica);
+      const pageObj = doc.addPage([600, 800]);
+      // Normalised (0.15, 0.15) — under the triangle's top edge.
+      pageObj.drawText('INSIDESHAPE', { x: 90, y: 668, size: 14, font });
+      // Normalised (0.55, 0.43) — inside the bounding box, outside the triangle.
+      pageObj.drawText('CORNERKEEP', { x: 330, y: 444, size: 14, font });
+      return new Uint8Array(await doc.save());
+    });
+
+  test('redact: a freehand shape removes only what its outline encloses', async ({ page }) => {
+    await importFixture(page, await shapeFixture());
+    await gotoTool(page, 'redact');
+
+    await page.getByRole('radio', { name: 'Freehand' }).check();
+
+    const drawingArea = page.getByRole('group', { name: /Redaction drawing area/ });
+    const box = await drawingArea.boundingBox();
+    if (!box) throw new Error('missing drawing area geometry');
+    const at = (fx: number, fy: number) =>
+      [box.x + box.width * fx, box.y + box.height * fy] as const;
+
+    // A right triangle: top edge across the page, hypotenuse back down to the
+    // left, leaving the bottom-right of the bounding box outside the shape.
+    await page.mouse.move(...at(0.1, 0.1));
+    await page.mouse.down();
+    await page.mouse.move(...at(0.9, 0.1), { steps: 12 });
+    await page.mouse.move(...at(0.1, 0.5), { steps: 12 });
+    await page.mouse.move(...at(0.1, 0.1), { steps: 8 });
+    await page.mouse.up();
+
+    await expect(page.getByText('Marks (1)')).toBeVisible();
+    await expect(page.getByRole('group', { name: /Redaction shape 1 on page 1/ })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Verify & apply' }).click();
+    await expect(page.getByText('Redaction verified and applied')).toBeVisible({
+      timeout: 60_000
+    });
+    await page.getByRole('button', { name: 'Dismiss notification' }).click();
+
+    await gotoTool(page, 'organize');
+    const bytes = await commitAndRead(page, 'Export PDF');
+    const text = await drawnText(bytes);
+    expect(text).not.toContain('INSIDESHAPE');
+    expect(text).toContain('CORNERKEEP');
+  });
+
+  test('redact: freehand mode still has a keyboard path to a mark', async ({ page }) => {
+    // Tracing a shape is inherently pointer-only, so freehand mode keeps the
+    // rectangle keyboard fallback rather than leaving a keyboard-only user with
+    // no way to mark something the text search cannot find.
+    await importFixture(page, await shapeFixture());
+    await gotoTool(page, 'redact');
+
+    await page.getByRole('radio', { name: 'Freehand' }).check();
+    const drawingArea = page.getByRole('group', { name: /Redaction drawing area/ });
+    await drawingArea.focus();
+    await page.keyboard.press('Enter');
+
+    await expect(page.getByText('Marks (1)')).toBeVisible();
+    const region = page.getByRole('group', { name: /Redaction region 1 on page 1/ });
+    await expect(region).toBeFocused();
+    await page.keyboard.press('Delete');
+    await expect(page.getByText('Marks (1)')).not.toBeVisible();
+  });
+
   test('cleanup: flatten background preserves text', async ({ page }) => {
     const file = await ensureFixture('colored-bg.pdf', async () => {
       const doc = await PDFDocument.create();
@@ -1826,6 +1902,73 @@ test.describe('tool flows', () => {
     await expect(page.locator('header')).toBeVisible();
     await gotoTool(page, 'batch');
     await expect(recipeSelect.locator('option', { hasText: 'No N-up' })).toHaveCount(1);
+  });
+
+  test('redact: declining the face-detector download disables the tool and says so, on screen and on export (RED-08)', async ({
+    page
+  }) => {
+    // RED-08's second acceptance criterion, driven through the real UI: a
+    // decline must leave a visible, persistent "off, and here is why" state —
+    // never a quiet nothing that lets a document be exported with faces the
+    // user believed had been blurred.
+    test.setTimeout(120_000);
+
+    // Nothing may be requested on this path. Recorded for the whole test rather
+    // than just the click, so a fetch fired from a worker still counts.
+    const origin = new URL(page.url() || 'http://localhost').origin;
+    const external: string[] = [];
+    page.on('request', request => {
+      const url = request.url();
+      if (!/^(blob:|data:|chrome-extension:)/.test(url) && !url.startsWith(origin)) {
+        external.push(url);
+      }
+    });
+
+    const fixture = await ensureFixture('mixed-text-image-flate.pdf', () => mixedTextImagePdf());
+    await importFixture(page, fixture);
+    await gotoTool(page, 'redact');
+
+    // The disclosure is in the panel before anything is clicked, not only in
+    // the dialog: someone deciding whether to use the tool sees it first.
+    await expect(
+      page.getByText(/downloads a .* MB detection model from cdn\.jsdelivr\.net/i)
+    ).toBeVisible();
+
+    await page.getByRole('button', { name: 'Find and blur' }).click();
+
+    const dialog = page.getByRole('dialog', { name: /Download the on-device face detector/ });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText('cdn.jsdelivr.net');
+    await dialog.getByRole('button', { name: 'Not now' }).click();
+
+    // 1. A message, not silence.
+    await expect(
+      page.getByText(/Face blur is off — the detector was not downloaded/i)
+    ).toBeVisible();
+    // 2. The tool is disabled, and stays disabled.
+    await expect(page.getByRole('checkbox', { name: 'Blur faces' })).toBeDisabled();
+    await expect(
+      page.getByText(/Face blur is switched off because the one-time detector/i)
+    ).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Allow the download' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Find and blur' })).toBeDisabled();
+
+    // 3. Export says it too, so the state cannot be forgotten between clicks.
+    //    The decline toast stays up until dismissed (`timeout: 0` — deliberate,
+    //    this is not a message to miss), and it sits over the action bar, so it
+    //    has to go before the export button is reachable.
+    await page.getByRole('button', { name: 'Dismiss notification' }).first().click();
+    await expect(page.getByRole('button', { name: 'Dismiss notification' })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Verify & apply' }).click();
+    await expect(page.getByText(/Faces in this document were not blurred/i)).toBeVisible();
+
+    // 4. And nothing was requested by declining.
+    expect(external, `declining must fetch nothing. Observed:\n${external.join('\n')}`).toEqual([]);
+
+    // 5. Changing your mind puts the tool back, without another decline sticking.
+    await page.getByRole('button', { name: 'Allow the download' }).click();
+    await expect(page.getByRole('checkbox', { name: 'Blur faces' })).toBeEnabled();
+    await expect(page.getByRole('button', { name: 'Find and blur' })).toBeEnabled();
   });
 
   test('ocr: the one disclosed network exception actually downloads the real model and recognizes text (OCR-01)', async ({

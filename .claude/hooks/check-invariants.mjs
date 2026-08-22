@@ -5,7 +5,9 @@
  * Enforces the four constraints that the product's core claim depends on, at the
  * moment code is written rather than at review time. See docs/PLAN.md §5.4.
  *
- *   1. Zero network      — no CDN imports, no fetch/XHR/WebSocket in src/
+ *   1. Zero network      — no CDN imports, no fetch/XHR/WebSocket in src/, except
+ *                          the two disclosed model downloads (src/core/ocr/,
+ *                          src/core/faceblur/)
  *   2. Design tokens     — no raw hex/rgb colours outside tokens.css
  *   3. Layer boundary    — no chrome.* outside src/platform/
  *   4. Zero permissions  — manifest.json permissions arrays stay empty
@@ -110,8 +112,14 @@ const lines = text.split('\n');
 const flag = (i, msg) => findings.push(`${rel}:${i + 1} — ${msg}`);
 
 if (inSrc && isSource) {
-  // The OCR model download is the single documented exception (PLAN §5.4 item 5).
-  const ocrExempt = rel.startsWith('src/core/ocr/');
+  // The two documented model downloads (PLAN §5.4 item 5): the OCR language
+  // model and RED-08's face-detector weights. Both are fetched once, on an
+  // explicit confirmation, from a pinned URL — and nothing else in src/ may
+  // name a remote host or call a network API. Scoped to these two directories
+  // by prefix, exactly as narrow as the OCR carve-out was on its own; every
+  // other file in src/ is still checked.
+  const modelDownloadExempt =
+    rel.startsWith('src/core/ocr/') || rel.startsWith('src/core/faceblur/');
 
   // Document colours (a PDF page is white; redaction fill is black) are numbers
   // handed to canvas/pdf-lib, not theme colours, so they cannot be CSS vars. They
@@ -127,9 +135,10 @@ if (inSrc && isSource) {
     if (/^\s*(\/\/|\*|<!--)/.test(line)) return; // skip comment lines
 
     for (const [re, msg] of REMOTE_IMPORT) if (re.test(line)) flag(i, msg);
-    if (!ocrExempt && REMOTE_HOSTS.test(line))
+    if (!modelDownloadExempt && REMOTE_HOSTS.test(line))
       flag(i, 'reference to a remote host — breaks the zero-network guarantee');
-    if (!ocrExempt) for (const [re, msg] of NETWORK_APIS) if (re.test(line)) flag(i, msg);
+    if (!modelDownloadExempt)
+      for (const [re, msg] of NETWORK_APIS) if (re.test(line)) flag(i, msg);
 
     // Design tokens: colour literals belong in tokens.css only.
     if (

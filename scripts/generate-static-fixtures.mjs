@@ -220,6 +220,30 @@ function generateEncodedFixtures() {
     }
   }
 
+  // face-chip.png: a real photographic face, for RED-08's detector test. Cropped from
+  // the MIT-licensed sample that ships inside the installed `@vladmandic/face-api`
+  // package — the same library whose detector the test runs — so no new asset enters
+  // the repo from outside the dependency tree. The crop rectangle is fixed on purpose:
+  // `tests/unit/faceblur.test.ts` hard-codes where the face sits inside the result, and
+  // regenerating with a different crop would move it. See tests/fixtures/README.md.
+  const faceChip = path.join(FIXTURES_DIR, 'face-chip.png');
+  if (!existsSync(faceChip)) {
+    const sample = path.resolve(
+      process.cwd(),
+      'node_modules/@vladmandic/face-api/demo/sample1.jpg'
+    );
+    if (!existsSync(sample)) {
+      throw new Error(
+        `Cannot rebuild face-chip.png: ${sample} is missing. Run an install first — the ` +
+          'source image ships inside the @vladmandic/face-api dependency.'
+      );
+    }
+    run(
+      `convert ${sample} -crop 594x599+1278+42 +repage -resize 240x240! -depth 8 PNG24:${faceChip}`,
+      'ImageMagick (convert)'
+    );
+  }
+
   // encrypted.pdf: a real password-protected PDF via Ghostscript. DOC-02 must detect and
   // explain this, never fail obscurely.
   const encrypted = path.join(FIXTURES_DIR, 'encrypted.pdf');
