@@ -1,12 +1,14 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   activeDocId,
+  addAnnotation,
   addDocument,
   appendPages,
   bytesForPages,
   closeDocument,
   deletePages,
   documents,
+  duplicateAnnotationToAllPages,
   duplicatePages,
   insertPages,
   makePageRefs,
@@ -23,7 +25,7 @@ import {
   sources,
   type StaplerDoc
 } from '../../src/core/store';
-import { historySourceRefCount, resetHistory } from '../../src/core/history';
+import { canUndo, resetHistory, undo } from '../../src/core/history';
 import { __memoryFallback } from '../../src/core/opfs';
 
 function seed(pageCount = 5, sourceId = 'src-a'): StaplerDoc {
@@ -231,6 +233,58 @@ describe('duplicatePages', () => {
   });
 });
 
+describe('duplicateAnnotationToAllPages (SGN-08: fast multi-page initialing)', () => {
+  it('places the same rectangle on every other page, in a single undo entry', () => {
+    const doc = seed(20);
+    const initial = {
+      id: 'initial-1',
+      pageKey: doc.pages[0].key,
+      type: 'signature' as const,
+      x: 0.7,
+      y: 0.85,
+      width: 0.12,
+      height: 0.05,
+      data: 'sig-id'
+    };
+    addAnnotation(doc.id, initial);
+    expect(canUndo()).toBe(true);
+
+    duplicateAnnotationToAllPages(doc.id, 'initial-1');
+
+    const annotations = documents.value[0].annotations;
+    // The original plus one new stamp per remaining page.
+    expect(annotations).toHaveLength(20);
+    // Every page has exactly one stamp, and every stamp shares the same
+    // rectangle and content — the AC's "same initial at the same position".
+    for (const page of doc.pages) {
+      const onPage = annotations.filter(a => a.pageKey === page.key);
+      expect(onPage).toHaveLength(1);
+      expect(onPage[0]).toMatchObject({
+        x: 0.7,
+        y: 0.85,
+        width: 0.12,
+        height: 0.05,
+        data: 'sig-id'
+      });
+    }
+    // Every stamp has its own id — moving one later must not move them all.
+    expect(new Set(annotations.map(a => a.id)).size).toBe(20);
+
+    // "In one action": placing the original was entry 1; duplicating to the
+    // other 19 pages is entry 2, not nineteen entries.
+    undo();
+    expect(documents.value[0].annotations).toHaveLength(1);
+    undo();
+    expect(documents.value[0].annotations).toHaveLength(0);
+  });
+
+  it('does nothing if the source annotation no longer exists', () => {
+    const doc = seed(3);
+    duplicateAnnotationToAllPages(doc.id, 'missing');
+    expect(documents.value[0].annotations).toHaveLength(0);
+  });
+});
+
 describe('selectPageRange', () => {
   it('selects inclusively in either direction', () => {
     const doc = seed(5);
@@ -428,4 +482,3 @@ describe('source reference counting', () => {
     expect(sourceDocRefCount('redacted')).toBe(1);
   });
 });
-
