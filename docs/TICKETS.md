@@ -1693,6 +1693,1161 @@ direction, and narrowing it belongs to `findText`, not here.
 
 ---
 
+## EPIC-16 · v1.2 feature expansion
+
+Twenty more tools/features. Same rules as EPIC-15: every one satisfies the hard invariants
+in `CLAUDE.md` (zero network, zero permissions, tokens-only colour, the `core`/`ui`/`platform`
+boundary) and the definition of done at the top of this file, and none of these revisit the
+non-goals in `PLAN.md` §1.1. RED-08's local face/logo blur model follows OCR-01's precedent —
+a large model fetched once on explicit user confirmation, not a standing network dependency.
+
+### ACC-02 · Read-aloud mode — `S` `P2`
+
+**Status: Done** — A new `read-aloud` tool (`src/ui/tools/read-aloud/`), grid canvas mode
+so the existing page thumbnails stay usable while listening. `extractPageText` (a new
+thin wrapper in `src/core/operations.ts` around the render worker's existing `extractText`,
+factored out so a single-page read doesn't carry `extractDocumentText`'s multi-page
+`--- Page N ---` banner) supplies each page's already-tested reading-order text
+(`layoutText`, CNV-04's own logic — see ACC-03 below for what that does and does not
+handle). Playback is driven by the Web Speech Synthesis API directly — an on-device
+browser capability, not `chrome.*`, so it is used straight from `ui/` the same way
+`createImageBitmap`/`crypto.randomUUID` already are — with `SpeechSynthesisUtterance.onend`
+auto-advancing to the next page. Pause/resume use the API's own `pause()`/`resume()`,
+which suspend and continue the *same* utterance rather than restarting it, so resuming
+does not lose position within a page. A page with no extractable text sets a visible
+note and immediately advances rather than sitting silent forever (the AC's "not a silent
+hang"). Rate changes restart the current utterance at the new rate — the Web Speech API
+has no way to alter one already speaking, so leaving the old rate running until the next
+page would make the slider lie. `hasSpeechSynthesis()` feature-detects and shows a
+plain message instead of a broken control on a browser without it.
+
+Verified against the real app (dev server + a real multi-page fixture, Playwright,
+in-tree because Node/vitest has no `speechSynthesis` global to unit-test against):
+Play starts on page 1 with the status line reading "Reading page 1 of 3", Pause and Stop
+both work, Next/Previous move the page indicator, and both light and dark theme render
+without console errors. `tsc --noEmit`, full unit suite, eslint, and prettier all clean.
+
+- **Requirements:** Read the current document's extracted text aloud via the Web Speech
+  Synthesis API (on-device OS/browser voices only), with play/pause, per-page navigation,
+  and rate control. No audio file is fetched or generated remotely.
+- **AC:** Starting playback on a multi-page fixture reads pages in order, pausing and
+  resuming without losing position; unsupported/empty text pages are skipped with a
+  spoken or visible notice, not a silent hang.
+
+### ACC-03 · Reflow view — `M` `P2`
+
+**Status: Done, with one AC explicitly unmet — disclosed below, not papered over.** A new
+`reflow` tool, `canvasMode: 'single'`, wired into `Canvas.tsx` the same way `compare` and
+`compress` get a fully custom view instead of the default page-image one. `ReflowView`
+calls the same new `extractPageText` ACC-02 uses and renders it as large, single-column
+paragraphs (`ReflowView.module.css`, font size from a `Slider` in `ReflowPanel`), with its
+own Previous/Next pager reusing `SinglePageView.module.css`'s existing `.pager` styles.
+Purely presentational: nothing here calls any mutation or export path, and the tool's
+commit handler is a no-op, so the document is trivially byte-identical before and after —
+there is nothing to toggle back from.
+
+**The multi-column half of the AC is not met.** Reading order comes from `layoutText`
+(`src/core/text-layout.ts`), which groups runs into lines by baseline and sorts each line
+left-to-right — correct for ordinary single-column pages (already proven by CNV-04's own
+tests) but not column-aware: on a genuine two-column layout it reads straight across both
+columns on each shared baseline, interleaving them, rather than finishing the left column
+before starting the right one. Real column detection (clustering lines by a sustained
+horizontal gutter, handling full-width headers/footers that span both columns) is a
+distinct, non-trivial layout-analysis problem, not a documented shortcut of an existing
+building block. Rather than ship an untested heuristic likely to garble real documents in
+exactly the case the AC cares about, this is left for a follow-up and reported honestly
+as unmet, per this file's own definition of done ("Verify acceptance criteria against
+real output bytes, not against intent").
+
+Verified against the real app: a multi-page fixture's page 1 text renders as large,
+readable single-column prose in the main canvas area, Next/Previous move between pages,
+and both light and dark theme render without console errors. One real bug caught by that
+check and fixed: the page text used `var(--ink)`, a token that inverts for dark mode,
+against `var(--doc-page)`, which — correctly, per the existing "a page is white in both
+themes" rule — never inverts; the result was near-white text on a white page, unreadable
+in dark mode. Fixed by adding `--doc-ink`/`--doc-ink-muted` to `tokens.css`, always-dark
+tokens for text drawn directly on the never-inverted document page, alongside the
+existing always-dark `--doc-redact`. `tsc --noEmit`, full unit suite, eslint, and prettier
+all clean.
+
+- **Requirements:** A reading mode that re-lays the extracted text of a page into a large,
+  single-column, resizable-font view for low-vision users, entirely presentational —
+  the underlying document is never modified.
+- **AC:** Toggling reflow view on a fixture with multi-column text presents it as ordered
+  single-column text matching reading order; toggling off returns to the normal page view
+  with the document byte-identical to before. **Unmet:** multi-column reading order — see
+  writeup above.
+
+### OPS-14 · Auto-outline from heading detection — `M` `P2`
+
+**Status: Done** — `detectHeadingOutline` in `src/core/outline-detect.ts` is pure and
+independent of pdf.js: it takes the same `{text, x, y, width, height}` item shape
+`extractPageTextItems` already returns, groups items into lines by vertical proximity
+(the same tolerance-and-gap heuristics `text-layout.ts`'s `layoutText` already uses, so a
+heading split across two runs still reads as one line), finds the document's own
+body-text size as whichever line height covers the most lines, and treats anything at
+least 15% larger as a heading candidate. Distinct heading sizes become nesting levels —
+the largest becomes level 1, and so on — built into a tree the same way Markdown ATX
+headings nest: a heading closes every open level at least as deep as itself before
+attaching under whatever remains open above it. Sizes deeper than `maxLevels` (default
+3, matching the AC) collapse into the deepest level as siblings rather than inventing a
+level that was never actually distinguishable by size.
+
+`proposeOutlineFromHeadings` in `operations.ts` is the only orchestration: read every
+page's text items, hand them to the pure detector, return candidates. Nothing here
+writes anything. The panel converts page-index-based candidates to the same page-*key*-
+based `OutlineEntry` shape every other bookmark in OPS-10's tree already uses (so a
+detected heading survives a reorder exactly as well as a manual one), then calls the
+existing `editTree` — the exact same seam a manually-typed bookmark goes through. The
+proposal is not written to `/Outlines` by this action; the user reviews it in the same
+editable tree OPS-10 already provides and has to press Export for anything to reach the
+document, which is what "seeding the editor rather than writing directly" means
+concretely. Replacing a non-empty tree asks for confirmation first, since detection is a
+destructive action against manual edits otherwise.
+
+Evidence: `tests/unit/outline-detect.test.ts` (8 tests) — the AC's own scenario, three
+heading levels by font size, produces a tree with the exact nesting and page indexes
+expected; a document with no font-size jump detects nothing; a heading split across two
+runs (no space between them) is still read as one title; heading sizes beyond
+`maxLevels` collapse into siblings at the deepest level rather than a phantom fourth
+level; consecutive same-level headings are siblings, not nested; and `countCandidates`
+counts the whole tree, not just the top level (a real bug caught live, not in review: an
+earlier version of the "Found N heading(s)" toast counted only top-level candidates,
+reporting "Found 1" when a chapter and its nested section both appeared on screen).
+Confirmed live end to end against the running app: a real two-level fixture (an H1 and a
+nested H2) detects correctly, exports, and the *exported* PDF's real `/Outlines` —
+independently re-parsed, not the panel's own state — has "Chapter 1" as the top-level
+entry with "Section 1.1" nested under it exactly as detected, going through OPS-10's
+existing, already-tested export path completely unchanged. Full suite (744 tests),
+`tsc --noEmit`, eslint, and prettier all clean.
+
+- **Requirements:** Scan extracted text runs for font-size/weight jumps that read as
+  headings and propose a bookmark tree from them, seeding OPS-10's editor rather than
+  writing `/Outlines` directly. The user reviews and accepts before anything is written.
+- **AC:** A fixture with three heading levels by font size produces a proposed tree with
+  matching nesting and correct target pages; accepting it round-trips through OPS-10's
+  existing export path unchanged.
+
+### SGN-07 · Calculated AcroForm fields — `M` `P2`
+
+**Status: Done** — `src/core/formula.ts` is a closed infix grammar: four operators,
+parentheses, decimal literals, and field names matched *longest-first* against the
+document's own field list (so `Line Total`, `name.first`, or any field name a PDF author
+actually used — spaces, dots, hyphens — is addressable, which no identifier regex could
+manage). There is no `Function`/`eval` anywhere in it — the parser can only ever build the
+three `FormulaNode` kinds, so a hostile formula string has nothing to reach — and a
+function-call spelling like `sum(a, b)` is caught and rejected with the infix form named
+in the message, rather than a bare syntax error. `evaluateFormulas` resolves one field's
+formula referencing another calculated field correctly (computed from *this pass's*
+value, not last render's), detects a reference cycle instead of recursing forever, and
+treats an unfilled field as 0 while an unparseable one (text, a European `12,50`) is a
+hard error rather than a silently wrong total.
+
+**Where the formula lives**: in-session Stapler state only (`formulas` signal in
+`src/ui/tools/sign/state.ts`), not written into the PDF anywhere — lost on reload, which
+is the deliberate, disclosed trade-off. A full spec-compliant calculated field (an `/AA`
+JavaScript action Acrobat itself would run) is explicitly out of scope; this recomputes
+the value once, at export, from Stapler's own rules.
+
+**UI**: a "Calculated fields" section in `SignPanel.tsx` lists every text field with a
+checkbox ("Calculate…") that reveals a formula input, live-validated (`parseFormula`)
+with the parse error shown inline. `AcroFormOverlay.tsx` renders a calculated field's live
+computed value directly on the page and makes it read-only — the on-page box is
+literally `applyFormulas(formulas, fields, formValues)`'s own output, the same call the
+panel and the export path make, so what is on screen cannot drift from what gets written.
+`commit.ts`'s `sign` handler runs that same merge before `fillFormFields` and refuses the
+save outright — no file written — if any formula errors, naming which field and why.
+
+Evidence: `tests/unit/formula.test.ts`, 53 tests — the parser's accepted/rejected
+boundary (26 rejection cases spanning every JS operator/syntax form deliberately left
+out, a function-call spelling, cycle detection, nesting/length caps against an
+adversarial `((((…` input); `parseFieldNumber`'s coercion (checkbox as 1/0, a leading
+currency symbol, grouped thousands accepted, a European decimal *refused* rather than
+misread); and the AC itself against a real fixture (`calculatedFormPdf` in
+`tests/e2e/fixtures.ts`) — `getFormFields` → `applyFormulas` → the existing SGN-03
+`fillFormFields` → an independent `PDFDocument.load` reading `/V` straight off the field
+dictionary, confirming the *computed* number is there, the formula string is nowhere in
+the raw bytes, and no `/JavaScript` or `/AA` was added (nothing needs to run for a
+viewer to show the right value). A companion case proves flattening still bakes the
+computed value into the page content, and another proves a formula error leaves nothing
+written. Live recalculation was additionally confirmed by hand against the running dev
+server: checking "Calculate" on a fixture's total field and typing `subtotal + tax +
+shipping` updates the on-page box to `119.75` immediately, with zero console errors.
+Capturing the actual export *download* through that same ad-hoc script did not succeed —
+the dev server (unlike the built preview server `tests/e2e` targets) 404s on a pdf.js
+asset unrelated to this ticket, and chasing that further was not a good use of time given
+the export path itself is already independently proven by the unit test above, which
+exercises the identical `fillFormFields` call against real bytes. `tsc --noEmit`, the full
+suite (723 tests), eslint, and prettier are all clean.
+
+- **Requirements:** A formula field type on top of SGN-03 restricted to sum/product/
+  difference across named numeric fields — no arbitrary expression evaluation — that
+  recalculates when a referenced field changes and writes the result as a normal field
+  value on export.
+- **AC:** A fixture with three input fields and one sum field shows the correct total
+  live as inputs change, and the exported PDF's field value matches in an external
+  viewer with no active script required to display it.
+
+### SGN-08 · Fast multi-page initialing — `S` `P2`
+
+**Status: Done** — Already shipped: `duplicateAnnotationToAllPages` in `src/core/store.ts`
+and the per-stamp "Duplicate to all pages" button in `AnnotationOverlay.tsx` (both
+pre-dating this ticket) do exactly what SGN-08 asks — place a saved initial (or any
+stamp) on every remaining page at the source stamp's own rectangle, in a single
+`commit()`, so it is one undo entry rather than one per page. What was missing was the
+AC's own proof, which had no test at all before this ticket.
+
+Evidence: `tests/unit/store.test.ts` → "duplicateAnnotationToAllPages (SGN-08: fast
+multi-page initialing)" — a 20-page fixture ends with exactly one stamp per page, every
+stamp sharing the source's `x`/`y`/`width`/`height`/`data` (the AC's literal "rectangle
+position equality across pages"), every stamp with its own distinct id (so moving one
+later cannot move them all), and two `undo()` calls peeling back exactly two entries —
+placement, then the all-pages duplication — confirming "in one action" rather than
+nineteen. A second case confirms a reference to a since-removed annotation is a no-op,
+not a crash. Full suite green, `tsc --noEmit`, eslint, and prettier all clean.
+
+- **Requirements:** Apply a saved initial (from SGN-01's library) to every page in one
+  action, at a fixed position/size, instead of placing it page by page through SGN-02.
+- **AC:** Running it on a 20-page fixture places the same initial at the same position
+  on every page in one action, verified by rectangle position equality across pages.
+
+### SGN-09 · Signature/tamper integrity report — `S` `P2`
+
+**Status: Done** — `checkSignatureIntegrity` in `src/core/workers/process.worker.ts` walks
+`/AcroForm/Fields` (recursing into `/Kids`, the same field hierarchy `getFormFields`
+already handles) for any field with `/FT /Sig`, reads its `/V` signature dictionary's
+`/ByteRange`, and checks whether the range's second span reaches the document's *current*
+byte length. Standard incremental-update signing has that span run to the file's end
+*as it was when signed*; if the file has grown since (bytes appended without re-signing),
+the current length no longer matches — which is the structural definition of "modified
+after signing" this ticket asks for, computed from real offsets rather than inferred.
+`/Contents` (the signature payload itself) is never read or validated — this is
+explicitly not PAdES/CMS cryptographic verification, matching the ticket's own scope and
+this codebase's non-goal on certificate-based signing.
+
+For a document signed more than once, only the *outermost* signature's reach is what
+`intact` reports on: an earlier signature's own range legitimately stops short once a
+later signature adds bytes after it, so checking every signature's own reach would
+misreport a valid, ordinary multi-signature chain as tampered. Surfaced in `SignPanel.tsx`
+as a note next to the existing form-fields notice — neutral when intact, using the
+existing warning-styled `.note` class when not — computed alongside the existing
+`getFormFields` fetch, not inside it, since the check has nothing to do with whether the
+document has *fillable* fields.
+
+Evidence: `tests/unit/signature-integrity.test.ts` — since there is no cryptographic
+signing anywhere in this codebase to produce a real signed PDF from, the fixture builds a
+`/Sig` dictionary by hand (the same approach `golden.test.ts` already uses for a raw
+`/Outlines` tree): a `/Contents` hex placeholder and `/ByteRange` numbers are both
+reserved at a fixed text width *before* the first save (mirroring how real incremental
+signing reserves space before it knows the final offsets), the real offsets are measured
+from the saved bytes, and patched back in as same-width text so nothing else shifts —
+the fixture is proved genuine by re-parsing it with a fresh `PDFDocument.load` and
+reading its real page count before ever calling the function under test. Four cases: no
+`/Sig` field at all reports `{ hasSignature: false, intact: null }`; the intact fixture
+reports `intact: true` with `start + length` of its second range equal to the real file
+length; the same fixture with exactly one byte appended reports `intact: false`, and the
+reported range now falls exactly one byte short of the tampered file's real length (not
+merely "false", the precise arithmetic the AC calls for); and a copied buffer of the
+intact fixture, re-checked, still reports intact — ruling out any read-time drift.
+Confirmed live against the running app: both fixtures show the correct note (neutral vs.
+warning-styled) with zero console errors. Full suite (736 tests), `tsc --noEmit`, eslint,
+and prettier all clean.
+
+- **Requirements:** For a document containing a `/Sig` dictionary, report whether the
+  signature's byte range still covers the current file content (i.e., whether bytes
+  outside the signed range were appended/changed) — a structural check, not PAdES/CMS
+  cryptographic validation.
+- **AC:** An untouched signed fixture reports intact; the same fixture with a byte
+  appended after the signed range reports modified-after-signing, both against real
+  byte offsets, not a guessed heuristic.
+
+### RED-07 · Freehand/polygon redaction shapes — `M` `P1`
+
+**Status: Done** — A shaped mark is an *optional polygon on the existing rectangle*, not a
+second kind of mark. `RedactionRegion` (`src/core/workers/process.worker.ts:304`) gained
+`points?: {x,y}[]` in the same normalised page-fraction frame, with `x/y/width/height`
+continuing to hold the outline's bounding box. That choice is what kept RED-01/02/03
+untouched: `groupRegionsByPage`, the pixel verifier's render window, the annotation sweep, the
+panel's mark list and the overlay's arrow-key nudging all still read the box, and a mark with
+no `points` takes byte-identical code paths to before. A discriminated union would have
+forced every one of those to narrow first. RED-05's suggestions, being boxes, are unaffected.
+
+Geometry lives in one new pure module, `src/core/geometry.ts`, because four layers ask the
+same "is this inside the mark?" question in four different spaces (content space, the
+normalised display frame, region-local pixels, an image's unit square) and any disagreement
+between two of them is a leak. It uses the **nonzero winding rule** throughout
+(`pointInPolygon`, `geometry.ts:65`) precisely because that is what pdf-lib's `drawSvgPath`
+fill emits (`f`, not `f*`); had the predicates used even-odd while the cover filled nonzero, a
+self-crossing scribble would paint opaque black over an area the predicates call "outside" —
+text never removed, never verified, hidden under a black shape, which is the overlay-only
+failure RED-02 exists to prevent.
+
+Where the polygon is consulted:
+
+- **Removal** — `RedactionArea` (`interpreter.ts:353`) is `Rect & { polygon? }`, so
+  `filterContentStream`'s signature change is source-compatible with every existing
+  `Rect[]` caller. `areaTouches`/`areaCovers` (`interpreter.ts:366`, `:372`) test the box
+  first and then the shape, and replace the bare `intersects`/`contains` calls for text
+  runs, vector paths, Form XObjects, image coverage, and (`process.worker.ts:5545`)
+  overlapping annotations. The granularity is deliberately RED-02's existing one: a run is
+  removed when its box *overlaps* the shape, not when the shape contains it, so switching a
+  mark from rectangle to shape can never leave behind a run the rectangle would have taken.
+  RED-05's documented whole-run limitation is unchanged and not narrowed here.
+- **The cover** — a shaped mark is filled as its own path (`process.worker.ts:4877` via
+  `polygonSvgPath`, `:5080`) instead of `drawRectangle`. Drawing the bounding rectangle would
+  black out the corners the shape deliberately left alone — content the user chose to keep —
+  and the shape-aware pixel verifier would still pass it, so the difference would be silent.
+- **Coordinates** — the polygon goes through `redactionRectsForPage`'s own four-case rotation
+  mapping, reduced to a point (`pointToPage`, `process.worker.ts:5109`), rather than a second
+  transform invented for shapes. Proved rather than asserted: at each of 0/90/180/270°, a
+  polygon built from a rectangle's own four corners removes exactly the lines that rectangle
+  removes.
+- **Verification (RED-03)** — `checkRegionText` (`render.worker.ts:1397`) adds the shape test
+  to its per-character box test. The pixel half needed a real fix, not just an extension:
+  `regionPixelResidue` grades the rendered *bounding box*, so a correct shaped redaction would
+  have failed on the corner content it correctly kept, blocking a legitimate save. It now
+  rasterises the shape into the region's own pixel grid and erodes it by the same
+  anti-aliasing inset the rectangle path trims from its edges (`render.worker.ts:674`,
+  `regionLocalPolygon` at `:750`). A mask of all ones eroded by that inset *is* the old
+  rectangle loop, which is why the rectangle path is untouched and its tests unchanged.
+- **Images** — the shape is carried through the inverse CTM into the image's unit square
+  (`redactionAreaInUnitSpace`, `interpreter.ts:459`) and `paintRectsBlack`
+  (`image-redaction.ts:57`) rasterises it into the image's own pixels, dilated by one pixel to
+  keep the existing over-removal rounding bias. So a shape over a photo destroys the pixels it
+  encloses rather than the box around them.
+
+UI: a `Draw shape` radio group in the panel (`RedactPanel.tsx:119`) switches
+`redactShapeMode` (`state.ts:14`); the overlay traces on pointer-move, sampling by distance
+(`TRACE_STEP`, `RedactOverlay.tsx:46`, capped at 160 vertices by `thinTrace`) and closes the
+shape on pointer-up (`finishTrace`, `:193`). A shaped mark reuses the rectangle mark's box
+element — same focus, same remove button, same arrow-key move/resize, with the outline carried
+by the same transform as the box so the two cannot drift apart — and draws itself as an inline
+SVG polygon with `var(--doc-redact)`/`var(--danger)`; no new token, no colour literal.
+Verified visually at 1280×800 and 900×800 in both themes: the shape matches the trace, the
+page stays white in dark mode, and the `--primary-focus` ring is visible on keyboard focus.
+
+**Keyboard fallback, decided deliberately:** `Enter`/`Space` on the drawing layer adds a
+**rectangle even in freehand mode**. There is no keyboard equivalent of tracing, and a default
+polygon would hand a keyboard user a shape they cannot reshape (per-vertex editing is out of
+scope) instead of one they can move and resize. The reason that fallback exists — never
+leaving a keyboard-only user unable to mark something the text search cannot find — is served
+by a rectangle, and would not be served better by a decorative polygon.
+
+Evidence, `tests/unit/redact-polygon.test.ts` (17 tests) against a right triangle whose
+bounding box has a large empty corner with content planted in it, so the two possible
+implementations produce different exports: the enclosed run is gone from the decompressed
+content stream *and* from pdf.js's text extraction, the corner run and a vector block in that
+corner survive, and the control — the same box with no `points` — removes both, which is what
+proves the polygon test rather than the layout saved them. Then: `checkRegionText` finds
+nothing in the shape, `checkRegionPixels` passes it while grading the same output as a box
+fails, a probe over the kept corner still reads as content (the cover really is not a
+rectangle), and a block painted back inside the shape is caught. E2E in a real browser
+(`tests/e2e/tool-flows.spec.ts`, "a freehand shape removes only what its outline encloses"
+and "freehand mode still has a keyboard path to a mark") traces the shape with the mouse and
+asserts the exported bytes.
+
+**Limitations accepted rather than solved:** per-vertex editing after drawing is out of scope —
+draw it, or delete and redraw. `polygonContainsBox` answers "no" for an edge that merely grazes
+the box, which routes an image to the pixel path and destroys slightly more of it than
+necessary (over-removal is the only safe direction). A shape whose interior is thinner than
+the anti-aliasing inset samples no pixels, so the pixel half of the gate abstains on it and
+only the text and string checks apply — the same conservatism a sub-pixel rectangle mark has
+always had. New UI strings fall back to English until the next `i18n-extract` pass.
+
+- **Requirements:** Extend RED-01's rectangle-only marking with a freehand/polygon draw
+  mode whose bounding shape feeds the same RED-02 commit and RED-03 verification
+  pipeline — a polygon mark removes the text/image content it encloses, not just its
+  bounding box's naive rectangle.
+- **AC:** A polygon mark drawn around an irregular region removes exactly the enclosed
+  text runs on export and RED-03's verifier reports no residual text inside the marked
+  polygon.
+
+### RED-08 · On-device face/logo blur — `L` `P2`
+
+**Status: Done, with the logo half deliberately narrowed — see "Scope narrowed" below.**
+
+**The second disclosed network exception.** Invariant #1 allowed exactly one fetch — OCR's
+language model. This adds the second, and the two are now enumerated together in
+`CLAUDE.md` invariant #1, `docs/PLAN.md` §5.4 item 5, and the header comment of
+`src/core/ocr/model.ts` (which used to call itself "the single documented exception").
+`.claude/hooks/check-invariants.mjs`'s `ocrExempt` is renamed `modelDownloadExempt` and
+now also matches `src/core/faceblur/`, used exactly where the old flag was — the
+`REMOTE_HOSTS` and `NETWORK_APIS` checks only, never the colour or `chrome.*` checks.
+
+**Engine bundled, weights fetched.** `@vladmandic/face-api@1.7.15` (MIT) is a normal
+dependency in `package.json`; its `dist/face-api.esm.js` carries the TensorFlow.js runtime
+inside it, and `src/core/faceblur/detect.ts` imports that path as a literal dynamic import
+so Vite code-splits it into a chunk nothing loads until a blur is actually run. Only the
+`tinyFaceDetector` weights (~196 KB) are fetched, from
+`https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/model/` — pinned to the exact
+package version, the same "download once, then fully offline" pattern OCR-01 established.
+
+**On the library choice**, since it was a starting recommendation to verify rather than
+take on faith: `@vladmandic/face-api` is real, MIT, and the maintained fork of the
+abandoned face-api.js, though its last release (1.7.15) is well over a year old — "actively
+updated" would be generous. It was still the right pick over the more current alternative
+considered (`@mediapipe/tasks-vision`): face-api's weights land on the CDN host this
+project already discloses for OCR rather than adding a second one, the model itself is a
+fraction of MediaPipe's WASM runtime, and — the deciding factor — face-api's TensorFlow.js
+runs on a pure-JS CPU backend, which is what makes the real detector testable in the unit
+suite under Node rather than only behind a browser (MediaPipe cannot run headless at all).
+
+**Where the work happens.** `src/core/faceblur/` holds the parts that can be tested without
+a PDF: `model.ts` (the pinned URL and a `setModelBaseOverride` test seam, mirroring
+`ocr/model.ts`), `modelState.ts` (`faceblur.modelDownloaded.<id>` via `readSetting`/
+`writeSetting`, mirroring `ocr/modelState.ts`), `download.ts` (the only `fetch`),
+`detect.ts`, `blur.ts`, `logoMatch.ts`, and `runFaceBlur.ts`. The PDF surgery reuses RED-02's
+plumbing rather than a parallel copy: `render.worker.ts`'s new `blurPageImages` calls the
+same `decodeImage`/`encodeRedacted` that `redactPageImages` uses, so SMask re-attachment,
+CMYK→RGB and Indexed handling are code paths RED-02 already proved. `process.worker.ts`
+adds `planPageImages` and `replacePageImages`; the latter is deliberately *not* a
+`PDFDocument.create()` + `copyPages` rebuild the way `applyRedactions` is, because blur
+touches pixels only and the cheapest way to keep every content stream, font and vector
+byte-identical is to never take them apart. Retired image streams are purged via the
+existing `purgeXObjectIfUnreferenced`, after every page is rewritten rather than during, so
+an image shared by two pages is not unhooked while the second still names it. Reuse costs
+one encode, not one per page: `runFaceBlur.ts` keys a `firstPlacement` map by object number,
+decodes each distinct image on the first page that draws it, and `replacePageImages` embeds
+each replacement once and reuses the ref across every slot.
+
+**AC 1 — "a fixture with a known face position blurs a region overlapping that position and
+no others": met.** `tests/fixtures/face-chip.png` is a real 240×240 photograph of a face,
+cropped from the MIT-licensed `demo/sample1.jpg` inside the installed face-api package (so
+no asset enters the repo from outside the dependency tree). The face occupies `x 62, y 63,
+113×112` in it — measured by eye and recorded in `tests/fixtures/README.md`, deliberately
+not taken from a detector run, since asserting that the detector agrees with its own
+previous answer would prove nothing. `tests/unit/faceblur.test.ts` composites that chip on
+a larger raster with coloured blocks elsewhere, loads the real `tinyFaceDetector` weights
+off disk and runs the real network on the CPU backend, and asserts: exactly one detection;
+most of the known face rectangle inside it at a high IoU; after `pixelateRects`, the large
+majority of sampled pixels inside the known box differ substantially from the original;
+named background probes are byte-identical; and a fine-stride sweep of the raster finds
+zero changed pixels outside the padded detection boxes. A second test feeds a face-free
+texture and asserts the result is `[]`, so "blurs a region" is not "blurs everything". The
+same is then proved through real PDF bytes in the same file: the raster goes into a
+one-page PDF with real text, through the real `planPageImages` → `replacePageImages` pair,
+and the output bytes are re-parsed — pdf-lib reports the right page count, pdf.js
+re-extracts the page's own text untouched by a pixel operation, the substituted image's own
+inflated samples show the same changed/unchanged split, and a sweep of every image stream
+in the output confirms the unblurred original is gone from the file rather than merely
+unreferenced.
+
+**AC 2 — "declining the model download leaves the tool disabled with a clear message, never
+a silent no-op on export": met.** `runFaceBlur.ts` resolves the confirmation before
+anything is spawned or requested, and returns `null` on a decline.
+`tests/unit/faceblur-consent.test.ts` stubs `fetch` to throw rather than to resolve (a stub
+that returns something would still pass a call-count test) and asserts that on decline
+`fetch`, `renderWorker`, and `processWorker` are all untouched and the consent flag is
+unset. The flag is written only after a run completes, so a failed run re-asks. Logo-only
+mode asks for nothing and fetches nothing, because template matching needs no model.
+Through the real UI, `tests/e2e/tool-flows.spec.ts`'s RED-08 test declines the dialog and
+asserts the persistent toast, the "Blur faces" checkbox and "Find and blur" button both
+disabled with a panel note explaining why, the export path itself saying "Faces in this
+document were not blurred" when Verify & apply is pressed afterwards (`commit.ts`'s
+`redact` handler, gated on `faceBlurModelDeclined`) — the specific "never a silent no-op on
+export" clause — and zero external requests across the whole decline path. An "Allow the
+download" button restores the tool.
+
+**Scope narrowed, stated rather than glossed:** "or a marked logo" is implemented as
+template matching (`logoMatch.ts`), not as a second model. A face detector does not find
+logos, and the honest cheap answer is correlation: the user marks the logo once with an
+ordinary RED-01 mark, its pixels are cropped out of the image it sits on, and every other
+embedded image is searched for it by zero-mean normalised cross-correlation —
+brightness- and contrast-invariant, so the same mark over a grey header and over white
+paper both score. It does not find a rotated, mirrored, or recoloured copy, and searches
+only a narrow scale ladder around the marked size. The panel says so. It also only searches
+*embedded images*: a logo drawn as vectors has no pixels to match, and the panel says that
+too.
+
+**One honest gap:** the pdf.js decode / OffscreenCanvas re-encode step inside
+`blurPageImages` is not covered by the Node unit suite — neither exists outside a browser —
+so the byte-level AC 1 test drives the pure detection and pixel code plus the real pdf-lib
+substitution, with the decode/encode pair being the identical, already-proven functions
+RED-02 ships. The e2e test covers the decline path in a real browser but not a completed
+blur. This implementation was recovered and merged from a background agent whose worktree
+had drifted from a different point in this session's history (missing fixtures the rest of
+this session had since added, and RED-07, which did not exist on that branch); after
+merging, `tsc --noEmit`, `eslint`, `prettier --check`, and the full `vitest run` (805 tests)
+are all clean on this tree — the agent's own "not green" disclosure was accurate for its
+worktree but does not carry over.
+
+- **Requirements:** Detect faces or a marked logo in embedded page images using a local
+  WASM/ONNX model downloaded once on explicit user confirmation (OCR-01's pattern), and
+  blur/pixelate the detected regions in the exported image, never uploading pixels
+  anywhere.
+- **AC:** A fixture with a known face position blurs a region overlapping that position
+  and no others; declining the model download leaves the tool disabled with a clear
+  message, never a silent no-op on export.
+
+### RED-09 · Batch metadata scrub — `S` `P1`
+
+**Status: Done** — A "Scrub metadata from every file" checkbox in the Batch panel
+(`scrubMetadataInBatch` in `src/ui/tools/batch/state.ts`) runs after BAT-01's existing
+per-file tool loop in `runner.ts`. The decision is made per file, not per batch: each
+file's own bytes are re-inspected with the same `readMetadata` RED-04 uses, then
+`stripAllMetadataSettings` (`src/core/metadata-scrub.ts`, a pure function shared by
+nothing else on purpose — it has to build "strip everything *this* file's findings
+report" from a `MetadataFindings`, not from another file's) turns that into the
+`ScrubSettings` RED-04's own `scrubMetadata` already accepts. A file with nothing to
+strip is written through untouched and gets no scrub note; a file that had something
+removed gets a `metadata-scrubbed` batch note naming how many findings were removed —
+`countMetadataFindings` counts actual pieces of information (a `customInfo` toggle that
+clears seven non-standard Info entries reports 7, not 1), fixed after an independent AC
+verification pass caught the original `Object.keys(settings).length` undercounting it.
+The panel checkbox label was also rewritten after that pass flagged it leaking the
+ticket ID (`RED-04`) into user-facing copy.
+
+Evidence: `tests/unit/batch-runner.test.ts` → "RED-09" describe block — off by default
+(no `readMetadata`/`scrubMetadata` call), and "decides each file from its own findings,
+not the first file's": two mocked fixtures, only one carrying a marker `readMetadata`
+reads as an author, prove only that file's bytes reach `scrubMetadata` and only that file
+gets the note. That test mocks both worker calls, though, so it proves *routing*, not that
+metadata is actually removed — the same verification pass called this out directly. Real
+removal is proved separately in `tests/unit/batch-metadata-scrub.test.ts`, driving the
+*real* `processWorkerImpl.readMetadata`/`scrubMetadata` (comlink mocked, nothing else) on
+two real documents with different metadata: each document's strip settings are asserted to
+reflect only its own findings, the scrub actually removes them from re-parsed output bytes
+(`PDFDocument.load` afterwards, not just the findings report), and a separate case proves
+even pdf-lib's own stamped Producer/Creator/dates on an otherwise-plain document are caught
+and stripped — the kind of disclosure RED-04 exists for in the first place.
+
+- **Requirements:** Run RED-04's metadata scrubber across every file in a selected
+  folder/batch in one action, reusing BAT-01's folder-processing infrastructure.
+- **AC:** A batch of N fixtures each carrying identifying metadata produces N outputs
+  with metadata removed, each independently verified against its own source (not just
+  the first file in the batch).
+
+### OPS-15 · Split by target file size — `S` `P1`
+
+**Status: Done** — A "Split by target file size" mode alongside OPS-03/OPS-12, planned by
+`planSizeSplitBoundaries`/`planRangesBySize` in `src/core/operations.ts` since a slice's
+real size is only known after composing, not from page count alone.
+
+**First version had a real bug, found by an independent AC verification pass, not by
+inspection: it over-split documents whose pages share a large resource.** That version
+composed every page *individually* once, summed the isolated sizes, and cut greedily
+before the running sum would exceed the target — reasoning that summing isolated pages is
+a safe over-estimate, since a multi-page slice can only *save* bytes by embedding a shared
+resource once instead of once per file. That reasoning is correct in direction but was
+used the wrong way: on `tests/fixtures/shared-image.pdf` (10 pages sharing one big image,
+~4.68MB combined) it produced **10 files totalling ~46.8MB** — each individual page
+"safely" fit under a 5MB target on its own, so the greedy walk cut after every single
+page, throwing away all of the sharing the real combined file gets for free. A target the
+whole document already met produced ten times more output than the input.
+
+The fix replaces summing with recursive bisection over real measurements
+(`planRangesBySize`): ask whether the *whole* candidate range's actual composed size fits
+the target; if yes, stop — that range is one output file, no matter how many pages it
+spans. If no and the range is more than one page, bisect and ask the same question of
+each half. This asks "does sharing already make this fit?" before ever proposing a cut,
+so a document that fits entirely (the shared-image case) costs exactly one `composeSplit`
+call and produces zero cuts. `planSizeSplitBoundaries` wires this to reality: each
+candidate range is composed alone (no internal boundaries) through the same
+`splitDocument`/`composeSplit` path the real split uses, so what gets measured is exactly
+what would ship. A leaf that is still one page and still over target is unavoidable (nothing
+left to bisect) and is now reported back as `oversized` rather than silently accepted —
+`commit.ts`'s split handler surfaces a persistent warning naming each such page and its
+real size, which the first version never did; a user asking for ≤2MB used to get a larger
+file back with no indication anything was off.
+
+Wired into the split commit handler in `commit.ts` (`settings.mode === 'size'` branch)
+ahead of the existing `splitDocument` call, so it reuses every downstream behaviour
+(ZIP/folder output, Bates, watermark) unchanged.
+
+Evidence: `tests/unit/split-by-size.test.ts` — `planRangesBySize` against synthetic cost
+models, including one that explicitly simulates the shared-resource scenario (proving zero
+cuts when the whole thing already fits, and correct bisection down to oversized singles
+when a shared cost alone exceeds the target), plus the same union/no-overlap and
+single-page-never-splits properties `split.test.ts` asserts for the other modes;
+`planSizeSplitBoundaries` against a mocked `composeSplit` for the range-slicing wiring; and
+— the actual regression test for the bug — a real-fixture case against
+`tests/fixtures/shared-image.pdf` through the unmocked `processWorkerImpl`, asserting the
+whole 10-page, ~4.68MB document plans as zero cuts under a generous target, which is
+exactly the case the first version got wrong by an order of magnitude. Full suite green,
+`tsc --noEmit` clean, lint/format clean on every touched file.
+
+- **Requirements:** A size-based split mode alongside OPS-03/OPS-12: cut the document
+  into consecutive-page files each at or under a target size (e.g., for email
+  attachment limits), never splitting a single page across two outputs.
+- **AC:** A fixture whose pages have known, unequal weights splits into files each
+  under the target size (measured on real output bytes), with the same
+  union/no-overlap page-coverage property OPS-03 already tests.
+
+### OPS-16 · Cross-document page reordering before merge — `M` `P1`
+
+**Status: Done** — Already built, by construction, before this ticket existed: OPS-01's
+"Add files" appends each new source's pages into the *same* unified `doc.pages` array
+(`appendPages` in `src/core/store.ts`), and `movePages`/`movePage` reorder by page key
+alone with no notion of which source a key came from. DOC-04's page grid already calls
+`movePages` from both drag-and-drop and the arrow-key reorder (OPS-02), so a user could
+already drag any page next to any other page regardless of source — `MergePanel.tsx`'s
+own description text ("Drag pages in the grid to reorder across files") already said so.
+What this ticket actually contributes is proof that the claim holds all the way through
+export, not just in the in-memory list: `tests/unit/golden.test.ts` →
+"golden: OPS-16 cross-document page reordering before merge" seeds three sources of
+unequal page count (2, 2, 1), appends them end-to-end, then calls the exact same
+`movePages` the UI calls to interleave into `[a0, b0, c0, a1, b1]` — an arrangement no
+whole-file reorder could produce — and asserts the real composed export's page count,
+per-page text (each source's own 1-based numbering, read back in interleaved order), and
+the page-union property (every `sourceDocId:sourceIndex` pair contributed exactly once)
+all match. No production code changed; nothing needed to.
+
+- **Requirements:** Before committing OPS-01's merge, let the user drag individual
+  pages from multiple loaded source documents into one combined, freely-ordered list —
+  not just reordering whole source files in sequence.
+- **AC:** Merging three fixtures with pages interleaved out of source order produces an
+  output whose page sequence matches the interleaved order exactly, keyboard-operable
+  throughout.
+
+### OPS-17 · Image/logo watermark — `S` `P1`
+
+**Status: Done** — Already shipped: OPS-08's own writeup discloses that "an image
+watermark (PNG/JPEG, same grid/opacity/rotation/page-range)... was added in a later
+pass," and it was — `WatermarkImage`/`kind: 'image'`/`imageScale` in
+`src/ui/tools/watermark/state.ts`, a file picker sniffing PNG/JPEG magic bytes
+(`readWatermarkImage`), and the actual draw in `process.worker.ts` (`embedPng`/
+`embedJpg` + `drawImage`, sharing `positionOrigin`'s 9-point grid and
+`placeDisplayBox`'s rotation handling with the text watermark, Bates stamp, and
+header/footer) all existed before this ticket. What was missing was AC-grade proof:
+the one prior test (`process.test.ts` → "embeds the picked image only on the targeted
+pages") checked presence per page range, not that position/opacity/scale actually
+landed where the settings said.
+
+Added `tests/unit/process.test.ts` → "places the image at the exact position, scale,
+and opacity the settings specify": a page-rendering canvas isn't available in this
+Node test environment (per QA-02's own note on why PDF→image tests live in e2e
+instead), so this reads the real content stream instead of pixel-sampling a raster.
+`drawImage` at rotation 0 emits its placement as three separate `cm` operators —
+translate, an identity rotate, then scale — confirmed by probing pdf-lib's own
+`drawImage` operation list rather than assumed; the test decodes those and asserts
+the translate's e/f against `positionOrigin`'s bottom-right formula
+(`pageWidth - boxW - padding`, `padding`) and the scale's a/d against
+`pageWidth * imageScale` and its aspect-derived height, on a deliberately non-square
+(2:1) image so a width/height swap would be caught. Opacity is read from the page's
+`/ExtGState` resource's `/ca` entry directly, not regexed out of the stream. Full
+suite green (643 tests), `tsc --noEmit` clean, lint/format clean.
+
+- **Requirements:** Extend OPS-08's stamp engine to place a user-supplied image (e.g., a
+  logo) as a watermark, sharing the same 9-point placement grid, opacity, and scale
+  controls as the existing text watermark.
+- **AC:** A fixture stamped with a logo image shows it at the configured position,
+  opacity, and scale on every page, pixel-sampled against the expected placement.
+
+### ANN-06 · Redline export — `S` `P2`
+
+**Status: Done** — A new `exportRedlinePdf` (`src/core/redline-export.ts`), wired in as a
+third `diffMode` alongside ANN-05's `'visual'`/`'text'` in `compare-export.ts`'s existing
+dispatcher and `ComparePanel.tsx`'s `RadioGroup`. Each source page is rasterised once
+(`renderAllPages` loads the whole document a single time rather than once per page, unlike
+`exportVisualDiff`'s per-page load) and drawn into its own output PDF page next to its
+counterpart, "Before"/"After" labelled, rather than merged into one overlay image the way
+ANN-05 does.
+
+- **AC met — before/after side by side at matching scale:** both panes are placed at their
+  *true* point size — pixel dimensions divided by the same `RENDER_SCALE` (1.5) constant
+  for both sides (`redline-export.ts:130-137`) — rather than stretched to fit a shared box.
+  `tests/unit/redline-export.test.ts`'s "renders each pane at its own true scale" test
+  proves this the way a force-fit implementation would fail it: a 100×100 "before" next to
+  a 200×200 "after" produces an output page wide enough for both true sizes (100/1.5 +
+  200/1.5 pt), not merely twice the smaller pane — a real size change stays visible instead
+  of being hidden by normalisation. Live-verified with two 3-page fixtures differing only
+  on page 2: `pdftoppm` raster of the real download shows "Before"/"Page two (before)" and
+  "After"/"Page two (after, marked)" side by side at equal scale.
+- **AC met — unchanged pages skipped or marked, per the option:** a new `unchangedPages:
+  'skip' | 'mark'` setting (`compareSettings` in `src/ui/tools/compare/state.ts`, a second
+  `RadioGroup` shown only in redline mode). `pageHasChanges` (`redline-export.ts:72-85`)
+  calls the same `pixelDiff` ANN-05 already uses, plus two cases pixel-diff alone can't
+  cover: a page present on only one side, or a page whose rendered dimensions differ, both
+  of which count as changed by definition rather than throwing (pixelDiff itself requires
+  identical dimensions). `'mark'` keeps every page and stamps a grey "UNCHANGED" banner
+  band on ones with no changes (confirmed live: an unchanged page's output height came out
+  `LABEL_BAND_PT` taller than a changed page's — 588pt vs 568pt on the test fixtures —
+  exactly the added banner row); `'skip'` drops them, verified
+  live with the two 3-page fixtures producing exactly 1 output page (the one truly-changed
+  page). `tests/unit/redline-export.test.ts` covers both modes plus the "nothing changed at
+  all" edge case (`'skip'` with zero real differences still emits one informational page
+  rather than a degenerate zero-page PDF) and the missing-page-on-one-side case.
+- **Test seam matching ANN-05's:** `exportRedlinePdf` takes an optional 4th
+  `RedlineRenderedPages` argument so unit tests inject known `ImageData` directly instead of
+  routing through the render worker — the same shape `exportVisualDiff`'s `diffResults`
+  parameter already gives ANN-05, not a new pattern.
+- **No raw colours:** the banner/border colours needed for PDF page content (not CSS) were
+  added to `src/core/doc-colors.ts` as named RGB tuples (`REDLINE_BANNER_BG_RGB`,
+  `REDLINE_BANNER_TEXT_RGB`, `REDLINE_PLACEHOLDER_BORDER_RGB`), the same pattern every
+  other pdf-lib-facing colour in that file already follows, rather than passing numeric
+  literals to `rgb()` directly (which the invariant hook correctly rejects).
+- 7 new tests in `tests/unit/redline-export.test.ts`, 1 new dispatcher-routing test in
+  `tests/unit/compare-export.test.ts`; full suite (760 tests) green, `tsc --noEmit`,
+  `eslint`, `prettier` all clean.
+
+- **Requirements:** Export a side-by-side before/after page layout (source page image
+  next to the compared page image) as a print-ready PDF, distinct from ANN-05's
+  overlay-diff export.
+- **AC:** Comparing two fixtures with a known changed page produces a redline PDF with
+  that page's before/after rendered side by side at matching scale; unchanged pages are
+  either skipped or clearly marked unchanged, per the export option chosen.
+
+### DOC-10 · Local edit-history / audit-trail log — `M` `P2`
+
+**Status: Done, with "affected pages" explicitly not implemented — see below.** A new
+`history` tool lists the session's operations and exports them as text. The log is
+`undoLog`/`redoLog` in `src/core/history.ts`, two arrays kept in exact lockstep with the
+existing `undoStack`/`redoStack` — same push, same pop, same clear — rather than folding
+a label into `Snapshot` itself, so `historySourceRefCount`'s existing raw-snapshot walk
+is untouched. `operationLog()` is just `undoLog` copied out: an operation undone before
+export is excluded *by construction* (it physically leaves `undoLog` the moment `undo()`
+pops it onto `redoLog`), not by a separate filter that could drift from what the undo
+stack actually holds — and it comes back, with its original label and timestamp
+unchanged, if redone.
+
+**Labelling, and the design problem it solves**: the ticket asks for "tool name," but
+`commit()`/`beginTransaction()` are called from ~20 sites across `store.ts` and three UI
+files with no operation-name argument at all — threading a bespoke label through each
+would be the same invasive refactor rejected for the same reason elsewhere in this file.
+Instead, `core/tools.ts` gained a plain `activeToolId` signal that `useActiveTool` (called
+by `ActionBar`/`Canvas`/`OptionsPanel` on every render, so always in sync) keeps mirroring
+the router's own idea of the current tool — something `history.ts`, a plain module with no
+hook access, cannot read any other way. `push()` reads `findTool(activeToolId.value)?.title`
+at the moment it fires, which is also what makes `beginTransaction`'s own coalescing key
+(`crop-${page.key}`, `move-annotation`) the wrong thing to show the user: it exists purely
+to detect "is this the same open transaction," not to be read.
+
+**"Affected pages" is not implemented.** `Snapshot` records whole-document *state before*
+a mutation, not a diff — at `push()` time the mutation hasn't happened yet, so there is
+nothing to compare against. Computing which pages changed would need a second hook
+*after* every mutation at the same ~20 call sites the label threading above was
+deliberately designed to avoid touching. Disclosed rather than guessed at or silently
+dropped from the requirements list.
+
+Evidence: `tests/unit/history.test.ts` → "DOC-10: operation log" (7 tests) — labels come
+from the tool active at push time, not at read time or at undo/redo time (switching tools
+between an undo and its redo does not relabel the restored entry); the generic "Edit"
+fallback when no tool is active; a whole coalesced transaction produces exactly one entry,
+not one per drag step; `resetHistory` clears the log; timestamps are real and
+non-decreasing. Confirmed live against the running app: rotating a page under Organize and
+switching to the new Edit History tool shows one "Organize" entry at the correct time, with
+zero console errors, in a screenshot. Full suite (730 tests), `tsc --noEmit`, eslint, and
+prettier all clean.
+
+- **Requirements:** Record every operation applied in the current session (tool name,
+  timestamp, affected pages) in memory/IndexedDB and let the user export it as a text
+  or PDF log — no data leaves the device, and the log reflects only what the undo
+  stack (DOC-06) actually applied.
+- **AC:** A session with five known operations exports a log listing exactly those five
+  entries in order; an operation that was undone before export is excluded. **Partially
+  met:** page-level attribution ("affected pages") is not implemented — see writeup above.
+
+### OPS-18 · Stamp a QR/barcode onto pages — `S` `P2`
+
+**Status: Done** — A new "QR / barcode stamp" section in the Watermark panel
+(`barcodeStampSettings` in `src/ui/tools/watermark/state.ts`), built on the exact
+OPS-08/OPS-11 stamp engine: `positionOrigin`/`placeDisplayBox` for the 9-point grid,
+threaded through `ComposeExtras.barcodeStamp` in `process.worker.ts` the same way
+`extras.bates` already is, and plumbed through `composeDocument`/`splitDocument` and
+all four of `commit.ts`'s Bates call sites (export, annotate, size-split planning,
+split export) identically to Bates.
+
+- **`src/core/barcode.ts`** (new) — `qrcode` and `jsbarcode` added as real bundled
+  npm dependencies (not a network fetch of any kind; see the module's doc comment for
+  why this doesn't need a zero-network exception, the same reasoning that already
+  applies to `pdf-lib`/`pdf.js`/`tesseract.js`). `generateQrRaster(text)` uses
+  `QRCode.create()`'s pure module matrix (no canvas) rasterised by hand into RGB
+  samples and handed to the existing `encodePng` writer. `encodeCode128Bars(text)`
+  calls `jsbarcode`'s undocumented-but-real "object" render target (an empty plain
+  object matched by its own `getRenderProperties` on having no `nodeName`/`getContext`,
+  landing on `ObjectRenderer`, which assigns the encoded bar string instead of drawing
+  anywhere) — a one-line, well-isolated cast bridges the gap between that real behaviour
+  and its narrower published `.d.ts`.
+- **QR embeds as a raster; CODE128 draws as vector bars — and this split was found
+  live, not assumed.** The first implementation rasterised both the same way. QR round
+  tripped fine (Reed-Solomon error correction absorbs ordinary antialiasing), but a
+  live Playwright export of a 14-character CODE128 value, rasterised with poppler's
+  `pdftoppm` and decoded with `zxing-wasm` (ZXing-C++/WASM, independent of both
+  encoders here), came back empty — a 1D barcode has no error correction and decodes
+  by comparing *relative bar widths*, and the antialiasing between this module's raster
+  and whatever DPI a viewer/printer/scanner finally renders at was enough width
+  distortion to misread. Fixed by building CODE128 as a tiny one-page PDF of vector
+  rectangles (`process.worker.ts`'s `barcodeForm` branch), embedded once via
+  `outDoc.embedPdf()` and placed per page with `drawPage()` — geometrically exact at
+  any render resolution, since only one final rasterisation ever happens (by the
+  viewer/printer), not two compounding ones.
+- **A second, independent live-repro found a real sizing bug the unit tests alone
+  would not have caught:** even as vector content, a moderate-length CODE128 value
+  (~189 modules for `"CODE128-XYZ-99"`) squeezed into a small fraction of page width
+  puts well under one device pixel per module at ordinary print/scan resolutions —
+  physically unscannable regardless of vector precision. Fixed with two floors in
+  `process.worker.ts`: `CODE128_MIN_MODULE_WIDTH_PT` (1pt/module, inside the usual
+  10-20 mil "X-dimension" scanning-quality guidance) governs width *before* the "Size"
+  setting is applied — the setting can only make a stamp bigger, never smaller than
+  scannable — and `CODE128_MIN_STAMP_HEIGHT_PT` (20pt) guards height the same way,
+  kept even though it turned out not to be the binding constraint once the width
+  floor was added (aspect ratio means the width floor already implies a height well
+  above it) — cheap, honest insurance against a future change to the internal
+  rendering unit that could make it the binding one again.
+- **AC met — decodes back to the exact input text via an independent decoder:**
+  `tests/unit/barcode.test.ts` round-trips both `generateQrRaster` and
+  `encodeCode128Bars` through `zxing-wasm`, an engine neither encoder here is derived
+  from. Re-verified live end-to-end after each fix: a real document exported through
+  the actual UI, rasterised with `pdftoppm` (independent of this codebase entirely),
+  decoded with `zxing-wasm` — QR and CODE128 both came back with the exact stamped
+  text, `isValid: true`.
+- **AC met — at every configured placement position:** position/scale geometry is
+  verified precisely in `tests/unit/process.test.ts`'s "barcode stamp composition"
+  suite by reading the drawn `cm` translate/scale operators directly off the page's
+  own content stream (the same technique OPS-17's image-watermark geometry test
+  already uses), not by trusting "a stamp exists somewhere" — including a dedicated
+  test proving the CODE128 width floor actually binds (scale-derived width ≈30pt vs.
+  a 209pt floor) rather than coincidentally landing above it, and that `drawPage`
+  scales *relative to the embedded form's own BBox* (unlike `drawImage`, which scales
+  relative to an implicit unit square) was read back from the real PDF rather than a
+  hardcoded production constant.
+- **No page-range targeting** — applies to every exported page, matching Bates'
+  behaviour (and its absence of a page-range field) rather than the text/image
+  watermark's independent per-stamp range, since the settings signal started with one
+  and it was removed once nothing in the UI exposed it (an unreachable, unexposed
+  field is worse than no field).
+- 11 new unit tests across `tests/unit/barcode.test.ts` (6) and `process.test.ts`'s
+  new "barcode stamp composition (OPS-18)" describe block (5); full suite (771 tests)
+  green across three consecutive runs, `tsc --noEmit`, `eslint`, `prettier` all clean.
+  `zxing-wasm` is a devDependency only (test-time independent verification), never
+  bundled into the shipped extension.
+
+- **Requirements:** Encode user-provided text (e.g., a document ID) as a QR or 1D
+  barcode and stamp it via OPS-08/OPS-11's existing stamp engine and placement grid.
+- **AC:** A stamped fixture's barcode decodes back to the exact input text when scanned
+  by an independent decoder, at every configured placement position.
+
+### SCN-04 · Decode barcodes from scanned pages — `M` `P2`
+
+**Status: Done** — A "Barcodes" section in the Metadata panel
+(`src/ui/tools/metadata/BarcodeScanSection.tsx`), matching DOC-12's Font Embedding
+section's exact shape (a "Check"/"Scan" button, a live `busy` flag rather than
+`useJob`'s non-reactive `isRunning()`, a findings list). `decodeBarcodesFromImage`
+(`src/core/barcode.ts`) wraps `zxing-wasm`'s reader — the same independent decoder
+OPS-18's own tests round-trip against — now promoted from a devDependency (test-only)
+to a real bundled dependency, since this ticket uses it at runtime. Its reader build is
+single-threaded (a plain `fetch()` of its own same-origin `.wasm` binary, no worker of
+its own to spawn), so none of OCR-04's blob-URL-under-MV3-CSP problem specifically
+applies here — but a related, equally real packaging bug did, caught the same way
+OCR-04's was: by loading the actual packaged extension rather than trusting the dev
+server. See below.
+
+- **A real MV3 bug found by loading the packaged extension, not the dev server —
+  `zxing-wasm` defaults to fetching its own engine `.wasm` file from the jsDelivr CDN**
+  (documented behaviour of `PrepareZXingModuleOptions.overrides`, not a bug in the
+  library — it assumes a bundler will override it). Against the dev server this
+  succeeds silently, because the request just goes out over the real internet and
+  nothing looks wrong. Loading `dist/ext` as a real unpacked extension via Playwright's
+  `launchPersistentContext` with `--load-extension` — the same technique that would have
+  caught OCR-04's bug immediately, and did here — showed the real failure: `wasm
+  streaming compile failed`, then an `XMLHttpRequest` to
+  `https://fastly.jsdelivr.net/npm/zxing-wasm@…/dist/reader/zxing_reader.wasm`, which
+  MV3's CSP (`connect-src 'self' https://cdn.jsdelivr.net`) does not even allow — this
+  would have failed outright in a real user's browser, for every barcode scan, forever,
+  and passed every dev-server and unit test in this repo. Fixed two ways:
+  1. A new `stapler:zxing-assets` Vite plugin (`vite.config.ts`) copies
+     `zxing_reader.wasm` into the build's `assets/` folder — Vite's bundler never
+     detects this asset on its own, because the library resolves it via its own runtime
+     `fetch()`, not a static `import`/`new URL(..., import.meta.url)` Vite can trace.
+  2. `barcode.ts`'s `ensureZxingLocalWasm()` overrides `locateFile` to resolve against
+     `self.location` — the exact pattern `ocr.worker.ts`'s `WORKER_PATH`/`CORE_PATH`
+     already established for tesseract, so the same code is correct under
+     `chrome-extension://`, the website twin, and the dev server without any of them
+     knowing the other's base path. Guarded on `typeof self !== 'undefined'` so the
+     override is skipped in the Node test environment, where the library's own
+     resolution already works correctly and needed no fixing.
+  Re-verified after the fix with the same real-extension harness: stamped a QR (OPS-18)
+  with a known value, exported, re-imported, scanned (SCN-04) — decoded correctly, zero
+  console errors, zero requests outside the extension's own origin. `pnpm run
+  check:bundle` still passes (357.93 KB gzipped initial bundle, budget 900 KB): like
+  `@vladmandic/face-api`, the reader chunk is dynamically imported and never loads
+  until a scan actually runs.
+
+- **Reuses the rendering pipeline, not the cleanup pipeline:** `render.worker.ts` gained
+  `decodePageBarcodes(handle, pageIndex, dpi)`, built the same way `pageToImageBytes`
+  already renders a page to a bitmap (same `page.getViewport`/`page.render` call), then
+  hands the pixels to `decodeBarcodesFromImage`. "Reusing SCN-01/02's rendering
+  pipeline" is this shared render call — the one SCN-01/02's own cleanup preview
+  renders a page through — not the deskew/threshold step, which a barcode decoder does
+  not need: `zxing-wasm`'s library defaults (`tryHarder`/`tryRotate`/`tryInvert`, all on)
+  already tolerate the moderate rotation and noise a real scan carries, and are tuned
+  for exactly that case rather than the perfectly upright synthetic images the encoder
+  half of `barcode.ts` produces.
+- **`scanDocumentBarcodes`** (`src/core/operations.ts`) loads the document once and
+  loops every requested page through `decodePageBarcodes`, reporting progress and
+  honouring cancellation — the same shape `extractDocumentText` already has.
+- **AC met — a fixture with a known barcode decodes to the exact planted value:**
+  `tests/unit/barcode.test.ts`'s new `decodeBarcodesFromImage` suite plants a known QR
+  and a known CODE128 value on a synthetic bitmap and asserts the decoded text matches
+  exactly. Live end-to-end, chaining this ticket with OPS-18's own new stamping feature:
+  a QR stamped with `SCN04-ROUNDTRIP-8891` via the Watermark panel, exported, re-opened,
+  and scanned with this ticket's "Scan for barcodes" button reports
+  `Page 1 — QRCode: SCN04-ROUNDTRIP-8891` — a full round trip through two tickets'
+  worth of real code, not a synthetic fixture on either end.
+- **AC met — a page with no barcode reports none, not a false positive:**
+  `decodeBarcodesFromImage` is tested against both a blank white bitmap and a
+  deliberately barcode-*shaped* decoy (evenly spaced vertical bars that are not a real,
+  checksummed CODE128 pattern) — a naive "any dark stripes" heuristic would be fooled
+  by the second one; a real decoder is not, and both return `[]`. `scanDocumentBarcodes`
+  is tested (mocked render worker, `tests/unit/scan-document-barcodes.test.ts`) to prove
+  a page with none gets an explicit `{ pageIndex, barcodes: [] }` entry — every requested
+  page is actually checked, never silently skipped — and separately that cancellation is
+  honoured before the next page is scanned. Live: a blank-page fixture scanned through
+  the real UI shows "No barcodes found on any page." in both themes, no console errors.
+- **Export as a sidecar list:** "Export N as a list" writes a tab-separated
+  `barcodes.txt` (page, format, value per line) via `platform.saveFileAs`, satisfying the
+  ticket's "export as a sidecar list" phrasing directly rather than only "attachable to
+  search," which nothing else in this codebase currently indexes page content into.
+- 7 new tests (4 in `barcode.test.ts`'s decode suite, 3 in `scan-document-barcodes.test.ts`);
+  full suite (812 tests) verified green across four consecutive runs, `tsc --noEmit`,
+  `eslint`, `prettier` all clean. The WASM module's cold-start under heavy parallel test
+  load was observed to occasionally abort outright rather than merely run slowly; a
+  `prepareZXingModule` warm-up with one retry in the test file's `beforeAll` (not in
+  product code — a real browser never runs 68 competing Node worker processes at once)
+  made four full-suite reruns deterministic.
+
+- **Requirements:** Scan rendered page bitmaps for barcodes/QR codes and surface decoded
+  values as extractable metadata (e.g., attachable to search or export as a sidecar
+  list), reusing SCN-01/02's rendering pipeline.
+- **AC:** A fixture with a known barcode on a known page decodes to the exact planted
+  value; a page with no barcode reports none, not a false positive.
+
+### DOC-11 · Crash/reload session recovery — `M` `P1`
+
+**Status: Done** — This is not the session-persistence feature `store.ts`'s own header
+warns was removed for cost: that version wrote whole documents, bytes included, to
+IndexedDB on every mutation. Since that removal, `store.ts` was already refactored so
+document *bytes* live in OPFS (`opfs.ts`), addressed by source id, entirely separate from
+the *pointer* state (`documents`/`sources`/`activeDocId`) and the undo stack
+(`history.ts`'s `Snapshot`) — neither of which has ever held a byte array. Persisting all
+of it costs about what persisting one document's page list costs, because that is all it
+has ever contained; OPFS bytes for a source already survive a reload on their own, so
+recovery only has to restore the pointers that say which files matter and in what
+arrangement.
+
+- **`history.ts`** gained `serializeHistory()`/`restoreHistoryFromRecord()`, converting
+  each snapshot's one non-JSON-safe field (`selection: Set<string>`) to and from an
+  array; everything else round-trips as-is.
+- **`src/core/session-recovery.ts`** (new) — `saveSession()` writes
+  `documents`/`sources`/`activeDocId`/selection/crop boxes/page annotations/the
+  serialized history stack to the generic `settings` IndexedDB store (F-06) under one
+  key, or clears that key once `documents.value.length === 0` (an empty record is not "a
+  session," and leaving one around would offer to restore nothing back to nothing).
+  `restoreSession()` is the inverse, replacing the live signals wholesale.
+- **Autosave is debounced (500ms) and gated behind a `sessionRecoveryChecked` signal.**
+  `AppShell.tsx` runs the startup recovery check in one `useEffect` and the autosave
+  watcher (`useSignalEffect` over `documents`/`sources`/`activeDocId`/`historyVersion`) in
+  another; the watcher's very first line returns early until the check has resolved.
+  Without that gate, the watcher's first run — on a fresh boot, before the saved record
+  has even been read — would see the empty state a boot starts in and overwrite the
+  record before the user was ever asked about it.
+- **AC met — offers to restore the exact prior document state and undo stack:** the
+  startup check calls the existing generic `confirmAction()` dialog (no new modal
+  component) with the saved document count, then `restoreSession()` on accept. Live
+  end-to-end via a real Playwright `page.reload()` (a genuine navigation, not an
+  in-memory reset — the only way to actually prove IndexedDB survives it): opened a
+  2-page fixture, rotated page 2 by 90° and selected it, waited past the debounce,
+  reloaded. The dialog appeared reading "Stapler found 1 document open from before this
+  tab closed"; accepting restored the same file, the same 2 pages, page 2 still rotated
+  90°, and page 2 still the selected one — position, transform, and selection, not just
+  "a document reopened." `tests/unit/session-recovery.test.ts` covers the same round trip
+  at the unit level plus, separately, that a real mutation's undo entry survives: restore,
+  then `undo()`, and the rotation reverts — proving the *stack* came back, not only the
+  current state.
+- **AC met — declining clears the record, not retried on the next launch:** live, a
+  second reload (session still open, nothing declined yet) offered the prompt again as
+  expected; clicking "Start fresh" and reloading a third time showed no prompt at all.
+  Unit-tested directly (`clearSession()` empties what `loadPendingRecovery()` returns).
+- Two comments this ticket makes stale were corrected rather than left to rot:
+  `store.ts`'s "session persistence was removed" note now explains what DOC-11 added and
+  why it is not the same mistake, and `useUnsavedGuard.ts`'s "a reload genuinely loses
+  edits" note now names the real remaining gap (a declined restore, cleared storage, or
+  further edits after export) instead of a claim recovery now makes false.
+- 5 new unit tests; full suite (817 tests) green, `tsc --noEmit`, `eslint`, `prettier` all
+  clean.
+
+- **Requirements:** Persist enough session state to F-06's IndexedDB layer to reopen the
+  editor after a crash or accidental reload and resume the in-progress document and undo
+  stack, with an explicit prompt to restore or discard rather than silent resumption.
+- **AC:** Killing the tab mid-edit and reopening the editor offers to restore the exact
+  prior document state and undo stack; declining starts a clean session with the
+  recovery record cleared, not retried on the next launch.
+
+### DOC-12 · Font-embedding checker — `S` `P2`
+
+**Status: Done, with "any matching locally-available system font" deliberately narrowed**
+**— see below.** `checkFontEmbedding` in `src/core/workers/process.worker.ts` walks every
+page's `/Resources/Font` (reusing the existing `pageFontDictOf`/`asDict`/`asArray` helpers
+`fontInfoFor` already established for RED-02's width lookups), grouping by `/BaseFont`
+with any subset tag (`ABCDEF+`) stripped. A `/Type0` composite font's embedding question
+and display name both live one level down in `/DescendantFonts[0]`, not on the font dict
+itself — handled once in a shared `descriptorHostOf` rather than duplicated between the
+checker and the fixer. A finding names exactly the pages where *that* font is not
+embedded, not everywhere its name appears, since a document can legitimately carry two
+font objects sharing a family name where only one is embedded.
+
+**The "system font" half is narrower than the requirement's literal wording, disclosed
+rather than silently reduced.** A real local-font-file match would need the Local Font
+Access API (`window.queryLocalFonts()`) — Chromium-only, gated behind its own runtime
+permission prompt, which this product has never asked for anywhere else — and even with
+a real font file in hand, swapping the program behind an *existing* reference risks a
+glyph-mapping mismatch between the original and the substitute that could silently change
+what the text looks like, which this codebase's "never silently corrupt a document" rule
+cannot allow. Separately, pdf-lib's own 14 "standard" fonts are not a real fix either: the
+PDF spec assumes viewers already have them, so pdf-lib writes no `/FontFile` for them at
+all — embedding `StandardFonts.Helvetica` would satisfy nothing this ticket's AC actually
+asks for. The one substitution actually offered is regular-weight Arial/Helvetica,
+re-embedded with the *real*, already-vendored Liberation Sans Regular font program — the
+same metric-compatible substitute pdf.js's own renderer already uses for this exact case
+(`pdfjs-setup.ts`) — copied into `src/core/pdf/assets/` (with its license text) and
+imported with Vite's `?inline` so it is a base64 string baked into the bundle at build
+time, not fetched: there is no `fetch()`/network call anywhere in this path, so no
+addition to the invariant hook's OCR-only exemption was needed at all. A bold or italic
+Arial reports no match rather than a wrong one, since only the regular weight is vendored
+and substituting a different weight would be exactly the visual change the "never
+corrupt" rule rules out.
+
+`embedMissingFont` embeds that font once, then repoints every non-embedded occurrence's
+resource-*name* entry (`/F1`, `/F2`, …) at it — content-stream operators are untouched,
+since they reference the name, not the underlying object. The UI (`FontEmbeddingSection`,
+composed into the existing Metadata panel) applies the fix with `repointPage` per page
+inside one `beginTransaction`, not `replaceWithSource`: the latter clears annotations,
+correct for a scan-cleanup pixel rewrite but wrong here, since a font fix touches no page
+content a stamp could have been placed relative to.
+
+Evidence: `tests/unit/font-embedding.test.ts` (8 tests) — the AC's own scenario (one font
+embedded via real fontkit embedding of the vendored NotoSansDevanagari.ttf, one hand-built
+`/BaseFont /Arial` with no `/FontDescriptor` at all) reports exactly the non-embedded one;
+a subset tag is stripped before reporting; a document with no fonts reports nothing; a
+bold/italic Arial variant reports no match; and — the AC's literal requirement —
+`embedMissingFont`'s output, independently re-parsed with a fresh `PDFDocument.load`, has
+a real `/FontFile*` present on the fixed font (drilling into `/DescendantFonts[0]` for the
+fontkit-produced `/Type0` composite the same way the checker itself does), the
+already-embedded font is left completely untouched, the checker reports the export clean
+afterward, and a font with no safe substitute is refused with the document unwritten.
+Confirmed live end to end against the running app: a real fixture with two non-embedded
+fonts (a hand-built Arial and pdf-lib's own default Helvetica, both flagged) — embedding
+one leaves the other still flagged and un-corrupted, the toast confirms which font was
+fixed, and the document tab's dirty indicator confirms the in-session edit, all with zero
+console errors. A real `vite build` (not just the dev server / vitest transform) confirms
+the vendored font is inlined as base64 directly into `process.worker.js` with no separate
+fetchable asset file, unlike the OCR font's own `fetch()`-loaded asset. Full suite
+(752 tests), `tsc --noEmit`, eslint, and prettier all clean.
+
+- **Requirements:** Report which fonts referenced by the document are not embedded, and
+  offer to embed any matching locally-available system font, without touching text that
+  already uses an embedded font.
+- **AC:** A fixture with one embedded and one non-embedded font reports exactly the
+  non-embedded one; embedding it (when a system match exists) is confirmed by re-parsing
+  the export and finding the font's `/FontFile*` present.
+
+### ANN-07 · Synced dual-pane compare — `M` `P2`
+
+**Status: Done** — `src/ui/tools/side-by-side/state.ts` holds three shared signals
+(`sideBySideSourceId`, `sideBySidePageIndex`, `sideBySideZoomStep`); `SideBySidePanel.tsx`
+picks the second document the same way ANN-02's compare tool does
+(`platform.openFiles` → `importFiles`); `SideBySideView.tsx` renders two `Pane`s reading
+those same shared signals, so page and zoom are identical by construction rather than
+copied across a channel — no `BroadcastChannel` is used since both panes live in the same
+JS context (comment at `SideBySideView.tsx:1-20` records why one would be pointless here).
+`Canvas.tsx:120-129` wires `'side-by-side'` in as its own `canvasMode: 'single'` branch,
+memoising the second document's page refs on `sideBySideSource?.id`/`pageCount`
+(`Canvas.tsx:58-64`) — `makePageRefs` mints a fresh key per call, so without the `useMemo`
+every render would hand `Pane` a page whose identity never survives a re-render, discarding
+its cached bitmap.
+
+- **AC met — scroll sync within one frame:** `SideBySideView.tsx:162-176`'s `mirror()`
+  converts the scrolled pane's position to a 0–1 fraction of its own scrollable range and
+  applies that fraction to the other pane's range on the same `onScroll` event (not
+  polled/debounced), guarded by a `syncing` ref against feedback loops. Verified live via
+  Playwright (`scripts/verify-ann07.mjs`): scrolling pane A to its bottom
+  (`scrollTop = scrollHeight`) leaves both panes' `scrollTop / (scrollHeight - clientHeight)`
+  at exactly `1` after one frame.
+- **AC met — zoom/page sync:** both are literally one shared signal each (`sideBySideZoomStep`,
+  `sideBySidePageIndex`) read by both panes, so there is only one zoom control and one pager
+  in the UI, not two to keep consistent. Verified live: zooming in moves the single zoom
+  label 100%→150%, and clicking Next moves both panes from page 1 to page 2 together.
+- **AC met — closing one pane leaves the other independently usable:** `SideBySidePanel.tsx`
+  gained a "Close" button (`variant="ghost"`, next to the "Comparing against…" line) that
+  sets `sideBySideSourceId.value = null`; this was missing from the initial implementation
+  and was added specifically to satisfy this AC line, which is stronger than ANN-02/ANN-06's
+  compare tools promise (neither one offers a close, only "change"). Verified live: after
+  Close, pane B reverts to its pre-open "No second document" placeholder and pane A's own
+  Previous/Next/zoom controls keep working, unaffected (`maxPages` falls back to
+  `pagesA.length` once `pagesB` is `null`, `Canvas.tsx:61-64`).
+- **No console errors** in either theme; a light/dark screenshot pair confirmed pages stay
+  on `--doc-page` (white in both themes) while the rail/panel chrome inverts correctly, per
+  `docs/DESIGN-ADAPTATION.md`.
+- **Deliberately separate from `SinglePageView`:** `SideBySideView.tsx`'s `Pane` duplicates
+  that component's render approach (`renderHandleFor`/`bitmapKey`/`thumbnailCache`) instead
+  of extending it — `SinglePageView` is shared by five other tools with their own
+  uncontrolled zoom state, and threading a second, externally-controlled zoom mode through
+  it risked all five for the sake of this one new consumer (comment at the top of the file).
+
+- **Requirements:** A two-pane view of two documents with scroll position and zoom kept
+  in sync via `BroadcastChannel`/local state, distinct from ANN-02's single-view diff —
+  no network channel involved.
+- **AC:** Scrolling or zooming one pane moves the other to the matching page/offset
+  within one frame; closing one pane leaves the other independently usable.
+
+### RED-10 · Redaction pattern packs beyond US formats — `S` `P1`
+
+**Status: Done** — Three categories added to `src/core/patterns.ts`'s `MATCHERS`, each
+with a real checksum deciding acceptance rather than shape alone, the same "regex is the
+cheap filter" split RED-05 already used for credit cards:
+
+- **IBAN** — `ibanChecksumValid` implements ISO 7064 MOD 97-10 (rearrange the first 4
+  characters to the end, expand letters to two-digit values, reduce mod 97, valid iff 1)
+  digit-by-digit so no number ever exceeds what a JS number represents exactly, plus the
+  real 15-34 character length bound. The regex itself is deliberately loose (a country/
+  check prefix then one-or-more 1-4 char alnum groups) so a real IBAN's shorter final
+  group — the UK's own 4-4-4-4-2 — still matches in full; an earlier draft required every
+  group to be exactly 4 characters and silently truncated the UK textbook example IBAN
+  before its last two digits, which then failed the checksum it should have passed. Caught
+  by the fixture test, not inspection.
+- **UK National Insurance number** — HMRC's structural rules only (there is no
+  arithmetic check digit for a NINO, unlike the other two): specific excluded letters in
+  each of the first two positions, the six reserved prefixes (BG, GB, NK, KN, TN, ZZ) via
+  a negative lookahead, and a suffix restricted to A-D.
+- **Passport** — a 9-character alphanumeric document number plus a check digit validated
+  with the ICAO 9303 7-3-1 weighted algorithm, the same scheme printed in the
+  machine-readable zone of most of the world's passports and ID cards (not a bespoke
+  US/UK format, since no single passport check-digit scheme is universal).
+
+Precedence: `uk-nino` and `passport` are ordered ahead of `iban` in `MATCHERS`, not
+after — IBAN's own regex is the loosest of the three and would otherwise be tried
+against, and on a checksum coincidence even claim, a NINO- or passport-shaped span first.
+The reverse never happens: a real IBAN's mixed letter/digit grouping essentially never
+satisfies NINO's "6 *consecutive* digits" requirement or passport's separate check digit.
+The AC's explicit example — an IBAN must not also fire the credit-card matcher — holds by
+the existing span-claiming mechanism: ordering IBAN ahead of `credit-card` in `MATCHERS`
+means the whole IBAN span (letters included) is claimed before the credit-card matcher's
+pure-digit regex ever gets to try the digit groups inside it.
+
+Evidence: `tests/unit/patterns.test.ts` — the existing "one of each category" and
+"finds nothing beyond the sensitive ones" fixtures extended with one real, checksum-valid
+example of each new category (the textbook UK/DE/FR IBANs, an HMRC-format NINO, and a
+locally-computed valid passport check digit) and, in the prose fixture, one deliberately
+*wrong* example of each (bad IBAN check digits, a reserved NINO prefix, a wrong passport
+check digit) that must produce zero matches; a dedicated test proves the IBAN-before-
+credit-card precedence claim; `ibanChecksumValid` and `icaoCheckDigit` are also tested
+directly against known-correct published values (including the ICAO 9303 specification's
+own worked example, "L898902C" → check digit 3). 13 tests, all passing; the pre-existing
+`redact-patterns.test.ts` (RED-05's PDF-level integration test) is unaffected. `tsc
+--noEmit`, eslint, and prettier all clean on `patterns.ts` and its test file. No UI or
+worker changes were needed — `RedactPanel.tsx` already renders one section per
+`PATTERN_LABELS` entry generically, so the three new categories appear automatically.
+
+- **Requirements:** Extend RED-05's matcher with IBAN, EU/UK national insurance/ID
+  numbers, and passport number formats as additional selectable categories, each with
+  its own precedence rule against the existing categories (an IBAN must not also fire
+  the generic card-number matcher, etc.).
+- **AC:** A fixture with one instance of each new category surfaces exactly those
+  matches with zero false positives against the existing RED-05 fixture's prose and
+  planted values.
+
+---
+
 ## Critical path to v1.0
 
 ```
