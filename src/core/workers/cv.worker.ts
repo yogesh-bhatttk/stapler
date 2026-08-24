@@ -115,7 +115,10 @@ const api: CVJob = {
 
     if (settings.corners) {
       await checkpoint(job, 0.1, 'Correcting perspective');
-      const { width, height } = warpTargetSize(settings.corners);
+      // `current` is still the frame the corners were detected in, which is what
+      // fixes the principal point the aspect-ratio recovery needs. Sizing has to
+      // happen before any pass that changes the pixel dimensions.
+      const { width, height } = warpTargetSize(settings.corners, current);
       current = warpPerspective(current, settings.corners, width, height);
     }
 
