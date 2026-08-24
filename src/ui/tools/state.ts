@@ -7,6 +7,7 @@
  * `ActionBar` imported from `CompressPanel` to read a DPI value.
  */
 import { signal } from '@preact/signals';
+import type { ImagesToPdfOptions } from '../../core/operations';
 
 export type SplitMode = 'extract' | 'individual' | 'every_n' | 'custom' | 'bookmarks' | 'size';
 
@@ -61,6 +62,28 @@ export const annotateFlattenOnExport = signal(true);
  * configures, the action bar commits, same split as every other tool.
  */
 export const markdownToPdfSource = signal('');
+
+/**
+ * CNV-01 — Images → PDF, as a standalone tool rather than only reachable by
+ * dropping images at the start screen. The file list lives here (not `useState`
+ * in the panel) for the same reason `markdownToPdfSource` does: the action bar
+ * commits, the panel only configures.
+ */
+export interface ImagesToPdfSettings {
+  files: File[];
+  pageSize: ImagesToPdfOptions['pageSize'];
+  orientation: ImagesToPdfOptions['orientation'];
+  margin: number;
+  quality: number;
+}
+
+export const imagesToPdfSettings = signal<ImagesToPdfSettings>({
+  files: [],
+  pageSize: 'original',
+  orientation: 'auto',
+  margin: 0,
+  quality: 0.9
+});
 
 export interface ExtractImagesSettings {
   outputFormat: 'zip' | 'directory';

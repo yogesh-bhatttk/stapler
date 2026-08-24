@@ -149,14 +149,17 @@ async function importPdf(file: File, options: JobOptions): Promise<ImportedFile>
 import type { ImagesToPdfOptions } from './operations';
 
 /**
- * Imports a set of images as one document. Grouping them is deliberate: 20 phone
- * photos should become one 20-page PDF (CNV-01), not 20 tabs.
+ * Decodes a set of image files and composes them into one PDF's bytes.
+ *
+ * Split out of `importImages` so the images-to-pdf tool (CNV-01) can produce a
+ * standalone PDF — save to disk, no workspace document — without duplicating the
+ * per-image decode/cancel/warning loop that opening images as a document also needs.
  */
-async function importImages(
+export async function imagesToPdfBytes(
   files: File[],
   options: JobOptions,
   imageOptions?: ImagesToPdfOptions
-): Promise<ImportedFile> {
+): Promise<{ bytes: Uint8Array; warnings: string[] }> {
   const job = createJobHandle(options);
   const jpegs: Uint8Array[] = [];
   const warnings: string[] = [];
@@ -173,6 +176,19 @@ async function importImages(
   }
 
   const bytes = await processWorker.lease(api => api.imagesToPdf(jpegs, imageOptions, job));
+  return { bytes, warnings };
+}
+
+/**
+ * Imports a set of images as one document. Grouping them is deliberate: 20 phone
+ * photos should become one 20-page PDF (CNV-01), not 20 tabs.
+ */
+async function importImages(
+  files: File[],
+  options: JobOptions,
+  imageOptions?: ImagesToPdfOptions
+): Promise<ImportedFile> {
+  const { bytes, warnings } = await imagesToPdfBytes(files, options, imageOptions);
   const client = renderWorker.pin();
   try {
     const info = await client.lease(api => api.loadDocument(bytes));

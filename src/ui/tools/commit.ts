@@ -31,6 +31,7 @@ import {
   splitDocument
 } from '../../core/operations';
 import { processWorker } from '../../core/workers';
+import { imagesToPdfBytes } from '../../core/import';
 import {
   activeDoc,
   deletePages,
@@ -54,6 +55,7 @@ import {
 } from './compress/state';
 import {
   annotateFlattenOnExport,
+  imagesToPdfSettings,
   markdownToPdfSource,
   pdfToImageSettings,
   removeBlanksThreshold,
@@ -557,6 +559,32 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
 
     const archive = await pagesToImageArchive(bytes, indices, settings.format, settings.dpi, job);
     await save(doc, archive, `${stem(doc.name)}-${settings.dpi}dpi.zip`);
+  },
+
+  'images-to-pdf': async ({ job }) => {
+    const settings = imagesToPdfSettings.value;
+    if (settings.files.length === 0) {
+      notify('warning', translate('Nothing to export.'), {
+        detail: 'Add at least one image first.'
+      });
+      return;
+    }
+
+    const { bytes, warnings } = await imagesToPdfBytes(settings.files, job, {
+      pageSize: settings.pageSize,
+      orientation: settings.orientation,
+      margin: settings.margin,
+      quality: settings.quality
+    });
+
+    const name = settings.files.length === 1 ? `${stem(settings.files[0].name)}.pdf` : 'Images.pdf';
+    const saved = await platform.saveFileAs(bytes, name);
+    if (!saved) return;
+
+    for (const warning of warnings) {
+      notify('warning', warning);
+    }
+    notify('success', translate('PDF saved successfully.'));
   },
 
   /**

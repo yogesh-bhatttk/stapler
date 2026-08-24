@@ -1875,6 +1875,29 @@ test.describe('tool flows', () => {
     await expect(page.getByText(/some characters could not be represented/i)).toBeVisible();
   });
 
+  test('images to pdf: the dedicated tool builds a PDF with no document open first', async ({
+    page
+  }) => {
+    // CNV-01 already covers the drop-zone path (import.spec.ts); this is the
+    // separate tool-rail route, reachable with no document open, and it must
+    // preserve add order in the output.
+    await openApp(page);
+    await gotoTool(page, 'images-to-pdf');
+
+    const fileChooserPromise = page.waitForEvent('filechooser');
+    await page.getByRole('button', { name: 'Add images' }).click();
+    const fileChooser = await fileChooserPromise;
+    await fileChooser.setFiles(['tests/fixtures/sample.png', 'tests/fixtures/tiny.jpg']);
+
+    const list = page.getByRole('list').filter({ hasText: 'sample.png' });
+    await expect(list.getByText('1. sample.png')).toBeVisible();
+    await expect(list.getByText('2. tiny.jpg')).toBeVisible();
+
+    const bytes = await commitAndRead(page, 'Export PDF');
+    const doc = await PDFDocument.load(bytes);
+    expect(doc.getPageCount()).toBe(2);
+  });
+
   test('batch: a recipe is built from checkboxes, not a free-text prompt (BAT-02)', async ({
     page
   }) => {

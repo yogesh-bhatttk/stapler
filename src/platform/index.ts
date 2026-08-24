@@ -70,12 +70,16 @@ export function acceptToInputAccept(accept: Record<string, string[]> | undefined
     .join(',');
 }
 
-export const PDF_AND_IMAGES: Record<string, string[]> = {
-  'application/pdf': ['.pdf'],
+export const IMAGES_ONLY: Record<string, string[]> = {
   'image/png': ['.png'],
   'image/jpeg': ['.jpg', '.jpeg'],
   'image/webp': ['.webp'],
   'image/gif': ['.gif'],
   'image/heic': ['.heic'],
   'image/tiff': ['.tiff', '.tif']
+};
+
+export const PDF_AND_IMAGES: Record<string, string[]> = {
+  'application/pdf': ['.pdf'],
+  ...IMAGES_ONLY
 };

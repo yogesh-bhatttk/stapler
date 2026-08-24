@@ -19,6 +19,7 @@ export type ToolId =
   | 'remove-blanks'
   | 'cleanup'
   | 'pdf-to-img'
+  | 'images-to-pdf'
   | 'extract-img'
   | 'extract'
   | 'compress'
@@ -202,6 +203,18 @@ export const TOOLS: readonly ToolDefinition[] = [
     needsOptionsPanel: true,
     commitLabel: 'Export images',
     selectable: true
+  },
+  {
+    id: 'images-to-pdf',
+    title: 'Images to PDF',
+    group: 'Convert',
+    summary: 'Combine photos and images into one PDF.',
+    icon: 'FileImage',
+    canvasMode: 'single',
+    needsOptionsPanel: true,
+    commitLabel: 'Export PDF',
+    worksWithoutDocument: true,
+    selectable: false
   },
   {
     id: 'extract-img',

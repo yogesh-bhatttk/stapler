@@ -14,6 +14,7 @@ import { InsertPanel } from '../tools/organize/InsertPanel';
 import { SplitPanel } from '../tools/split/SplitPanel';
 import { BlanksPanel } from '../tools/blanks/BlanksPanel';
 import { PdfToImagePanel } from '../tools/convert/PdfToImagePanel';
+import { ImagesToPdfPanel } from '../tools/convert/ImagesToPdfPanel';
 import { ExtractPanel } from '../tools/extract/ExtractPanel';
 import { ExtractImagesPanel } from '../tools/extract-images/ExtractImagesPanel';
 import { CompressPanel } from '../tools/compress/CompressPanel';
@@ -49,6 +50,7 @@ const BODIES: Record<string, () => preact.JSX.Element | null> = {
   split: SplitPanel,
   'remove-blanks': BlanksPanel,
   'pdf-to-img': PdfToImagePanel,
+  'images-to-pdf': ImagesToPdfPanel,
   extract: ExtractPanel,
   'extract-img': ExtractImagesPanel,
   compress: CompressPanel,
