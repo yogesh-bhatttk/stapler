@@ -158,24 +158,60 @@ export const RadioGroup = forwardRefGeneric(function RadioGroup<T extends string
     <fieldset ref={ref} className={styles.radioGroup}>
       <legend>{legend}</legend>
       {options.map(option => (
-        <label className={styles.radio} key={option.value}>
-          <input
-            type="radio"
-            name={name}
-            checked={value === option.value}
-            onChange={() => onChange(option.value)}
-          />
-          <span className={styles.radioBody}>
-            <span>{option.label}</span>
-            {option.hint && <span className={styles.radioHint}>{option.hint}</span>}
-          </span>
-        </label>
+        <RadioOptionRow
+          key={option.value}
+          name={name}
+          option={option}
+          checked={value === option.value}
+          onChange={onChange}
+        />
       ))}
     </fieldset>
   );
 }) as <T extends string>(
   props: RadioGroupProps<T> & { ref?: Ref<HTMLFieldSetElement> }
 ) => JSX.Element | null;
+
+/**
+ * `aria-label` keeps the accessible name to just the option label — without it, the
+ * native label-wraps-input rule folds the hint text into the name too, so a hint like
+ * "...pages per file..." makes the radio's name collide with an unrelated field's
+ * `getByLabel('Pages per file')` lookup elsewhere on the same panel. `aria-describedby`
+ * still exposes the hint to screen readers, as a description rather than the name.
+ */
+function RadioOptionRow<T extends string>({
+  name,
+  option,
+  checked,
+  onChange
+}: {
+  name: string;
+  option: RadioOption<T>;
+  checked: boolean;
+  onChange: (value: T) => void;
+}) {
+  const hintId = useId();
+  return (
+    <label className={styles.radio}>
+      <input
+        type="radio"
+        name={name}
+        aria-label={option.label}
+        aria-describedby={option.hint ? hintId : undefined}
+        checked={checked}
+        onChange={() => onChange(option.value)}
+      />
+      <span className={styles.radioBody}>
+        <span>{option.label}</span>
+        {option.hint && (
+          <span id={hintId} className={styles.radioHint}>
+            {option.hint}
+          </span>
+        )}
+      </span>
+    </label>
+  );
+}
 
 export interface SliderProps {
   id?: string;

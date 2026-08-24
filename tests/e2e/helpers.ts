@@ -40,6 +40,16 @@ export async function openApp(page: Page) {
     await page.getByRole('button', { name: 'Get started' }).click();
     await expect(dialog).toBeHidden();
   }
+  // DOC-11 — a leftover autosave record from a prior session in the same storage
+  // state surfaces this prompt too; its scrim swallows clicks just like the welcome
+  // dialog's, so a test that reloads and then interacts with the page hangs on it.
+  // "Start fresh" is the right default for a test fixture: it should never inherit
+  // undo history or open documents from a session it didn't create.
+  const recovery = page.getByRole('dialog', { name: 'Restore your previous session?' });
+  if (await recovery.isVisible().catch(() => false)) {
+    await page.getByRole('button', { name: 'Start fresh' }).click();
+    await expect(recovery).toBeHidden();
+  }
   await expect(page.locator('header')).toBeVisible();
 }
 
