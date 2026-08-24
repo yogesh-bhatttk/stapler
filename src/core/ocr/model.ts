@@ -4,30 +4,87 @@
  *
  * PLAN §5.4 item 5 makes the OCR *language model* one of two documented exceptions
  * to the zero-network invariant — the other is RED-08's face-detector weights in
- * `src/core/faceblur/model.ts`, which follows this file's shape deliberately.
+ * `src/core/faceblur/model.ts`, which follows this file's shape deliberately: same
+ * host, same pin-an-exact-version rule, same `setModelBaseOverride` test seam.
+ * This file adds one thing that one does not — a hardcoded SHA-256 per language,
+ * checked in `download.ts` against every byte actually received — because a
+ * `.traineddata` file is loaded straight into the recognition engine with no
+ * further parsing to catch a corrupted or substituted download, where the
+ * face-detector's weight manifest at least gets a shape/size sanity check first.
  * Everything else OCR needs — the tesseract.js worker script and the WASM engine —
  * is vendored into the bundle by the `stapler:tesseract-assets` Vite plugin,
  * because engine code is remote code execution and no amount of user consent makes
  * that acceptable (PLAN §5.4 item 2).
  *
- * The invariant hook (`.claude/hooks/check-invariants.mjs`) carves `src/core/ocr/`
- * (and, identically, `src/core/faceblur/`) out of its `REMOTE_HOSTS` check as well
- * as its network-API check, so the host can be named in full here instead of
- * assembled to dodge the scanner.
+ * The actual `fetch()` call lives in `download.ts`, not here — this file only
+ * resolves URLs and holds the pinned hashes, exactly as `faceblur/model.ts` holds
+ * URLs while `faceblur/download.ts` does the one fetch. Auditing "what can OCR
+ * request?" means reading this file and `download.ts`, and nothing else in
+ * `src/core/ocr/`.
+ *
+ * The invariant hook (`.claude/hooks/check-invariants.mjs`) and `scripts/
+ * check-invariants.mjs` both carve `src/core/ocr/` (and, identically,
+ * `src/core/faceblur/`) out of their `REMOTE_HOSTS` check for `model.ts` and
+ * `download.ts` only — so the host can be named in full here instead of being
+ * assembled to dodge the scanner — and out of their network-API check for those
+ * two files plus `devanagariFont.ts`'s narrower, pre-existing, same-origin
+ * `fetch()` of a bundled asset. A stray `fetch()` or remote-host reference
+ * anywhere else in either directory still trips the guard.
  */
 
 /** Host the model is fetched from. Named out loud in the confirmation dialog. */
 export const MODEL_HOST = 'cdn.jsdelivr.net';
 
 /**
- * Pinned to an exact package path rather than a floating tag: an unpinned CDN URL
- * is a remote dependency that can change under us between two runs of the same
- * build, which is the thing "download once, then fully offline" is supposed to rule
- * out. `4.0.0_best_int` is tesseract.js's own LSTM-only ("best" integerised) data
- * set — the one that matches `OEM.LSTM_ONLY`, which is what the OCR worker asks for.
+ * Pinned to an exact package *version*, not just a path segment that merely looks
+ * like one: `/npm/@tesseract.js-data/<lang>/4.0.0_best_int` (no `@<version>`)
+ * resolves on jsdelivr to the *latest* published version of the `@tesseract.js-data/
+ * <lang>` package, with `4.0.0_best_int` taken as a sub-path inside it — not a
+ * version pin at all. `4.0.0_best_int` is tesseract.js's own name for the LSTM-only
+ * ("best" integerised) data set, the one that matches `OEM.LSTM_ONLY` used by the
+ * OCR worker, but it names a *directory inside the package*, not the package's own
+ * version. `DATA_PACKAGE_VERSION` is the actual npm version pin; jsdelivr's scoped-
+ * package syntax puts it right after the package name (`@tesseract.js-data/<lang>
+ * @<version>`), before that sub-path.
  */
 const DATA_PACKAGE = '@tesseract.js-data';
+const DATA_PACKAGE_VERSION = '1.0.0';
 const DATA_VERSION = '4.0.0_best_int';
+
+/**
+ * SHA-256 of the exact gzip bytes served at `resolveModelUrl(lang)` for each
+ * pinned `DATA_PACKAGE_VERSION` — computed once, by hand, against the real file
+ * (`curl` + `sha256sum` against the pinned URL), the same way a subresource-
+ * integrity hash is produced for a `<script>` tag. `download.ts` verifies every
+ * downloaded byte against this before the bytes are ever handed to tesseract;
+ * a mismatch is refused outright rather than used. Keyed by the *component*
+ * code (`eng`, `hin`), never by a composite (`eng+hin`) — a combined language is
+ * always downloaded and verified as its separate components.
+ *
+ * A pinned npm version's published tarball is immutable, so this hash does not
+ * need to be re-derived unless `DATA_PACKAGE_VERSION` changes.
+ */
+export const MODEL_SHA256: Readonly<Record<string, string>> = {
+  eng: '45b4cb346724ac1774f1c36f42f182b887bcdb28ebe63e6fff90ac41f3fcff91',
+  hin: 'f3b6a0d320df38d886178cdd727b90dbf9df3db053adb32bd9cf73f0463cda07'
+};
+
+/**
+ * Test seam for `MODEL_SHA256`, the same shape as `baseOverride` below: point it
+ * at whatever hash a test fixture actually hashes to, so the integrity check in
+ * `download.ts` can be exercised — both the success and the mismatch path —
+ * without needing a real network download of the real, multi-megabyte file.
+ */
+let hashOverride: Readonly<Record<string, string>> | null = null;
+
+export function setModelHashOverride(map: Readonly<Record<string, string>> | null): void {
+  hashOverride = map;
+}
+
+/** The hash `download.ts` must see before it will use a downloaded model. */
+export function expectedModelHash(lang: string): string | undefined {
+  return (hashOverride ?? MODEL_SHA256)[lang];
+}
 
 export interface OcrLanguage {
   /** tesseract language code, also the `<lang>.traineddata` file stem. */
@@ -98,7 +155,7 @@ export function getModelBaseOverride(): string | null {
  */
 export function resolveModelBase(lang: string): string {
   if (baseOverride) return baseOverride.replace(/\/$/, '');
-  return `https://${MODEL_HOST}/npm/${DATA_PACKAGE}/${lang}/${DATA_VERSION}`;
+  return `https://${MODEL_HOST}/npm/${DATA_PACKAGE}/${lang}@${DATA_PACKAGE_VERSION}/${DATA_VERSION}`;
 }
 
 /**

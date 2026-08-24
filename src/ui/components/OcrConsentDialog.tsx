@@ -73,7 +73,7 @@ export const OcrConsentDialog = forwardRef<HTMLDivElement, Record<string, never>
               onClick={() => request.resolve('download')}
               disabled={uploading}
             >
-              Download
+              Download and run OCR
             </Button>
           </>
         }

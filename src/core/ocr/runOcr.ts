@@ -16,15 +16,11 @@ import { renderWorker, cvWorker, ocrWorker, processWorker } from '../workers';
 import { createJobHandle, type JobOptions } from '../workers/protocol';
 import { requestOcrConsent } from '../notify';
 import { cancelled, internal } from '../errors';
-import { isModelDownloaded, markModelDownloaded } from './modelState';
-import { hasModelBytes } from '../opfs';
-import {
-  DEFAULT_OCR_LANGUAGE,
-  MODEL_HOST,
-  findLanguage,
-  resolveModelBase,
-  splitLangCodes
-} from './model';
+import { markModelDownloaded } from './modelState';
+import { readModelBytes } from '../opfs';
+import { fetchVerifiedModel } from './download';
+import { hasCachedModel, writeCachedModel } from './tesseractCache';
+import { DEFAULT_OCR_LANGUAGE, MODEL_HOST, findLanguage, splitLangCodes } from './model';
 import type { OcrLayerReport, OcrPageLayer } from './types';
 
 /**
@@ -84,13 +80,40 @@ export function modelConsentCopy(missingCodes: string[]): { title: string; body:
 /**
  * Asks for consent to fetch every language in `missingCodes`. Returns `null`
  * when the user declined, otherwise the choice they made — the caller needs to
- * know 'download' from 'upload' to decide whether it still has to fetch the
- * bytes itself (see `runOcr`'s combined-language branch).
+ * know 'download' from 'upload' to decide how it gets the bytes into
+ * tesseract's cache (see `runOcr`).
  */
 async function ensureConsent(missingCodes: string[]): Promise<'download' | 'upload' | null> {
   const { title, body } = modelConsentCopy(missingCodes);
   const result = await requestOcrConsent(missingCodes, title, body);
   return result === 'cancel' ? null : result;
+}
+
+/**
+ * OCR-01 Defect 2 fix: whether `code` can be recognised right now with no
+ * further download — checked against where the bytes actually live, never
+ * against a boolean "the user said yes once" flag alone. A flag like that can
+ * go stale: the browser can evict IndexedDB under storage pressure without
+ * telling Stapler, and a run that trusted the flag anyway would let tesseract's
+ * own loader silently re-fetch the model with no consent dialog shown — which
+ * is exactly what the zero-network invariant forbids.
+ *
+ * Two real sources of truth are checked instead, and both double as the seed
+ * for the cache the OCR worker actually reads from:
+ *
+ *  - tesseract's own cache (`hasCachedModel`) — a genuine byte-presence probe.
+ *  - a manually uploaded copy in OPFS (`readModelBytes`), which never touched
+ *    the network in the first place, so finding one here re-seeds tesseract's
+ *    cache silently: there is nothing for a fresh consent dialog to disclose.
+ */
+async function isModelReady(code: string): Promise<boolean> {
+  if (await hasCachedModel(code)) return true;
+  const uploaded = await readModelBytes(code);
+  if (uploaded) {
+    await writeCachedModel(code, uploaded);
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -116,10 +139,7 @@ export async function runOcr(
 
   const components = splitLangCodes(lang);
   const availability = await Promise.all(
-    components.map(async code => ({
-      code,
-      already: (await hasModelBytes(code)) || (await isModelDownloaded(code))
-    }))
+    components.map(async code => ({ code, already: await isModelReady(code) }))
   );
   const missing = availability.filter(a => !a.already).map(a => a.code);
 
@@ -128,20 +148,37 @@ export async function runOcr(
     // Nothing has been spawned, opened, or requested at this point. Declining is
     // a clean no-op by construction, not by cleanup.
     if (!choice) return null;
-    // Nothing further to do here: a solo language's 'download' is fetched by
-    // tesseract itself inside the worker (as OCR-01 shipped it), and a
-    // combined run is *also* left to tesseract — leaving `langPath` unset
-    // there makes it compute each language's own default URL (the exact
-    // package/version `resolveModelBase` pins) and cache each independently,
-    // so it never re-fetches a language a prior solo run already has. Fetching
-    // here too, into OPFS, would just be a second, unused download — the OCR
-    // worker only ever reads OPFS bytes back for a single-language run (see
-    // `ocr.worker.ts`). 'upload' has already written its one OPFS file via the
-    // consent dialog — the dialog only offers that choice when
-    // `missing.length === 1`.
+
+    if (choice === 'download') {
+      // OCR-01 Defects 1 & 3: Stapler fetches and integrity-verifies every
+      // missing language itself (`download.ts`), then seeds tesseract's own
+      // cache directly (`writeCachedModel`) — tesseract's internal loader is
+      // never given the chance to fetch on its own. That matters for a
+      // combined run especially: each component lives at a different base
+      // URL, and tesseract's own hardcoded default has no version pin at all
+      // (see `model.ts`), so leaving it to fetch a language itself would
+      // silently reintroduce the unpinned-URL problem this fix closes.
+      await Promise.all(
+        missing.map(async code => {
+          const verified = await fetchVerifiedModel(code, options.signal);
+          await writeCachedModel(code, verified);
+        })
+      );
+    } else {
+      // 'upload' is only offered when `missing.length === 1` — one file
+      // cannot cover two languages — and the consent dialog's handler has
+      // already written the bytes to OPFS before resolving with this choice.
+      const code = missing[0];
+      const uploaded = await readModelBytes(code);
+      if (!uploaded) {
+        throw internal(
+          `The uploaded ${code} OCR language model could not be read back after upload.`
+        );
+      }
+      await writeCachedModel(code, uploaded);
+    }
   }
 
-  const modelBase = resolveModelBase(components[0]);
   const layers: OcrPageLayer[] = [];
 
   // `pin()` rather than the shared render cache: these bytes are the *export* of
@@ -196,7 +233,11 @@ export async function runOcr(
             // Transferred, not copied — a 300 DPI A4 raster is ~35 MB of RGBA.
             // The OCR worker takes ownership and closes it.
             Comlink.transfer(bitmap, [bitmap]),
-            { lang, modelBase },
+            // No model bytes or path travel with this call: every language in
+            // `lang` is already sitting in tesseract's own cache by this point
+            // (seeded above, or on an earlier run), so the worker only ever
+            // needs the plain language string (see `ocr.worker.ts`).
+            { lang },
             createJobHandle({
               signal: options.signal,
               onProgress: (fraction, label) =>

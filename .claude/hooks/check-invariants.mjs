@@ -30,6 +30,30 @@ const NETWORK_APIS = [
 const REMOTE_HOSTS =
   /(fonts\.googleapis|fonts\.gstatic|cdn\.jsdelivr|unpkg\.com|cdnjs\.cloudflare|googletagmanager|google-analytics|sentry\.io)/;
 
+// OCR-01 Defect 4: this used to carve out `src/core/ocr/` and
+// `src/core/faceblur/` *wholesale*, so a `fetch()` or a remote-host reference
+// added anywhere in either directory — not just the one legitimate
+// model-download module — would never be caught. Narrowed to the specific
+// files that are actually allowed to do each thing; kept in sync with
+// `scripts/check-invariants.mjs`.
+const NETWORK_API_ALLOWED_FILES = new Set([
+  'src/core/ocr/model.ts',
+  'src/core/ocr/download.ts',
+  'src/core/faceblur/model.ts',
+  'src/core/faceblur/download.ts',
+  // Pre-existing, narrower exception: reads a bundled font file, same-origin,
+  // via `fetch(new URL('./assets/...', import.meta.url))`. Never names a
+  // remote host — see `REMOTE_HOST_ALLOWED_FILES` below, which does not
+  // include it.
+  'src/core/ocr/devanagariFont.ts'
+]);
+const REMOTE_HOST_ALLOWED_FILES = new Set([
+  'src/core/ocr/model.ts',
+  'src/core/ocr/download.ts',
+  'src/core/faceblur/model.ts',
+  'src/core/faceblur/download.ts'
+]);
+
 const REMOTE_IMPORT = [
   [
     /\b(?:import|from|require\s*\()\s*['"`]https?:\/\//,
@@ -115,11 +139,11 @@ if (inSrc && isSource) {
   // The two documented model downloads (PLAN §5.4 item 5): the OCR language
   // model and RED-08's face-detector weights. Both are fetched once, on an
   // explicit confirmation, from a pinned URL — and nothing else in src/ may
-  // name a remote host or call a network API. Scoped to these two directories
-  // by prefix, exactly as narrow as the OCR carve-out was on its own; every
-  // other file in src/ is still checked.
-  const modelDownloadExempt =
-    rel.startsWith('src/core/ocr/') || rel.startsWith('src/core/faceblur/');
+  // name a remote host or call a network API. Narrowed to the specific files
+  // named above rather than the two directories wholesale, so a stray
+  // `fetch()` elsewhere in either directory still trips this guard.
+  const networkApiAllowed = NETWORK_API_ALLOWED_FILES.has(rel);
+  const remoteHostAllowed = REMOTE_HOST_ALLOWED_FILES.has(rel);
 
   // Document colours (a PDF page is white; redaction fill is black) are numbers
   // handed to canvas/pdf-lib, not theme colours, so they cannot be CSS vars. They
@@ -135,9 +159,9 @@ if (inSrc && isSource) {
     if (/^\s*(\/\/|\*|<!--)/.test(line)) return; // skip comment lines
 
     for (const [re, msg] of REMOTE_IMPORT) if (re.test(line)) flag(i, msg);
-    if (!modelDownloadExempt && REMOTE_HOSTS.test(line))
+    if (!remoteHostAllowed && REMOTE_HOSTS.test(line))
       flag(i, 'reference to a remote host — breaks the zero-network guarantee');
-    if (!modelDownloadExempt)
+    if (!networkApiAllowed)
       for (const [re, msg] of NETWORK_APIS) if (re.test(line)) flag(i, msg);
 
     // Design tokens: colour literals belong in tokens.css only.

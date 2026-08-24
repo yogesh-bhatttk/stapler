@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import { PDFArray, PDFDocument, PDFName, PDFStream, StandardFonts } from 'pdf-lib';
 
 /**
@@ -25,9 +26,15 @@ describe('ocr/model', () => {
     const url = resolveModelUrl('eng');
     // Same construction tesseract.js's own loadAndGunzipFile performs:
     // `${langPath}/${lang}.traineddata${gzip ? '.gz' : ''}`.
-    expect(url).toMatch(/^https:\/\/cdn\.jsdelivr\.net\/npm\/@tesseract\.js-data\/eng\//);
-    expect(url.endsWith('/eng.traineddata.gz')).toBe(true);
-    expect(url).toContain('4.0.0_best_int');
+    expect(url).toMatch(
+      /^https:\/\/cdn\.jsdelivr\.net\/npm\/@tesseract\.js-data\/eng@\d+\.\d+\.\d+\/4\.0\.0_best_int\/eng\.traineddata\.gz$/
+    );
+    // OCR-01 Defect 1: `.../eng/4.0.0_best_int/...` with no `@<version>` at all
+    // is the unpinned shape this replaces — jsdelivr resolves a bare
+    // `/npm/@pkg/path` to the package's *latest* published version, so
+    // `4.0.0_best_int` alone was never a real version pin, just a path segment
+    // that happened to look like one.
+    expect(url).not.toMatch(/\/eng\/4\.0\.0_best_int\//);
     // A `@latest`, `@7`, or bare-package URL would let the file change under a
     // build that has already been shipped and audited.
     expect(url).not.toMatch(/@latest|\/npm\/@tesseract\.js-data\/eng\/?$/);
@@ -51,6 +58,108 @@ describe('ocr/model', () => {
       expect(language.label.length).toBeGreaterThan(0);
     }
   });
+
+  it('registers a pinned SHA-256 for every single-component language, so download.ts never has to trust unverified bytes', async () => {
+    const { OCR_LANGUAGES, expectedModelHash, setModelHashOverride, splitLangCodes } =
+      await import('../../src/core/ocr/model');
+    setModelHashOverride(null);
+    const components = new Set(OCR_LANGUAGES.flatMap(l => splitLangCodes(l.code)));
+    expect(components.size).toBeGreaterThan(0);
+    for (const code of components) {
+      expect(expectedModelHash(code)).toMatch(/^[0-9a-f]{64}$/);
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * download.ts — the one fetch in the OCR feature, and its integrity check
+ * ------------------------------------------------------------------ */
+
+describe('ocr/download — the one verified fetch (OCR-01 Defect 1)', () => {
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    const { setModelHashOverride, setModelBaseOverride } = await import('../../src/core/ocr/model');
+    setModelHashOverride(null);
+    setModelBaseOverride(null);
+  });
+
+  it('returns the bytes once they match the pinned hash', async () => {
+    const { setModelHashOverride } = await import('../../src/core/ocr/model');
+    const bytes = new TextEncoder().encode('a fixture standing in for real traineddata bytes');
+    const hash = createHash('sha256').update(bytes).digest('hex');
+    setModelHashOverride({ eng: hash });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, arrayBuffer: async () => bytes.buffer }) as unknown as Response)
+    );
+
+    // The top-level `vi.mock('../../src/core/ocr/download', ...)` below (used by
+    // the runOcr tests) applies to every import in this file, so the *real*
+    // implementation is fetched explicitly here via `importActual`.
+    const { fetchVerifiedModel } =
+      await vi.importActual<typeof import('../../src/core/ocr/download')>(
+        '../../src/core/ocr/download'
+      );
+    const result = await fetchVerifiedModel('eng');
+    expect(Array.from(result)).toEqual(Array.from(bytes));
+  });
+
+  it('refuses bytes that do not match the pinned hash, rather than using them anyway', async () => {
+    const { setModelHashOverride } = await import('../../src/core/ocr/model');
+    // A hash that cannot possibly match whatever the stub below returns.
+    setModelHashOverride({ eng: '0'.repeat(64) });
+
+    const tampered = new TextEncoder().encode('not what was pinned');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, arrayBuffer: async () => tampered.buffer }) as unknown as Response)
+    );
+
+    // The top-level `vi.mock('../../src/core/ocr/download', ...)` below (used by
+    // the runOcr tests) applies to every import in this file, so the *real*
+    // implementation is fetched explicitly here via `importActual`.
+    const { fetchVerifiedModel } =
+      await vi.importActual<typeof import('../../src/core/ocr/download')>(
+        '../../src/core/ocr/download'
+      );
+    await expect(fetchVerifiedModel('eng')).rejects.toThrow(/integrity verification/i);
+  });
+
+  it('refuses a language with no pinned hash at all, rather than trusting it by default', async () => {
+    const { setModelHashOverride } = await import('../../src/core/ocr/model');
+    setModelHashOverride({}); // 'eng' deliberately absent
+
+    const bytes = new TextEncoder().encode('anything');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, arrayBuffer: async () => bytes.buffer }) as unknown as Response)
+    );
+
+    // The top-level `vi.mock('../../src/core/ocr/download', ...)` below (used by
+    // the runOcr tests) applies to every import in this file, so the *real*
+    // implementation is fetched explicitly here via `importActual`.
+    const { fetchVerifiedModel } =
+      await vi.importActual<typeof import('../../src/core/ocr/download')>(
+        '../../src/core/ocr/download'
+      );
+    await expect(fetchVerifiedModel('eng')).rejects.toThrow(/no pinned integrity hash/i);
+  });
+
+  it('surfaces a clear error on an HTTP failure rather than hashing an error page', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: false, status: 404, statusText: 'Not Found' }) as unknown as Response)
+    );
+    // The top-level `vi.mock('../../src/core/ocr/download', ...)` below (used by
+    // the runOcr tests) applies to every import in this file, so the *real*
+    // implementation is fetched explicitly here via `importActual`.
+    const { fetchVerifiedModel } =
+      await vi.importActual<typeof import('../../src/core/ocr/download')>(
+        '../../src/core/ocr/download'
+      );
+    await expect(fetchVerifiedModel('eng')).rejects.toThrow(/could not be downloaded/i);
+  });
 });
 
 /* ------------------------------------------------------------------ *
@@ -73,6 +182,32 @@ vi.mock('../../src/core/notify', () => ({
   confirmAction: (...args: unknown[]) => confirmAction(...args),
   requestOcrConsent: (...args: unknown[]) => requestOcrConsent(...args),
   notify: vi.fn()
+}));
+
+/**
+ * In-memory stand-in for tesseract's own IndexedDB cache (`tesseractCache.ts`),
+ * so `runOcr`'s "is this language actually ready?" check (OCR-01 Defect 2) can
+ * be driven from a test without a real IndexedDB. Presence in this map is what
+ * "already downloaded" now means — a `settings` flag alone is deliberately not
+ * enough, which is exactly the defect the tests below are written against.
+ */
+const tesseractCacheStore = new Map<string, Uint8Array>();
+vi.mock('../../src/core/ocr/tesseractCache', () => ({
+  hasCachedModel: vi.fn(async (lang: string) => tesseractCacheStore.has(lang)),
+  writeCachedModel: vi.fn(async (lang: string, bytes: Uint8Array) => {
+    tesseractCacheStore.set(lang, bytes);
+  })
+}));
+
+/**
+ * `fetchVerifiedModel` is `runOcr`'s only path to the network (OCR-01 Defects
+ * 1 & 3) — mocked here so these orchestration tests never touch a real socket;
+ * the fetch-and-verify logic itself is exercised directly in the
+ * `ocr/download` describe block above.
+ */
+const fetchVerifiedModel = vi.fn();
+vi.mock('../../src/core/ocr/download', () => ({
+  fetchVerifiedModel: (...args: [string, AbortSignal?]) => fetchVerifiedModel(...args)
 }));
 
 /**
@@ -110,15 +245,42 @@ describe('ocr/modelState', () => {
 });
 
 describe('ocr/runOcr — the confirmation gate', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     settings.clear();
+    tesseractCacheStore.clear();
     requestOcrConsent.mockReset();
     renderPin.lease.mockReset();
     renderPin.release.mockReset();
     cvLease.mockReset();
     ocrLease.mockReset();
     processLease.mockReset();
+    fetchVerifiedModel.mockReset();
+    fetchVerifiedModel.mockImplementation(async (lang: string) =>
+      new TextEncoder().encode(`fake-model-bytes-${lang}`)
+    );
+    const { __memoryFallback } = await import('../../src/core/opfs');
+    __memoryFallback.clear();
   });
+
+  const mockWorkersForOneSuccessfulPage = () => {
+    renderPin.lease.mockImplementation(async (fn: (api: unknown) => unknown) =>
+      fn({
+        loadDocument: async () => ({ handle: 'h' }),
+        renderPage: async () => ({ width: 100, height: 100, close() {} }),
+        closeDocument: async () => {}
+      })
+    );
+    cvLease.mockImplementation(async (fn: (api: unknown) => unknown) =>
+      fn({ cleanupForOcr: async (bitmap: unknown) => bitmap })
+    );
+    processLease.mockResolvedValue({
+      bytes: new Uint8Array([9]),
+      wordsAdded: 0,
+      wordsSkipped: 0,
+      pagesTouched: 0,
+      pagesReplaced: 0
+    });
+  };
 
   it('touches no worker at all when the user declines', async () => {
     requestOcrConsent.mockResolvedValue('cancel');
@@ -132,38 +294,49 @@ describe('ocr/runOcr — the confirmation gate', () => {
     expect(renderPin.lease).not.toHaveBeenCalled();
     expect(ocrLease).not.toHaveBeenCalled();
     expect(processLease).not.toHaveBeenCalled();
+    expect(fetchVerifiedModel).not.toHaveBeenCalled();
     // Declining must not be remembered as consent.
     expect(settings.get('ocr.modelDownloaded.eng')).toBeUndefined();
   });
 
-  it('asks exactly once: a second run with the flag set shows no dialog', async () => {
-    settings.set('ocr.modelDownloaded.eng', true);
+  it('asks exactly once: a second run with the model already cached shows no dialog', async () => {
+    // Not the `ocr.modelDownloaded.eng` flag — the actual bytes, in the actual
+    // cache tesseract reads from. See the Defect 2 test below for why that
+    // distinction is the whole point of this fix.
+    tesseractCacheStore.set('eng', new Uint8Array([1]));
     const { runOcr } = await import('../../src/core/ocr/runOcr');
-
-    renderPin.lease.mockImplementation(async (fn: (api: unknown) => unknown) =>
-      fn({
-        loadDocument: async () => ({ handle: 'h' }),
-        renderPage: async () => ({ width: 100, height: 100, close() {} }),
-        closeDocument: async () => {}
-      })
-    );
-    cvLease.mockImplementation(async (fn: (api: unknown) => unknown) =>
-      fn({ cleanupForOcr: async (bitmap: unknown) => bitmap })
-    );
+    mockWorkersForOneSuccessfulPage();
     ocrLease.mockResolvedValue({ words: [], text: '' });
-    processLease.mockResolvedValue({
-      bytes: new Uint8Array([9]),
-      wordsAdded: 0,
-      wordsSkipped: 0,
-      pagesTouched: 0,
-      pagesReplaced: 0
-    });
 
     const result = await runOcr(new Uint8Array([1]), 1);
 
     expect(requestOcrConsent).not.toHaveBeenCalled();
+    expect(fetchVerifiedModel).not.toHaveBeenCalled();
     expect(result?.downloadedModel).toBe(false);
     expect(ocrLease).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * OCR-01 Defect 2, reproduced directly: a `markModelDownloaded` flag that
+   * survives independently of the bytes it once described. Before the fix,
+   * `runOcr` trusted this flag alone, so a run in this exact state would
+   * silently proceed straight to the (mocked, but in reality network-fetching)
+   * OCR worker with no dialog shown at all — precisely what "no fetch unless
+   * the user opts in" forbids. After the fix, the flag is not even consulted
+   * for this decision; only real presence is, so it is not touched here.
+   */
+  it('re-shows the consent dialog when the flag says downloaded but the bytes are gone (OCR-01 Defect 2)', async () => {
+    settings.set('ocr.modelDownloaded.eng', true);
+    // tesseractCacheStore and OPFS are both deliberately left empty here —
+    // simulating the browser having evicted IndexedDB since the flag was set.
+    requestOcrConsent.mockResolvedValue('cancel');
+    const { runOcr } = await import('../../src/core/ocr/runOcr');
+
+    const result = await runOcr(new Uint8Array([1]), 1);
+
+    expect(result).toBeNull();
+    expect(requestOcrConsent).toHaveBeenCalledWith(['eng'], expect.any(String), expect.any(String));
+    expect(fetchVerifiedModel).not.toHaveBeenCalled(); // declined, so still nothing fetched
   });
 
   it('does not record consent when the run fails after the dialog', async () => {
@@ -177,6 +350,67 @@ describe('ocr/runOcr — the confirmation gate', () => {
     // again rather than silently retrying a fetch they never agreed to repeat.
     expect(settings.get('ocr.modelDownloaded.eng')).toBeUndefined();
     expect(renderPin.release).toHaveBeenCalled();
+  });
+
+  it('does not record consent, and bricks nothing, when the download fails integrity verification', async () => {
+    requestOcrConsent.mockResolvedValue('download');
+    fetchVerifiedModel.mockRejectedValue(new Error('integrity verification failed'));
+    const { runOcr } = await import('../../src/core/ocr/runOcr');
+
+    await expect(runOcr(new Uint8Array([1]), 1)).rejects.toThrow(/integrity verification/);
+
+    expect(settings.get('ocr.modelDownloaded.eng')).toBeUndefined();
+    expect(tesseractCacheStore.has('eng')).toBe(false);
+    expect(ocrLease).not.toHaveBeenCalled();
+
+    // The language was never marked ready, so a retry asks again rather than
+    // being permanently stuck — the failure mode OCR-01 Defect 3 warned about.
+    requestOcrConsent.mockReset();
+    requestOcrConsent.mockResolvedValue('cancel');
+    const result = await runOcr(new Uint8Array([1]), 1);
+    expect(result).toBeNull();
+    expect(requestOcrConsent).toHaveBeenCalledWith(['eng'], expect.any(String), expect.any(String));
+  });
+
+  /**
+   * OCR-01 Defect 3: the manually uploaded model has to actually get used, via
+   * the exact shape `createWorker` accepts — a plain language string, with the
+   * bytes already sitting in tesseract's own cache — never the `{ code, data }`
+   * array shape that broke `initialize()`.
+   */
+  it('seeds tesseract\'s cache from a manual upload and calls the worker with a plain language string (OCR-01 Defect 3)', async () => {
+    const uploadedBytes = new Uint8Array([7, 7, 7, 7]);
+    // Simulates `OcrConsentDialog`'s upload handler: it writes the bytes to
+    // OPFS *before* resolving the consent promise with 'upload'.
+    requestOcrConsent.mockImplementation(async () => {
+      const { writeModelBytes } = await import('../../src/core/opfs');
+      await writeModelBytes('eng', uploadedBytes);
+      return 'upload';
+    });
+
+    mockWorkersForOneSuccessfulPage();
+    let capturedOptions: unknown;
+    ocrLease.mockImplementation(async (fn: (api: unknown) => unknown) =>
+      fn({
+        recognizePage: async (_bitmap: unknown, options: unknown) => {
+          capturedOptions = options;
+          return { words: [], text: '' };
+        }
+      })
+    );
+
+    const { runOcr } = await import('../../src/core/ocr/runOcr');
+    const result = await runOcr(new Uint8Array([1]), 1);
+
+    expect(result?.downloadedModel).toBe(true);
+    expect(fetchVerifiedModel).not.toHaveBeenCalled(); // upload never touches the network
+    // The uploaded bytes landed in tesseract's own cache, under the plain
+    // language code — the only place `createWorker` can find them given a
+    // plain-string `lang` (see ocr.worker.ts).
+    expect(Array.from(tesseractCacheStore.get('eng') ?? [])).toEqual(Array.from(uploadedBytes));
+    // The worker call itself carries only the language — never bytes, never a
+    // `{ code, data }` array, never a `modelBase`/`langPath`.
+    expect(capturedOptions).toEqual({ lang: 'eng' });
   });
 
   it('names the model, its size, the host, and the one-time nature in the dialog', async () => {
@@ -199,11 +433,11 @@ describe('ocr/runOcr — the confirmation gate', () => {
 });
 
 /*
- * A combined `eng+hin` run cannot lean on tesseract's own loader — it fetches
- * every plain-string language in one run from the *same* `langPath`, and
- * `eng`/`hin` each live at a different `resolveModelBase`. So `runOcr` fetches
- * each missing component itself; these tests are against that fetch, not
- * against the worker (which is mocked exactly as above).
+ * A combined `eng+hin` run cannot lean on tesseract's own loader — each
+ * component lives at a different base URL, and (post OCR-01 Defects 1 & 3)
+ * tesseract's internal loader is never allowed to fetch on its own anyway. So
+ * `runOcr` fetches, verifies, and caches each missing component itself, via
+ * the mocked `fetchVerifiedModel`/`tesseractCacheStore` seams.
  */
 describe('ocr/runOcr — combined-language download', () => {
   const setUpWorkers = () => {
@@ -229,12 +463,17 @@ describe('ocr/runOcr — combined-language download', () => {
 
   beforeEach(async () => {
     settings.clear();
+    tesseractCacheStore.clear();
     requestOcrConsent.mockReset();
     renderPin.lease.mockReset();
     renderPin.release.mockReset();
     cvLease.mockReset();
     ocrLease.mockReset();
     processLease.mockReset();
+    fetchVerifiedModel.mockReset();
+    fetchVerifiedModel.mockImplementation(async (lang: string) =>
+      new TextEncoder().encode(`fake-model-bytes-${lang}`)
+    );
     // `__memoryFallback` is a module-level OPFS stand-in: without clearing it,
     // a language "downloaded" by an earlier test in this file stays available
     // to every test after it.
@@ -246,17 +485,7 @@ describe('ocr/runOcr — combined-language download', () => {
     vi.unstubAllGlobals();
   });
 
-  // `runOcr` no longer fetches a combined run's models itself — see
-  // `ocr.worker.ts`'s comment on tesseract.js's `initialize()` bug: passing it
-  // an array of `{code, data}` objects (which is what pre-fetching into OPFS
-  // and handing over was building) makes it call `TessBaseAPI.Init` with the
-  // *bytes* stringified instead of the language codes, and recognition fails
-  // outright. A combined run now always reaches the worker as a plain string,
-  // and tesseract's own loader — left to compute each language's default URL
-  // itself — fetches and caches each one independently. These tests are
-  // against the *consent* gate only: what's disclosed and when, not who ends
-  // up doing the fetching.
-  it('discloses every missing component and proceeds once download is chosen', async () => {
+  it('discloses every missing component, fetches and caches each one, and proceeds once download is chosen', async () => {
     requestOcrConsent.mockResolvedValue('download');
     setUpWorkers();
 
@@ -269,13 +498,20 @@ describe('ocr/runOcr — combined-language download', () => {
       expect.any(String),
       expect.any(String)
     );
+    // OCR-01 Defects 1 & 3: Stapler fetches (and, in the real module, verifies)
+    // every missing component itself, rather than leaving tesseract's own
+    // loader to do it — so both land in its cache before the worker ever runs.
+    expect(fetchVerifiedModel).toHaveBeenCalledWith('eng', undefined);
+    expect(fetchVerifiedModel).toHaveBeenCalledWith('hin', undefined);
+    expect(tesseractCacheStore.has('eng')).toBe(true);
+    expect(tesseractCacheStore.has('hin')).toBe(true);
     expect(result?.downloadedModel).toBe(true);
     expect(settings.get('ocr.modelDownloaded.eng')).toBe(true);
     expect(settings.get('ocr.modelDownloaded.hin')).toBe(true);
   });
 
-  it('only discloses the component not already downloaded', async () => {
-    settings.set('ocr.modelDownloaded.eng', true);
+  it('only discloses, fetches, and caches the component not already available', async () => {
+    tesseractCacheStore.set('eng', new Uint8Array([1]));
     requestOcrConsent.mockResolvedValue('download');
     setUpWorkers();
 
@@ -284,11 +520,13 @@ describe('ocr/runOcr — combined-language download', () => {
     await runOcr(new Uint8Array([1]), 1, { lang: 'eng+hin' });
 
     expect(requestOcrConsent).toHaveBeenCalledWith(['hin'], expect.any(String), expect.any(String));
+    expect(fetchVerifiedModel).toHaveBeenCalledWith('hin', undefined);
+    expect(fetchVerifiedModel).not.toHaveBeenCalledWith('eng', undefined);
   });
 
-  it('asks for nothing once every component is already downloaded', async () => {
-    settings.set('ocr.modelDownloaded.eng', true);
-    settings.set('ocr.modelDownloaded.hin', true);
+  it('asks for nothing once every component is already cached', async () => {
+    tesseractCacheStore.set('eng', new Uint8Array([1]));
+    tesseractCacheStore.set('hin', new Uint8Array([2]));
     setUpWorkers();
 
     const { runOcr } = await import('../../src/core/ocr/runOcr');
@@ -296,6 +534,7 @@ describe('ocr/runOcr — combined-language download', () => {
     const result = await runOcr(new Uint8Array([1]), 1, { lang: 'eng+hin' });
 
     expect(requestOcrConsent).not.toHaveBeenCalled();
+    expect(fetchVerifiedModel).not.toHaveBeenCalled();
     expect(result?.downloadedModel).toBe(false);
   });
 });

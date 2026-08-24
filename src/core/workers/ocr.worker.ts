@@ -1,7 +1,7 @@
 /**
  * OCR-01 — the tesseract.js worker.
  *
- * Three things here are load-bearing rather than tuning:
+ * Four things here are load-bearing rather than tuning:
  *
  *  • `workerPath` and `corePath` point at **bundled** copies (the
  *    `stapler:tesseract-assets` Vite plugin). tesseract.js's browser defaults are
@@ -19,6 +19,20 @@
  *  • tesseract.js is loaded with a dynamic `import()`. Nothing in this module —
  *    and so nothing in the tesseract dependency tree — is evaluated until an OCR
  *    run actually starts.
+ *  • `createWorker` is always called with `options.lang` as a **plain string**,
+ *    never an array of `{ code, data }` objects. tesseract.js 7.0.0 has a real
+ *    bug in its own `initialize()`: given such an array it builds the language
+ *    string for `TessBaseAPI.Init` via `langs.map(l => l.data).join('+')` — the
+ *    *bytes*, not any code field — so `Init` is called with a stringified byte
+ *    array instead of e.g. `"eng"`, and recognition fails outright ("Tesseract
+ *    couldn't load any languages!"), whatever the array's field names are. This
+ *    used to be worked around for a single-language "uploaded a custom model"
+ *    path by building exactly that broken shape (OCR-01 Defect 3) — the actual
+ *    fix is upstream, in `runOcr.ts`: every language `lang` names is guaranteed
+ *    to already be sitting in tesseract's own cache (`tesseractCache.ts`) by the
+ *    time this worker is ever spawned, whether it got there by a verified CDN
+ *    download or a manual upload, so a plain string is all this worker ever
+ *    needs — tesseract's normal cache-hit path does the rest.
  *
  * `recognize()` is not preemptible: once the engine is inside a page there is no
  * supported way to interrupt it. Cancellation therefore races the recognition
@@ -29,7 +43,6 @@
 import * as Comlink from 'comlink';
 import { checkpoint, type JobHandle } from './protocol';
 import { cancelled as cancelledError, internal } from '../errors';
-import { splitLangCodes } from '../ocr/model';
 import type { OcrPageResult, OcrWord } from '../ocr/types';
 // Type-only, so it is erased: the runtime import stays dynamic (see the header).
 import type * as Tesseract from 'tesseract.js';
@@ -51,15 +64,6 @@ export interface RecognizeOptions {
    * `eng+hin`) for a single mixed-script recognition pass.
    */
   lang: string;
-  /**
-   * Directory the traineddata is resolved against — `langPath` in tesseract's
-   * terms, which appends `<lang>.traineddata.gz` itself. Supplied by the caller so
-   * the *only* place a network destination is decided is `core/ocr/model.ts`.
-   * Only meaningful for a single-language `lang`: a multi-language `lang`
-   * always supplies every component's bytes explicitly (see `recognizePage`
-   * below), because each language's package lives at its own base URL.
-   */
-  modelBase: string;
 }
 
 export interface OCRJob {
@@ -166,40 +170,16 @@ const api: OCRJob = {
     let engine: Tesseract.Worker | null = null;
 
     try {
-      const { readModelBytes } = await import('../opfs');
-      const codes = splitLangCodes(options.lang);
-
-      // tesseract.js 7.0.0 has a real bug in its own `initialize()`: given an
-      // array of `{ code, data }` objects, it builds the language string for
-      // `TessBaseAPI.Init` via `langs.map(l => l.data).join('+')` — the
-      // *bytes*, not `l.code` — so `Init` is called with a giant stringified
-      // byte array instead of e.g. `"eng+hin"`, and recognition fails outright
-      // ("Tesseract couldn't load any languages!"). A combined run must never
-      // build that array, only the single-language "uploaded a custom model"
-      // path below still does (a narrower, pre-existing use of the same
-      // buggy shape, tracked separately from this fix).
-      //
-      // The plain joined string is sufficient on its own for a combined run:
-      // leaving `langPath` unset makes tesseract's own loader compute a
-      // *per-language* default URL (`https://cdn.jsdelivr.net/npm/
-      // @tesseract.js-data/<lang>/4.0.0_best_int` for the LSTM-only data this
-      // project uses) — the exact package and version `resolveModelBase`
-      // pins — and cache each language independently, so a combined run never
-      // re-fetches a language a prior solo run already cached. There is no
-      // shared-`langPath` problem here to work around.
-      let langsParam: string | Array<{ code: string; data: Uint8Array }> = options.lang;
-      let modelBase: string | undefined = options.modelBase;
-      if (codes.length === 1) {
-        const modelBytes = await readModelBytes(codes[0]);
-        if (modelBytes) langsParam = [{ code: codes[0], data: modelBytes }];
-      } else {
-        modelBase = undefined;
-      }
-
-      engine = await createWorker(langsParam, OEM.LSTM_ONLY, {
+      // Always a plain string — see the header comment for why an array of
+      // `{ code, data }` objects must never be built here. Every component of
+      // `options.lang` is guaranteed to already be in tesseract's own cache by
+      // the time this worker is spawned (`runOcr.ts` seeds it, from a verified
+      // download or an uploaded copy, before ever leasing this worker), so no
+      // `langPath` is supplied either: the normal cache-hit path in tesseract's
+      // own loader is what actually serves the bytes, with no fetch involved.
+      engine = await createWorker(options.lang, OEM.LSTM_ONLY, {
         workerPath: WORKER_PATH,
         corePath: CORE_PATH,
-        langPath: modelBase,
         // tesseract.js defaults to spawning its worker from a `blob:` URL that
         // does nothing but `importScripts(workerPath)` — a level of
         // indirection meant to dodge CORS on a cross-origin `workerPath` in a

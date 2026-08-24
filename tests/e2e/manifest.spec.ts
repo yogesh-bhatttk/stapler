@@ -30,12 +30,26 @@ test.describe('manifest', () => {
     expect(manifest.background.type).toBe('module');
   });
 
-  test('forbids remote code in its CSP', () => {
+  test('forbids remote code in its CSP, allowing only the one pinned model-download host', () => {
+    // OCR-01 and RED-08 are documented exceptions to zero-network: each fetches
+    // one pinned host, once, on explicit consent (CLAUDE.md invariant #1). The
+    // CSP's `connect-src` is where that host has to be named, so this asserts
+    // the allowance is exactly that one host — not merely that *some* `https:`
+    // showed up, which an unrelated CSP change could satisfy without anyone
+    // meaning to add a fetchable remote host to the extension.
     const csp: string = manifest.content_security_policy.extension_pages;
     expect(csp).toContain("script-src 'self'");
-    expect(csp).not.toMatch(/https?:/);
     expect(csp).not.toContain("'unsafe-eval'");
     expect(csp).not.toContain("'unsafe-inline'");
+
+    const connectSrcMatch = csp.match(/connect-src\s+([^;]+);/);
+    expect(connectSrcMatch).not.toBeNull();
+    const connectSrcHosts = connectSrcMatch![1].trim().split(/\s+/);
+    expect(connectSrcHosts).toEqual(["'self'", 'https://cdn.jsdelivr.net']);
+
+    // No other directive may name a remote host at all.
+    const withoutConnectSrc = csp.replace(/connect-src\s+[^;]+;/, '');
+    expect(withoutConnectSrc).not.toMatch(/https?:/);
   });
 
   test('ships every icon size the store requires, at real dimensions', () => {
