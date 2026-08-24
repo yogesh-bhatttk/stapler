@@ -155,7 +155,16 @@ export function openDocument({ data, password }: OpenOptions) {
     FilterFactory: NoopFilterFactory,
     // Rendering happens on an OffscreenCanvas; there is no document to install
     // @font-face rules into, so glyphs are drawn as paths.
-    disableFontFace: true
+    disableFontFace: true,
+    // `PDFWorker#initialize` reads `window.location` to decide whether it can
+    // spin up its own nested worker; `window` does not exist here, so that
+    // always throws, is swallowed, and pdf.js logs "Setting up fake worker."
+    // once and quietly reuses this thread instead (a real nested worker would
+    // just double the thread/memory cost for no benefit — this thread is
+    // already off the main thread). The warning is cosmetic, not a signal
+    // this ever fails to open a document, so it is the one thing silenced;
+    // actual failures still throw and are unaffected by verbosity.
+    verbosity: pdfjsLib.VerbosityLevel.ERRORS
   });
 }
 
