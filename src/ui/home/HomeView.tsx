@@ -8,7 +8,7 @@ import { translate } from '../../core/i18n';
  */
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { useLocation } from 'wouter-preact';
-import { Clock, Info, X } from 'lucide-preact';
+import { ChevronDown, Clock, Info, X } from 'lucide-preact';
 import { TOOLS, groupedTools, toolRoute } from '../../core/tools';
 import { importFiles } from '../../core/import';
 import { addDocument, makePageRefs } from '../../core/store';
@@ -32,7 +32,20 @@ export function HomeView() {
   const [, setLocation] = useLocation();
   const [query, setQuery] = useState('');
   const [recents, setRecents] = useState<RecentEntry[]>([]);
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
   const { requestOptions, node } = useImageImportOptions();
+
+  const toggleSection = (name: string) => {
+    setCollapsedSections(prev => {
+      const next = new Set(prev);
+      if (next.has(name)) {
+        next.delete(name);
+      } else {
+        next.add(name);
+      }
+      return next;
+    });
+  };
 
   useEffect(() => {
     void platform.restoreHandles().then(setRecents);
@@ -116,24 +129,41 @@ export function HomeView() {
             </p>
           )}
 
-          {groups.map(({ group, tools }) => (
-            <div className={styles.section} key={group}>
-              <h2 className={styles.sectionTitle}>{group}</h2>
-              <ul className={styles.toolGrid}>
-                {tools.map(tool => (
-                  <li key={tool.id}>
-                    <a className={styles.tool} href={`#${toolRoute(tool.id)}`}>
-                      <ToolIcon name={tool.icon} size={18} />
-                      <span className={styles.toolBody}>
-                        <span>{tool.title}</span>
-                        <span className={styles.toolSummary}>{tool.summary}</span>
-                      </span>
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ))}
+          {groups.map(({ group, tools }) => {
+            const isCollapsed = collapsedSections.has(group);
+            const sectionId = `home-section-${group}`;
+            return (
+              <div className={styles.section} key={group}>
+                <button
+                  type="button"
+                  className={`${styles.sectionTitle} ${styles.sectionToggle}`}
+                  onClick={() => toggleSection(group)}
+                  aria-expanded={!isCollapsed}
+                  aria-controls={sectionId}
+                >
+                  <span>{group}</span>
+                  <ChevronDown
+                    size={14}
+                    aria-hidden="true"
+                    className={`${styles.sectionChevron} ${isCollapsed ? styles.sectionChevronCollapsed : ''}`}
+                  />
+                </button>
+                <ul className={styles.toolGrid} id={sectionId} hidden={isCollapsed}>
+                  {tools.map(tool => (
+                    <li key={tool.id}>
+                      <a className={styles.tool} href={`#${toolRoute(tool.id)}`}>
+                        <ToolIcon name={tool.icon} size={18} />
+                        <span className={styles.toolBody}>
+                          <span>{tool.title}</span>
+                          <span className={styles.toolSummary}>{tool.summary}</span>
+                        </span>
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            );
+          })}
         </div>
 
         {recents.length > 0 ? (

@@ -33,11 +33,37 @@
 }
 
 .sectionTitle {
-  font: var(--text-micro);
-  letter-spacing: var(--text-micro-ls);
-  text-transform: uppercase;
-  color: var(--ink-subtle);
+  font: var(--text-section);
+  letter-spacing: var(--text-section-ls);
+  color: var(--primary-text);
   margin: 0;
+}
+
+.sectionToggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: var(--space-xs) var(--space-xs);
+  background: none;
+  border: none;
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  transition: var(--transition-snappy);
+}
+
+.sectionToggle:hover {
+  background: var(--surface-hover);
+}
+
+.sectionChevron {
+  flex-shrink: 0;
+  color: var(--ink-subtle);
+  transition: transform var(--dur-fast) var(--ease-snappy);
+}
+
+.sectionChevronCollapsed {
+  transform: rotate(-90deg);
 }
 
 .toolGrid {
@@ -47,6 +73,13 @@
   list-style: none;
   margin: 0;
   padding: 0;
+}
+
+/* A plain `display: grid` on .toolGrid outranks the UA's `[hidden] { display:
+   none }` (author beats user-agent regardless of specificity), so the toggle
+   button's `hidden` attribute did nothing without this explicit override. */
+.toolGrid[hidden] {
+  display: none;
 }
 
 .tool {

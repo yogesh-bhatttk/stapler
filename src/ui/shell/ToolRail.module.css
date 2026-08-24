@@ -20,12 +20,34 @@
 }
 
 .railHeading {
-  font: var(--text-micro);
-  letter-spacing: var(--text-micro-ls);
-  color: var(--ink-subtle);
-  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  font: var(--text-section);
+  letter-spacing: var(--text-section-ls);
+  color: var(--primary-text);
   margin: 0;
-  padding: 0 var(--space-xs);
+  padding: var(--space-xs) var(--space-xs);
+  background: none;
+  border: none;
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  transition: var(--transition-snappy);
+}
+
+.railHeading:hover {
+  background: var(--surface-hover);
+}
+
+.railHeadingChevron {
+  flex-shrink: 0;
+  color: var(--ink-subtle);
+  transition: transform var(--dur-fast) var(--ease-snappy);
+}
+
+.railHeadingChevronCollapsed {
+  transform: rotate(-90deg);
 }
 
 .railList {
@@ -35,6 +57,13 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+/* A plain `display: flex` on .railList outranks the UA's `[hidden] { display:
+   none }` (author beats user-agent regardless of specificity), so the toggle
+   button's `hidden` attribute did nothing without this explicit override. */
+.railList[hidden] {
+  display: none;
 }
 
 .railItem {
@@ -59,10 +88,16 @@
 }
 
 .railItem.active {
-  background: var(--surface-active);
-  color: var(--ink);
+  background: var(--surface-3);
+  color: var(--primary-text);
   font: var(--text-body-strong);
   letter-spacing: var(--text-body-strong-ls);
+  box-shadow: inset 2px 0 0 var(--primary);
+}
+
+.railItem.active:hover {
+  background: var(--surface-4);
+  color: var(--primary-text);
 }
 
 .railLabel {
@@ -87,5 +122,11 @@
     width: var(--control-h);
     justify-content: center;
     padding: 0;
+  }
+  /* The heading button that toggles a group is hidden here, so there is no way
+     to re-expand a group collapsed at wider widths — always show every group's
+     icons in icon-only mode regardless of collapse state. */
+  .railList[hidden] {
+    display: flex;
   }
 }
