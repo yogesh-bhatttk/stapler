@@ -201,7 +201,7 @@ async function importImages(
         pageSizes: info.pageSizes
       };
       await writeSourceBytes(id, bytes);
-      registerSource(source);
+      registerSource(source, files);
       return {
         originalFile: files[0],
         source,

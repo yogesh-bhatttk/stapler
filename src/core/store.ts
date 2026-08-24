@@ -87,6 +87,23 @@ export const documents = signal<StaplerDoc[]>([]);
  */
 export const sources = signal<Record<string, SourceDocument>>({});
 
+/**
+ * Original raw image File(s) behind a source, when it was built by importing
+ * image(s) directly rather than opening a PDF. Lets the standalone "Images to
+ * PDF" tool (CNV-01) offer to reuse an image the user already has open as a
+ * document instead of asking them to re-pick the same file from disk — the
+ * confusing alternative being a document that visibly holds the image while
+ * the tool insists none was added. Deliberately not a signal and never
+ * persisted: unlike `sources`, session recovery has no need to survive a
+ * reload with these, and a `File` handle is cheap to keep for the tab's
+ * lifetime.
+ */
+const sourceOriginalFiles = new Map<string, File[]>();
+
+export function getSourceOriginalFiles(sourceId: string): File[] | undefined {
+  return sourceOriginalFiles.get(sourceId);
+}
+
 export const activeDocId = signal<string | null>(null);
 export const selectedPageKeys = signal<Set<string>>(new Set());
 
@@ -111,8 +128,11 @@ export const activeSources = computed<SourceDocument[]>(() => {
   return order.map(id => sources.value[id]).filter((s): s is SourceDocument => Boolean(s));
 });
 
-export function registerSource(source: SourceDocument): void {
+export function registerSource(source: SourceDocument, originalFiles?: File[]): void {
   sources.value = { ...sources.value, [source.id]: source };
+  if (originalFiles && originalFiles.length > 0) {
+    sourceOriginalFiles.set(source.id, originalFiles);
+  }
 }
 
 /* ---------------- source reference counting ---------------- */
@@ -184,6 +204,7 @@ export function releaseSourceIfUnused(sourceId: string): void {
   const rest = { ...sources.value };
   delete rest[sourceId];
   sources.value = rest;
+  sourceOriginalFiles.delete(sourceId);
   deleteSourceBytes(sourceId).catch(() => {});
 }
 
@@ -252,6 +273,7 @@ export function closeDocument(id: string): void {
     if (stillUsed.has(key)) {
       kept[key] = value;
     } else {
+      sourceOriginalFiles.delete(key);
       deleteSourceBytes(key).catch(() => {});
     }
   }

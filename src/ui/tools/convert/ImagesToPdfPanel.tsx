@@ -10,6 +10,7 @@ import { platform } from '../../../platform/current';
 import { IMAGES_ONLY } from '../../../platform/index';
 import { isSupportedImage } from '../../../core/image';
 import { notify } from '../../../core/notify';
+import { activeDoc, activeSources, getSourceOriginalFiles } from '../../../core/store';
 import { Button } from '../../components/Button';
 import { IconButton } from '../../components/IconButton';
 import { Field, RadioGroup, Select, NumberStepper } from '../../components/Field';
@@ -20,6 +21,25 @@ import { useTranslation } from '../../../core/i18n';
 export function ImagesToPdfPanel() {
   const t = useTranslation();
   const settings = imagesToPdfSettings.value;
+  const doc = activeDoc.value;
+  // The image(s) behind the document currently open in the canvas, if it was
+  // built by importing image file(s) directly rather than opening a PDF.
+  // Surfacing these lets the tool actually use the picture the user can see
+  // on screen instead of making them re-pick the same file from disk — the
+  // alternative is a document that visibly holds the image while this panel
+  // insists none was added, which is exactly the confusing state this closes.
+  const openDocFiles = doc
+    ? activeSources.value.flatMap(s => getSourceOriginalFiles(s.id) ?? [])
+    : [];
+  const openDocFilesAvailable =
+    openDocFiles.length > 0 && !openDocFiles.every(file => settings.files.includes(file));
+
+  const useOpenDocumentImages = () => {
+    imagesToPdfSettings.value = {
+      ...settings,
+      files: [...settings.files, ...openDocFiles.filter(file => !settings.files.includes(file))]
+    };
+  };
 
   const addImages = async () => {
     const opened = await platform.openFiles({ multiple: true, accept: IMAGES_ONLY });
@@ -53,6 +73,23 @@ export function ImagesToPdfPanel() {
 
   return (
     <>
+      {openDocFilesAvailable && doc && (
+        <div className={`${panelStyles.note} ${panelStyles.noteInfo} ${panelStyles.section}`}>
+          <span>
+            {t(
+              '“{name}” is already open with {count} image(s) — this tool never reads the canvas, so add them here to build a PDF from them.',
+              {
+                name: doc.name,
+                count: openDocFiles.length
+              }
+            )}
+          </span>
+          <Button variant="secondary" size="compact" onClick={useOpenDocumentImages}>
+            {t('Use the image(s) from “{name}”', { name: doc.name })}
+          </Button>
+        </div>
+      )}
+
       <Button variant="secondary" icon={Plus} onClick={addImages}>
         {t('Add images')}
       </Button>
