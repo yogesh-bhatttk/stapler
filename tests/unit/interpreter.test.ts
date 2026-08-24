@@ -180,12 +180,226 @@ describe('text width no longer a 0.6em byte count (§1, medium)', () => {
   it('subtracts TJ kerning from the advance', () => {
     const font: FontInfo = { twoByte: false, defaultWidth: 1000 };
     const region: Rect[] = [{ x: 95, y: 0, width: 20, height: 20 }];
-    const kerned = filterText('BT /F1 10 Tf [(ABCDEFGHIJ) 50000] TJ ET\n', region, () => font);
+    // The kern that moves glyphs is the one *before* them: 10 glyphs at 10pt
+    // land on 0..100, whose last one reaches x=95, but a 50000/1000 em leftward
+    // pull ahead of the string puts the whole run on -500..-400, clear of the
+    // region — so the operator survives byte for byte.
+    const kerned = filterText('BT /F1 10 Tf [50000 (ABCDEFGHIJ)] TJ ET\n', region, () => font);
+    expect(kerned.text).toContain('[ 50000 (ABCDEFGHIJ) ] TJ');
+
+    // Unkerned, the region covers the tenth glyph and nothing else, so that one
+    // glyph goes and the other nine stay — the granularity the block below is
+    // about. Before RED-02's glyph-level split this dropped all ten.
     const plain = filterText('BT /F1 10 Tf [(ABCDEFGHIJ)] TJ ET\n', region, () => font);
-    // 10 glyphs = 100pt reaches x=95; a 50000/1000 em leftward kern pulls the
-    // measured end back to 0pt, so it no longer does.
-    expect(plain.text).not.toContain('TJ');
-    expect(kerned.text).toContain('TJ');
+    expect(plain.text).not.toContain('(ABCDEFGHIJ)');
+    expect(plain.text).toContain('<414243444546474849>');
+  });
+});
+
+/**
+ * RED-02 AC3 — a mark over part of a run takes that part, not the run.
+ *
+ * Nearly every PDF producer typesets a whole line as one `Tj`, or as one
+ * justified `TJ` array. Removing the operator a mark intersects therefore
+ * deleted the whole line whenever the user marked one field inside it: the
+ * marked string did disappear (AC1), but so did everything typeset beside it,
+ * which AC3 forbids. Every assertion here is on the emitted operator bytes.
+ */
+describe('glyph-level splitting of a partly-marked run (RED-02 AC3)', () => {
+  /** 1000/1000 em at 10pt, so glyph `i` of a run at the origin spans 10i..10i+10. */
+  const font: FontInfo = { twoByte: false, defaultWidth: 1000 };
+  const hex = (s: string) =>
+    `<${[...s].map(c => c.charCodeAt(0).toString(16).padStart(2, '0').toUpperCase()).join('')}>`;
+
+  it('keeps the text either side of a mark in the middle of a Tj', () => {
+    // "AB" 0..20, "CD" 20..40 (marked), "EF" 40..60.
+    const region: Rect[] = [{ x: 21, y: 0, width: 18, height: 20 }];
+    const { text } = filterText('BT /F1 10 Tf (ABCDEF) Tj ET\n', region, () => font);
+
+    expect(text).not.toContain('(ABCDEF)');
+    expect(text).toContain(hex('AB'));
+    expect(text).toContain(hex('EF'));
+    // The marked codes appear nowhere — not as a literal, not as hex, not in a
+    // second show operator. What replaced them is a bare displacement.
+    expect(text).not.toContain(hex('CD'));
+    expect(text).not.toContain('43');
+    // 2 glyphs x 10pt of advance, written as -1000/1000 em x 10pt.
+    expect(text).toContain('[ <4142> -2000 <4546> ] TJ');
+  });
+
+  it('re-emits the surviving glyphs in reading order', () => {
+    // Two marks, so the run splits into three surviving stretches.
+    const regions: Rect[] = [
+      { x: 11, y: 0, width: 8, height: 20 },
+      { x: 41, y: 0, width: 8, height: 20 }
+    ];
+    const { text } = filterText('BT /F1 10 Tf (ABCDEF) Tj ET\n', regions, () => font);
+    expect(text).toContain(`[ ${hex('A')} -1000 ${hex('CD')} -1000 ${hex('F')} ] TJ`);
+  });
+
+  it('splits one string inside a TJ array and leaves the others alone', () => {
+    // The justified-paragraph shape: several strings with kerns between them.
+    // "Name" 0..40, kern, "SSN" 45..75 with the mark over "SN", kern, "Dept".
+    const region: Rect[] = [{ x: 56, y: 0, width: 18, height: 20 }];
+    const { text } = filterText(
+      'BT /F1 10 Tf [(Name) -500 (SSN) -500 (Dept)] TJ ET\n',
+      region,
+      () => font
+    );
+    expect(text).toContain(hex('Name'));
+    expect(text).toContain(hex('Dept'));
+    expect(text).toContain(hex('S'));
+    // Both kerns are still there, in place, so the surviving strings keep their
+    // positions rather than sliding into the hole.
+    expect(text.match(/-500/g)).toHaveLength(2);
+    expect(text).not.toContain('(SSN)');
+    expect(text).not.toContain(hex('SN'));
+  });
+
+  it('leaves a run a mark does not reach byte-identical', () => {
+    const region: Rect[] = [{ x: 500, y: 0, width: 20, height: 20 }];
+    const { text } = filterText('BT /F1 10 Tf (ABCDEF) Tj ET\n', region, () => font);
+    expect(text).toContain('(ABCDEF) Tj');
+  });
+
+  it('still removes the whole operator when every glyph is marked', () => {
+    const region: Rect[] = [{ x: -5, y: -5, width: 200, height: 30 }];
+    const { text } = filterText('BT /F1 10 Tf (ABCDEF) Tj ET\n', region, () => font);
+    // No show operator of any kind survives — RED-01's PASS-level removal.
+    expect(text).not.toContain('Tj');
+    expect(text).not.toContain('TJ');
+    expect(text.split('\n').filter(Boolean)).toEqual(['BT', '/F1 10 Tf', 'ET']);
+  });
+
+  it('splits a two-byte CID run on glyph boundaries, never mid-code', () => {
+    const cid: FontInfo = { twoByte: true, defaultWidth: 1000 };
+    // Five CID glyphs at 10pt: 0..10, 10..20, 20..30 (marked), 30..40, 40..50.
+    const region: Rect[] = [{ x: 21, y: 0, width: 8, height: 20 }];
+    const { text } = filterText(
+      'BT /F1 10 Tf <00410042004300440045> Tj ET\n',
+      region,
+      () => cid
+    );
+    expect(text).toContain('[ <00410042> -1000 <00440045> ] TJ');
+  });
+
+  it("keeps the line move of a ' whose glyphs are all removed", () => {
+    // `'` is `T* … Tj`. Dropping the statement dropped the line move with it, so
+    // every following line of *kept* text drew one leading too high.
+    // `'` moves to y = 300 - 12 = 288 and shows six glyphs on 0..60; `(KEPT)`
+    // follows on the same line from 60. The mark covers the first six and stops
+    // short of the seventh.
+    const { text } = filterText(
+      "BT /F1 10 Tf 12 TL 0 300 Td (SECRET) ' (KEPT) Tj ET\n",
+      [{ x: -5, y: 285, width: 60, height: 20 }],
+      () => font
+    );
+    expect(text).toContain('T*');
+    expect(text).not.toContain('(SECRET)');
+    expect(text).toContain('(KEPT) Tj');
+  });
+
+  it('re-emits the Tw/Tc a fully-removed " had set', () => {
+    const region: Rect[] = [{ x: -5, y: -5, width: 400, height: 400 }];
+    const { text } = filterText('BT /F1 10 Tf 3 1 (SECRET) " ET\n', region, () => font);
+    expect(text).not.toContain('(SECRET)');
+    expect(text).toContain('3 Tw');
+    expect(text).toContain('1 Tc');
+    expect(text).toContain('T*');
+  });
+
+  it('accounts for the removed glyphs so following runs keep their position', () => {
+    // Two shows on one line: mark the middle of the first. The second must land
+    // where it did before, which means the replacement's total advance has to
+    // equal the original's — otherwise it slides left into the hole.
+    const region: Rect[] = [{ x: 21, y: 0, width: 18, height: 20 }];
+    const marked = filterText(
+      'BT /F1 10 Tf (ABCDEF) Tj (GH) Tj ET\n',
+      region,
+      () => font
+    );
+    // Sum of the emitted array: 2 glyphs kept, -2000/1000 em x 10pt, 2 kept = 60pt.
+    expect(marked.text).toContain('[ <4142> -2000 <4546> ] TJ');
+    expect(marked.text).toContain('(GH) Tj');
+    // And the interpreter's own cursor agrees: the second show is untouched, so
+    // its box was measured from 60pt, not from 40pt.
+    const shifted = filterText(
+      'BT /F1 10 Tf (ABCDEF) Tj (GH) Tj ET\n',
+      [{ x: 61, y: 0, width: 8, height: 20 }],
+      () => font
+    );
+    expect(shifted.text).toContain('(ABCDEF) Tj');
+    expect(shifted.text).not.toContain('(GH)');
+  });
+});
+
+/**
+ * RED-02 defect 2 — a font with no `/Widths` was measured at a flat 0.6 em per
+ * glyph, which is narrower than the run a viewer draws, so a mark over the tail
+ * of such a run intersected nothing and RED-02's own pass left the marked
+ * glyphs in the file. (RED-03's independent re-scan blocked the save, so this
+ * was never a live leak; the point of the fix is that RED-02 catches it itself.)
+ */
+describe('coverage boxes are never narrower than the glyphs (RED-02)', () => {
+  const SOURCE = 'BT /F1 10 Tf (Name Ada SSN 123456789) Tj ET\n';
+  // 22 glyphs at 10pt. The flat 0.6 em fallback measures the run as 0..132, but
+  // a viewer drawing it in a real face reaches past that — so a mark at 150..175
+  // sits over glyphs the estimate says are not there.
+  const tailMark: Rect[] = [{ x: 150, y: 0, width: 25, height: 20 }];
+
+  it('reaches a mark past the end of the flat metric estimate', () => {
+    // No widths and nothing to bound them: the coverage box runs to one full em
+    // per glyph (0..220) and finds the mark. This is the case that used to slip
+    // past RED-02 entirely and reach RED-03 as a blocked save.
+    const { text } = filterText(SOURCE, tailMark, () => ({ twoByte: false }));
+    expect(text).not.toContain('(Name Ada SSN 123456789)');
+    expect(text).not.toContain('4E616D65');
+  });
+
+  it('would have missed that mark with no widening — the control', () => {
+    // The same run, told that 0.6 em really is the widest glyph in the font.
+    // Coverage then equals the metric estimate, the box stops at 132, and the
+    // mark is missed. This is what the fallback used to do unconditionally.
+    const narrow: FontInfo = { twoByte: false, maxGlyphWidth: 600 };
+    const { text } = filterText(SOURCE, tailMark, () => narrow);
+    expect(text).toContain('(Name Ada SSN 123456789) Tj');
+  });
+
+  it('uses a bound the font declares in preference to the flat one', () => {
+    // What a /FontBBox of [-x, y, 1100, z] yields: 22 x 11pt = 242, past the mark.
+    const bounded: FontInfo = { twoByte: false, maxGlyphWidth: 1100 };
+    const { text } = filterText(SOURCE, tailMark, () => bounded);
+    expect(text).not.toContain('(Name Ada SSN 123456789)');
+  });
+
+  it('keeps the box tight when the font declares every width', () => {
+    // The regression guard for the widening: a font with real per-code widths
+    // must not have its coverage box inflated, or a mark sitting *beside* a run
+    // would start eating into it.
+    const widths = new Map<number, number>();
+    for (let code = 32; code < 127; code++) widths.set(code, 600);
+    const exact: FontInfo = { twoByte: false, widths, maxGlyphWidth: 1100 };
+    const { text } = filterText(SOURCE, tailMark, () => exact);
+    expect(text).toContain('(Name Ada SSN 123456789) Tj');
+  });
+
+  it('never splits a run whose widths were guessed', () => {
+    // A guessed cursor can sit either side of the glyph it describes, so no cut
+    // inside the run can be trusted to fall between the marked glyphs and the
+    // kept ones. The whole operator goes instead: over-removal is recoverable
+    // from the original, half a redacted field in the output is not.
+    const midMark: Rect[] = [{ x: 60, y: 0, width: 20, height: 20 }];
+    const guessed = filterText(SOURCE, midMark, () => ({ twoByte: false }));
+    expect(guessed.text).not.toContain('4E616D65');
+    expect(guessed.text).not.toContain('Tj');
+    expect(guessed.text).not.toContain('TJ');
+
+    // The same mark on the same run, with the widths declared, does split.
+    const widths = new Map<number, number>();
+    for (let code = 32; code < 127; code++) widths.set(code, 600);
+    const declared = filterText(SOURCE, midMark, () => ({ twoByte: false, widths }));
+    expect(declared.text).toContain('TJ');
+    expect(declared.text).toContain('4E616D65');
   });
 });
 

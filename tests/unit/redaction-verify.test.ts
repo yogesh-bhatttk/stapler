@@ -95,7 +95,7 @@ vi.mock('../../src/core/workers', () => ({
 
 const { regionPixelResidue, renderWorkerImpl } =
   await import('../../src/core/workers/render.worker');
-const { applyRedactions, residueFailure, MAX_RESIDUE_FRACTION } =
+const { applyRedactions, residueFailure, MAX_RESIDUE_FRACTION, MAX_EDGE_FRACTION } =
   await import('../../src/core/operations');
 
 const FILL = [
@@ -192,6 +192,72 @@ describe('regionPixelResidue (RED-03, the measurement)', () => {
     const residue = regionPixelResidue(data, width, height);
     expect(residue.fraction).toBeGreaterThan(MAX_RESIDUE_FRACTION);
     expect(residueFailure(residue)).not.toBeNull();
+  });
+
+  /* ---------------------------------------------------------------- *
+   * The fill-agnostic half: is anything *there*, whatever colour the
+   * mark was filled with. Distance from `DOC_REDACT_RGB` alone answers
+   * "is this the colour we painted", which is a different question and
+   * misses content the fill never covered.
+   * ---------------------------------------------------------------- */
+
+  it('reads a correct fill as one flat colour with no interior edges', () => {
+    const residue = regionPixelResidue(filledRegion(60, 40), 60, 40);
+    expect(residue.content.sampled).toBe(residue.sampled);
+    expect(residue.content.offDominant).toBe(0);
+    expect(residue.content.offDominantFraction).toBe(0);
+    // The only hard boundary in a filled mark is the mark's own outline, and
+    // that is outside the sampled interior.
+    expect(residue.content.edges).toBe(0);
+  });
+
+  it('catches a hairline that squeaks under the area budget, by its edges', () => {
+    // The failure the area threshold cannot see: a surviving rule or glyph stem
+    // one pixel wide covers ~1% of the mark, under `MAX_RESIDUE_FRACTION`, so
+    // the fill reading passes it. It is almost entirely edge, so the edge
+    // reading does not.
+    const width = 100;
+    const height = 60;
+    const data = filledRegion(width, height);
+    paint(data, width, { x: 50, y: 5, w: 1, h: height - 10 }, [255, 255, 255, 255]);
+
+    const residue = regionPixelResidue(data, width, height);
+    expect(residue.fraction).toBeLessThanOrEqual(MAX_RESIDUE_FRACTION);
+    expect(residue.content.edges).toBeGreaterThan(12);
+    expect(residue.content.edgeFraction).toBeGreaterThan(MAX_EDGE_FRACTION);
+    expect(residueFailure(residue)).toMatch(/hard edge/);
+  });
+
+  it('flags a photograph left in the mark: no one colour covers it', () => {
+    const width = 40;
+    const height = 40;
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let p = 0; p < width * height; p++) {
+      // A smooth gradient — no edges anywhere, and no dominant colour either.
+      data[p * 4] = (p * 7) % 256;
+      data[p * 4 + 1] = (p * 11) % 256;
+      data[p * 4 + 2] = (p * 13) % 256;
+      data[p * 4 + 3] = 255;
+    }
+    const residue = regionPixelResidue(data, width, height);
+    expect(residue.content.offDominantFraction).toBeGreaterThan(MAX_RESIDUE_FRACTION);
+    expect(residueFailure(residue)).not.toBeNull();
+  });
+
+  it('does not fail a flat mark drawn in some other colour on uniformity alone', () => {
+    // Independence, stated as a test: a mark filled white is *not* the redaction
+    // colour (the fill reading says so, loudly) but it does hold one flat colour
+    // and no edges, so the content reading has nothing to report. Were the two
+    // measuring the same thing, this would double-report.
+    const width = 60;
+    const height = 40;
+    const data = filledRegion(width, height);
+    paint(data, width, { x: 0, y: 0, w: width, h: height }, [255, 255, 255, 255]);
+    const residue = regionPixelResidue(data, width, height);
+    expect(residue.fraction).toBe(1);
+    expect(residue.content.offDominantFraction).toBe(0);
+    expect(residue.content.edges).toBe(0);
+    expect(residueFailure(residue)).toMatch(/not the redaction fill/);
   });
 
   it('reports nothing sampled for a sub-pixel region rather than failing it', () => {
@@ -303,8 +369,20 @@ function wireStubs(pixels: { checkRegionPixels: any }) {
 }
 
 describe('applyRedactions blocks on the pixel half (RED-03)', () => {
-  const dirty = { sampled: 1000, offFill: 90, fraction: 0.09, maxDeviation: 240 };
-  const clean = { sampled: 1000, offFill: 3, fraction: 0.003, maxDeviation: 21 };
+  const dirty = {
+    sampled: 1000,
+    offFill: 90,
+    fraction: 0.09,
+    maxDeviation: 240,
+    content: { sampled: 1000, offDominant: 90, offDominantFraction: 0.09, edges: 40, edgeFraction: 0.04 }
+  };
+  const clean = {
+    sampled: 1000,
+    offFill: 3,
+    fraction: 0.003,
+    maxDeviation: 21,
+    content: { sampled: 1000, offDominant: 0, offDominantFraction: 0, edges: 0, edgeFraction: 0 }
+  };
 
   it('fails verification when the region does not render blank, though no text remains', async () => {
     wireStubs({

@@ -16,7 +16,12 @@ import { DOC_PAGE_WHITE, DOC_REDACT_RGB } from '../doc-colors';
 import { blankCoverageLimit, inkCoverage, layoutText, toRgba, type TextRun } from '../text-layout';
 import type { RedactionRegion } from './process.worker';
 import { locatePatterns, type PatternCategory } from '../patterns';
-import { paintRectsBlack, type UnitRect } from '../pdf/image-redaction';
+import {
+  measureRectsBlacked,
+  paintRectsBlack,
+  type BlackoutResidue,
+  type UnitRect
+} from '../pdf/image-redaction';
 import { findAcrossRuns } from '../pdf/text-search';
 import { pixelateRects, type BlurStrength } from '../faceblur/blur';
 import {
@@ -108,6 +113,36 @@ export interface RegionRaster {
 }
 
 /**
+ * RED-03 — is anything still *there*, whatever colour the mark was filled with?
+ *
+ * Distance from the redaction fill (below) can only answer "is this the colour we
+ * painted". It is blind in both directions: a fill drawn in any other colour
+ * reads as 100% residue on a perfectly good redaction, and — the reason this
+ * exists — content that survives in a region whose fill never covered it is only
+ * caught when it happens to be far from *that one colour*.
+ *
+ * So the region is also graded against itself: the colour covering most of it is
+ * measured from its own pixels, and anything that departs from that colour, or
+ * sits on a hard edge, is content. A solid fill has no interior edges at any DPI;
+ * a glyph, a rule, a logo or a photograph is almost entirely edges.
+ */
+export interface RegionContentSignal {
+  /** Pixels examined — the same set the fill grading below sampled. */
+  sampled: number;
+  /**
+   * Sampled pixels that differ from the region's own dominant colour, plus every
+   * pixel nothing was painted into at all (whatever is under it shows through).
+   */
+  offDominant: number;
+  /** `offDominant / sampled`, 0 when nothing could be sampled. */
+  offDominantFraction: number;
+  /** Sampled pixels sitting on a high-contrast edge — a stroke, rule, or outline. */
+  edges: number;
+  /** `edges / sampled`, 0 when nothing could be sampled. */
+  edgeFraction: number;
+}
+
+/**
  * RED-03 — what a rendered redaction region actually contains, in pixels.
  *
  * The text-based half of verification can only prove there is no *extractable
@@ -125,6 +160,26 @@ export interface RegionPixelResidue {
   fraction: number;
   /** Largest per-channel distance from the fill seen on any sampled pixel. */
   maxDeviation: number;
+  /** Fill-colour-agnostic reading of the same pixels. See {@link RegionContentSignal}. */
+  content: RegionContentSignal;
+}
+
+/**
+ * RED-03 — one image XObject still drawn under a mark in the *output*, graded on
+ * whether the pixels the mark covers were really destroyed.
+ *
+ * See {@link BlackoutResidue}: this is the only half of the gate that can see
+ * *underneath* the cover rectangle, and the only one that works at all on a
+ * redaction over a photograph or a scan, where there is no text layer to
+ * re-extract.
+ */
+export interface RedactedImageInspection {
+  pageIndex: number;
+  objectNumber: number;
+  /** Absent when the image could not be read — `reason` then says why. */
+  residue?: BlackoutResidue;
+  /** Set when the image could not be decoded, so the caller can fail closed. */
+  reason?: string;
 }
 
 export interface RenderJob {
@@ -199,19 +254,37 @@ export interface RenderJob {
   ): Promise<ExtractedImage[]>;
   checkRegionText(
     handle: string,
-    regions: RedactionRegion[]
+    regions: RedactionRegion[],
+    job?: JobHandle
   ): Promise<{ region: RedactionRegion; foundText: string }[]>;
   /**
-   * RED-03's pixel half — renders each region and reports how far it is from the
-   * redaction fill. Kept in the worker (rather than handing `renderRegionPng`'s
-   * PNG back and decoding it on the main thread) because decoding and scanning a
-   * region per mark is exactly the >50ms main-thread work the NFRs forbid.
+   * RED-03's pixel half — renders each region and grades it, both against the
+   * redaction fill and against itself (see {@link RegionContentSignal}). Kept in
+   * the worker (rather than handing `renderRegionPng`'s PNG back and decoding it
+   * on the main thread) because decoding and scanning a region per mark is
+   * exactly the >50ms main-thread work the NFRs forbid.
    */
   checkRegionPixels(
     handle: string,
     regions: RedactionRegion[],
     job?: JobHandle
   ): Promise<{ region: RedactionRegion; residue: RegionPixelResidue }[]>;
+  /**
+   * RED-03 — reads the *embedded* pixels of every image a mark still covers in
+   * the output and reports what is left there.
+   *
+   * `requests` is `planImageRedactions` run against the **output** bytes: the
+   * same plan that told the redaction which image pixels to destroy, so this asks
+   * the narrow question "did that actually happen", against the image stream
+   * rather than the composited page. Rendering cannot answer it — the cover
+   * rectangle is drawn over the image, so an untouched image and a destroyed one
+   * look identical from above.
+   */
+  inspectRedactedImages(
+    handle: string,
+    requests: { pageIndex: number; objectNumber: number; rects: UnitRect[] }[],
+    job?: JobHandle
+  ): Promise<RedactedImageInspection[]>;
   /**
    * RED-02 — destroys the covered pixels of an image a redaction mark only
    * partly overlaps, and hands back the re-encoded image.
@@ -732,6 +805,38 @@ const FILL_CHANNEL_TOLERANCE = 24;
  */
 const AA_INSET_FRACTION = 0.08;
 
+/**
+ * Side of the colour cube bucket the dominant colour is found in, out of 255.
+ *
+ * Coarse on purpose. The dominant colour has to survive the same rasteriser
+ * noise and JPEG ringing `FILL_CHANNEL_TOLERANCE` forgives, so a flat fill whose
+ * pixels jitter across a bucket boundary must still land in one bucket often
+ * enough to win it; the winner's own pixels are then averaged, so the coarseness
+ * costs no accuracy in the value itself.
+ */
+const DOMINANT_BUCKET = 32;
+
+/**
+ * Per-channel slack allowed against the region's *own* dominant colour, out of 255.
+ *
+ * Deliberately looser than `FILL_CHANNEL_TOLERANCE`: this reading exists to catch
+ * content, not to re-litigate the fill colour, and a false failure here would
+ * block a save on a correct redaction. Content a reader could recover is
+ * hundreds of levels away, not fifty.
+ */
+const UNIFORM_CHANNEL_TOLERANCE = 48;
+
+/**
+ * Per-channel step between neighbouring pixels that counts as an edge, out of 255.
+ *
+ * A solid fill has no interior edges at any resolution — the only hard boundary
+ * in a correctly redacted region is the mark's own outline, which the inset below
+ * has already trimmed away. Glyph strokes, rules, and logo outlines are almost
+ * entirely edge, which is what makes this readable even where the surviving
+ * content happens to sit close to the fill colour.
+ */
+const EDGE_CONTRAST_TOLERANCE = 64;
+
 /** Pixels trimmed from each edge before sampling. 0 when the region is tiny. */
 function regionInset(width: number, height: number): number {
   const shortest = Math.min(width, height);
@@ -743,7 +848,9 @@ function regionInset(width: number, height: number): number {
 }
 
 /**
- * Measures how far a rendered region is from the opaque redaction fill.
+ * Measures a rendered region twice over: how far it is from the opaque redaction
+ * fill, and — independently of what colour that fill is — whether it holds
+ * anything at all (see {@link RegionContentSignal}).
  *
  * Pure and exported so the grading can be tested against real pixel buffers
  * without a browser. Returns counts rather than a verdict: the threshold is the
@@ -786,40 +893,127 @@ export function regionPixelResidue(
         )
       : undefined;
 
-  const grade = (at: number) => {
-    const alpha = data[at + 3];
-    // A transparent pixel is *not* fill: nothing was painted there, so
-    // whatever is underneath in a viewer shows through.
-    const deviation =
-      alpha < 255 - FILL_CHANNEL_TOLERANCE
-        ? 255
-        : Math.max(
-            Math.abs(data[at] - fill[0]),
-            Math.abs(data[at + 1] - fill[1]),
-            Math.abs(data[at + 2] - fill[2])
-          );
+  /** Is this pixel one of the ones this mark is judged on? */
+  const inside = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) return false;
+    if (shape) return shape[y * width + x] === 1;
+    return x >= inset && y >= inset && x < width - inset && y < height - inset;
+  };
+
+  /** Every sampled pixel, once, in row order. */
+  const forEachSampled = (visit: (x: number, y: number, at: number) => void) => {
+    if (shape) {
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          if (shape[y * width + x] === 1) visit(x, y, (y * width + x) * 4);
+        }
+      }
+    } else {
+      for (let y = inset; y < height - inset; y++) {
+        for (let x = inset; x < width - inset; x++) {
+          visit(x, y, (y * width + x) * 4);
+        }
+      }
+    }
+  };
+
+  /** True where nothing was painted, so whatever is underneath shows through. */
+  const unpainted = (at: number) => data[at + 3] < 255 - FILL_CHANNEL_TOLERANCE;
+
+  // Pass 1 — distance from the fill, and a coarse colour histogram of everything
+  // that *was* painted, whose modal bucket becomes the dominant colour.
+  const buckets = Math.ceil(256 / DOMINANT_BUCKET);
+  const bins = buckets * buckets * buckets;
+  const binCount = new Uint32Array(bins);
+  const binSum = new Float64Array(bins * 3);
+
+  forEachSampled((_x, _y, at) => {
+    const deviation = unpainted(at)
+      ? 255
+      : Math.max(
+          Math.abs(data[at] - fill[0]),
+          Math.abs(data[at + 1] - fill[1]),
+          Math.abs(data[at + 2] - fill[2])
+        );
     sampled++;
     if (deviation > FILL_CHANNEL_TOLERANCE) offFill++;
     if (deviation > maxDeviation) maxDeviation = deviation;
-  };
 
-  if (shape) {
-    for (let p = 0; p < width * height; p++) {
-      if (shape[p] === 1) grade(p * 4);
-    }
-  } else {
-    for (let y = inset; y < height - inset; y++) {
-      for (let x = inset; x < width - inset; x++) {
-        grade((y * width + x) * 4);
-      }
-    }
+    if (unpainted(at)) return;
+    const bin =
+      (Math.floor(data[at] / DOMINANT_BUCKET) * buckets +
+        Math.floor(data[at + 1] / DOMINANT_BUCKET)) *
+        buckets +
+      Math.floor(data[at + 2] / DOMINANT_BUCKET);
+    binCount[bin]++;
+    binSum[bin * 3] += data[at];
+    binSum[bin * 3 + 1] += data[at + 1];
+    binSum[bin * 3 + 2] += data[at + 2];
+  });
+
+  let best = -1;
+  for (let bin = 0; bin < bins; bin++) {
+    if (best === -1 || binCount[bin] > binCount[best]) best = bin;
   }
+  // No painted pixel at all: nothing can be "the colour covering most of it", and
+  // every sampled pixel is content by definition.
+  const dominant =
+    best >= 0 && binCount[best] > 0
+      ? [
+          binSum[best * 3] / binCount[best],
+          binSum[best * 3 + 1] / binCount[best],
+          binSum[best * 3 + 2] / binCount[best]
+        ]
+      : null;
+
+  // Pass 2 — departure from that colour, and hard edges between neighbours. Both
+  // are read from the same sampled set, so a shaped mark judges its shape only.
+  let offDominant = 0;
+  let edges = 0;
+
+  const step = (at: number, otherAt: number) =>
+    Math.max(
+      Math.abs(data[at] - data[otherAt]),
+      Math.abs(data[at + 1] - data[otherAt + 1]),
+      Math.abs(data[at + 2] - data[otherAt + 2])
+    );
+
+  forEachSampled((x, y, at) => {
+    if (!dominant || unpainted(at)) {
+      offDominant++;
+    } else {
+      const away = Math.max(
+        Math.abs(data[at] - dominant[0]),
+        Math.abs(data[at + 1] - dominant[1]),
+        Math.abs(data[at + 2] - dominant[2])
+      );
+      if (away > UNIFORM_CHANNEL_TOLERANCE) offDominant++;
+    }
+
+    // Right and down only: every sampled neighbour pair is then visited once, and
+    // both pixels of a genuine edge still get counted (one from each side).
+    const right = inside(x + 1, y) ? (y * width + x + 1) * 4 : -1;
+    const down = inside(x, y + 1) ? ((y + 1) * width + x) * 4 : -1;
+    if (
+      (right >= 0 && step(at, right) > EDGE_CONTRAST_TOLERANCE) ||
+      (down >= 0 && step(at, down) > EDGE_CONTRAST_TOLERANCE)
+    ) {
+      edges++;
+    }
+  });
 
   return {
     sampled,
     offFill,
     fraction: sampled > 0 ? offFill / sampled : 0,
-    maxDeviation
+    maxDeviation,
+    content: {
+      sampled,
+      offDominant,
+      offDominantFraction: sampled > 0 ? offDominant / sampled : 0,
+      edges,
+      edgeFraction: sampled > 0 ? edges / sampled : 0
+    }
   };
 }
 
@@ -977,6 +1171,64 @@ const api: RenderJob = {
         });
         canvas.width = 0;
         canvas.height = 0;
+      } finally {
+        page.cleanup();
+      }
+    }
+    return out;
+  },
+
+  async inspectRedactedImages(handle, requests, job) {
+    if (requests.length === 0) return [];
+    const { doc } = entry(handle);
+
+    const byPage = new Map<number, typeof requests>();
+    for (const request of requests) {
+      const list = byPage.get(request.pageIndex);
+      if (list) list.push(request);
+      else byPage.set(request.pageIndex, [request]);
+    }
+
+    const out: RedactedImageInspection[] = [];
+    let done = 0;
+    for (const [pageIndex, pageRequests] of byPage) {
+      await checkpoint(
+        job,
+        done / byPage.size,
+        `Inspecting images on page ${pageIndex + 1} of ${doc.numPages}`
+      );
+      done++;
+      const page = await doc.getPage(pageIndex + 1);
+      try {
+        const wanted = new Map(pageRequests.map(r => [r.objectNumber, r.rects]));
+        const seen = new Set<number>();
+        for (const placement of imagePlacements(await page.getOperatorList())) {
+          if (seen.size === wanted.size) break;
+          const decoded = await decodeImage(page, placement.objId);
+          if (!decoded) continue;
+          const rects = wanted.get(decoded.objectNumber);
+          if (!rects || seen.has(decoded.objectNumber)) continue;
+          seen.add(decoded.objectNumber);
+          out.push({
+            pageIndex,
+            objectNumber: decoded.objectNumber,
+            residue: measureRectsBlacked(decoded, rects)
+          });
+        }
+        // An image the mark still covers that could not be read is the one case
+        // where "we could not look" and "the secret is still in there" are
+        // indistinguishable, so it is reported rather than omitted: the caller
+        // fails the region closed.
+        for (const request of pageRequests) {
+          if (seen.has(request.objectNumber)) continue;
+          out.push({
+            pageIndex,
+            objectNumber: request.objectNumber,
+            reason:
+              'pdf.js could not decode this image (JBIG2 and JPEG 2000 images have no decoder ' +
+              'here), so whether its covered pixels were destroyed cannot be checked.'
+          });
+        }
       } finally {
         page.cleanup();
       }
@@ -1591,11 +1843,17 @@ const api: RenderJob = {
     }
   },
 
-  async checkRegionText(handle, regions) {
+  async checkRegionText(handle, regions, job) {
     const { doc } = entry(handle);
     const results: { region: RedactionRegion; foundText: string }[] = [];
 
-    for (const region of regions) {
+    for (let i = 0; i < regions.length; i++) {
+      await checkpoint(
+        job,
+        i / Math.max(1, regions.length),
+        `Checking region ${i + 1} of ${regions.length}`
+      );
+      const region = regions[i];
       const page = await doc.getPage(region.pageIndex + 1);
       try {
         const viewport = page.getViewport({ scale: 1 });

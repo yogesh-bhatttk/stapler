@@ -34,9 +34,9 @@ const IPV6 = '2001:0db8:85a3:0000:0000:8a2e:0370:7334';
 /**
  * One instance of each pattern, plus prose that must produce no suggestions.
  *
- * Each sensitive value gets its own line because RED-02 removes the whole
- * text-showing operator a mark intersects — see the last test in this file,
- * which pins that behaviour down rather than leaving it implied.
+ * Each sensitive value gets its own line so the "accept one, leave the rest"
+ * test below has an unambiguous declined value to check per pattern kind; the
+ * last test in this file covers same-line, same-run precision directly.
  */
 const LINES = [
   'Case notes, revision 3.14.15, filed 2024-11-03 at 12:00:00.',
@@ -140,11 +140,10 @@ describe('RED-05 scanning a fixture', () => {
     }
   });
 
-  it('takes the whole show-text operator with it, which is RED-02 granularity', async () => {
-    // Documented, not hidden: content-stream redaction removes the text operator
-    // a mark intersects, so a declined value typeset in the *same* run as an
-    // accepted one goes too. Values on their own lines are unaffected, which is
-    // why the fixture above puts them there.
+  it('removes only the marked value from a shared run, leaving the rest of the line', async () => {
+    // RED-02 granularity: redaction now operates on the glyphs a mark actually
+    // covers, not the whole show-text operator it intersects — so a declined
+    // value typeset in the *same* run/line as an accepted one survives.
     const bytes = await pdfOf([`SSN ${SSN} and card ${CARD} on one line.`]);
     const { runs, w, h } = await runsOf(bytes);
     const ssn = locatePatterns(runs, w, h).filter(item => item.category === 'ssn');
@@ -156,6 +155,6 @@ describe('RED-05 scanning a fixture', () => {
     );
     const text = await textOf(output);
     expect(text).not.toContain(SSN);
-    expect(text).not.toContain(CARD);
+    expect(text.replace(/\s+/g, ' ')).toContain(CARD);
   });
 });

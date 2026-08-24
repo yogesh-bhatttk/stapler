@@ -21,7 +21,12 @@ import type {
   RedactedImageReplacements
 } from './workers/process.worker';
 import type { ProtectionSettings } from './pdf/encrypt';
-import type { PatternSuggestion, RegionPixelResidue, TextRegion } from './workers/render.worker';
+import type {
+  PatternSuggestion,
+  RedactedImageInspection,
+  RegionPixelResidue,
+  TextRegion
+} from './workers/render.worker';
 import type { ImageResultStat } from './compress-report';
 import {
   MEANINGFUL_SAVING,
@@ -944,8 +949,15 @@ export async function applyRedactions(
   // copied.
   output = await processWorker.lease(api => api.scrubMetadata(handOver(output), undefined, job));
 
-  options.onProgress?.(0.85, 'Verifying');
-  const verdicts = await verifyRedaction(output, regions);
+  // Verification is the last 15% of the bar and reports inside it region by
+  // region and page by page, so a long pass is not a frozen "Verifying" tick —
+  // and `signal` reaches every loop inside it, so it can be cancelled like any
+  // other stage.
+  const verdicts = await verifyRedaction(output, regions, {
+    signal: options.signal,
+    onProgress: (fraction, label) =>
+      options.onProgress?.(0.85 + 0.15 * Math.min(1, Math.max(0, fraction ?? 0)), label)
+  });
 
   // No `rasterizedPages`: this pipeline is operator-level throughout — content
   // streams are edited and partly-covered images have their pixels replaced.
@@ -1039,19 +1051,119 @@ async function redactOverlappedImages(
 export const MAX_RESIDUE_FRACTION = 0.02;
 
 /**
+ * RED-03 — how much of a region may sit on a hard edge before it is treated as
+ * holding a shape rather than a fill.
+ *
+ * An order of magnitude below `MAX_RESIDUE_FRACTION` because an edge is a
+ * *perimeter*, not an area: a surviving 8pt glyph covering 2% of a mark is
+ * perhaps half a percent of it in outline. A correctly filled region has no
+ * interior edges at all, so the floor below — not this fraction — is what keeps a
+ * handful of stray rasteriser pixels in a small mark from blocking a save.
+ */
+export const MAX_EDGE_FRACTION = 0.005;
+
+/** Edge pixels below which a region is too small for the reading to mean anything. */
+export const MIN_EDGE_PIXELS = 12;
+
+/**
+ * RED-03 — how much of a blacked-out *image* area may read as non-black.
+ *
+ * Looser than `MAX_RESIDUE_FRACTION` for a measured reason: the image is
+ * re-encoded as JPEG after its pixels are destroyed, and JPEG's blocks smear the
+ * hard boundary between the black square and the content around it several pixels
+ * inward. On a high-frequency photograph that halo is ~2% of a small covered area
+ * even after the proportional inset `measureRectsBlacked` already trims. A true
+ * failure is not marginal — an unpainted area reads near 100% — so the headroom
+ * costs nothing, and `MAX_IMAGE_BRIGHT_FRACTION` covers the small-but-readable
+ * case this fraction alone would miss.
+ */
+export const MAX_IMAGE_RESIDUE_FRACTION = 0.05;
+
+/**
+ * How much of a blacked-out image area may be bright enough to *read*.
+ *
+ * The JPEG halo above is dark: measured at ≤46/255 inside the inset. Content is
+ * not, so this is the tighter of the two margins and the one that catches a leak
+ * too small to move the fraction — a sliver of a face or a signature left at the
+ * edge of what was painted.
+ */
+export const MAX_IMAGE_BRIGHT_FRACTION = 0.01;
+
+/**
  * Grades one region's rendered pixels. Pure, and exported so the policy can be
  * tested without a worker; the measurement itself lives in the render worker.
+ *
+ * Three readings, in order of how directly they answer "is content still
+ * visible here": distance from the fill we painted, departure from whatever
+ * colour actually covers the region, and hard edges inside it. The last two are
+ * independent of the fill colour, which is what makes them a second signal rather
+ * than a restatement of the first.
  */
 export function residueFailure(residue: RegionPixelResidue): string | null {
   // Nothing could be sampled: the region is sub-pixel at verification DPI, so
   // there is no room inside it for content a reader could recover. The text and
   // string checks still apply to it.
   if (residue.sampled === 0) return null;
-  if (residue.fraction <= MAX_RESIDUE_FRACTION) return null;
-  const percent = (residue.fraction * 100).toFixed(1);
+
+  if (residue.fraction > MAX_RESIDUE_FRACTION) {
+    const percent = (residue.fraction * 100).toFixed(1);
+    return (
+      `${percent}% of the pixels inside the mark are not the redaction fill ` +
+      `(worst pixel is ${residue.maxDeviation}/255 away from it), so content is still visible there.`
+    );
+  }
+
+  const { content } = residue;
+  if (content.offDominantFraction > MAX_RESIDUE_FRACTION) {
+    const percent = (content.offDominantFraction * 100).toFixed(1);
+    return (
+      `the mark does not render as one flat colour — ${percent}% of its pixels differ from the ` +
+      'colour covering the rest of it, so something is still drawn inside it.'
+    );
+  }
+
+  if (content.edges >= MIN_EDGE_PIXELS && content.edgeFraction > MAX_EDGE_FRACTION) {
+    return (
+      `${content.edges} pixels inside the mark sit on a hard edge, which a flat fill has none ` +
+      'of, so an outline or a shape is still drawn inside it.'
+    );
+  }
+
+  return null;
+}
+
+/**
+ * RED-03 — grades one image the output still draws under a mark.
+ *
+ * This is the reading that sees *underneath* the cover rectangle. Everything else
+ * in the gate looks at the page: the composited render (which an overlay
+ * satisfies) and the text layer (which a photograph does not have). This looks at
+ * the image XObject's own pixels, so it answers the question those two cannot —
+ * "would `pdfimages` still get the secret out of this file".
+ */
+export function imageResidueFailure(inspection: RedactedImageInspection): string | null {
+  if (inspection.reason) {
+    return (
+      `an image on page ${inspection.pageIndex + 1} that a mark covers could not be inspected, ` +
+      `so its removal is unproven. ${inspection.reason}`
+    );
+  }
+  const residue = inspection.residue;
+  // Sub-pixel coverage of a tiny image: nothing recoverable fits in it, and the
+  // measurement deliberately samples inside the painted area only.
+  if (!residue || residue.sampled === 0) return null;
+
+  const offBlack = residue.fraction > MAX_IMAGE_RESIDUE_FRACTION;
+  const readable = residue.brightFraction > MAX_IMAGE_BRIGHT_FRACTION;
+  if (!offBlack && !readable) return null;
+
+  const percent = ((readable ? residue.brightFraction : residue.fraction) * 100).toFixed(1);
   return (
-    `${percent}% of the pixels inside the mark are not the redaction fill ` +
-    `(worst pixel is ${residue.maxDeviation}/255 away from it), so content is still visible there.`
+    `an image on page ${inspection.pageIndex + 1} still holds its original pixels where a mark ` +
+    `covers it — ${percent}% of the covered area is ` +
+    `${readable ? 'bright enough to read' : 'not blacked out'} (brightest pixel ` +
+    `${residue.maxLevel}/255) — so the mark only hides it, and the image comes straight back ` +
+    'out of any image extractor.'
   );
 }
 
@@ -1067,14 +1179,22 @@ export function residueFailure(residue: RegionPixelResidue): string | null {
  *     operators.
  *
  *  2. Pixels: `checkRegionPixels` renders each region as a viewer would draw it
- *     and measures how far it is from the opaque redaction fill. Text extraction
- *     is blind to a vector shape, an inline image, and to an image whose covered
- *     pixels were only partly overwritten — all three now real possibilities,
- *     because a partly-covered image has its pixels painted rather than the whole
- *     XObject dropped. An overlay rectangle is not a redaction, and this is the
- *     check that can tell the difference.
+ *     and grades it twice — against the opaque redaction fill, and against
+ *     whatever colour actually covers it, plus the hard edges inside it. Text
+ *     extraction is blind to a vector shape and to an inline image; the
+ *     fill-agnostic half of this reading is what catches content the fill never
+ *     covered, whatever colour it happens to be.
  *
- *  3. String-level: if a region was found by search (so we know the exact
+ *  3. Buried images: `inspectRedactedImages` reads the *embedded pixels* of every
+ *     image the output still draws under a mark and checks the covered area was
+ *     really destroyed. This is the only check that sees underneath the cover
+ *     rectangle. Rendering cannot: an intact image under an opaque black
+ *     rectangle renders as solid black and measures as perfectly clean, which is
+ *     exactly the failure an overlay-only "redaction" produces. Neither can text
+ *     extraction, because a photograph or a scan has no text layer at all — so
+ *     for a redaction over an image this is the whole of the protection.
+ *
+ *  4. String-level: if a region was found by search (so we know the exact
  *     string), that string must be absent from the entire document — not just
  *     from its original page — so that a copy of the text in a footer, a
  *     header, or another section also fails verification.
@@ -1087,25 +1207,67 @@ export function residueFailure(residue: RegionPixelResidue): string | null {
  * rendered is reported as unverified, not as verified — `applyRedactions`'s
  * caller blocks the save on any failing verdict, which is the only safe reading
  * of "we could not look".
+ *
+ * Every step reports progress into `job` and is cancellable at each region and
+ * each page: verification renders and decodes as much as the redaction itself
+ * did, and "cancellable with determinate progress" is not satisfied by one tick
+ * before a minute of silence.
  */
 async function verifyRedaction(
   output: Uint8Array,
-  regions: RedactionRegion[]
+  regions: RedactionRegion[],
+  options: JobOptions = {}
 ): Promise<RegionVerdict[]> {
+  /**
+   * A worker-side handle whose 0..1 progress lands in `[from, to]` of this pass.
+   *
+   * Built with `createJobHandle` per band rather than `subJob`: `subJob` returns a
+   * plain object holding closures, which is fine inside a worker but cannot be
+   * structured-cloned *across* the Comlink boundary — the functions would be
+   * dropped and the worker would report progress into nothing.
+   */
+  const band = (from: number, to: number) =>
+    createJobHandle({
+      signal: options.signal,
+      onProgress: (fraction, label) =>
+        options.onProgress?.(from + (to - from) * Math.min(1, Math.max(0, fraction ?? 0)), label)
+    });
+
+  /** Main-thread cancellation point between the worker calls below. */
+  const tick = (fraction: number, label: string) => {
+    if (options.signal?.aborted) throw cancelled();
+    options.onProgress?.(fraction, label);
+  };
+
+  tick(0, 'Verifying: reading the saved document');
   // Annotation `/Contents` (sticky notes, comments) and AcroForm field `/V`
   // values never appear in pdf.js's page text, so a copy of the redacted
   // string quoted in a comment elsewhere in the document would otherwise pass
   // the whole-document check below untouched.
   const offPageText = await processWorker.lease(api => api.collectOffPageText(output));
 
+  // Which images the *output* still draws under a mark, and which of their pixels
+  // the mark covers — the same plan the redaction worked from, recomputed against
+  // what was actually written. A throw here is a refusal to answer, so it is
+  // carried to every region as a failure rather than swallowed.
+  let imagePlan: ImageRedactionRequest[] = [];
+  let imagePlanError: string | null = null;
+  tick(0.1, 'Verifying: locating images under the marks');
+  try {
+    imagePlan = await processWorker.lease(api => api.planImageRedactions(output, regions));
+  } catch (error) {
+    if (isCancellation(error)) throw error;
+    imagePlanError = error instanceof Error ? error.message : String(error);
+  }
+
   return renderWorker.lease(async api => {
     const { handle } = await api.loadDocument(output);
     try {
-      const pageText = await api.documentText(handle);
+      const pageText = await api.documentText(handle, band(0.15, 0.35));
       const wholeDocument = [...pageText, ...offPageText].join('\n').toLowerCase();
 
       // RED-03: geometric verification — no text may remain inside any marked region.
-      const regionChecks = await api.checkRegionText(handle, regions);
+      const regionChecks = await api.checkRegionText(handle, regions, band(0.35, 0.55));
 
       // RED-03: pixel verification — the region must actually *render* blank.
       // Failing closed on an error here is deliberate: an unrenderable page is
@@ -1113,9 +1275,58 @@ async function verifyRedaction(
       let pixelChecks: { region: RedactionRegion; residue: RegionPixelResidue }[] | null = null;
       let pixelError: string | null = null;
       try {
-        pixelChecks = await api.checkRegionPixels(handle, regions);
+        pixelChecks = await api.checkRegionPixels(handle, regions, band(0.55, 0.8));
       } catch (error) {
+        // A cancellation is the user's answer, not a verification result: it must
+        // abort the pass, never be reported as a region that failed to verify.
+        if (isCancellation(error)) throw error;
         pixelError = error instanceof Error ? error.message : String(error);
+      }
+
+      // RED-03: the buried-image check. Attributed by page, not by mark: the plan
+      // says which image on which page still carries content, and mapping that
+      // back to one specific mark would mean threading mark identity through the
+      // content-stream filter. Blaming every mark on the page over-reports which
+      // mark is at fault and never under-reports that the document is unsafe,
+      // which is the direction that matters — and in the ordinary case of one mark
+      // over the image it is exact.
+      const imageFailuresByPage = new Map<number, string>();
+      if (imagePlanError) {
+        for (const region of regions) {
+          imageFailuresByPage.set(
+            region.pageIndex,
+            'the images under the marks on this page could not be checked, so their removal is ' +
+              `unproven. ${imagePlanError}`
+          );
+        }
+      } else if (imagePlan.length > 0) {
+        try {
+          const inspections = await api.inspectRedactedImages(
+            handle,
+            imagePlan.map(r => ({
+              pageIndex: r.pageIndex,
+              objectNumber: r.objectNumber,
+              rects: r.rects
+            })),
+            band(0.8, 1)
+          );
+          for (const inspection of inspections) {
+            const failure = imageResidueFailure(inspection);
+            if (failure && !imageFailuresByPage.has(inspection.pageIndex)) {
+              imageFailuresByPage.set(inspection.pageIndex, failure);
+            }
+          }
+        } catch (error) {
+          if (isCancellation(error)) throw error;
+          const message = error instanceof Error ? error.message : String(error);
+          for (const request of imagePlan) {
+            imageFailuresByPage.set(
+              request.pageIndex,
+              `an image under a mark on this page could not be inspected, so its removal is ` +
+                `unproven. ${message}`
+            );
+          }
+        }
       }
 
       return regionChecks.map(({ region, foundText }, index) => {
@@ -1167,12 +1378,24 @@ async function verifyRedaction(
           };
         }
 
+        // Last, because it is the only check that can fail a region whose page
+        // *renders* perfectly: the cover hides the image, and only the image's own
+        // pixels say whether it was destroyed.
+        const imageDetail = imageFailuresByPage.get(region.pageIndex);
+        if (imageDetail) {
+          return {
+            region,
+            pass: false,
+            detail: `The redaction on page ${region.pageIndex + 1} is not proven: ${imageDetail}`
+          };
+        }
+
         return {
           region,
           pass: true,
           detail: region.text
-            ? `"${region.text}" is absent, the redacted region is geometrically clear, and it renders as solid fill.`
-            : `The redacted region on page ${region.pageIndex + 1} is geometrically clear and renders as solid fill.`
+            ? `"${region.text}" is absent, the redacted region is geometrically clear, it renders as solid fill, and any image underneath it has had its covered pixels destroyed.`
+            : `The redacted region on page ${region.pageIndex + 1} is geometrically clear, renders as solid fill, and any image underneath it has had its covered pixels destroyed.`
         };
       });
     } finally {

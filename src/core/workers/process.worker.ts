@@ -95,6 +95,8 @@ import {
   pushGraphicsState
 } from 'pdf-lib';
 import type { PDFField, PDFImage, PDFContext, PDFEmbeddedPage } from 'pdf-lib';
+import { Encodings, Font as StandardFontMetrics, FontNames } from '@pdf-lib/standard-fonts';
+import type { IFontNames } from '@pdf-lib/standard-fonts';
 import { zipSync } from 'fflate';
 import type { JobHandle } from './protocol';
 import { checkpoint, subJob } from './protocol';
@@ -5827,6 +5829,233 @@ function numberAt(array: PDFArray, index: number, context: PDFContext): number |
 }
 
 /**
+ * `/BaseFont` name → the AFM metric set that describes it.
+ *
+ * The standard 14 are the one family of fonts a PDF is allowed to reference
+ * without shipping any metrics at all: no `/Widths`, often no
+ * `/FontDescriptor`, because every conforming viewer is required to already
+ * know them. pdf-lib's own `StandardFonts` writes exactly that shape, as do
+ * plenty of real producers. The redaction filter used to meet such a font with
+ * nothing but a flat 0.6 em-per-glyph guess, which for mixed prose overshoots
+ * the real advance by about a fifth — so the estimated run sat to the *right* of
+ * the run a viewer draws, and a mark over one field in it matched the wrong
+ * glyphs.
+ *
+ * These are the real metrics instead, out of the same tables pdf.js measures
+ * with, so the estimate stops being an estimate. The Arial and Courier New
+ * aliases are here because they are metric-compatible with the Helvetica and
+ * Courier entries they map to — the same equivalence DOC-12's font substitution
+ * already relies on — and are what Windows producers emit for them.
+ */
+const STANDARD_FONT_METRICS: Readonly<Record<string, IFontNames>> = {
+  Helvetica: FontNames.Helvetica,
+  'Helvetica-Bold': FontNames.HelveticaBold,
+  'Helvetica-Oblique': FontNames.HelveticaOblique,
+  'Helvetica-BoldOblique': FontNames.HelveticaBoldOblique,
+  Arial: FontNames.Helvetica,
+  ArialMT: FontNames.Helvetica,
+  'Arial-Bold': FontNames.HelveticaBold,
+  'Arial-BoldMT': FontNames.HelveticaBold,
+  'Arial-Italic': FontNames.HelveticaOblique,
+  'Arial-ItalicMT': FontNames.HelveticaOblique,
+  'Arial-BoldItalicMT': FontNames.HelveticaBoldOblique,
+  Courier: FontNames.Courier,
+  'Courier-Bold': FontNames.CourierBold,
+  'Courier-Oblique': FontNames.CourierOblique,
+  'Courier-BoldOblique': FontNames.CourierBoldOblique,
+  CourierNew: FontNames.Courier,
+  'CourierNewPSMT': FontNames.Courier,
+  'Times-Roman': FontNames.TimesRoman,
+  'Times-Bold': FontNames.TimesRomanBold,
+  'Times-Italic': FontNames.TimesRomanItalic,
+  'Times-BoldItalic': FontNames.TimesRomanBoldItalic,
+  TimesNewRoman: FontNames.TimesRoman,
+  TimesNewRomanPSMT: FontNames.TimesRoman,
+  Symbol: FontNames.Symbol,
+  ZapfDingbats: FontNames.ZapfDingbats
+};
+
+interface StandardMetricTable {
+  /** Character code → width in 1/1000 em, for codes this table can be sure of. */
+  widths: Map<number, number>;
+  /** The widest glyph in the whole font, in 1/1000 em. */
+  maxGlyphWidth: number;
+}
+
+/** Built tables, keyed by metric set plus base encoding. `null` caches a miss. */
+const standardMetricCache = new Map<string, StandardMetricTable | null>();
+
+/**
+ * The code → width table for one standard-14 metric set under one base
+ * encoding, or `null` when the metrics cannot be read.
+ *
+ * Codes 32–126 are populated whatever the encoding, because every Latin text
+ * encoding a PDF can name (Standard, WinAnsi, MacRoman, PDFDoc) agrees on the
+ * glyph for each of them — except codes 39 and 96, where Standard has
+ * `quoteright`/`quoteleft` and WinAnsi has `quotesingle`/`grave`, at different
+ * widths. Those two are populated only when `/WinAnsiEncoding` is named
+ * explicitly, and otherwise left out: a code absent from the table is treated
+ * as inexact by the filter, which costs that run its glyph-level split but
+ * cannot mis-measure it. Above 126 the encodings genuinely disagree, so those
+ * codes need the same explicit naming.
+ */
+function standardMetricTable(metricName: IFontNames, baseEncoding: string | undefined) {
+  const key = `${metricName}|${baseEncoding ?? ''}`;
+  const cached = standardMetricCache.get(key);
+  if (cached !== undefined) return cached;
+
+  let table: StandardMetricTable | null = null;
+  try {
+    const font = StandardFontMetrics.load(metricName);
+    const symbolic =
+      metricName === FontNames.Symbol
+        ? Encodings.Symbol
+        : metricName === FontNames.ZapfDingbats
+          ? Encodings.ZapfDingbats
+          : undefined;
+    const encoding = symbolic ?? Encodings.WinAnsi;
+
+    const names = new Map<number, string>();
+    for (const codePoint of encoding.supportedCodePoints) {
+      const encoded = encoding.encodeUnicodeCodePoint(codePoint);
+      if (!names.has(encoded.code)) names.set(encoded.code, encoded.name);
+    }
+
+    const widthOfGlyph = (glyph: string) => {
+      const width = font.getWidthOfGlyph(glyph);
+      return typeof width === 'number' && Number.isFinite(width) ? width : undefined;
+    };
+
+    // A symbolic font has exactly one encoding, so every code in it is certain.
+    const winAnsi = baseEncoding === 'WinAnsiEncoding';
+    const widths = new Map<number, number>();
+    let maxGlyphWidth = 0;
+    for (const [code, glyph] of names) {
+      const width = widthOfGlyph(glyph);
+      if (width === undefined) continue;
+      if (width > maxGlyphWidth) maxGlyphWidth = width;
+      const certain = symbolic || winAnsi || (code >= 32 && code <= 126 && code !== 39 && code !== 96);
+      if (certain) widths.set(code, width);
+    }
+    if (widths.size > 0 && maxGlyphWidth > 0) table = { widths, maxGlyphWidth };
+  } catch {
+    // A metric set that will not load is a miss, not a failure: the caller falls
+    // back to the guessed width and its conservative coverage bound.
+    table = null;
+  }
+
+  standardMetricCache.set(key, table);
+  return table;
+}
+
+/**
+ * The `/Encoding` a simple font names, as `BaseEncoding` plus `/Differences`.
+ * `/Encoding` may be a name or a dictionary (PDF 32000 9.6.6).
+ */
+function simpleFontEncoding(dict: PDFDict, context: PDFContext) {
+  const raw = dict.get(PDFName.of('Encoding'));
+  const resolved = raw instanceof PDFRef ? context.lookup(raw) : raw;
+  if (resolved instanceof PDFName) {
+    return { baseEncoding: resolved.asString().replace(/^\//, ''), differences: undefined };
+  }
+  if (resolved instanceof PDFDict) {
+    const base = resolved.get(PDFName.of('BaseEncoding'));
+    return {
+      baseEncoding: base instanceof PDFName ? base.asString().replace(/^\//, '') : undefined,
+      differences: asArray(resolved.get(PDFName.of('Differences')), context)
+    };
+  }
+  return { baseEncoding: undefined, differences: undefined };
+}
+
+/**
+ * Widths for a simple font that ships none of its own, from the standard-14
+ * metrics its `/BaseFont` names — or `undefined` when it names something else.
+ */
+function standardFontWidths(
+  dict: PDFDict,
+  context: PDFContext
+): { widths: Map<number, number>; maxGlyphWidth: number } | undefined {
+  const metricName = STANDARD_FONT_METRICS[baseFontNameOf(dict)];
+  if (!metricName) return undefined;
+
+  const { baseEncoding, differences } = simpleFontEncoding(dict, context);
+  const table = standardMetricTable(metricName, baseEncoding);
+  if (!table) return undefined;
+
+  const widths = new Map(table.widths);
+
+  // `/Differences` remaps codes to named glyphs. Applying it is not optional:
+  // without it a remapped code would be measured as whatever glyph the base
+  // encoding puts there, which is a wrong width rather than a missing one. A
+  // name this font has no metric for is *deleted*, so the filter treats that
+  // code as inexact instead of trusting a stale entry.
+  if (differences) {
+    let font: ReturnType<typeof StandardFontMetrics.load> | undefined;
+    try {
+      font = StandardFontMetrics.load(metricName);
+    } catch {
+      return undefined;
+    }
+    let code = 0;
+    for (let i = 0; i < differences.size(); i++) {
+      const raw = differences.get(i);
+      const item = raw instanceof PDFRef ? context.lookup(raw) : raw;
+      if (item instanceof PDFNumber) {
+        code = item.asNumber();
+        continue;
+      }
+      if (!(item instanceof PDFName)) continue;
+      const width = font.getWidthOfGlyph(item.asString().replace(/^\//, ''));
+      if (typeof width === 'number' && Number.isFinite(width)) widths.set(code, width);
+      else widths.delete(code);
+      code++;
+    }
+  }
+
+  return widths.size > 0 ? { widths, maxGlyphWidth: table.maxGlyphWidth } : undefined;
+}
+
+/**
+ * An upper bound on any glyph's advance in this font, in 1/1000 em, or
+ * `undefined` when the font declares nothing to bound it with.
+ *
+ * Fed to `FontInfo.maxGlyphWidth`, which uses it *only* to widen the redaction
+ * filter's hit-testing box for a code whose width had to be guessed — never to
+ * position anything. The widest declared width bounds the font on its own; the
+ * `/FontBBox` span covers a font that declares no per-code widths at all, which
+ * is exactly the case that used to be measured at a flat 0.6 em and therefore
+ * measured *narrower* than the glyphs a viewer draws.
+ */
+function maxGlyphWidthOf(
+  widths: Map<number, number> | undefined,
+  declaredDefault: number | undefined,
+  descriptor: PDFDict | undefined,
+  context: PDFContext
+): number | undefined {
+  let max = 0;
+  if (widths) for (const width of widths.values()) if (width > max) max = width;
+  if (declaredDefault !== undefined && declaredDefault > max) max = declaredDefault;
+
+  const bbox = descriptor ? asArray(descriptor.get(PDFName.of('FontBBox')), context) : undefined;
+  if (bbox && bbox.size() === 4) {
+    const llx = numberAt(bbox, 0, context);
+    const urx = numberAt(bbox, 2, context);
+    // Measured from the origin, or from a negative left side bearing when the
+    // font has one, so the span is never shorter than the ink it describes.
+    if (llx !== undefined && urx !== undefined) {
+      const span = urx - Math.min(0, llx);
+      if (Number.isFinite(span) && span > max) max = span;
+    }
+  }
+
+  if (max <= 0) return undefined;
+  // A bogus /FontBBox must not turn one glyph's coverage box into a page-wide
+  // one, which would silently redact the whole line around the mark.
+  return Math.min(max, 4000);
+}
+
+/**
  * Real glyph widths for one font resource, so the redaction filter measures a
  * text run instead of guessing 0.6em per byte.
  *
@@ -5873,23 +6102,69 @@ function fontInfoFor(name: string, fonts: PDFDict | undefined, context: PDFConte
         }
       }
     }
-    return { twoByte: true, widths, defaultWidth: dw };
+    const cidDescriptor = descendant
+      ? asDict(descendant.get(PDFName.of('FontDescriptor')), context)
+      : undefined;
+    return {
+      twoByte: true,
+      widths,
+      defaultWidth: dw,
+      maxGlyphWidth: maxGlyphWidthOf(widths, dw, cidDescriptor, context)
+    };
   }
+
+  const descriptor = asDict(dict.get(PDFName.of('FontDescriptor')), context);
+  const missingRaw = descriptor?.get(PDFName.of('MissingWidth'));
+  const missingWidth = missingRaw instanceof PDFNumber ? missingRaw.asNumber() : undefined;
 
   const firstCharRaw = dict.get(PDFName.of('FirstChar'));
   const firstChar = firstCharRaw instanceof PDFNumber ? firstCharRaw.asNumber() : undefined;
   const widthsArray = asArray(dict.get(PDFName.of('Widths')), context);
-  if (firstChar === undefined || !widthsArray) return { twoByte: false };
+  if (firstChar === undefined || !widthsArray) {
+    // No per-code widths at all — a bare `/BaseFont /Helvetica` reference, whose
+    // real metrics live in the viewer's own standard-14 tables. Read them from
+    // the same AFM data pdf.js measures with, so the filter agrees with the
+    // extractor that verifies it rather than guessing 0.6 em per glyph.
+    const standard = standardFontWidths(dict, context);
+    if (standard) {
+      return {
+        twoByte: false,
+        widths: standard.widths,
+        maxGlyphWidth: Math.max(
+          standard.maxGlyphWidth,
+          maxGlyphWidthOf(undefined, missingWidth, descriptor, context) ?? 0
+        )
+      };
+    }
+
+    // Not one of the standard 14 either. The descriptor is still worth reading:
+    // `/MissingWidth` is what the spec says to advance by here, and `/FontBBox`
+    // bounds the glyphs the viewer will draw. Both beat the flat 0.6 em this
+    // returned nothing for before, which could measure such a run *shorter* than
+    // it draws and let a mark over its tail miss the last glyphs entirely.
+    //
+    // A `/MissingWidth` of zero is not used for positioning: it is the spec
+    // default, so a descriptor that simply omits the key is indistinguishable
+    // from one declaring it, and taking it literally would collapse every run in
+    // the font to zero width and drag every later run's box to the wrong place.
+    return {
+      twoByte: false,
+      defaultWidth: missingWidth !== undefined && missingWidth > 0 ? missingWidth : undefined,
+      maxGlyphWidth: maxGlyphWidthOf(undefined, missingWidth, descriptor, context)
+    };
+  }
 
   const widths = new Map<number, number>();
   for (let k = 0; k < widthsArray.size(); k++) {
     const width = numberAt(widthsArray, k, context);
     if (width !== undefined) widths.set(firstChar + k, width);
   }
-  const descriptor = asDict(dict.get(PDFName.of('FontDescriptor')), context);
-  const missingRaw = descriptor?.get(PDFName.of('MissingWidth'));
-  const defaultWidth = missingRaw instanceof PDFNumber ? missingRaw.asNumber() : undefined;
-  return { twoByte: false, widths, defaultWidth };
+  return {
+    twoByte: false,
+    widths,
+    defaultWidth: missingWidth,
+    maxGlyphWidth: maxGlyphWidthOf(widths, missingWidth, descriptor, context)
+  };
 }
 
 interface PageRedactionFilter {
