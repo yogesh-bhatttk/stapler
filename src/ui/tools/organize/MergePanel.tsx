@@ -10,7 +10,7 @@ import { Plus } from 'lucide-preact';
 import { platform } from '../../../platform/current';
 import { PDF_AND_IMAGES } from '../../../platform/index';
 import { importFiles } from '../../../core/import';
-import { appendPages, activeDoc, activeSources } from '../../../core/store';
+import { addDocument, appendPages, activeDoc, activeSources } from '../../../core/store';
 import { notify, notifyError } from '../../../core/notify';
 import { Button } from '../../components/Button';
 import { useImageImportOptions } from '../../useImageImportOptions';
@@ -29,7 +29,6 @@ export function MergePanel() {
   const { requestOptions, node } = useImageImportOptions();
 
   const addFiles = async () => {
-    if (!doc) return;
     setBusy(true);
     try {
       const opened = await platform.openFiles({ multiple: true, accept: PDF_AND_IMAGES });
@@ -47,8 +46,24 @@ export function MergePanel() {
 
       await run({ label: 'Importing', scope: 'merge.add' }, async job => {
         const outcome = await importFiles(files, job, imageOptions);
+        // With nothing open yet, the first imported file becomes a new
+        // document rather than being silently dropped — merge builds a
+        // document from scratch just like images-to-pdf does.
+        let targetDocId = doc?.id ?? null;
         for (const imported of outcome.imported) {
-          appendPages(doc.id, imported.pages);
+          if (!targetDocId) {
+            const newDoc = {
+              id: crypto.randomUUID(),
+              name: imported.source.name,
+              pages: imported.pages,
+              annotations: [],
+              dirty: false
+            };
+            addDocument(newDoc);
+            targetDocId = newDoc.id;
+          } else {
+            appendPages(targetDocId, imported.pages);
+          }
           for (const warning of imported.warnings) {
             notify('warning', imported.source.name, { detail: warning });
           }
@@ -75,7 +90,7 @@ export function MergePanel() {
 
   return (
     <>
-      <Button variant="secondary" icon={Plus} onClick={addFiles} disabled={busy || !doc}>
+      <Button variant="secondary" icon={Plus} onClick={addFiles} disabled={busy}>
         {t('Add PDFs or images')}
       </Button>
       {node}

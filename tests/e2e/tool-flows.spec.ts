@@ -508,6 +508,36 @@ test.describe('tool flows', () => {
     await expect(page.getByText(/named destination/i)).toBeVisible();
   });
 
+  test('merge: builds a document from scratch with nothing open yet', async ({ page }) => {
+    // Merge used to require a document already open before "Add PDFs or
+    // images" would do anything — the button rendered disabled and the
+    // handler silently returned. It should work the same cold-start way
+    // images-to-pdf does: pick files, get a document, export it.
+    const file = await ensureFixture('mixed-sizes.pdf', mixedSizePdf);
+    await openApp(page);
+    await gotoTool(page, 'merge');
+    await expect(page.getByText('No document open')).toBeVisible();
+
+    const fileChooserPromise = page.waitForEvent('filechooser');
+    await page.getByRole('button', { name: 'Add PDFs or images' }).click();
+    const fileChooser = await fileChooserPromise;
+    await fileChooser.setFiles([file]);
+    await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({
+      timeout: 30_000
+    });
+
+    const bytes = await commitAndRead(page, 'Export PDF');
+    const output = await PDFDocument.load(bytes);
+    expect(output.getPageCount()).toBe(3);
+  });
+
+  test('merge: exporting with nothing added yet warns instead of crashing', async ({ page }) => {
+    await openApp(page);
+    await gotoTool(page, 'merge');
+    await page.getByRole('button', { name: 'Export PDF' }).click();
+    await expect(page.getByText('Nothing to export.')).toBeVisible();
+  });
+
   test('extract: text comes out in reading order', async ({ page }) => {
     const file = await ensureFixture('text-6.pdf', () => textPdf(6));
     await importFixture(page, file);

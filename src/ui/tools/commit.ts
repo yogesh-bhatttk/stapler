@@ -341,7 +341,20 @@ async function finalize(
 }
 
 const HANDLERS: Record<ToolId, CommitHandler> = {
-  merge: exportComposed,
+  // `worksWithoutDocument` (merge now builds a document from scratch, same as
+  // images-to-pdf) means `context.doc` may not correspond to a real open
+  // document — read the live signal instead of trusting the non-null cast the
+  // rest of the handlers rely on.
+  merge: async ({ job }) => {
+    const doc = activeDoc.value;
+    if (!doc) {
+      notify('warning', translate('Nothing to export.'), {
+        detail: 'Add at least one PDF or image first.'
+      });
+      return;
+    }
+    await exportComposed({ doc, job });
+  },
   organize: exportComposed,
   insert: exportComposed,
   extract: exportComposed,

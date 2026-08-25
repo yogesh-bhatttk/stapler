@@ -81,7 +81,10 @@ export const TOOLS: readonly ToolDefinition[] = [
     canvasMode: 'grid',
     needsOptionsPanel: true,
     commitLabel: 'Export PDF',
-    selectable: false
+    selectable: false,
+    // Merge builds a document from scratch, same as images-to-pdf — it should
+    // never require opening one first just to have something to add files to.
+    worksWithoutDocument: true
   },
   {
     id: 'organize',
