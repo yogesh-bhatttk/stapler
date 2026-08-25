@@ -24,6 +24,16 @@
   animation: scaleIn var(--dur-base) var(--ease-smooth);
 }
 
+/* The palette's only focusable control is the input, so this fires exactly when it's
+   focused. Styled here — rounded, inset in the shell's own shadow — instead of relying
+   on the global `*:focus-visible` outline, which is always rectangular and offset, so it
+   floated a hard-edged box above the rounded panel. */
+.palette:focus-within {
+  box-shadow:
+    0 0 0 2px var(--primary-focus),
+    var(--shadow-3);
+}
+
 .inputRow {
   display: flex;
   align-items: center;
@@ -48,6 +58,11 @@
   margin: 0;
   padding: var(--space-xxs);
   overflow-y: auto;
+  /* Without this, the flex column lets .list grow past .palette's max-height instead
+     of scrolling internally, so results beyond 60vh were clipped with no way to reach
+     them rather than becoming scrollable. */
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .group {
@@ -68,6 +83,7 @@
   color: var(--ink-muted);
   cursor: pointer;
   font: var(--text-body);
+  transition: var(--transition-snappy);
 }
 
 .itemActive {

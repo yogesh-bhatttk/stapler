@@ -74,12 +74,17 @@ export function TopBar() {
             color: 'inherit',
             border: '1px solid var(--hairline)',
             borderRadius: '4px',
-            padding: '4px'
+            padding: '4px',
+            // The dropdown's popup is a separate, OS-rendered surface — it doesn't
+            // inherit `--ink`/`--surface` at all. Without this, the popup falls back
+            // to a light background while `--ink` forces near-white option text in
+            // dark mode, so every unselected row is invisible white-on-white.
+            colorScheme: isDark ? 'dark' : 'light'
           }}
           aria-label={translate('Change Language')}
         >
           {locales.map(loc => (
-            <option key={loc} value={loc} style={{ color: 'var(--ink)' }}>
+            <option key={loc} value={loc}>
               {loc.toUpperCase()}
             </option>
           ))}
