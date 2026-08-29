@@ -117,7 +117,10 @@ export function CompressPanel() {
     const stats: CompressionResultStats = lastResult
       ? {
           originalBytes: lastResult.originalBytes,
-          compressedBytes: lastResult.compressedBytes,
+          // `finalBytes` (set once `save()` finishes) reflects password protection
+          // applied after compression measured `compressedBytes` — report the size
+          // that actually landed on disk, not the pre-encryption one.
+          compressedBytes: lastResult.finalBytes ?? lastResult.compressedBytes,
           keptOriginal: lastResult.keptOriginal,
           imageStats: lastResult.imageStats
         }

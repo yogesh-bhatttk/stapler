@@ -155,12 +155,14 @@ async function save(
   doc: StaplerDoc,
   bytes: Uint8Array,
   name: string,
-  job?: JobOptions
+  job?: JobOptions,
+  onFinalBytes?: (bytes: Uint8Array) => void
 ): Promise<boolean> {
   const protectedBytes = await applyProtection(bytes, name, job);
   if (!protectedBytes) return false;
   const wasProtected = protectedBytes !== bytes;
   bytes = protectedBytes;
+  onFinalBytes?.(bytes);
   const note = (size: string) => (wasProtected ? `${size} · password required to open` : size);
 
   if (doc.sourceHandle?.writable) {
@@ -724,7 +726,20 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         if (!proceed) return;
       }
 
-      const savedTarget = await save(doc, outcome.bytes, `${stem(doc.name)}-compressed.pdf`);
+      const savedTarget = await save(
+        doc,
+        outcome.bytes,
+        `${stem(doc.name)}-compressed.pdf`,
+        undefined,
+        finalBytes => {
+          if (lastCompressionResult.value?.documentId === doc.id) {
+            lastCompressionResult.value = {
+              ...lastCompressionResult.value,
+              finalBytes: finalBytes.byteLength
+            };
+          }
+        }
+      );
       if (savedTarget && outcome.reachedTarget) {
         notify(
           'success',
@@ -771,7 +786,20 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       return;
     }
 
-    const saved = await save(doc, result.bytes, `${stem(doc.name)}-compressed.pdf`);
+    const saved = await save(
+      doc,
+      result.bytes,
+      `${stem(doc.name)}-compressed.pdf`,
+      undefined,
+      finalBytes => {
+        if (lastCompressionResult.value?.documentId === doc.id) {
+          lastCompressionResult.value = {
+            ...lastCompressionResult.value,
+            finalBytes: finalBytes.byteLength
+          };
+        }
+      }
+    );
     if (saved) {
       const percent = Math.round((1 - result.bytes.byteLength / result.originalBytes) * 100);
       notify('success', translate('Reduced by {percent}%', { percent }), {

@@ -116,6 +116,13 @@ export interface LastCompressionResult {
   keptOriginal?: boolean;
   /** CMP-06 — measured per-image before/after sizes from the run that produced this. */
   imageStats?: ImageResultStat[];
+  /**
+   * The byte length actually written to disk, when password protection (RED-06)
+   * changed it after compression measured `compressedBytes`. Encryption runs inside
+   * `save()`, after this result is recorded, so without this the exported report
+   * would understate the real file size for any protected export.
+   */
+  finalBytes?: number;
 }
 
 export const lastCompressionResult = signal<LastCompressionResult | null>(null);
