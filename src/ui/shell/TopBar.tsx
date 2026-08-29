@@ -76,15 +76,25 @@ export function TopBar() {
             borderRadius: '4px',
             padding: '4px',
             // The dropdown's popup is a separate, OS-rendered surface — it doesn't
-            // inherit `--ink`/`--surface` at all. Without this, the popup falls back
-            // to a light background while `--ink` forces near-white option text in
-            // dark mode, so every unselected row is invisible white-on-white.
+            // inherit `--ink`/`--surface` at all. `color-scheme` is meant to fix this
+            // but native popups on Linux/GTK builds of Chrome ignore it and keep the
+            // OS-theme (light) background regardless, so it's not a reliable enough
+            // signal on its own here — see the explicit background+color pairing on
+            // each option below.
             colorScheme: isDark ? 'dark' : 'light'
           }}
           aria-label={translate('Change Language')}
         >
           {locales.map(loc => (
-            <option key={loc} value={loc}>
+            <option
+              key={loc}
+              value={loc}
+              // Force background and text together, as a matched pair, instead of just
+              // text color: forcing only `--ink` (near-white in dark mode) against
+              // whatever background the popup falls back to is what made every
+              // unselected row invisible white-on-white in the first place.
+              style={{ backgroundColor: 'var(--surface-1)', color: 'var(--ink)' }}
+            >
               {loc.toUpperCase()}
             </option>
           ))}

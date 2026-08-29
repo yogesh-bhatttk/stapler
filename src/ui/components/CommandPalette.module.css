@@ -53,6 +53,16 @@
   color: var(--ink);
 }
 
+/* `.input { outline: none }` above ties in specificity with the global
+   `*:focus-visible` reset (tokens.css), so which one wins depends on bundle source
+   order — and it was losing, leaving the rectangular, offset ring plastered over this
+   rounded panel even after adding the .palette:focus-within ring below. Pairing the
+   class with :focus-visible raises specificity past the universal-selector rule so
+   this unconditionally wins. */
+.input:focus-visible {
+  outline: none;
+}
+
 .list {
   list-style: none;
   margin: 0;
