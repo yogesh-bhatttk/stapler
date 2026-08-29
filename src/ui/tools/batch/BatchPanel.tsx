@@ -55,7 +55,12 @@ export function BatchPanel() {
   const [draftTools, setDraftTools] = useState<Recipe['tools']>([]);
 
   useEffect(() => {
-    loadRecipes().catch(e => console.error('Failed to load recipes', e));
+    loadRecipes().catch(e => {
+      console.error('Failed to load recipes', e);
+      notify('warning', translate('Could not load saved recipes'), {
+        detail: e instanceof Error ? e.message : String(e)
+      });
+    });
   }, []);
 
   const reportPickerFailure = (scope: string, error: unknown) => {
