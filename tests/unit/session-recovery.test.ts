@@ -35,8 +35,10 @@ import {
   saveSession,
   loadPendingRecovery,
   clearSession,
-  restoreSession
+  restoreSession,
+  checkRecovery
 } from '../../src/core/session-recovery';
+import { writeSourceBytes, deleteSourceBytes } from '../../src/core/opfs';
 
 function resetWorkspace() {
   settings.clear();
@@ -198,6 +200,55 @@ describe('session-recovery (DOC-11)', () => {
     documents.value = [];
     await saveSession();
     expect(await loadPendingRecovery()).toBeNull();
+  });
+
+  it('checkRecovery passes a record through unchanged when every source still has bytes', async () => {
+    await writeSourceBytes('src-6', new Uint8Array([1, 2, 3]));
+    registerSource({
+      id: 'src-6',
+      name: 'f.pdf',
+      pageCount: 1,
+      pageSizes: [{ width: 1, height: 1 }]
+    });
+    addDocument({
+      id: 'doc-6',
+      name: 'f.pdf',
+      pages: makePageRefs('src-6', 1),
+      annotations: [],
+      dirty: false
+    });
+    await saveSession();
+    const record = await loadPendingRecovery();
+
+    const checked = await checkRecovery(record!);
+    expect(checked?.droppedDocuments).toBe(0);
+    expect(checked?.record.documents).toHaveLength(1);
+  });
+
+  it('checkRecovery drops a document whose source bytes are gone, instead of restoring a dangling reference', async () => {
+    await writeSourceBytes('src-7', new Uint8Array([1, 2, 3]));
+    registerSource({
+      id: 'src-7',
+      name: 'g.pdf',
+      pageCount: 1,
+      pageSizes: [{ width: 1, height: 1 }]
+    });
+    addDocument({
+      id: 'doc-7',
+      name: 'g.pdf',
+      pages: makePageRefs('src-7', 1),
+      annotations: [],
+      dirty: false
+    });
+    await saveSession();
+    const record = await loadPendingRecovery();
+
+    // Simulate the race this guards against: the source's bytes are gone by
+    // the time recovery is checked (a browser without OPFS support, or a
+    // close-then-crash before the next autosave), while the pointer survived.
+    await deleteSourceBytes('src-7');
+
+    expect(await checkRecovery(record!)).toBeNull();
   });
 
   it('leaves no record after an explicit decline, so it is not offered again', async () => {

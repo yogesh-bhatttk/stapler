@@ -27,6 +27,7 @@ import type { Annotation } from '../ui/tools/annotate/state';
 import { serializeHistory, restoreHistoryFromRecord, type SerializedHistory } from './history';
 import { readSetting, writeSetting } from './db';
 import { logEvent } from './errors';
+import { sourceBytesExist } from './opfs';
 
 const SESSION_KEY = 'session.recovery';
 const SAVE_DEBOUNCE_MS = 500;
@@ -92,6 +93,73 @@ export function scheduleSessionSave(): void {
     saveTimer = null;
     saveSession().catch(err => logEvent('warn', 'session-recovery', String(err)));
   }, SAVE_DEBOUNCE_MS);
+}
+
+export interface RecoveryCheck {
+  record: SessionRecord;
+  /** Documents dropped because their source bytes no longer exist. */
+  droppedDocuments: number;
+}
+
+/**
+ * Validates a saved record against what OPFS actually still holds, before it
+ * is ever offered to the user.
+ *
+ * The pointer this module saves can outlive the bytes it points to in two
+ * ways: `opfs.ts` falls back to an in-memory `Map` in a browser without OPFS
+ * support, which does not survive the reload this feature exists to recover
+ * from; and `closeDocument` deletes a now-unreferenced source's bytes
+ * synchronously while the next autosave recording that removal is still
+ * debounced, so a crash in that window leaves a record naming a source that
+ * is already gone. Either way, restoring the record as saved would hand back
+ * a document Stapler cannot read a single byte of — exactly the silent
+ * corruption this product refuses to produce, so it is checked here instead
+ * of surfacing as the first failed export after "Restore" was clicked.
+ *
+ * Returns `null` when nothing in the record survives (nothing to offer).
+ */
+export async function checkRecovery(record: SessionRecord): Promise<RecoveryCheck | null> {
+  const ids = Object.keys(record.sources);
+  const existing = new Set<string>();
+  await Promise.all(
+    ids.map(async id => {
+      if (await sourceBytesExist(id)) existing.add(id);
+    })
+  );
+  if (existing.size === ids.length) return { record, droppedDocuments: 0 };
+
+  // A document with even one page whose source is gone is dropped whole:
+  // a document silently missing some of its pages is worse than one that
+  // is not offered back at all.
+  const survivingDocs = record.documents.filter(doc =>
+    doc.pages.every(page => existing.has(page.sourceDocId))
+  );
+  const droppedDocuments = record.documents.length - survivingDocs.length;
+  if (survivingDocs.length === 0) return null;
+
+  const survivingSources: Record<string, SourceDocument> = {};
+  for (const id of ids) {
+    if (existing.has(id)) survivingSources[id] = record.sources[id];
+  }
+
+  return {
+    droppedDocuments,
+    record: {
+      ...record,
+      documents: survivingDocs,
+      sources: survivingSources,
+      activeDocId: survivingDocs.some(d => d.id === record.activeDocId)
+        ? record.activeDocId
+        : survivingDocs[0].id,
+      selection: [],
+      // A saved undo/redo entry can reference a page key or source this pass
+      // just dropped; restoring it would let Undo resurrect the very document
+      // that was just excluded for having no bytes behind it. Discarding
+      // history here is the same trade-off `closeDocument` already makes for
+      // the same reason.
+      history: { undoStack: [], redoStack: [], undoLog: [], redoLog: [] }
+    }
+  };
 }
 
 /** Replaces the live workspace wholesale with a previously saved one. */

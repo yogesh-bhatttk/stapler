@@ -30,6 +30,26 @@ export async function readSourceBytes(id: string): Promise<Uint8Array> {
   return new Uint8Array(await file.arrayBuffer());
 }
 
+/**
+ * Whether a source's bytes are actually retrievable, without reading them.
+ *
+ * Session recovery (`session-recovery.ts`) needs this to tell "OPFS still has
+ * it" from "the pointer survived but the bytes did not" before it ever offers
+ * a restore — reading the whole file just to prove it exists would work too,
+ * but for a multi-document session that's real bytes copied out of OPFS for
+ * nothing.
+ */
+export async function sourceBytesExist(id: string): Promise<boolean> {
+  if (!navigator.storage?.getDirectory) return __memoryFallback.has(id);
+  try {
+    const root = await navigator.storage.getDirectory();
+    await root.getFileHandle(`${id}.pdf`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function deleteSourceBytes(id: string): Promise<void> {
   if (!navigator.storage?.getDirectory) {
     __memoryFallback.delete(id);

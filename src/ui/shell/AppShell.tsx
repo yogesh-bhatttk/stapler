@@ -48,6 +48,7 @@ import {
 } from '../../core/store';
 import {
   loadPendingRecovery,
+  checkRecovery,
   clearSession,
   restoreSession,
   scheduleSessionSave,
@@ -102,16 +103,30 @@ export function AppShell({ children }: { children: ComponentChildren }) {
   // fire and overwrite it before the prompt ever resolves.
   useEffect(() => {
     void (async () => {
-      const record = await loadPendingRecovery();
-      if (record) {
+      const pending = await loadPendingRecovery();
+      // Confirms the record's sources still have bytes behind them before it is
+      // ever offered — a browser without OPFS support, or a crash landing in
+      // the gap between closing a document and the next autosave, can leave a
+      // record naming bytes that are already gone. See `checkRecovery`.
+      const checked = pending ? await checkRecovery(pending) : null;
+      if (checked) {
+        const { record, droppedDocuments } = checked;
         const count = record.documents.length;
-        const restore = await confirmAction({
-          title: translate('Restore your previous session?'),
-          body: translate(
+        const body =
+          translate(
             'Stapler found {count} document{plural} open from before this tab closed. Restore ' +
               'them exactly as they were, undo history included, or start with a clean workspace.',
             { count, plural: count === 1 ? '' : 's' }
-          ),
+          ) +
+          (droppedDocuments > 0
+            ? ` ${translate(
+                '{dropped} other document{droppedPlural} from that session could not be recovered — its saved data no longer exists.',
+                { dropped: droppedDocuments, droppedPlural: droppedDocuments === 1 ? '' : 's' }
+              )}`
+            : '');
+        const restore = await confirmAction({
+          title: translate('Restore your previous session?'),
+          body,
           confirmLabel: translate('Restore'),
           cancelLabel: translate('Start fresh')
         });
@@ -120,6 +135,10 @@ export function AppShell({ children }: { children: ComponentChildren }) {
         } else {
           await clearSession();
         }
+      } else if (pending) {
+        // Every document in the record was unrecoverable — nothing to offer,
+        // and no stale pointer worth keeping around for next time either.
+        await clearSession();
       }
       sessionRecoveryChecked.value = true;
     })();
