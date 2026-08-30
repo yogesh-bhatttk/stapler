@@ -680,8 +680,7 @@ function glyphAdvances(bytes: Uint8Array, state: GraphicsState, font?: FontInfo)
     // `/Widths` or `/W` for this exact code, else the font's declared default
     // (`/MissingWidth`, `/DW`) — both of which the spec makes authoritative.
     // A trailing half-code (`code === null`) is malformed input, never exact.
-    const declared =
-      code === null ? undefined : (font?.widths?.get(code) ?? font?.defaultWidth);
+    const declared = code === null ? undefined : (font?.widths?.get(code) ?? font?.defaultWidth);
     const width = declared ?? fallback;
     // A width the font itself states is exact. A guessed one may be narrower
     // than the glyph a viewer actually draws, so its coverage bound must not be.
@@ -1103,7 +1102,9 @@ export function filterContentStream(
         continue;
       }
 
-      const removed = spans.map(span => touching.some(r => areaTouches(r, boxOf(span.lo, span.hi))));
+      const removed = spans.map(span =>
+        touching.some(r => areaTouches(r, boxOf(span.lo, span.hi)))
+      );
       const removedCount = removed.reduce((n, flag) => n + (flag ? 1 : 0), 0);
 
       // Byte-untouched when the mark reached the run's box but no glyph in it —

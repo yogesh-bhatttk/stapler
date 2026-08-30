@@ -91,16 +91,17 @@ describe('ocr/download — the one verified fetch (OCR-01 Defect 1)', () => {
 
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => ({ ok: true, arrayBuffer: async () => bytes.buffer }) as unknown as Response)
+      vi.fn(
+        async () => ({ ok: true, arrayBuffer: async () => bytes.buffer }) as unknown as Response
+      )
     );
 
     // The top-level `vi.mock('../../src/core/ocr/download', ...)` below (used by
     // the runOcr tests) applies to every import in this file, so the *real*
     // implementation is fetched explicitly here via `importActual`.
-    const { fetchVerifiedModel } =
-      await vi.importActual<typeof import('../../src/core/ocr/download')>(
-        '../../src/core/ocr/download'
-      );
+    const { fetchVerifiedModel } = await vi.importActual<
+      typeof import('../../src/core/ocr/download')
+    >('../../src/core/ocr/download');
     const result = await fetchVerifiedModel('eng');
     expect(Array.from(result)).toEqual(Array.from(bytes));
   });
@@ -113,16 +114,17 @@ describe('ocr/download — the one verified fetch (OCR-01 Defect 1)', () => {
     const tampered = new TextEncoder().encode('not what was pinned');
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => ({ ok: true, arrayBuffer: async () => tampered.buffer }) as unknown as Response)
+      vi.fn(
+        async () => ({ ok: true, arrayBuffer: async () => tampered.buffer }) as unknown as Response
+      )
     );
 
     // The top-level `vi.mock('../../src/core/ocr/download', ...)` below (used by
     // the runOcr tests) applies to every import in this file, so the *real*
     // implementation is fetched explicitly here via `importActual`.
-    const { fetchVerifiedModel } =
-      await vi.importActual<typeof import('../../src/core/ocr/download')>(
-        '../../src/core/ocr/download'
-      );
+    const { fetchVerifiedModel } = await vi.importActual<
+      typeof import('../../src/core/ocr/download')
+    >('../../src/core/ocr/download');
     await expect(fetchVerifiedModel('eng')).rejects.toThrow(/integrity verification/i);
   });
 
@@ -133,31 +135,33 @@ describe('ocr/download — the one verified fetch (OCR-01 Defect 1)', () => {
     const bytes = new TextEncoder().encode('anything');
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => ({ ok: true, arrayBuffer: async () => bytes.buffer }) as unknown as Response)
+      vi.fn(
+        async () => ({ ok: true, arrayBuffer: async () => bytes.buffer }) as unknown as Response
+      )
     );
 
     // The top-level `vi.mock('../../src/core/ocr/download', ...)` below (used by
     // the runOcr tests) applies to every import in this file, so the *real*
     // implementation is fetched explicitly here via `importActual`.
-    const { fetchVerifiedModel } =
-      await vi.importActual<typeof import('../../src/core/ocr/download')>(
-        '../../src/core/ocr/download'
-      );
+    const { fetchVerifiedModel } = await vi.importActual<
+      typeof import('../../src/core/ocr/download')
+    >('../../src/core/ocr/download');
     await expect(fetchVerifiedModel('eng')).rejects.toThrow(/no pinned integrity hash/i);
   });
 
   it('surfaces a clear error on an HTTP failure rather than hashing an error page', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => ({ ok: false, status: 404, statusText: 'Not Found' }) as unknown as Response)
+      vi.fn(
+        async () => ({ ok: false, status: 404, statusText: 'Not Found' }) as unknown as Response
+      )
     );
     // The top-level `vi.mock('../../src/core/ocr/download', ...)` below (used by
     // the runOcr tests) applies to every import in this file, so the *real*
     // implementation is fetched explicitly here via `importActual`.
-    const { fetchVerifiedModel } =
-      await vi.importActual<typeof import('../../src/core/ocr/download')>(
-        '../../src/core/ocr/download'
-      );
+    const { fetchVerifiedModel } = await vi.importActual<
+      typeof import('../../src/core/ocr/download')
+    >('../../src/core/ocr/download');
     await expect(fetchVerifiedModel('eng')).rejects.toThrow(/could not be downloaded/i);
   });
 });
@@ -378,7 +382,7 @@ describe('ocr/runOcr — the confirmation gate', () => {
    * bytes already sitting in tesseract's own cache — never the `{ code, data }`
    * array shape that broke `initialize()`.
    */
-  it('seeds tesseract\'s cache from a manual upload and calls the worker with a plain language string (OCR-01 Defect 3)', async () => {
+  it("seeds tesseract's cache from a manual upload and calls the worker with a plain language string (OCR-01 Defect 3)", async () => {
     const uploadedBytes = new Uint8Array([7, 7, 7, 7]);
     // Simulates `OcrConsentDialog`'s upload handler: it writes the bytes to
     // OPFS *before* resolving the consent promise with 'upload'.

@@ -547,14 +547,11 @@ export function estimateQuadAspectRatio(quad: Quad, frame: FrameSize): AspectEst
   // than multiplying a zero weight by a NaN.
   const nominalSq = (NOMINAL_FOCAL_PER_DIAGONAL * diagonal) ** 2;
   const inverseFocalSq =
-    focalWeight > 0
-      ? focalWeight / focalSq + (1 - focalWeight) / nominalSq
-      : 1 / nominalSq;
+    focalWeight > 0 ? focalWeight / focalSq + (1 - focalWeight) / nominalSq : 1 / nominalSq;
   const method: AspectEstimate['method'] =
     focalWeight >= 0.999 ? 'projective' : focalWeight <= 0.001 ? 'assumed-focal' : 'blended';
 
-  const ratioSq =
-    (len2 * inverseFocalSq + n2[2] * n2[2]) / (len3 * inverseFocalSq + n3[2] * n3[2]);
+  const ratioSq = (len2 * inverseFocalSq + n2[2] * n2[2]) / (len3 * inverseFocalSq + n3[2] * n3[2]);
   const ratio = Math.sqrt(ratioSq);
   // A page is not 50× longer than it is wide. Anything out here came from corners
   // that are not a rectangle's, and the measured edges are the better guess.

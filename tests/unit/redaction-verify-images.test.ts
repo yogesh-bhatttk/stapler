@@ -40,7 +40,7 @@ vi.mock('../../src/core/workers/pdfjs-setup', async () => {
 
 // `any` throughout the shim: @napi-rs/canvas is resolved dynamically off
 // pdfjs-dist's own optional dependency, so there are no types to import for it.
- 
+
 const canvasLib: any = await import('@napi-rs/canvas').catch(async () => {
   const { createRequire } = await import('node:module');
   const require = createRequire(import.meta.url);
@@ -103,7 +103,6 @@ if (typeof (globalThis as { createImageBitmap?: unknown }).createImageBitmap ===
     return canvas;
   };
 }
- 
 
 /**
  * `operations.ts` reaches the workers through this module, so this is the seam
@@ -113,13 +112,12 @@ if (typeof (globalThis as { createImageBitmap?: unknown }).createImageBitmap ===
  * `any`: these stand in for two Comlink `Remote<T>` proxies. A structural type
  * would have to restate all of `RenderJob` and `ProcessJob`.
  */
- 
+
 const stubs: { render: any; process: any } = { render: {}, process: {} };
 
 vi.mock('../../src/core/workers', () => ({
-   
   renderWorker: { lease: (fn: (api: any) => unknown) => fn(stubs.render) },
-   
+
   processWorker: { lease: (fn: (api: any) => unknown) => fn(stubs.process) },
   cvWorker: { lease: () => undefined }
 }));
@@ -223,7 +221,6 @@ function cloningBoundary<T extends object>(api: T): T {
       const value = Reflect.get(target, prop, receiver);
       if (typeof value !== 'function') return value;
       return (...args: unknown[]) =>
-         
         (value as (...a: unknown[]) => unknown).apply(
           target,
           args.map(arg => (arg instanceof Uint8Array ? arg.slice() : arg))

@@ -159,7 +159,10 @@ const MEASURE_INSET_FRACTION = 0.08;
 function insetFor(pxWidth: number, pxHeight: number): number {
   const shortest = Math.min(pxWidth, pxHeight);
   const wanted = Math.max(MIN_MEASURE_INSET, Math.round(shortest * MEASURE_INSET_FRACTION));
-  return Math.max(0, Math.min(wanted, Math.floor((pxWidth - 1) / 3), Math.floor((pxHeight - 1) / 3)));
+  return Math.max(
+    0,
+    Math.min(wanted, Math.floor((pxWidth - 1) / 3), Math.floor((pxHeight - 1) / 3))
+  );
 }
 
 /**

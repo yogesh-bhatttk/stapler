@@ -5864,7 +5864,7 @@ const STANDARD_FONT_METRICS: Readonly<Record<string, IFontNames>> = {
   'Courier-Oblique': FontNames.CourierOblique,
   'Courier-BoldOblique': FontNames.CourierBoldOblique,
   CourierNew: FontNames.Courier,
-  'CourierNewPSMT': FontNames.Courier,
+  CourierNewPSMT: FontNames.Courier,
   'Times-Roman': FontNames.TimesRoman,
   'Times-Bold': FontNames.TimesRomanBold,
   'Times-Italic': FontNames.TimesRomanItalic,
@@ -5934,7 +5934,8 @@ function standardMetricTable(metricName: IFontNames, baseEncoding: string | unde
       const width = widthOfGlyph(glyph);
       if (width === undefined) continue;
       if (width > maxGlyphWidth) maxGlyphWidth = width;
-      const certain = symbolic || winAnsi || (code >= 32 && code <= 126 && code !== 39 && code !== 96);
+      const certain =
+        symbolic || winAnsi || (code >= 32 && code <= 126 && code !== 39 && code !== 96);
       if (certain) widths.set(code, width);
     }
     if (widths.size > 0 && maxGlyphWidth > 0) table = { widths, maxGlyphWidth };

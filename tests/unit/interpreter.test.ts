@@ -275,11 +275,7 @@ describe('glyph-level splitting of a partly-marked run (RED-02 AC3)', () => {
     const cid: FontInfo = { twoByte: true, defaultWidth: 1000 };
     // Five CID glyphs at 10pt: 0..10, 10..20, 20..30 (marked), 30..40, 40..50.
     const region: Rect[] = [{ x: 21, y: 0, width: 8, height: 20 }];
-    const { text } = filterText(
-      'BT /F1 10 Tf <00410042004300440045> Tj ET\n',
-      region,
-      () => cid
-    );
+    const { text } = filterText('BT /F1 10 Tf <00410042004300440045> Tj ET\n', region, () => cid);
     expect(text).toContain('[ <00410042> -1000 <00440045> ] TJ');
   });
 
@@ -313,11 +309,7 @@ describe('glyph-level splitting of a partly-marked run (RED-02 AC3)', () => {
     // where it did before, which means the replacement's total advance has to
     // equal the original's — otherwise it slides left into the hole.
     const region: Rect[] = [{ x: 21, y: 0, width: 18, height: 20 }];
-    const marked = filterText(
-      'BT /F1 10 Tf (ABCDEF) Tj (GH) Tj ET\n',
-      region,
-      () => font
-    );
+    const marked = filterText('BT /F1 10 Tf (ABCDEF) Tj (GH) Tj ET\n', region, () => font);
     // Sum of the emitted array: 2 glyphs kept, -2000/1000 em x 10pt, 2 kept = 60pt.
     expect(marked.text).toContain('[ <4142> -2000 <4546> ] TJ');
     expect(marked.text).toContain('(GH) Tj');

@@ -374,7 +374,13 @@ describe('applyRedactions blocks on the pixel half (RED-03)', () => {
     offFill: 90,
     fraction: 0.09,
     maxDeviation: 240,
-    content: { sampled: 1000, offDominant: 90, offDominantFraction: 0.09, edges: 40, edgeFraction: 0.04 }
+    content: {
+      sampled: 1000,
+      offDominant: 90,
+      offDominantFraction: 0.09,
+      edges: 40,
+      edgeFraction: 0.04
+    }
   };
   const clean = {
     sampled: 1000,

@@ -54,11 +54,7 @@ interface Pose {
  * focal length, offset to the principal point. This is the same projection a phone
  * performs, so a quad it produces is one the detector could really see.
  */
-function photograph(
-  aspect: number,
-  frame: { width: number; height: number },
-  pose: Pose
-): Quad {
+function photograph(aspect: number, frame: { width: number; height: number }, pose: Pose): Quad {
   const { tilt, pan = 0, roll = 0, distance = 2.3636, focal = 0.72 } = pose;
   const t = (tilt * Math.PI) / 180;
   const p = (pan * Math.PI) / 180;
@@ -305,9 +301,7 @@ describe('warpTargetSize', () => {
         );
       const { width, height } = warpTargetSize(quad, FRAME);
       // `+ width + height` is the slack from rounding each axis to a whole pixel.
-      expect(width * height, `tilt ${tilt}°`).toBeLessThanOrEqual(
-        measured * 2 + width + height
-      );
+      expect(width * height, `tilt ${tilt}°`).toBeLessThanOrEqual(measured * 2 + width + height);
     }
   });
 
@@ -351,8 +345,14 @@ describe('de-warp end to end', () => {
 
     // Page space → image space, so each pixel can be asked "what is under you".
     const toImage = (u: number, v: number) => {
-      const top = { x: quad.tl.x + (quad.tr.x - quad.tl.x) * u, y: quad.tl.y + (quad.tr.y - quad.tl.y) * u };
-      const bottom = { x: quad.bl.x + (quad.br.x - quad.bl.x) * u, y: quad.bl.y + (quad.br.y - quad.bl.y) * u };
+      const top = {
+        x: quad.tl.x + (quad.tr.x - quad.tl.x) * u,
+        y: quad.tl.y + (quad.tr.y - quad.tl.y) * u
+      };
+      const bottom = {
+        x: quad.bl.x + (quad.br.x - quad.bl.x) * u,
+        y: quad.bl.y + (quad.br.y - quad.bl.y) * u
+      };
       return { x: top.x + (bottom.x - top.x) * v, y: top.y + (bottom.y - top.y) * v };
     };
 
