@@ -1958,7 +1958,8 @@ test.describe('tool flows', () => {
   });
 
   test('redact: declining the face-detector download disables the tool and says so, on screen and on export (RED-08)', async ({
-    page
+    page,
+    baseURL
   }) => {
     // RED-08's second acceptance criterion, driven through the real UI: a
     // decline must leave a visible, persistent "off, and here is why" state —
@@ -1968,7 +1969,10 @@ test.describe('tool flows', () => {
 
     // Nothing may be requested on this path. Recorded for the whole test rather
     // than just the click, so a fetch fired from a worker still counts.
-    const origin = new URL(page.url() || 'http://localhost').origin;
+    // (baseURL, not page.url(), because the page hasn't navigated yet at this
+    // point — page.url() would still be about:blank, whose origin is the
+    // string "null", which no real request ever starts with.)
+    const origin = new URL(baseURL || 'http://localhost').origin;
     const external: string[] = [];
     page.on('request', request => {
       const url = request.url();
