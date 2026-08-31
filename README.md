@@ -30,7 +30,7 @@ For more details, please see our [Privacy Policy](public/privacy.html).
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/stapler.git
+   git clone https://github.com/yogesh-bhatttk/stapler.git
    cd stapler
    ```
 
