@@ -6,30 +6,40 @@
 Stapler — Offline PDF Tools
 
 ### Short Description (max 132 chars)
-Merge, split, compress, sign, and redact PDFs entirely offline in your browser. Zero uploads, zero accounts, zero limits.
+20+ PDF tools, entirely offline in your browser: merge, compress, sign, redact. No uploads, ever.
 
 ### Detailed Description (max 16,000 chars)
-**Stapler** is an offline PDF toolkit designed for privacy, speed, and simplicity.
+**Stapler** is a complete PDF toolkit that never leaves your browser — no uploads, no accounts, no server, ever.
 
-Have you ever needed to quickly merge two PDFs or compress a large document, but hesitated to upload your sensitive files to a random online converter? With Stapler, everything happens **locally in your browser**. Your files never leave your device.
+Most "free PDF tools" online quietly send your file to a server you'll never see, then ask you to sign up to get it back. Stapler works differently: every merge, every redaction, every signature is computed on your own machine, inside a sandboxed offline-only extension page. Your documents never touch a network — not ours, not anyone's.
 
-**Key Features:**
-- **Merge PDFs**: Combine multiple PDF files into one seamlessly. Reorder and rotate pages before merging.
-- **Split PDFs**: Extract specific pages or split a large document into individual files.
-- **Compress PDFs**: Reduce file size without losing quality, perfect for emailing large documents.
-- **Sign & Fill**: Draw, type, or import a signature; fill interactive form fields.
-- **Redact**: Permanently remove sensitive text and images, not just paint over them, with a verification report before you save.
-- **Scan Cleanup**: Straighten, deskew, and clean up phone-camera scans of paper documents.
-- **Offline First**: Works entirely offline after installation. No internet connection required.
-- **No Limits**: Process as many files as you want. No file size limits, no daily quotas.
+**Organize & edit**
+Merge, split, and extract pages. Rotate, delete, duplicate, and reorder. Crop, insert, and remove blank pages. Normalize mixed page sizes. Build N-up layouts and booklets. Add bookmarks, page numbers, watermarks, Bates stamps, and QR/barcode stamps.
 
-**Privacy Guarantee:**
-- No upload, ever. Your files are read and written only through your browser's own file picker.
-- No account, no sign-in, no tracking, no analytics.
-- No file size limits and no watermark added to your output.
-- Open source under the MIT licence — read the code, or verify the "no network" claim yourself in your browser's DevTools.
+**Convert**
+Images (PNG/JPEG/HEIC) to PDF and back. PDF to plain text or Markdown. Markdown to PDF. Extract embedded images and tables.
 
-We don't collect, store, or transmit any of your files or any data about you.
+**Sign & fill**
+Draw, type, or import a signature. Fill and flatten interactive form (AcroForm) fields.
+
+**Protect & clean up**
+Real redaction — the underlying content is structurally removed from the file, not just painted over, with a verification pass before you save. Scrub metadata. Straighten, deskew, and clean up phone-camera scans of paper documents.
+
+**Compress**
+Shrink file size with a raster pass or a surgical re-encode that keeps text sharp — and never inflates a file that's already optimized.
+
+**Review & manage**
+Annotate with highlights, freehand marks, sticky notes, and whiteout. Compare two documents side by side. Batch-process a whole folder with a saved recipe.
+
+Built for real accessibility, too: every tool is fully operable from the keyboard alone, in ten languages including right-to-left scripts, in light or dark mode.
+
+**Privacy, proven — not promised**
+- Zero network requests at runtime. Verify it yourself: open DevTools' Network tab and use any tool — nothing appears.
+- Zero permissions in the install prompt. Chrome won't even show you a warning, because there's nothing to warn about.
+- No accounts, no tracking, no analytics, no watermarks, no file-size limits, no daily quota.
+- Open source under the MIT licence — read every line of the code that touches your files.
+
+We built the tool we wanted for our own sensitive documents: something that just works, and never has to ask where your files are going — because they aren't going anywhere.
 
 ### Search Terms / Keywords (max 5)
 1. PDF Editor
