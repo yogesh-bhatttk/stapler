@@ -10,7 +10,7 @@ Pre-1.0. See `docs/TICKETS.md` for the ticket-by-ticket state of every feature �
 this file starts tracking user-facing changes from the first tagged release
 onward, not the full development history before it.
 
-## [0.1.0] — unreleased
+## [0.1.0] — 2026-08-31
 
 First release candidate. Core toolkit: merge, organize (rotate/delete/duplicate/
 reorder), split & extract, insert pages, remove blanks, crop, N-up & booklet,
