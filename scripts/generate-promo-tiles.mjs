@@ -1,11 +1,19 @@
 #!/usr/bin/env node
 /**
- * DIST-01 — Chrome Web Store promo tiles: the 440x280 small tile and the
- * 1280x800 large promo tile. Optional CWS assets, but the ticket's AC lists
- * both, so this closes that gap the same way `generate-screenshots.mjs`
- * closed the required screenshots: render real markup with Playwright rather
- * than hand-rolling text into a raw pixel buffer (that approach is only
- * dependency-free-worthy for `generate-icons.mjs`'s simple glyph).
+ * DIST-01 — Chrome Web Store promo tiles: the 440x280 small tile, the
+ * 1280x800 large promo tile, and the 1400x560 marquee tile (optional in the
+ * dashboard, but its upload slot rejects anything that isn't exactly that
+ * canvas at 24-bit RGB with no alpha channel — CWS-05). This closes that gap
+ * the same way `generate-screenshots.mjs` closed the required screenshots:
+ * render real markup with Playwright rather than hand-rolling text into a
+ * raw pixel buffer (that approach is only dependency-free-worthy for
+ * `generate-icons.mjs`'s simple glyph).
+ *
+ * Playwright's screenshot encoder already drops the alpha channel to plain
+ * RGB when the captured page has no transparency anywhere in it (verified
+ * against the two tiles this script already produced), so there is nothing
+ * extra to do for the "no alpha" requirement as long as `body` stays fully
+ * opaque, as it already is below.
  *
  * No preview server needed — this renders a self-contained HTML string via
  * `page.setContent`, not the live app.
@@ -28,16 +36,24 @@ const CANVAS_DARK = '#14151a';
 const INK = '#f7f8f8';
 const INK_MUTED = '#b4b7c5';
 
-function pageHtml({ width, height, compact }) {
-  const foldSize = compact ? 44 : 96;
-  const titleSize = compact ? 28 : 56;
-  const taglineSize = compact ? 14 : 24;
+// Sizing per tile rather than a single compact/large split: the 1400x560
+// marquee is far wider and shorter than either existing tile (2.5:1 vs.
+// 1.57:1 and 1.6:1), so scaling the large tile's proportions down to fit its
+// height alone left the glyph and text looking lost in the extra width.
+const SIZING = {
+  sm: { foldSize: 44, titleSize: 28, taglineSize: 14, gap: 20, textGap: 4 },
+  lg: { foldSize: 96, titleSize: 56, taglineSize: 24, gap: 40, textGap: 10 },
+  marquee: { foldSize: 80, titleSize: 48, taglineSize: 22, gap: 36, textGap: 8 }
+};
+
+function pageHtml({ width, height, size }) {
+  const { foldSize, titleSize, taglineSize, gap, textGap } = SIZING[size];
   return `<!doctype html>
 <html><head><meta charset="utf-8"><style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { width: ${width}px; height: ${height}px; overflow: hidden; }
   body {
-    display: flex; align-items: center; justify-content: center; gap: ${compact ? 20 : 40}px;
+    display: flex; align-items: center; justify-content: center; gap: ${gap}px;
     background: linear-gradient(135deg, ${CANVAS_DARK}, #1c1e27);
     font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
   }
@@ -53,7 +69,7 @@ function pageHtml({ width, height, compact }) {
     border-color: transparent ${CANVAS_DARK} transparent transparent;
     border-top-right-radius: ${foldSize * 0.06}px;
   }
-  .text { display: flex; flex-direction: column; gap: ${compact ? 4 : 10}px; }
+  .text { display: flex; flex-direction: column; gap: ${textGap}px; }
   .title { color: ${INK}; font-size: ${titleSize}px; font-weight: 700; letter-spacing: -0.01em; }
   .tagline { color: ${INK_MUTED}; font-size: ${taglineSize}px; font-weight: 400; max-width: ${width * 0.55}px; }
 </style></head>
@@ -69,8 +85,9 @@ function pageHtml({ width, height, compact }) {
 async function main() {
   const browser = await chromium.launch();
   const tiles = [
-    { name: 'small-tile-440x280.png', width: 440, height: 280, compact: true },
-    { name: 'promo-tile-1280x800.png', width: 1280, height: 800, compact: false }
+    { name: 'small-tile-440x280.png', width: 440, height: 280, size: 'sm' },
+    { name: 'promo-tile-1280x800.png', width: 1280, height: 800, size: 'lg' },
+    { name: 'marquee-tile-1400x560.png', width: 1400, height: 560, size: 'marquee' }
   ];
   for (const tile of tiles) {
     const page = await browser.newPage({ viewport: { width: tile.width, height: tile.height } });
