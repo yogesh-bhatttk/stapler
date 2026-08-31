@@ -17,18 +17,25 @@ async function openEditor(): Promise<void> {
   const editorUrl = chrome.runtime.getURL('editor.html');
   // `tabs.query({ url })` needs the broad `tabs` permission. Extension contexts
   // expose their own tab IDs without that permission, so prefer this MV3 API.
-  const contexts = await chrome.runtime.getContexts({
-    contextTypes: ['TAB'],
-    documentUrls: [`${editorUrl}*`]
-  });
-  const existing = contexts.find(context => context.tabId !== undefined);
+  // `runtime.getContexts` only landed in Firefox 127 (our manifest's
+  // `strict_min_version` is 109.0, and we deliberately don't add the `tabs`
+  // permission there either — see firefox-manifest.test.ts), so on an older
+  // Firefox this branch is skipped and a fresh tab opens every click instead
+  // of silently doing nothing, which is what happened before this existed.
+  if (typeof chrome.runtime.getContexts === 'function') {
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ['TAB'],
+      documentUrls: [`${editorUrl}*`]
+    });
+    const existing = contexts.find(context => context.tabId !== undefined);
 
-  if (existing?.tabId !== undefined) {
-    await chrome.tabs.update(existing.tabId, { active: true });
-    if (existing.windowId !== undefined) {
-      await chrome.windows.update(existing.windowId, { focused: true });
+    if (existing?.tabId !== undefined) {
+      await chrome.tabs.update(existing.tabId, { active: true });
+      if (existing.windowId !== undefined) {
+        await chrome.windows.update(existing.windowId, { focused: true });
+      }
+      return;
     }
-    return;
   }
 
   await chrome.tabs.create({ url: editorUrl });
