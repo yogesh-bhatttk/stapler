@@ -22,7 +22,22 @@ describe('transformManifestForFirefox', () => {
     const firefox = transformManifestForFirefox(chromeManifest);
     const gecko = (firefox.browser_specific_settings as { gecko: Record<string, string> }).gecko;
     expect(gecko.id).toMatch(/@/);
-    expect(gecko.strict_min_version).toBe('109.0');
+    // 112.0, not MV3's own 109.0 floor: background.type: "module" (below) is only
+    // recognized from Firefox 112 onward, and AMO's validator flags 109 here as a
+    // real bug, not noise — below 112, Firefox does not know to load background.js
+    // as an ES module, which is a parse failure given the compiled file uses
+    // import/export.
+    expect(gecko.strict_min_version).toBe('112.0');
+  });
+
+  test('declares zero data collection, as AMO now requires', () => {
+    const firefox = transformManifestForFirefox(chromeManifest);
+    const gecko = (
+      firefox.browser_specific_settings as {
+        gecko: { data_collection_permissions: { required: string[] } };
+      }
+    ).gecko;
+    expect(gecko.data_collection_permissions).toEqual({ required: ['none'] });
   });
 
   test('leaves host_permissions/content_scripts intact and does not add tabs', () => {
