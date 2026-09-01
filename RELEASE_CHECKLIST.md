@@ -42,6 +42,15 @@ so it gets its own explicit step below rather than being buried inside "run veri
  - [ ] **QA-05 — macOS Preview (manual):** same as above.
  - [ ] **QA-05 — Firefox pdf.js (manual):** same as above.
        Record pass/fail per viewer per tool in this file's git history or an issue.
+ - [ ] **QA-05 — Microsoft Word and LibreOffice Writer (manual, CNV-08):** open a
+       `.docx` produced by PDF → Word from `tests/fixtures/pdf-to-word.pdf`.
+       Confirm **no repair prompt**, the two headings carry Word's Heading 1 /
+       Heading 2 styles, the table is a real editable table (click into a cell),
+       the bold and italic runs are emphasised, and the image is visible on the
+       second page. Structural conformance is already asserted against the output
+       bytes by `tests/unit/pdf-to-word.test.ts` (via `mammoth` and by unzipping
+       the OPC package) — this step is specifically about the two real
+       applications, which no test in this repo can launch.
 - [ ] **Feature Complete:** All features for this release are implemented; any
       known limitation is disclosed in the relevant panel, not silent.
 

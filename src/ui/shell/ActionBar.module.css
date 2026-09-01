@@ -25,6 +25,21 @@
   flex: 1;
 }
 
+/*
+ * Why the primary CTA is disabled, for a tool that gates its own commit behind a
+ * mandatory preview (PLAN §5.5). Takes the spacer's place rather than sitting
+ * beside it, so the bar's layout does not shift when the gate clears.
+ */
+.gate {
+  flex: 1;
+  min-width: 0;
+  font: var(--text-small);
+  color: var(--ink-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .actions {
   display: flex;
   align-items: center;

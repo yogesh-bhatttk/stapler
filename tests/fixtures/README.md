@@ -91,6 +91,20 @@ git-ignored — deterministic, so re-running tests reproduces them identically:
 - `shared-image.pdf` — the same image on ten text pages (`sharedImagePdf`). **Must not
   regress:** the output holds exactly one image object, referenced from all ten pages.
 
+- `pdf-to-word.pdf` — CNV-08's fixture, and the only one in the corpus that carries all
+  four structural categories at once: a 22pt title, a wrapped 11pt paragraph, a 14pt
+  subheading, one line mixing regular/bold/italic runs, a real three-column four-row
+  table, and an embedded PNG on a second page (`pdfToWordPdf`; the expected strings are
+  exported as `PDF_TO_WORD` so the test asserts against the fixture rather than a copy of
+  it). **Must not regress:** the geometry *is* the test. Type sizes of 22/14/11 put the
+  body size at 11pt so 22 clears the level-1 heading ratio (1.6x) and 14 clears the
+  promotion ratio (1.25x) without reaching it; the paragraph's 14pt leading sits below the
+  paragraph-break threshold the 40 and 52pt gaps around the headings sit above, so the
+  three wrapped lines convert as one paragraph; and the table's cells are 190pt apart,
+  far beyond the widest word space a justified line can stretch to, which is what
+  separates a table row from a sentence. Moving any of those numbers changes what
+  `pageBlocks` produces, which is what `tests/unit/pdf-to-word.test.ts` grades.
+
 - `acroform.pdf` — a fillable text field with a hierarchical name (`name.first`) and a
   checkbox (`acroformPdf`). The hierarchy is the point: pdf-lib joins the `/T` of every node
   to name a field, so a two-level name is what catches a `/AcroForm` rebuild that dedupes

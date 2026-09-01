@@ -2846,6 +2846,340 @@ worker changes were needed — `RedactPanel.tsx` already renders one section per
   matches with zero false positives against the existing RED-05 fixture's prose and
   planted values.
 
+### CNV-08 · PDF → Word (DOCX) — `XL` `P1`
+
+**Status: Done, after an independent audit found five defects that are now
+closed — one of them a real bug behind a false claim. Three limitations remain,
+stated in the tool's own copy rather than hidden.** Carves a scoped exception
+into the `PLAN.md` §1.1 non-goal — see the revision note there. Best-effort
+structural conversion, not layout-perfect; ships labeled beta with a mandatory
+preview per §5.5, same policy as OCR-03. The audit's findings and what was and
+was not done about each are in **Audit follow-up** below; the one it did *not*
+ask to be fixed (table cell formatting) is now limitation 3 rather than a
+silently broken promise.
+
+New tool `pdf-to-word` (group Convert, `Save .docx`). Three workers, sequenced by
+`convertPdfToDocx` in `src/core/operations.ts`:
+
+- **`render`** gains `extractPageBlocks`. Text runs come from
+  `src/core/convert/pdf-runs.ts`, blocks from `src/core/convert/blocks.ts`.
+- **`process`** contributes images through CNV-06's existing `extractImages` — the
+  embedded XObject's own bytes, never re-encoded.
+- **`convert`** is a new fifth worker (`src/core/workers/convert.worker.ts`,
+  `maxSize: 1`) owning only the `docx` package, loaded by a dynamic `import()`
+  inside `src/core/convert/docx-writer.ts`.
+
+It takes a block model rather than PDF bytes on purpose: reading a PDF needs
+pdf.js and pdf-lib, both of which already have a worker, and `index.ts`'s split is
+by library so the build holds one copy of each. Passing bytes in would add a third
+copy of pdf.js and a second of pdf-lib to save one Comlink hop. What it *does* take
+as raw bytes is CNV-06's image archive, unopened and `handOver`-transferred rather
+than cloned — unzipping a document's worth of images is exactly the >50ms
+main-thread work the NFRs forbid, and this way the image bytes cross a worker
+boundary once instead of being copied into the model first. That transfer is why
+`buildDocx` takes the archive and its per-image report as **two top-level
+parameters** rather than one `{ archive, entries }` object: see finding 1 below,
+where the object version was found to transfer nothing at all.
+
+Reuse rather than reimplementation, as the requirements ask: `text-layout.ts` was
+refactored to expose `layoutLines`, so CNV-04's line grouping, paragraph-break
+threshold and CNV-05's 1.25× heading promotion are now *one* implementation read by
+both the Markdown export and this one (`layoutText` is a six-line consumer of it;
+its 32 existing tests are unchanged and still pass). Table *grids* are built by
+OCR-03's `extractTableFromPage`. The only new heuristic is the question OCR-03
+never had to ask — which lines on a page belong to a table at all, since its user
+hand-picks a page and gets the whole page as one grid: consecutive lines that wide
+gaps (>2.5× the body type size) split into ≥2 cells, ≥2 rows deep, headings
+excluded. That threshold is an order of magnitude above the ~1× a justified line's
+word spaces can stretch to, which is what keeps prose out of tables — asserted
+directly, not assumed.
+
+Bold/italic come from font descriptors, as specified, and getting them needed one
+non-obvious step: `getTextContent()`'s `styles` map carries only pdf.js's CSS
+*fallback* family, the same string for Helvetica and Helvetica-Bold, and pdf.js
+only sends the real font object to the main thread while building an **operator
+list** (its `getTextContent` path never calls `TranslatedFont.send`). So
+`formattedRuns` calls `getOperatorList()` per page purely to populate
+`page.commonObjs` and discards the result. Two sources are then combined because
+neither alone is sufficient: pdf.js's own `font.bold`/`font.italic` are set only on
+the `fallbackToSystemFont` path, so they are `undefined` for every *embedded* font,
+while the `/BaseFont` name is always present and carries the style by convention
+("AAAAAA+Arial-BoldMT"). Where neither says anything the run is reported unstyled
+rather than guessed from glyph geometry.
+
+**The three limitations, all surfaced to the user, none silent:**
+
+1. **Image position within a page is not reconstructed.** CNV-06 reports an
+   image's *resource* order, not where the content stream draws it, so images are
+   appended after their own page's text. Inventing a y-position would put an image
+   in a plausible-looking but wrong place.
+2. **An image PDF-format Word cannot embed is left out and reported.** JPEG 2000
+   is the live case: CNV-06 hands over the `.jp2` codestream untouched, and
+   re-encoding it here would mean decoding a format pdf.js itself often cannot.
+   Same for JBIG2/CCITT (CNV-06's own skip reason is passed through verbatim) and
+   for an `/SMask`, which is a separate PDF object neither a JPEG nor this writer
+   carries across. Every one of these appends a sentence to the preview's "left
+   out of the Word document" list.
+3. **Bold/italic inside a table cell is dropped.** `blocks.ts` models a table as
+   `{ kind: 'table'; rows: string[][] }` — plain strings, no run structure — so a
+   bold figure in a cell arrives as the right word in the right cell, unbolded.
+   Only paragraph and heading runs carry formatting. Added by the audit pass
+   below: the panel copy previously promised bold/italic without excepting
+   tables, which was a claim the output did not honour. **The formatting loss
+   itself is not fixed** — carrying runs into cells means a `DocxRun[][][]` row
+   model and a second `lineRuns` path through `extractTableFromPage`, which is
+   real added scope. What is fixed is the claim.
+
+The preview is the gate, not a label: `PdfToWordPanel` runs the whole conversion,
+**holds the produced bytes**, and only then clears `ui/tools/commit-gate.ts`'s
+block on the action bar's primary CTA — which `ActionBar` reads to disable the
+button and to render the reason as visible text. Saving writes those exact bytes,
+so what was reviewed and what lands on disk cannot differ; changing the "include
+images" option or switching document throws the preview away and re-closes the
+gate. `commit.ts`'s handler refuses again if reached anyway (a disabled button is a
+courtesy; the handler's check is the guarantee). Encrypted input is refused by
+`loadDocument`; XFA is refused from the raw bytes before any parse, with its own
+message (`XFA_CONVERT_MESSAGE`) rather than the compose one — the failure is the
+other way round here, nothing is written *into* the PDF, the problem is that a
+pure XFA form's page objects usually hold only an "open this in Adobe Reader"
+placeholder.
+
+**Audit follow-up.** An independent audit confirmed the structural correctness,
+the table cell values, the reading order and the gating logic against real bytes,
+and raised five defects. All five are closed. Two of them were the kind this
+repo's conventions exist to catch — a claim in a comment that the code did not
+honour, and a guarantee whose test never executed the guarantee.
+
+1. **The "zero-copy transfer" transferred nothing.** `operations.ts` called
+   `api.buildDocx(model, { archive: handOver(bytes), entries }, job)`. Comlink
+   reads its transfer list off each **top-level argument** only — `toWireValue`
+   looks the value up in `transferCache` and never recurses into a plain object's
+   properties (`comlink.mjs`, the final `return [{ type: 'RAW', value },
+   transferCache.get(value) || []]`) — so the marker on the nested array was
+   dropped and every image byte was structured-cloned, which is the exact cost
+   the comment claimed to avoid. `buildDocx` now takes `(model, imageArchive,
+   imageEntries, job)` with the `Uint8Array` as its own argument, matching how
+   the two working `handOver` call sites in the same file
+   (`flattenDocument`, `scrubMetadata`) are already shaped. The comment says what
+   the code does, and says why the argument position is load-bearing.
+2. **`pdf-to-word` was missing from the zero-network sweep** — and the sweep's own
+   comment already says why visiting a panel is not enough. Added to the tool
+   list, plus a dedicated test that runs a *real* conversion and save under the
+   request monitor. This tool is the sharpest case in the build for that
+   distinction: the conversion is what triggers the lazy `await import('docx')`,
+   a chunk carrying jszip, pako and buffer that a rendered panel never loads.
+3. **`convertPdfToDocx` had no direct coverage.** The unit test hand-rolled the
+   render → build sequence, so the exported function never ran and neither of its
+   refusal branches was ever executed. The test now mocks `core/workers` to lease
+   the three *real* worker implementations and calls `convertPdfToDocx` itself, so
+   the round-trip assertions grade the production entry point; the two refusals
+   (encrypted, XFA) are asserted on the whole function, including that the writer
+   was never reached.
+4. **A stale preview survived a document edit.** The gate keyed on the active
+   document's *id* alone. Deleting or rotating a page in another tool leaves the
+   id unchanged, so pre-edit bytes stayed marked valid and Save would have
+   written them — silently, which is precisely the outcome §5.5's mandatory
+   preview exists to prevent. The gate now also keys on `history.ts`'s
+   `historyVersion`, the counter every store mutator already bumps through
+   `commit()` and that `AppShell`/`HistoryPanel` already read as *the*
+   "something changed" signal, rather than a new counter that could drift from
+   it. The revision is captured *before* the input bytes are read, so an edit
+   made while a conversion is still running invalidates it too.
+5. **The panel copy overclaimed table formatting.** Corrected, and recorded as
+   limitation 3 above. The underlying formatting loss is deliberately *not*
+   fixed — see that entry for what fixing it would cost.
+
+- **Evidence** (re-run in full after the audit pass). `pnpm check` green (type,
+  lint, format, 102 tokens, 30 contrast pairs × 2 themes, invariants).
+  `pnpm test`: 78 files · 919 tests · 0 failures, including
+  `tests/unit/pdf-to-word.test.ts` (27, up from 23) and the new
+  `tests/unit/pdf-to-word-transfer.test.ts` (3), with `text-layout.test.ts` still
+  32 and unchanged. `pnpm test:e2e`: 107 passed, including
+  `tests/e2e/pdf-to-word.spec.ts` (3, up from 2) and `zero-network.spec.ts` (3,
+  up from 2). **One flake seen and not hidden:** a second full run of the same
+  tree came back 106 passed / 1 failed on
+  `compress-preview.spec.ts:65` (CMP-05) — it sampled the "before" canvas before
+  it had painted and got all-white pixels, so `after.pixels` and `before.pixels`
+  compared equal. It is a pre-existing render-timing flake in a path CNV-08 does
+  not touch, under a memory-constrained machine: the spec passes 7/7 re-run on
+  its own, and passed in the first full run. Not investigated further here, and
+  not attributed to this ticket — flagged so the next `QA` pass knows it exists.
+  `pnpm check:bundle`: 360.65 KB gzipped initial JS against the
+  900 KB budget — and the `docx` chunk (`assets/dist-*.js`, 373,408 bytes raw) is
+  referenced from exactly one place in the whole build,
+  `assets/convert.worker-*.js`, and only as ``import(`./dist-*.js`)``, re-checked
+  by grepping the built output rather than the source. `manifest.json` still
+  ships `"permissions": []` with no `host_permissions`; `docx`'s built chunk
+  contains no `fetch(`, `XMLHttpRequest`, `WebSocket` or `sendBeacon` at all —
+  zero occurrences of each, counted in the built chunk (it does carry URL
+  *strings* in license banners and error messages — jszip, pako, buffer — which
+  are text, not requests).
+- **Evidence specific to the audit findings.** Each fix was checked by making it
+  fail, not only by watching it pass.
+  - Finding 1 is measured against real `postMessage` semantics rather than a
+    stub: `pdf-to-word-transfer.test.ts` runs `convertPdfToDocx` against a real
+    `Comlink.wrap`/`Comlink.expose` pair over a real `MessageChannel` (this is the
+    one CNV-08 test file that does *not* `vi.mock('comlink')`) and asserts the
+    source `ArrayBuffer` is **detached** — `byteLength` 0 — afterwards, which only
+    a transfer does, while the 1024 bytes arrive intact on the far side. Both
+    regressions were reproduced against it: re-nesting the array in an
+    `{ archive, entries }` wrapper fails the test, and dropping the `handOver`
+    while keeping the argument position fails it at `byteLength === 0` with the
+    buffer still at 1024. A third test pins Comlink's own behaviour — the same
+    array transfers as an argument and clones as a property — so the signature
+    cannot be "tidied" back into a wrapper silently.
+  - Finding 2's new test asserts more than the absence of requests, which on its
+    own a broken test also satisfies: it records *every* request and asserts that
+    JS chunks — the convert worker among them, by name — were fetched between the
+    preview click and the outline appearing. A conversion that silently stopped
+    running would fail rather than pass by observing nothing.
+  - Finding 4's e2e test was run against a deliberately reverted, id-only gate
+    and **failed** exactly as the audit described: after deleting a page in
+    Organize, `Save .docx` remained `enabled` over the pre-edit bytes
+    (`expect(locator).toBeDisabled() failed … unexpected value "enabled"`). With
+    the fix it passes, and the unit test covers the same path plus undo and the
+    missing-revision case.
+- **Not verifiable here, and not claimed:** that the output opens in Microsoft Word
+  or LibreOffice. Neither is installed in this environment. What is proved instead
+  is structural and comes from the produced bytes two independent ways — `mammoth`
+  re-parses the file and yields `<h1>`/`<h2>`, `<strong>`/`<em>`, one real
+  `<table>` whose 4×3 cell grid equals the fixture's, an `<img>`, and **zero**
+  warning messages; and `fflate` unzips the OPC package to confirm
+  `[Content_Types].xml`, `word/document.xml`, `_rels/.rels`, exactly one
+  `word/media/` part carrying a real PNG signature, and a relationship in
+  `word/_rels/document.xml.rels` pointing at it. Add "opens in Word 365 and
+  LibreOffice Writer with no repair prompt" to the `QA-05` manual checklist.
+
+**Second review pass** (a general code-review sweep, independent of the audit
+above) found three more defects, all fixed:
+
+- **DOCX title race.** `convertPdfToDocx` used to read `activeDoc.value?.name`
+  live, partway through its own multi-await sequence (page-render loop, then
+  optional image extraction, then the worker build) — so switching the active
+  tab mid-conversion could title the output after a *different* document than
+  the one whose bytes it actually converted. Cosmetic only: the save gate
+  already keys off the source document's id and revision independently, so the
+  wrong tab can neither read nor overwrite the wrong file, only the internal
+  `docProps/core.xml` title could end up mismatched. Fixed by adding
+  `documentName` to `PdfToDocxOptions` and having the caller
+  (`PdfToWordPanel.tsx`) pass the document name it already captured at click
+  time, alongside `bytes`, instead of the function reading a live signal.
+  Regression tests: "titles the .docx from the documentName option, not from
+  whatever document happens to be active" and the generic-title fallback case,
+  both asserting `docProps/core.xml`'s `<dc:title>` directly.
+- **`CLAUDE.md` / `PLAN.md` drift.** `CLAUDE.md`'s working-style section still
+  named "PDF→Word, Office→PDF" as `PLAN.md` §1.1 non-goal examples after this
+  ticket's revision note removed that blanket restriction — the two governing
+  docs contradicted each other. Reworded to name the fidelity non-goal that
+  actually survives (pixel-perfect PDF↔Office layout) and to point at
+  CNV-08..13 as the in-scope carve-out.
+- **Quadratic table-clustering on adversarial pages.** In `blocks.ts`'s
+  `pageBlocks`, a long run of lines that each look tabular by the cheap
+  per-line gap check but never actually agree on a consistent column grid
+  (e.g. an inconsistently-aligned two-column layout) used to be re-clustered
+  once per line in the run — each rejection advanced the scan by only one
+  line before re-scanning nearly the same range again, instead of skipping
+  the whole rejected run. Fixed with a `rejectedTableEnd` guard so a range
+  already scanned and rejected is never re-attempted. Existing table/paragraph
+  tests (accepted grids, single wide-gapped lines, heading exclusion) all
+  still pass unchanged; no dedicated adversarial-input timing test was added
+  for this one, since reliably constructing an input that clears the per-line
+  gap heuristic but fails OCR-03's alignment-tolerant clustering (without
+  either being flaky or over-fitting to the clustering internals) was judged
+  not worth the added test-suite complexity for a fix this mechanical — the
+  existing coverage plus code inspection is the evidence here, not a new test.
+
+- **Requirements:** Extract page text via the render worker's existing reading-order
+  layout (CNV-04's `layoutText`) plus basic run formatting (bold/italic from font
+  descriptors) and embedded images, and build a real `.docx` with the `docx` package
+  (lazy-loaded, never in the initial bundle). Paragraphs, headings (by font-size
+  heuristic, reusing CNV-05's promotion logic), simple tables, and images are
+  preserved as structure; exact fonts, columns, and pagination are not guaranteed.
+  Unsupported input (encrypted, XFA) is detected and refused with a clear message,
+  never half-converted.
+- **AC:** A multi-page fixture with headings, paragraphs, a table, and an image
+  produces a `.docx` that opens in Word/LibreOffice with all text present in reading
+  order, the table intact as a real table, and the image embedded — verified by
+  re-parsing the output with `mammoth` in a round-trip test, not by visual inspection.
+  Beta label and mandatory preview appear before the save action is enabled.
+
+### CNV-09 · Word (DOCX) → PDF — `L` `P1`
+
+**Status: Not started.**
+
+- **Requirements:** Read `.docx` via `mammoth` (lazy-loaded) into structured HTML,
+  convert to the shared block model, and lay it onto PDF pages via the new
+  `html-to-pdf-blocks` engine (extends `markdown-to-pdf.ts`'s existing approach rather
+  than a new one). Headings, paragraphs, lists, tables, bold/italic runs, and images
+  are preserved as content; exact Word pagination/fonts are not reproduced.
+- **AC:** A `.docx` fixture with the same content categories as CNV-08's fixture
+  round-trips through this tool to a PDF whose extracted text (via CNV-04's own
+  extraction) matches the source paragraphs and table cell values, with the beta
+  label and mandatory preview shown before save.
+
+### CNV-10 · PDF → Excel (XLSX) — `L` `P1`
+
+**Status: Not started.** Generalizes OCR-03's table→XLSX writer (`table-extract.ts`,
+`docs/TICKETS.md:795`) — that ticket only ran on OCR'd scan output; this one runs the
+same column-position-clustering heuristic over a PDF's real, selectable text layer,
+covering ordinary (non-scanned) PDFs with tabular or columnar content.
+
+- **Requirements:** Detect table-like regions from pdf.js text-position data across
+  the whole document (not just a manually-selected single table as OCR-03 does), and
+  write one sheet per detected table (or per page, for non-tabular text) via the
+  generalized `xlsx-writer.ts` — no new dependency, since this reuses the existing
+  hand-rolled zip+XML builder already shipping for OCR-03.
+- **AC:** A fixture PDF with an unambiguous multi-column table produces an `.xlsx`
+  whose cell grid matches the table's rows/columns exactly when re-opened via the
+  `xlsx` reader in a round-trip test. A PDF with no detectable table still produces a
+  usable sheet (one row per line of text) rather than an empty or failed export.
+  Beta label and mandatory preview appear before save.
+
+### CNV-11 · Excel (XLSX) → PDF — `M` `P1`
+
+**Status: Not started.**
+
+- **Requirements:** Read `.xlsx` via the `xlsx` (SheetJS CE) reader (lazy-loaded,
+  read-only usage), render each sheet as a paginated grid through the shared
+  `html-to-pdf-blocks` engine (one logical "table" block per sheet, split across pages
+  by row count). Cell values and basic number/date formatting are preserved; column
+  widths are approximated, not pixel-matched to Excel's own layout.
+- **AC:** A multi-sheet fixture produces a PDF with one section per sheet, all cell
+  values present and in the correct row/column order, verified by re-extracting text
+  via CNV-04's extraction and comparing to the source grid. Beta label and mandatory
+  preview appear before save.
+
+### CNV-12 · PDF → PowerPoint (PPTX) — `XL` `P2`
+
+**Status: Not started.** The most novel surface of the six — no existing reader
+precedent in the codebase for the source direction, since PDF→PPTX still starts from
+pdf.js's existing page/text/image extraction, same as CNV-08.
+
+- **Requirements:** One slide per PDF page: page rendered/extracted content (text
+  blocks by position, embedded images) placed onto a same-size slide via `pptxgenjs`
+  (lazy-loaded). Exact PDF layout is approximated as positioned text boxes and images,
+  not editable rich text reflow — this is the widest fidelity gap of the six tickets
+  and must say so plainly in the beta copy.
+- **AC:** A multi-page fixture produces a `.pptx` with one slide per page, opens in
+  PowerPoint/LibreOffice Impress, and each slide's extracted text (via a round-trip
+  through `pptx-reader.ts`) matches the source page's text content. Beta label and
+  mandatory preview appear before save.
+
+### CNV-13 · PowerPoint (PPTX) → PDF — `L` `P2`
+
+**Status: Not started.**
+
+- **Requirements:** Read `.pptx` via the hand-rolled `pptx-reader.ts` (a zip-of-XML
+  walker over the existing `fflate` dependency — no new library for this narrow read
+  need), extract per-slide text runs and images, and lay one PDF page out per slide
+  via the shared `html-to-pdf-blocks` engine. Slide transitions, animations, and
+  speaker notes are not reproduced (out of scope, not silently dropped — state this
+  in the tool's copy).
+- **AC:** A multi-slide fixture (text + at least one image, one slide with a table)
+  produces a PDF with one page per slide, all slide text present, verified against
+  the source deck's own text content. Beta label and mandatory preview appear before
+  save.
+
 ---
 
 ## Critical path to v1.0

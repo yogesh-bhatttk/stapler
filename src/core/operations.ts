@@ -8,7 +8,7 @@ import { commit } from './history';
  * hands the user a file it cannot stand behind.
  */
 import * as Comlink from 'comlink';
-import { processWorker, renderWorker, cvWorker } from './workers';
+import { processWorker, renderWorker, cvWorker, convertWorker } from './workers';
 import { createJobHandle, type JobOptions } from './workers/protocol';
 import { detectHeadingOutline, type HeadingPage, type OutlineCandidate } from './outline-detect';
 import type {
@@ -61,6 +61,9 @@ import {
 } from '../ui/tools/watermark/state';
 import type { WatermarkData } from './workers/process.worker';
 import { internal, unsupported, cancelled, isCancellation, fromUnknown } from './errors';
+import { hasXfaMarker, XFA_CONVERT_MESSAGE } from './pdf/xfa';
+import type { DocxModel, DocxPage, DocxPreviewItem } from './convert/blocks';
+import type { ExtractedImageEntry } from './workers/process.worker';
 
 /**
  * Maps the UI's `WatermarkSettings` onto the worker's `WatermarkData`. The two
@@ -1642,6 +1645,128 @@ export async function extractEmbeddedImages(
 ): Promise<ExtractedImages> {
   const job = createJobHandle(options);
   return processWorker.lease(api => api.extractImages(bytes, pageIndices, job));
+}
+
+/* ------------------------------------------------------------------ *
+ * CNV-08 — PDF → Word (DOCX)
+ * ------------------------------------------------------------------ */
+
+export interface PdfToDocxOptions {
+  /** Embed the PDF's own image XObjects. On by default. */
+  includeImages: boolean;
+  /**
+   * Title for the .docx's core-properties metadata. Callers that know which
+   * document `bytes` came from should pass its name here — reading a live
+   * "current document" signal instead would race a mid-conversion tab switch,
+   * titling the file from whatever document happened to be active when this
+   * async function got around to it rather than the one it actually converted.
+   */
+  documentName?: string;
+}
+
+export interface PdfToDocxResult {
+  /** The finished `.docx`. The same bytes the preview describes get saved. */
+  bytes: Uint8Array;
+  pageCount: number;
+  imageCount: number;
+  /** Block-by-block description of the output, for the mandatory preview. */
+  outline: DocxPreviewItem[];
+  /** What was recognised and deliberately not converted, each with the reason. */
+  skipped: string[];
+}
+
+/**
+ * CNV-08 — best-effort structural conversion, three workers deep.
+ *
+ * `render` (pdf.js) reads the text and turns it into blocks, `process` (pdf-lib)
+ * hands over the embedded images without re-encoding them, and `convert` (`docx`)
+ * writes the file. Sequenced here rather than inside one worker because that is
+ * what keeps one copy of each library in the build — see `convert.worker.ts`.
+ *
+ * Refuses before doing any work on the two inputs that cannot be converted
+ * honestly:
+ *
+ *  • **encrypted** — every stream is ciphertext, so there is nothing to read.
+ *    `loadDocument` raises this itself.
+ *  • **XFA** — the visible content of an XFA form lives in an XML payload the
+ *    page objects do not carry. Extracting the page text yields the dead
+ *    AcroForm shadow layer, which for a pure XFA form is usually a "please open
+ *    this in Adobe Reader" placeholder. A `.docx` containing that, presented as
+ *    the user's form, is precisely the silent-corruption outcome PLAN §5.2
+ *    forbids.
+ */
+export async function convertPdfToDocx(
+  bytes: Uint8Array,
+  options: PdfToDocxOptions,
+  jobOptions: JobOptions = {}
+): Promise<PdfToDocxResult> {
+  if (hasXfaMarker(bytes)) throw unsupported(XFA_CONVERT_MESSAGE);
+
+  const skipped: string[] = [];
+  const pages: DocxPage[] = [];
+
+  // Text first, and on its own document handle: `loadDocument` is also where
+  // encryption and an unreadable file surface, so nothing else runs until the
+  // document has been proved readable.
+  await renderWorker.lease(async api => {
+    const { handle, pageCount, isXfa } = await api.loadDocument(bytes);
+    try {
+      if (isXfa) throw unsupported(XFA_CONVERT_MESSAGE);
+      for (let i = 0; i < pageCount; i++) {
+        if (jobOptions.signal?.aborted) throw cancelled();
+        jobOptions.onProgress?.((i / pageCount) * 0.6, `Reading page ${i + 1} of ${pageCount}`);
+        pages.push({ pageIndex: i, blocks: await api.extractPageBlocks(handle, i) });
+      }
+    } finally {
+      await api.closeDocument(handle).catch(() => {});
+    }
+  });
+
+  let imageArchive: Uint8Array | null = null;
+  let imageEntries: ExtractedImageEntry[] = [];
+  if (options.includeImages) {
+    if (jobOptions.signal?.aborted) throw cancelled();
+    jobOptions.onProgress?.(0.6, 'Collecting embedded images');
+    const extracted = await extractEmbeddedImages(bytes, [], {
+      signal: jobOptions.signal,
+      onProgress: fraction =>
+        jobOptions.onProgress?.(0.6 + (fraction ?? 0) * 0.15, 'Collecting embedded images')
+    });
+    imageArchive = extracted.bytes;
+    imageEntries = extracted.entries;
+  }
+
+  if (jobOptions.signal?.aborted) throw cancelled();
+  const model: DocxModel = { title: options.documentName ?? 'Converted document', pages, skipped };
+  const built = await convertWorker.lease(api =>
+    api.buildDocx(
+      model,
+      // Unopened, and handed over rather than cloned: unzipping a document's
+      // worth of image bytes is exactly the >50ms main-thread work the NFRs
+      // forbid, and `handOver` is safe here because these bytes came out of a
+      // worker a moment ago and nothing else will ever read them.
+      //
+      // It has to be *this* argument position. Comlink only reads a transfer
+      // marker off a top-level argument, so an earlier version of this call that
+      // passed `{ archive: handOver(bytes), entries }` transferred nothing and
+      // structured-cloned the whole archive instead. See `convert.worker.ts`.
+      imageArchive === null ? null : handOver(imageArchive),
+      imageEntries,
+      createJobHandle({
+        signal: jobOptions.signal,
+        onProgress: (fraction, label) =>
+          jobOptions.onProgress?.(0.75 + (fraction ?? 0) * 0.25, label)
+      })
+    )
+  );
+
+  return {
+    bytes: built.bytes,
+    pageCount: pages.length,
+    imageCount: built.imageCount,
+    outline: built.outline,
+    skipped: built.skipped
+  };
 }
 
 /** ACC-01 — returns thumbnails of all images for the alt-text editor */

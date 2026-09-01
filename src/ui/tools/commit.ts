@@ -74,6 +74,11 @@ import { protection, protectionActive, protectionIssue } from './protect/state';
 import type { ProtectionSettings } from '../../core/pdf/encrypt';
 import { scrubSettings } from './metadata/state';
 import { ocrReport, ocrSettings } from './ocr/state';
+import {
+  PDF_TO_WORD_GATE,
+  pdfToWordPreview,
+  pdfToWordPreviewIsStale
+} from './convert/pdf-to-word-state';
 import { runOcr } from '../../core/ocr/runOcr';
 import { renderWorker } from '../../core/workers';
 import { altTextMap } from './acc/state';
@@ -1132,6 +1137,45 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     } else {
       notify('success', translate('PDF saved successfully.'));
     }
+  },
+  /**
+   * CNV-08 — writes the `.docx` the panel has already converted and previewed.
+   *
+   * It deliberately does not convert here. The preview is mandatory (PLAN §5.5),
+   * and the only way to guarantee that what was reviewed is what gets written is
+   * to save the very bytes the preview was rendered from. Re-running the
+   * conversion at save time would reopen the gap between the two.
+   *
+   * The gate in `commit-gate.ts` already disables the action bar's button; this
+   * check is the guarantee behind that courtesy, and it also catches a preview
+   * that belongs to a document the user has since closed — or one edited since
+   * the conversion ran, which `pdfToWordPreviewIsStale` decides from
+   * `historyVersion` rather than from the document id alone.
+   */
+  'pdf-to-word': async ({ doc }) => {
+    const preview = pdfToWordPreview.value;
+    if (!preview || pdfToWordPreviewIsStale(doc.id)) {
+      notify('warning', translate('Nothing was saved.'), {
+        detail: PDF_TO_WORD_GATE,
+        timeout: 0
+      });
+      return;
+    }
+
+    // Deliberately `platform.saveFileAs`, not the shared `save`: that helper runs
+    // the bytes through `applyProtection`, which encrypts a *PDF*. Running a
+    // `.docx` through it would produce an unopenable file — the same reason
+    // OCR-03's CSV/XLSX export takes this path.
+    const name = `${stem(doc.name)}.docx`;
+    const saved = await platform.saveFileAs(preview.bytes, name);
+    if (!saved) return;
+    notify('success', translate('Saved {name}', { name }), {
+      detail:
+        `${formatBytes(preview.bytes.byteLength)} · ${preview.pageCount} page(s)` +
+        (preview.skipped.length > 0
+          ? ` · ${preview.skipped.length} item(s) could not be converted — see the panel`
+          : '')
+    });
   },
   shortcuts: async () => {}
 };

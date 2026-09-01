@@ -11,6 +11,7 @@ import type { RenderJob } from './render.worker';
 import type { ProcessJob } from './process.worker';
 import type { CVJob } from './cv.worker';
 import type { OCRJob } from './ocr.worker';
+import type { ConvertJob } from './convert.worker';
 
 /** pdf.js — reading, rasterising, text extraction, search, verification. */
 export const renderWorker = createWorkerClient<RenderJob>(
@@ -43,4 +44,15 @@ export const ocrWorker = createWorkerClient<OCRJob>(
   { idleMs: 30_000, name: 'ocr', maxSize: 1 }
 );
 
-export type { RenderJob, ProcessJob, CVJob, OCRJob };
+/**
+ * `docx` (CNV-08). Capped at a single instance for the same reason `ocr` is,
+ * scaled to this library's cost: writing a DOCX holds the whole OOXML tree plus
+ * every embedded image in memory while jszip deflates it, so a pool of four would
+ * multiply the peak footprint of a job that is one document at a time anyway.
+ */
+export const convertWorker = createWorkerClient<ConvertJob>(
+  () => new Worker(new URL('./convert.worker.ts', import.meta.url), { type: 'module' }),
+  { idleMs: 30_000, name: 'convert', maxSize: 1 }
+);
+
+export type { RenderJob, ProcessJob, CVJob, OCRJob, ConvertJob };

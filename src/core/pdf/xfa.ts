@@ -85,6 +85,24 @@ export function isXfaDocument(bytes: Uint8Array, parserSaysXfa: boolean): boolea
 }
 
 /**
+ * CNV-08's refusal, for a conversion *out* of PDF.
+ *
+ * Distinct from the compose refusal below because the failure is the other way
+ * round: nothing is being written back into the PDF, so there is no form to
+ * break — the problem is that the text a converter can see is not the text the
+ * user sees. A pure XFA form's page objects usually hold nothing but a "your
+ * viewer cannot show this" placeholder, and a `.docx` containing only that,
+ * handed over as a converted form, is silent corruption of the user's
+ * expectations if not of their bytes.
+ */
+export const XFA_CONVERT_MESSAGE =
+  'This is an XFA form. What it shows on screen is generated from an XML payload, not ' +
+  'from the page content Stapler can read, so a converted Word document would contain ' +
+  'the dead AcroForm shadow layer — usually a "open this in Adobe Reader" placeholder — ' +
+  'rather than the form. Nothing was converted. Print or export the form to a flat PDF ' +
+  'from a viewer that renders XFA, then convert that.';
+
+/**
  * The refusal for operations that rebuild a document page by page — merge,
  * split, organise, watermark, n-up, normalise.
  *

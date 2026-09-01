@@ -968,3 +968,108 @@ export async function metadataLeakPdf(): Promise<Uint8Array> {
 
   return doc.save();
 }
+
+/* ------------------------------------------------------------------ *
+ * CNV-08 — PDF → Word
+ * ------------------------------------------------------------------ */
+
+/**
+ * The exact content CNV-08's acceptance criteria are stated against, exported so
+ * the round-trip test asserts against these strings rather than against a copy of
+ * them that can drift from the fixture.
+ */
+export const PDF_TO_WORD = {
+  h1: 'Quarterly Operations Report',
+  h2: 'Revenue by region',
+  appendixH2: 'Appendix A: method',
+  paragraph: [
+    'This document exists so a converter can be graded against a page whose',
+    'structure is known: one title, one wrapped paragraph, a run of bold and a',
+    'run of italic text, a three column table, and one embedded raster image.'
+  ],
+  boldRun: '12 percent',
+  italicRun: 'restated',
+  appendixParagraph: [
+    'The appendix page carries the image, so the conversion has to place content',
+    'from two different source pages into one Word document.'
+  ],
+  /** Header row first, in reading order. Column x-positions are 56 / 250 / 420. */
+  table: [
+    ['Region', 'Revenue', 'Change'],
+    ['North', '1,204', 'plus 8'],
+    ['South', '987', 'plus 3'],
+    ['East', '1,455', 'plus 12']
+  ],
+  image: { width: 480, height: 320 }
+} as const;
+
+/**
+ * A two-page document with a title, a wrapped paragraph, inline bold and italic
+ * runs, a real three-column table, and an embedded PNG (CNV-08).
+ *
+ * Everything is positioned rather than laid out by a producer, so the geometry the
+ * heuristics read is exactly what this builder wrote:
+ *
+ *  • Type sizes are 22 / 14 / 11pt. 11pt covers the most characters, so it is the
+ *    body size; 22 clears the level-1 ratio (1.6x) and 14 clears the promotion
+ *    ratio (1.25x) without reaching level 1.
+ *  • The paragraph's own leading is 14pt and the gaps around the headings are 40
+ *    and 52pt, so the paragraph-break threshold falls between them and the three
+ *    wrapped lines become one paragraph rather than three.
+ *  • Table cells are drawn as separate `drawText` calls 190pt apart — far beyond
+ *    the widest word space a justified line can stretch to, which is what tells a
+ *    table row apart from a sentence.
+ *  • The bold and italic runs sit immediately after the text they follow, so their
+ *    gaps are near zero and the line stays a single-cell paragraph.
+ */
+export async function pdfToWordPdf(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const body = await doc.embedFont(StandardFonts.Helvetica);
+  const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+  const italic = await doc.embedFont(StandardFonts.HelveticaOblique);
+
+  const one = doc.addPage([612, 792]);
+  one.drawText(PDF_TO_WORD.h1, { x: 56, y: 730, size: 22, font: bold });
+  PDF_TO_WORD.paragraph.forEach((line, i) => {
+    one.drawText(line, { x: 56, y: 690 - i * 14, size: 11, font: body });
+  });
+  one.drawText(PDF_TO_WORD.h2, { x: 56, y: 610, size: 14, font: bold });
+
+  // One line, four runs, three fonts: "Revenue rose <b>12 percent</b> against a
+  // <i>restated</i> baseline." Each run starts where the previous one ended.
+  let x = 56;
+  const inline: [string, typeof body][] = [
+    ['Revenue rose ', body],
+    [PDF_TO_WORD.boldRun, bold],
+    [' against a ', body],
+    [PDF_TO_WORD.italicRun, italic],
+    [' baseline.', body]
+  ];
+  for (const [text, font] of inline) {
+    one.drawText(text, { x, y: 580, size: 11, font });
+    x += font.widthOfTextAtSize(text, 11);
+  }
+
+  const columnX = [56, 250, 420];
+  PDF_TO_WORD.table.forEach((row, r) => {
+    row.forEach((cell, c) => {
+      one.drawText(cell, {
+        x: columnX[c],
+        y: 540 - r * 20,
+        size: 11,
+        font: r === 0 ? bold : body
+      });
+    });
+  });
+
+  const two = doc.addPage([612, 792]);
+  two.drawText(PDF_TO_WORD.appendixH2, { x: 56, y: 730, size: 14, font: bold });
+  PDF_TO_WORD.appendixParagraph.forEach((line, i) => {
+    two.drawText(line, { x: 56, y: 700 - i * 14, size: 11, font: body });
+  });
+  const { width, height } = PDF_TO_WORD.image;
+  const image = await doc.embedPng(encodePng(photoPixels(width, height), width, height, false));
+  two.drawImage(image, { x: 56, y: 340, width: 360, height: 240 });
+
+  return doc.save();
+}

@@ -23,6 +23,8 @@ import {
   type UnitRect
 } from '../pdf/image-redaction';
 import { findAcrossRuns } from '../pdf/text-search';
+import { pageBlocks, type DocxBlock } from '../convert/blocks';
+import { formattedRuns } from '../convert/pdf-runs';
 import { pixelateRects, type BlurStrength } from '../faceblur/blur';
 import {
   detectFaces,
@@ -207,6 +209,13 @@ export interface RenderJob {
     dpi: number
   ): Promise<RegionRaster>;
   extractText(handle: string, pageIndex: number, mode: 'text' | 'markdown'): Promise<string>;
+  /**
+   * CNV-08 — one page's text as the DOCX block model: paragraphs, headings by
+   * font size, simple tables, and bold/italic per run. Shares CNV-04's line
+   * grouping and CNV-05's heading promotion (`layoutLines`), so the Word export
+   * and the text export never disagree about where a paragraph starts.
+   */
+  extractPageBlocks(handle: string, pageIndex: number): Promise<DocxBlock[]>;
   extractPageTextItems(
     handle: string,
     pageIndex: number
@@ -1240,6 +1249,19 @@ const api: RenderJob = {
     const page = await entry(handle).doc.getPage(pageIndex + 1);
     try {
       return layoutText(await textRuns(page), mode);
+    } finally {
+      page.cleanup();
+    }
+  },
+
+  async extractPageBlocks(handle, pageIndex) {
+    const page = await entry(handle).doc.getPage(pageIndex + 1);
+    try {
+      const runs = await formattedRuns(page);
+      // The unrotated media height, because `formattedRuns` hands back pdf.js's
+      // own y-up baselines rather than viewport coordinates.
+      const { height } = page.getViewport({ scale: 1, rotation: 0 });
+      return pageBlocks(runs, height);
     } finally {
       page.cleanup();
     }

@@ -1,5 +1,6 @@
 import { expect, test, type Request } from '@playwright/test';
-import { ensureFixture, textPdf } from './fixtures';
+import { ensureFixture, pdfToWordPdf, textPdf } from './fixtures';
+import { gotoTool, importFile, openApp } from './helpers';
 
 /**
  * QA-03 — the test that protects the entire product claim.
@@ -93,6 +94,10 @@ test.describe('zero network', () => {
         // one deliberate exception to the zero-network guarantee was the one path
         // this suite never actually watched.
         'ocr',
+        // CNV-08. Visiting the panel is the cheap half of watching this tool; the
+        // half that matters is the conversion itself, which is the only thing
+        // that loads the `docx` chunk — see the dedicated test below.
+        'pdf-to-word',
         'table-extract',
         'acc',
         'contact-sheet',
@@ -107,6 +112,73 @@ test.describe('zero network', () => {
       await page.goto('/#/tool/organize');
       await expect(page.locator('canvas').first()).toBeVisible({ timeout: 30_000 });
       await page.waitForTimeout(1500);
+    });
+  });
+
+  /**
+   * CNV-08 — the sweep above only *renders* each panel, and the comment on it
+   * already says why that is not enough: the code that could reach the network
+   * runs when the operation runs. This tool is the sharpest case of that in the
+   * build, because a conversion is what triggers the lazy
+   * `await import('docx')` inside `docx-writer.ts` — a chunk that carries jszip,
+   * pako and buffer, none of which is loaded until this moment. Watching a
+   * rendered panel would have watched none of it.
+   *
+   * So this runs the whole thing under the same monitor: import, convert, and
+   * write the `.docx` out.
+   */
+  test('makes no external request while actually converting a PDF to Word', async ({
+    page,
+    baseURL
+  }) => {
+    const origin = new URL(baseURL!).origin;
+    const fixture = await ensureFixture('pdf-to-word.pdf', pdfToWordPdf);
+
+    // Every request, not only the offending ones: this test has to be able to
+    // prove the lazily-imported code really was pulled in while the monitor was
+    // attached. A test that silently stopped converting — a renamed button, a
+    // click that no-ops — would otherwise still pass by observing nothing.
+    const seen: string[] = [];
+    page.on('request', request => seen.push(request.url()));
+
+    await withNetworkWatch(page, origin, async () => {
+      await openApp(page);
+      await importFile(page, fixture);
+      // A hash change rather than `page.goto`, so the imported document survives.
+      await gotoTool(page, 'pdf-to-word');
+
+      const panel = page.getByRole('complementary', { name: /PDF to Word options/ });
+      await expect(panel).toBeVisible();
+
+      // The `docx` chunk is not loaded by rendering the panel — that is the whole
+      // reason the tool sweep above is not sufficient cover for this tool.
+      const beforeConversion = seen.length;
+
+      // The conversion itself: render worker → process worker → convert worker,
+      // and the `docx` chunk's first and only load.
+      await panel.getByRole('button', { name: 'Preview conversion' }).click();
+      await expect(panel.getByRole('list', { name: /Blocks that will be written/ })).toBeVisible({
+        timeout: 90_000
+      });
+
+      // Chunks really were fetched at conversion time, under the monitor. The
+      // convert worker is the one module that only ever loads here, and the
+      // `docx` bundle rides in behind it as `docx-writer.ts`'s dynamic import.
+      const duringConversion = seen.slice(beforeConversion);
+      expect(
+        duringConversion.filter(url => /\/assets\/.*\.js(\?|$)/.test(url)),
+        `The conversion must load its lazy chunks inside the watched window; saw:\n${duringConversion.join('\n')}`
+      ).not.toEqual([]);
+      expect(duringConversion.some(url => /convert\.worker/.test(url))).toBe(true);
+
+      // And the save, because writing the file is a separate code path from
+      // building it.
+      const save = page.getByRole('button', { name: 'Save .docx' });
+      await expect(save).toBeEnabled();
+      const download = page.waitForEvent('download', { timeout: 60_000 });
+      await save.click();
+      const saved = await download;
+      expect(saved.suggestedFilename()).toMatch(/\.docx$/);
     });
   });
 

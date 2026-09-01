@@ -17,6 +17,13 @@ export interface TextRun {
   hasEOL?: boolean;
 }
 
+/**
+ * How far above the page's body size a line's type must be to read as a heading
+ * (CNV-05's promotion rule). One constant, read by the Markdown export and by
+ * CNV-08's DOCX export through {@link layoutLines}.
+ */
+const HEADING_SIZE_RATIO = 1.25;
+
 /** How pdf.js labels the pixel layout of a decoded image. Mirrors `ImageKind`. */
 export const IMAGE_KIND = {
   GRAYSCALE_1BPP: 1,
@@ -25,12 +32,51 @@ export const IMAGE_KIND = {
 } as const;
 
 /**
- * Groups runs into lines, lines into paragraphs, and returns reading-order text
- * (CNV-04). In `markdown` mode a line whose largest glyph is well above the page
- * median is promoted to a heading.
+ * One reading-order line, with the runs it was assembled from still attached.
+ *
+ * CNV-04 only ever needed the `text`, so the grouping used to be inlined in
+ * {@link layoutText} and threw the runs away. CNV-08 (PDF → DOCX) needs the same
+ * lines *and* their runs — a run carries the font the DOCX writer turns into a
+ * bold/italic `TextRun`, and a run's x-extent is what tells a table row's cells
+ * apart from a sentence's words. Sharing this function is what keeps the two
+ * exports agreeing about where a paragraph or a heading starts; a second copy of
+ * the heuristics would drift from this one on the first tuning change.
  */
-export function layoutText(items: TextRun[], mode: 'text' | 'markdown'): string {
-  if (items.length === 0) return '';
+export interface LaidOutLine {
+  /** The line's own runs, sorted left to right. Blank runs are kept. */
+  runs: TextRun[];
+  /** Reading-order text, whitespace collapsed and trimmed. Never empty. */
+  text: string;
+  /** Baseline in PDF space, so a larger value is higher on the page. */
+  baseline: number;
+  /** The largest glyph size on the line. */
+  maxSize: number;
+  /** True when a paragraph-sized vertical gap separates this line from the last. */
+  startsParagraph: boolean;
+  /**
+   * CNV-05's promotion rule: the line's type is well above the page's body size.
+   * `layoutText` renders this as `## `; the DOCX writer renders it as a real
+   * heading style.
+   */
+  isHeading: boolean;
+}
+
+export interface PageTextLayout {
+  /** Non-empty lines, top to bottom. */
+  lines: LaidOutLine[];
+  /** The size covering the most characters on the page — see `dominantSize`. */
+  bodySize: number;
+}
+
+/**
+ * Groups runs into lines and lines into paragraphs, deciding for each line
+ * whether a paragraph break precedes it and whether it reads as a heading.
+ *
+ * Pure geometry: no text is dropped, reordered beyond reading order, or
+ * rewritten beyond collapsing runs of whitespace.
+ */
+export function layoutLines(items: TextRun[]): PageTextLayout {
+  if (items.length === 0) return { lines: [], bodySize: 12 };
 
   const bodySize = dominantSize(items);
   // Runs on one line share a baseline but not exactly — subscripts and mixed font
@@ -48,7 +94,7 @@ export function layoutText(items: TextRun[], mode: 'text' | 'markdown'): string 
   const baselines = lines.map(line => line[0].transform[5]);
   const paragraphGap = paragraphThreshold(baselines, bodySize);
 
-  const out: string[] = [];
+  const out: LaidOutLine[] = [];
   let previousBaseline: number | null = null;
 
   for (const line of lines) {
@@ -70,13 +116,38 @@ export function layoutText(items: TextRun[], mode: 'text' | 'markdown'): string 
     }
 
     text = text.replace(/\s+/g, ' ').trim();
+    // A line that carried nothing but whitespace is not a line. It is skipped
+    // *before* `previousBaseline` moves, so the paragraph gap is measured between
+    // lines that have text — otherwise a stray blank run would halve every gap.
     if (!text) continue;
 
     const baseline = line[0].transform[5];
-    if (previousBaseline !== null && previousBaseline - baseline > paragraphGap) out.push('');
+    const startsParagraph = previousBaseline !== null && previousBaseline - baseline > paragraphGap;
     previousBaseline = baseline;
 
-    out.push(mode === 'markdown' && maxSize >= bodySize * 1.25 ? `## ${text}` : text);
+    out.push({
+      runs: line,
+      text,
+      baseline,
+      maxSize,
+      startsParagraph,
+      isHeading: maxSize >= bodySize * HEADING_SIZE_RATIO
+    });
+  }
+
+  return { lines: out, bodySize };
+}
+
+/**
+ * Groups runs into lines, lines into paragraphs, and returns reading-order text
+ * (CNV-04). In `markdown` mode a line whose largest glyph is well above the page
+ * median is promoted to a heading.
+ */
+export function layoutText(items: TextRun[], mode: 'text' | 'markdown'): string {
+  const out: string[] = [];
+  for (const line of layoutLines(items).lines) {
+    if (line.startsParagraph) out.push('');
+    out.push(mode === 'markdown' && line.isHeading ? `## ${line.text}` : line.text);
   }
 
   return out

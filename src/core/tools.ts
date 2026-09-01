@@ -35,6 +35,7 @@ export type ToolId =
   | 'annotate'
   | 'batch'
   | 'md-to-pdf'
+  | 'pdf-to-word'
   | 'ocr'
   | 'table-extract'
   | 'acc'
@@ -390,6 +391,19 @@ export const TOOLS: readonly ToolDefinition[] = [
     needsOptionsPanel: true,
     commitLabel: 'Export PDF',
     worksWithoutDocument: true,
+    selectable: false
+  },
+  {
+    id: 'pdf-to-word',
+    group: 'Convert',
+    title: 'PDF to Word',
+    // The summary is the panel's description and the palette's subtitle, so the
+    // fidelity limit PLAN §5.5 requires us to state has to fit in it.
+    summary: 'Convert to an editable .docx. Text and structure, not exact layout. Beta.',
+    icon: 'FileType',
+    canvasMode: 'grid',
+    needsOptionsPanel: true,
+    commitLabel: 'Save .docx',
     selectable: false
   },
   {

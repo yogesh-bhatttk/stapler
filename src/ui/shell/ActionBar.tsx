@@ -14,6 +14,7 @@ import { activeJob } from '../../core/notify';
 import { Button } from '../components/Button';
 import { ProgressBar } from '../components/Feedback';
 import { commitTool } from '../tools/commit';
+import { commitGate } from '../tools/commit-gate';
 import { useJob } from '../useJob';
 import styles from './ActionBar.module.css';
 import { useTranslation } from '../../core/i18n';
@@ -29,6 +30,13 @@ export function ActionBar() {
 
   const selected = selectedPageKeys.value.size;
   const busy = job !== null;
+  /**
+   * PLAN §5.5 — a tool whose output must be previewed before it is saved (CNV-08)
+   * blocks its own CTA from here. The reason is rendered next to the status text
+   * as well as put on the button, because a disabled control with no explanation
+   * is not an accessible one; the panel states it at length too.
+   */
+  const gate = commitGate(tool.id);
 
   return (
     <div className={styles.actionBar}>
@@ -41,6 +49,10 @@ export function ActionBar() {
         <div className={styles.progress}>
           <ProgressBar label={job.label} value={job.progress} />
         </div>
+      ) : gate ? (
+        <span className={styles.gate} id={`commit-gate-${tool.id}`}>
+          {gate}
+        </span>
       ) : (
         <span className={styles.spacer} />
       )}
@@ -55,7 +67,9 @@ export function ActionBar() {
         )}
         <Button
           variant="primary"
-          disabled={(!doc && !tool.worksWithoutDocument) || busy}
+          disabled={(!doc && !tool.worksWithoutDocument) || busy || gate !== null}
+          title={gate ?? undefined}
+          aria-describedby={gate ? `commit-gate-${tool.id}` : undefined}
           onClick={() =>
             run({ label: tool.commitLabel, scope: `commit.${tool.id}` }, jobOptions =>
               commitTool(tool.id, jobOptions)

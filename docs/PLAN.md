@@ -37,13 +37,23 @@ Explicitly out of scope. Each has a reason; do not relitigate without one.
 
 | Not building                          | Reason                                                                               |
 | ------------------------------------- | ------------------------------------------------------------------------------------ |
-| PDF → Word/DOCX                       | Layout reconstruction is its own product; a mediocre one generates our worst reviews |
-| Office → PDF                          | WASM options are enormous; docx→HTML→print quality is indefensible                   |
+| Pixel-perfect PDF ↔ Office fidelity   | Exact font/pagination/column reconstruction needs a full rendering engine (WASM or server-side LibreOffice) that either blows the 900KB bundle budget or breaks the zero-network invariant. We don't promise this and won't fake it. |
 | Password / permission removal         | pdf-lib cannot decrypt; attracts requests we won't serve                             |
 | Certificate-based signatures (PAdES)  | Incremental-update signing is a deep rabbit hole. Revisit post-v2                    |
 | Editing existing text in place        | Font matching and reflow make this a trap                                            |
 | Accounts, sync, cloud storage         | Breaks the cost model and the privacy claim                                          |
 | Analytics, telemetry, crash reporting | Breaks the zero-network invariant. Non-negotiable                                    |
+
+**Revision note:** PDF → Word/DOCX and Office → PDF were previously blanket
+non-goals here. They're now in scope as **CNV-08..13** (§3), scoped narrowly to
+what's actually achievable client-side: best-effort structural conversion
+(paragraphs, headings, tables, basic runs, images), not pixel-perfect layout.
+This is the same trade already made for OCR-03's table→XLSX export — ship it
+labeled beta with a mandatory preview rather than not shipping it at all (see
+§5.5). The reasoning that killed the old blanket non-goal is preserved above,
+narrowed to the fidelity claim it actually applies to. This is a deliberate
+carve-out, not a silent reversal — same pattern as RED-06 carving password
+*addition* out of the still-standing password *removal* non-goal.
 
 ---
 
@@ -95,7 +105,7 @@ stapler/
 │   │   ├── scan/         corner detect, dewarp, deskew, threshold
 │   │   ├── redact/       region model, text-op stripping, verifier
 │   │   ├── sign/         signature capture, placement, AcroForm fill
-│   │   ├── convert/      images→pdf, pdf→images, heic, markdown, text
+│   │   ├── convert/      images→pdf, pdf→images, heic, markdown, text, docx/xlsx/pptx ↔ pdf
 │   │   ├── meta/         metadata inspector + scrubber
 │   │   ├── ocr/          tesseract orchestration, model cache
 │   │   └── search/       folder index, query engine
@@ -125,6 +135,12 @@ stapler/
 | Worker RPC | **Comlink**                                              | Removes postMessage boilerplate; transferable ArrayBuffers                    |
 | Zip        | **fflate**                                               | Smallest, fastest, streaming                                                  |
 | OCR        | **tesseract.js** (lazy)                                  | Only loaded when OCR is invoked                                               |
+| DOCX write | **docx** (lazy)                                          | Pure JS OOXML writer, no WASM/native deps; only loaded by CNV-08/12           |
+| DOCX read  | **mammoth** (lazy)                                       | Structural docx→HTML for Word→PDF and PDF→Word round trips; not a renderer   |
+| XLSX read  | **xlsx** / SheetJS CE (lazy)                             | Apache-2.0, read-only usage for Excel→PDF                                     |
+| XLSX write | *(hand-rolled, via existing `fflate`)*                   | Same zip+XML builder OCR-03 already ships, generalized for CNV-10             |
+| PPTX write | **pptxgenjs** (lazy)                                     | Pure JS OOXML writer, no WASM/native deps                                     |
+| PPTX read  | *(hand-rolled, via existing `fflate`)*                   | pptx is a zip of slide XML; avoids a 5th format dependency for a narrow need |
 | DB         | **IndexedDB via `idb`**                                  | File handles, signatures, presets, search index                               |
 | Fonts      | **System stack only**                                    | A webfont CDN request would break the zero-network claim                      |
 | Unit tests | **Vitest**                                               | Fast, Vite-native                                                             |
@@ -147,7 +163,7 @@ Fallback chain for the website twin and Firefox: `<input type="file">` + Blob do
 | **v0.1** internal     | EPIC-0, EPIC-11 shell, EPIC-1, EPIC-2                                                            | Merge + organize + split works end to end on 10 fixture PDFs |
 | **v1.0** store launch | + EPIC-3 convert, EPIC-4 sign, EPIC-5 compress, EPIC-6 scan cleanup, EPIC-13 QA, EPIC-14 listing | All P0 acceptance criteria green; zero-network test passing  |
 | **v1.1**              | EPIC-7 redaction + metadata scrubber, EPIC-8 annotate                                            | Redaction verifier proves text removal on all fixtures       |
-| **v1.2**              | EPIC-9 batch + presets, crop, N-up, page numbers, watermark                                      | —                                                            |
+| **v1.2**              | EPIC-9 batch + presets, crop, N-up, page numbers, watermark, CNV-08..13 Office↔PDF conversion    | Round-trip tests green for docx/xlsx/pptx fixtures; beta label + mandatory preview shipped |
 | **v2.0**              | EPIC-10 OCR + local folder search                                                                | Index 200 PDFs and query in <500ms                           |
 | Continuous            | EPIC-12 a11y, i18n, perf; website twin landing pages                                             | —                                                            |
 
@@ -265,6 +281,9 @@ These are hard constraints, enforced by tests, not aspirations:
 - No competitor trademarks in listing text, name, or icons.
 - Table extraction (v2+) ships labeled beta with mandatory preview — silent wrong numbers
   are worse than no feature.
+- Same rule for CNV-08..13 (PDF↔Word/Excel/PowerPoint, §3): output is labeled **beta**,
+  every conversion shows a mandatory preview before save, and copy states plainly that
+  structure/text is preserved but layout, fonts, and pagination may differ from the source.
 - License: MIT, public repo.
 
 ---

@@ -66,4 +66,5 @@ pnpm test:e2e     # playwright, includes the zero-network assertion
   is not a passing criterion.
 - Report honestly. If an acceptance criterion is unmet, say which one and why.
 - Don't add features that aren't in a ticket. `docs/PLAN.md` §1.1 lists deliberate non-goals
-  with reasons — PDF→Word, Office→PDF, password removal, accounts, analytics.
+  with reasons — pixel-perfect PDF↔Office fidelity, password removal, accounts, analytics.
+  (Best-effort, beta-labeled PDF↔Word/Excel/PowerPoint conversion is in scope as CNV-08..13.)
