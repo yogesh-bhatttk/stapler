@@ -14,16 +14,18 @@
  *    export reads. A second copy of "is this line a heading" would drift from
  *    CNV-05's on the first tuning change.
  *  • Table *grids* are built by OCR-03's `extractTableFromPage`, the clustering
- *    that already ships for the table→XLSX export. Only the question OCR-03 never
+ *    that already ships for the table→XLSX export. The question OCR-03 never
  *    asked — "which lines on this page are part of a table at all", since its
- *    user hand-picks a page and gets the whole page as one grid — is new.
+ *    user hand-picks a page and gets the whole page as one grid — was new here,
+ *    and now lives in `table-regions.ts` because CNV-10 asks it too, of the same
+ *    input. This file consumes that answer; it does not decide it.
  *  • Image bytes come from CNV-06's `extractImages`, which hands over the
  *    embedded XObject's own bytes and never re-encodes. This file only decides
  *    where an image block goes and how big to draw it.
  */
 
-import { layoutLines, type LaidOutLine, type TextRun } from '../text-layout';
-import { extractTableFromPage, type TableTextItem } from '../ocr/table-extract';
+import { layoutLines, type TextRun } from '../text-layout';
+import { findTableRegions } from './table-regions';
 // Type-only: `process.worker.ts` calls `Comlink.expose` at import time, so this
 // must never become a runtime import.
 import type { ExtractedImageEntry } from '../workers/process.worker';
@@ -105,20 +107,6 @@ export function fitImage(width: number, height: number): { width: number; height
 }
 
 /**
- * A cell boundary is a horizontal gap this many times the body type size.
- *
- * `layoutText` treats a gap of 0.25× the type size as "the producer split a run
- * where a space belongs" — three points at 12pt. A table column gap is an order
- * of magnitude larger than that, and the threshold has to stay far above the
- * widest *word* space a justified paragraph can stretch to (roughly 1× the type
- * size in practice) or every justified line would be read as a two-column table.
- */
-const CELL_GAP_RATIO = 2.5;
-
-/** A table needs at least this many consecutive tabular lines to be one. */
-const MIN_TABLE_ROWS = 2;
-
-/**
  * Where a promoted heading becomes level 1 rather than level 2 — above CNV-05's
  * own 1.25 promotion threshold by design, so everything between the two reads as
  * a subheading. The Markdown export has one heading level and always writes
@@ -126,47 +114,6 @@ const MIN_TABLE_ROWS = 2;
  * and it is drawn from the same measurement rather than a new one.
  */
 const HEADING_LEVEL_1_RATIO = 1.6;
-
-/** …and at least this many columns, or it is just an indented line. */
-const MIN_TABLE_COLUMNS = 2;
-
-/**
- * Splits one line into cell-sized groups on wide horizontal gaps.
- *
- * Returns the runs per group rather than strings, so the caller can hand the
- * original positioned items to OCR-03's clustering (which needs x/width) and
- * still know how many columns it saw.
- */
-function splitLineCells(line: LaidOutLine, bodySize: number): TextRun[][] {
-  const minGap = Math.max(1, bodySize) * CELL_GAP_RATIO;
-  const groups: TextRun[][] = [];
-  let previous: TextRun | null = null;
-
-  for (const run of line.runs) {
-    // pdf.js emits a standalone whitespace item where it broke a chunk on a wide
-    // gap. It carries the gap's own width, so counting it as content would make
-    // the gap look like a filled cell.
-    if (run.str.trim().length === 0) continue;
-    const gap = previous ? run.transform[4] - (previous.transform[4] + previous.width) : 0;
-    if (!previous || gap > minGap) groups.push([run]);
-    else groups[groups.length - 1].push(run);
-    previous = run;
-  }
-
-  return groups;
-}
-
-/** pdf.js run → the y-down shape OCR-03's clustering expects. */
-function toTableItem(run: TextRun, pageHeight: number): TableTextItem {
-  const height = Math.abs(run.transform[3]) || run.height || 10;
-  return {
-    text: run.str,
-    x: run.transform[4],
-    y: Math.max(0, pageHeight - run.transform[5]),
-    width: run.width,
-    height
-  };
-}
 
 /** The runs of a line, joined into DOCX runs with adjacent same-format runs merged. */
 export function lineRuns(runs: readonly FormattedRun[]): DocxRun[] {
@@ -212,17 +159,6 @@ export function lineRuns(runs: readonly FormattedRun[]): DocxRun[] {
 }
 
 /**
- * A line is tabular when wide gaps split it into two or more cells *and* it is
- * not a heading. A heading is excluded on purpose: a two-word centred title with
- * a wide letter-space would otherwise start a table and swallow the paragraphs
- * under it.
- */
-function tabularColumns(line: LaidOutLine, bodySize: number): number {
-  if (line.isHeading) return 0;
-  return splitLineCells(line, bodySize).length;
-}
-
-/**
  * Turns one page's runs into blocks.
  *
  * `pageHeight` is the page's own height in points, needed only to flip pdf.js's
@@ -232,44 +168,19 @@ export function pageBlocks(runs: FormattedRun[], pageHeight: number): DocxBlock[
   const { lines, bodySize } = layoutLines(runs);
   if (lines.length === 0) return [];
 
-  const columns = lines.map(line => tabularColumns(line, bodySize));
+  // Table detection is `table-regions.ts`'s, shared with CNV-10. A range the
+  // clustering did not accept is simply not returned, and its lines fall through
+  // to the paragraph path below — the safe answer, since the text is in the
+  // output either way, just not in a grid.
+  const tableAt = new Map(findTableRegions(lines, bodySize, pageHeight).map(r => [r.startLine, r]));
   const blocks: DocxBlock[] = [];
 
-  // Once a run [i, end] has been scanned and rejected as a table, later indices
-  // inside that same range must not re-trigger the scan: each of them still
-  // looks tabular by the cheap column-count check alone, so without this guard
-  // a long run that never clusters into a real grid gets re-scanned once per
-  // line, one line shorter each time — quadratic work on an adversarial page
-  // (e.g. an inconsistently-aligned two-column layout).
-  let rejectedTableEnd = -1;
-
   for (let i = 0; i < lines.length; i++) {
-    // A run of consecutive lines that each split into enough cells is a table.
-    // `startsParagraph` deliberately does not break the run: a table with extra
-    // leading between its rows is still one table.
-    if (columns[i] >= MIN_TABLE_COLUMNS && i > rejectedTableEnd) {
-      let end = i;
-      while (end + 1 < lines.length && columns[end + 1] >= MIN_TABLE_COLUMNS) end += 1;
-
-      if (end - i + 1 >= MIN_TABLE_ROWS) {
-        const items: TableTextItem[] = [];
-        for (let r = i; r <= end; r++) {
-          for (const run of lines[r].runs) {
-            if (run.str.trim().length === 0) continue;
-            items.push(toTableItem(run, pageHeight));
-          }
-        }
-        const grid = extractTableFromPage(items);
-        // Only accept the grid if the clustering agreed it is a table. Falling
-        // through to paragraphs when it did not is the safe answer: the text is
-        // still in the output, just not in a table.
-        if (grid.rowCount > 0 && grid.columnCount >= MIN_TABLE_COLUMNS) {
-          blocks.push({ kind: 'table', rows: grid.rows });
-          i = end;
-          continue;
-        }
-      }
-      rejectedTableEnd = end;
+    const table = tableAt.get(i);
+    if (table) {
+      blocks.push({ kind: 'table', rows: table.rows });
+      i = table.endLine;
+      continue;
     }
 
     const line = lines[i];

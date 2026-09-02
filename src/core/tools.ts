@@ -37,6 +37,7 @@ export type ToolId =
   | 'md-to-pdf'
   | 'pdf-to-word'
   | 'word-to-pdf'
+  | 'pdf-to-excel'
   | 'ocr'
   | 'table-extract'
   | 'acc'
@@ -422,6 +423,21 @@ export const TOOLS: readonly ToolDefinition[] = [
     // The input is a `.docx` picked from disk, not the open PDF — requiring a
     // document first would mean opening an unrelated PDF to convert a Word file.
     worksWithoutDocument: true,
+    selectable: false
+  },
+  {
+    id: 'pdf-to-excel',
+    group: 'Convert',
+    title: 'PDF to Excel',
+    // Same rule as the two above: the summary is the panel's description and the
+    // palette's subtitle, so the fidelity limit PLAN §5.5 requires us to state
+    // has to fit inside it. "Detected" is the load-bearing word — a PDF has no
+    // tables, only text that happens to line up.
+    summary: 'Pull detected tables into a .xlsx. Cell values, not formulas or formatting. Beta.',
+    icon: 'Table',
+    canvasMode: 'grid',
+    needsOptionsPanel: true,
+    commitLabel: 'Save .xlsx',
     selectable: false
   },
   {

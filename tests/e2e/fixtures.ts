@@ -1220,3 +1220,102 @@ export async function wordToPdfDocx(): Promise<Uint8Array> {
 
   return new Uint8Array(await Packer.toArrayBuffer(doc));
 }
+
+/* ------------------------------------------------------------------ *
+ * CNV-10 — PDF → Excel
+ * ------------------------------------------------------------------ */
+
+/**
+ * The exact content CNV-10's acceptance criteria are stated against, exported so
+ * the round-trip test asserts against these strings rather than against a copy of
+ * them that can drift from the fixture.
+ */
+export const PDF_TO_EXCEL = {
+  heading: 'Regional Sales Summary',
+  intro: 'Figures are in thousands of dollars.',
+  closing: 'Prepared by the operations team.',
+  /** Header row first, in reading order. Column x-positions are 56 / 220 / 360 / 470. */
+  table: [
+    ['Region', 'Revenue', 'Units', 'Change'],
+    ['North', '1,204', '318', 'plus 8'],
+    ['South', '987', '245', 'plus 3'],
+    ['East', '1,455', '402', 'plus 12'],
+    ['West', '623', '168', 'minus 4']
+  ],
+  /** Page 2 carries no table at all, so one document exercises both criteria. */
+  appendix: [
+    'The appendix page carries no table, only prose, so the converter has to',
+    'write one row per line of text rather than leaving the page out.',
+    'A third line, so the sheet is unambiguously multi-row.'
+  ]
+} as const;
+
+/**
+ * A two-page document whose first page holds one unambiguous 5x4 table and whose
+ * second holds none (CNV-10).
+ *
+ * Everything is positioned rather than laid out by a producer, so the geometry the
+ * heuristics read is exactly what this builder wrote:
+ *
+ *  • Type sizes are 18 / 11pt. 11pt covers the most characters, so it is the body
+ *    size, and 18 clears CNV-05's 1.25x promotion ratio — which matters because
+ *    `table-regions.ts` refuses to start a table on a heading line.
+ *  • Table cells are drawn as separate `drawText` calls at least 110pt apart, far
+ *    beyond the 2.5x body size (27.5pt) that separates a column gap from the
+ *    widest word space a justified line can stretch to.
+ *  • The intro and closing lines are single `drawText` calls, so they split into
+ *    one cell and cannot extend the table's line run.
+ */
+export async function pdfToExcelPdf(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const body = await doc.embedFont(StandardFonts.Helvetica);
+  const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+
+  const one = doc.addPage([612, 792]);
+  one.drawText(PDF_TO_EXCEL.heading, { x: 56, y: 730, size: 18, font: bold });
+  one.drawText(PDF_TO_EXCEL.intro, { x: 56, y: 690, size: 11, font: body });
+
+  const columnX = [56, 220, 360, 470];
+  PDF_TO_EXCEL.table.forEach((row, r) => {
+    row.forEach((cell, c) => {
+      one.drawText(cell, {
+        x: columnX[c],
+        y: 650 - r * 20,
+        size: 11,
+        font: r === 0 ? bold : body
+      });
+    });
+  });
+
+  one.drawText(PDF_TO_EXCEL.closing, { x: 56, y: 520, size: 11, font: body });
+
+  const two = doc.addPage([612, 792]);
+  PDF_TO_EXCEL.appendix.forEach((line, i) => {
+    two.drawText(line, { x: 56, y: 730 - i * 14, size: 11, font: body });
+  });
+
+  return doc.save();
+}
+
+/**
+ * A document with no table anywhere — the second acceptance criterion on its own.
+ *
+ * Deliberately prose that *wraps*: `pageSheet` keeps lines rather than merging
+ * them into paragraphs the way CNV-08's block model does, and "one row per line"
+ * is the criterion's own wording.
+ */
+export const PDF_TO_EXCEL_PROSE = [
+  'This document contains no tabular content of any kind, so the converter',
+  'has nothing to cluster into a grid and must fall back to writing each',
+  'line of text as its own row rather than producing an empty workbook.'
+] as const;
+
+export async function pdfToExcelProsePdf(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage([612, 792]);
+  PDF_TO_EXCEL_PROSE.forEach((line, i) => {
+    page.drawText(line, { x: 56, y: 730 - i * 14, size: 11, font });
+  });
+  return doc.save();
+}

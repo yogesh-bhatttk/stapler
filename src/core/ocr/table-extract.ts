@@ -1,4 +1,4 @@
-import { strToU8, zipSync } from 'fflate';
+import { buildXlsx } from '../convert/xlsx-writer';
 
 /** Item extracted from page text layer with position coordinates. */
 export interface TableTextItem {
@@ -226,75 +226,14 @@ export function exportTableToTsv(grid: TableGridData): string {
     .join('\n');
 }
 
+/**
+ * OCR-03's single-table export, now a caller of the shared writer.
+ *
+ * CNV-10 generalized the OOXML package assembly to N sheets and moved it to
+ * `convert/xlsx-writer.ts`. This function stays as OCR-03's vocabulary — a
+ * `TableGridData` in, an `.xlsx` out — but there is only one writer in the build,
+ * so the two exports cannot disagree about escaping, content types or cell refs.
+ */
 export function exportTableToXlsx(grid: TableGridData): Uint8Array {
-  const contentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
-</Types>`;
-
-  const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
-</Relationships>`;
-
-  const workbookRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
-</Relationships>`;
-
-  const workbookXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <sheets>
-    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
-  </sheets>
-</workbook>`;
-
-  const sheetRowsXml = grid.rows
-    .map((row, rIdx) => {
-      const rowNum = rIdx + 1;
-      const cellsXml = row
-        .map((cell, cIdx) => {
-          if (!cell) return '';
-          const ref = `${getColRef(cIdx)}${rowNum}`;
-          return `<c r="${ref}" t="inlineStr"><is><t>${xmlEscape(cell)}</t></is></c>`;
-        })
-        .join('');
-      return `<row r="${rowNum}">${cellsXml}</row>`;
-    })
-    .join('');
-
-  const sheet1Xml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <sheetData>${sheetRowsXml}</sheetData>
-</worksheet>`;
-
-  return zipSync({
-    '[Content_Types].xml': strToU8(contentTypesXml),
-    '_rels/.rels': strToU8(relsXml),
-    'xl/_rels/workbook.xml.rels': strToU8(workbookRelsXml),
-    'xl/workbook.xml': strToU8(workbookXml),
-    'xl/worksheets/sheet1.xml': strToU8(sheet1Xml)
-  });
-}
-
-function xmlEscape(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
-
-function getColRef(colIndex: number): string {
-  let temp = colIndex;
-  let letter = '';
-  while (temp >= 0) {
-    letter = String.fromCharCode((temp % 26) + 65) + letter;
-    temp = Math.floor(temp / 26) - 1;
-  }
-  return letter;
+  return buildXlsx([{ name: 'Sheet1', rows: grid.rows }]);
 }

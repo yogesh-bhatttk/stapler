@@ -3446,10 +3446,211 @@ polish items. All seven are fixed:
 
 ### CNV-10 · PDF → Excel (XLSX) — `L` `P1`
 
-**Status: Not started.** Generalizes OCR-03's table→XLSX writer (`table-extract.ts`,
+**Status: Done, after a second review pass (below) that added a genuine SheetJS
+round-trip test and a cancellation test, and corrected a factually wrong
+justification in this entry's first draft.** Both acceptance criteria are met
+against real output bytes, verified two independent ways (see "AC1 verification"
+below). Six limitations, five of them measured rather than assumed; four are named
+in the tool's own panel copy, one is reported at runtime in the preview's "left
+out" list, and the sixth (control-character stripping, which removes no visible
+content) is disclosed here only. Generalizes OCR-03's table→XLSX writer (`table-extract.ts`,
 `docs/TICKETS.md:795`) — that ticket only ran on OCR'd scan output; this one runs the
 same column-position-clustering heuristic over a PDF's real, selectable text layer,
-covering ordinary (non-scanned) PDFs with tabular or columnar content.
+covering ordinary (non-scanned) PDFs with tabular or columnar content. Ships labeled
+beta with a mandatory preview per §5.5, same policy as CNV-08, CNV-09 and OCR-03.
+
+New tool `pdf-to-excel` (group Convert, `Save .xlsx`). Two workers, sequenced by
+`convertPdfToXlsx` in `src/core/operations.ts`:
+
+- **`render`** gains `extractPageSheet`, which reduces one page to "the tables on
+  it, and the lines that are not in one" (`src/core/convert/sheets.ts`).
+- **`convert`** gains `buildXlsx`, which plans the sheets and zips the OOXML.
+
+**Why two workers and not one, again.** `index.ts` splits workers by *library* so
+the build holds one copy of each. Reading the PDF needs pdf.js, which already lives
+in `render`; the writer needs nothing but `fflate`. Nothing is transferred *into*
+either call here — page data is strings — so, unlike CNV-08's image archive and
+CNV-09's block model, argument order carries no `Comlink.transfer` meaning and
+**no transfer regression test was written**, deliberately: there is no transfer to
+regress. The finished workbook is transferred back out.
+
+**Three pieces of reuse, and one deliberate divergence.**
+
+- **Table detection is CNV-08's, now shared.** `pageBlocks` had the "which lines on
+  this page are part of a table at all" scan written inline — the thresholds, the
+  heading exclusion, and the `rejectedTableEnd` guard CNV-08's own review pass added
+  against quadratic re-scanning. That scan moved verbatim into
+  `src/core/convert/table-regions.ts` and both `blocks.ts` and `sheets.ts` call it,
+  so a tuning change cannot land in the Word export and not the Excel one. The move
+  is behaviour-preserving; CNV-08's existing table/paragraph/heading tests are the
+  regression cover and all still pass unchanged.
+- **Grid clustering is still OCR-03's `extractTableFromPage`**, untouched.
+- **The XLSX writer is OCR-03's, generalized and moved** to
+  `src/core/convert/xlsx-writer.ts` as `buildXlsx(sheets, { title })`. It grew a
+  sheet list, per-sheet content-type overrides and relationships, sheet-name
+  sanitizing (Excel's 31-character cap, its six illegal characters, the reserved
+  name "History") and de-duplication, an optional `docProps/core.xml`, and a strip
+  of the code points XML 1.0 cannot represent at all. `exportTableToXlsx` is now a
+  one-line caller of it, so there is exactly one XLSX writer in the build and an
+  escaping or content-type bug can only exist in one place. **No new dependency**:
+  `fflate` was already bundled.
+- **The divergence:** this path keeps **lines**, where CNV-08's block model merges a
+  wrapped paragraph into one block. A spreadsheet row is a line, and the AC is
+  stated in lines. It also uses `textRuns` rather than `formattedRuns`, skipping the
+  `getOperatorList()` call per page that resolving bold/italic from font descriptors
+  costs — an XLSX cell carries no emphasis, so paying for it would buy nothing.
+
+**Every cell is written as an inline string, never a number, date or formula.** A
+PDF's text layer carries the glyphs that were drawn, not what they meant: "1,204" is
+a string that looks like a number, "007" loses its zeros the moment something decides
+it is one, and a date is whatever the producer's locale said it was. Excel still lets
+the user convert a text cell; guessing here would silently change values.
+
+**Four refusals, all before anything is written**, on CNV-08's pattern: encrypted
+(raised by `loadDocument`), XFA (from the raw bytes, with `XFA_CONVERT_MESSAGE`), a
+PDF with **no selectable text at all** (the scanned-PDF case — refused by name, with
+the message pointing at the OCR tool, rather than writing a workbook with nothing in
+it), and a workbook every sheet of which the user's own option excluded.
+
+**The six limitations.** Five were *measured* against the real `pageSheet`, not
+assumed. Where each one is disclosed to the user is noted on it:
+
+1. **A multi-column page layout is read as a table.** A four-line, two-column
+   newsletter layout clusters into a 4×2 grid — measured, not predicted. This is the
+   heuristic's headline false positive and the reason the preview is mandatory: the
+   sheet list and each table's header row are where it is visible before saving.
+   *In the panel copy.*
+2. **A merged header spanning two columns is separated from its table.** Measured: a
+   `Financial results` banner over a Region/Revenue grid lands on the page's text
+   sheet, and the grid below it becomes the table. No cell is lost; the association
+   is. *In the panel copy.*
+3. **A table continued across a page break becomes two sheets.** Pages are processed
+   independently, and nothing in a PDF says "this grid continues". Joining them would
+   need a same-column-geometry heuristic across pages that could just as easily weld
+   two unrelated tables together. *In the panel copy.*
+4. **Merged cells, borders, colours, column widths and formulas are not
+   reconstructed.** A PDF has none of them as data — borders are drawn lines, and a
+   formula's result is all that was ever printed. *In the panel copy.*
+5. **A cell past Excel's 32,767-character limit is truncated**, and the count is
+   reported in the "left out" list. Writing it in full produces a file Excel offers
+   to repair, which is the worse outcome. *Reported at runtime, in the preview's
+   "left out" list.*
+6. **Control characters a PDF's text layer can carry are stripped silently.** NUL,
+   BEL or a stray vertical tab in a part makes the whole workbook unparseable, which
+   Excel reports as a corrupt file rather than as a bad cell. This is the one drop
+   that is *not* itemised for the user, on the grounds that it removes no visible
+   content.
+
+**Two behaviours worth recording as measured-good rather than assumed**: a
+right-aligned numeric column clusters correctly (OCR-03's scorer weighs right-edge
+alignment as well as left), and a row with a genuinely empty middle cell keeps its
+shape — the gap stays in the right column rather than shifting the row left.
+
+**The preview is the gate, not a label**, on the same mechanism as CNV-08 and CNV-09:
+`PdfToExcelPanel` runs the whole conversion, **holds the produced bytes**, and only
+then clears `ui/tools/commit-gate.ts`'s block on the action bar's primary CTA. Saving
+writes those exact bytes. `commit.ts`'s handler refuses again if reached anyway, and
+that refusal is *executed* by a test rather than asserted. The staleness fix CNV-08's
+audit had to add after the fact (finding 4) is here **from the start**: the gate keys
+on `historyVersion` as well as the document id, because deleting or rotating a page
+leaves the id unchanged, and the revision is captured *before* the input bytes are
+read so an edit made mid-conversion invalidates the result that lands afterwards.
+
+**AC1 verification, two independent ways.** The criterion says the workbook is
+re-opened "via the `xlsx` reader" (SheetJS). `xlsx` is now a devDependency (added by
+the second review pass below — it is verification tooling, not shipped: confirmed
+absent from every built chunk) and `tests/unit/pdf-to-excel.test.ts` calls
+`XLSX.read()` on the produced bytes directly, asserting the sheet list and each
+sheet's grid against the fixture. Alongside it, the original `fflate`-based check
+still runs too, not as a fallback but because it catches things a black-box reader
+comparison would not: every worksheet part is parsed back into a grid **keyed by
+each cell's own `r="B3"` reference** (so a cell written to the wrong column or a row
+emitted out of order fails the comparison), every part is run through a strict XML
+well-formedness scanner, and the package's relationship graph is followed — a
+`<sheet r:id>` must resolve through `workbook.xml.rels` to a part that exists *and*
+is declared in `[Content_Types].xml`. Both checks are real, non-visual, cell-by-cell
+assertions, run against the same output bytes. What neither proves is that Excel or
+LibreOffice Calc themselves accept the file — added to the `QA-05` manual checklist
+in `RELEASE_CHECKLIST.md`. CNV-11 already plans to add `xlsx` as a dependency for its
+own read side; that dependency is now in place for it to build on, as a
+devDependency here and promotable to a real one there if CNV-11 needs it at runtime.
+
+- **Evidence.** `pnpm check` green (type, lint, format, 102 tokens, 30 contrast pairs
+  × 2 themes, invariants). `pnpm test`: **83 files · 1007 tests · 0 failures** (up
+  from CNV-09's 81 · 964), including `tests/unit/pdf-to-excel.test.ts` (38, up from
+  29 after the second review pass added the SheetJS round-trip and cancellation
+  cases) and `tests/unit/pdf-to-excel-commit.test.ts` (5); `table-extract.test.ts`
+  (OCR-03, now running through the shared writer) and CNV-08's `pdf-to-word.test.ts`
+  (29 — corrected here; both this and CNV-09's entry had copied forward an
+  already-wrong "27" from CNV-08's own writeup) are unchanged and still pass.
+  `pnpm test:e2e`: **115 passed / 0 failed** in one full run (up from 111), including
+  `tests/e2e/pdf-to-excel.spec.ts` (3) and `zero-network.spec.ts` (5, up from 4). A
+  later full run under more machine load hit **3 failures, all load-sensitive
+  timing flakes, none touching CNV-10 code**: `a11y-and-perf.spec.ts`'s 10 × 5MB
+  merge (the same flake CNV-08/09 already flagged), plus two new ones this run
+  surfaced for the first time — `import.spec.ts`'s full-corpus import test and its
+  CNV-07 clipboard-paste test, both unrelated to Word/Excel/PowerPoint conversion.
+  All three passed cleanly when re-run in isolation
+  (`pnpm exec playwright test tests/e2e/import.spec.ts -g "every PDF in the
+  corpus|Paste image as page"` → 2 passed). Recorded here rather than silently
+  re-run until green, per this repo's "report honestly" convention — these are
+  pre-existing infra flakiness under load, not something this ticket introduced or
+  fixed, and QA-05's manual pass should watch for recurrence.
+  `pnpm check:bundle`: **361.22 KB gzipped** initial JS against the 900 KB budget —
+  0.26 KB above CNV-09's 360.96 KB, which is the tool-registry entry and the panel
+  wiring, the same shape of delta CNV-09 added, and **unchanged by adding the `xlsx`
+  devDependency**, which is test-only. Confirmed by grepping the *built* output
+  rather than the source: `inlineStr` (the writer) appears only in
+  `assets/convert.worker-*.js` and `assets/table-extract-*.js`, both lazy;
+  `extractPageSheet` appears in `assets/render.worker-*.js` (the implementation) and
+  in `assets/operations-*.js` (the call site) — both expected, neither in the
+  initial bundle; the panel only in the lazy `assets/OptionsPanel-*.js`; `xlsx`
+  appears in no built chunk at all. `manifest.json` still ships `"permissions": []`
+  with no `host_permissions`, and this ticket adds no runtime dependency and no
+  network call.
+- **Evidence specific to the gate.** Each guard was checked by making it *fail*, not
+  only by watching it pass.
+  - Reverting `pdfToExcelPreviewIsStale` to an id-only check (CNV-08's original bug)
+    fails two unit tests — "writes nothing when the document was edited after the
+    preview ran" and "…when the conversion finished after its own input changed" —
+    and fails the e2e spec with the same error CNV-08's did:
+    `expect(locator).toBeDisabled() failed … unexpected value "enabled"`.
+  - Reducing `commit.ts`'s handler check to `if (!preview)` — trusting the disabled
+    button — fails three of the five commit tests. The handler's refusal is executed,
+    not asserted.
+  - The three refusals assert that the writer was **never reached**
+    (`buildXlsxCalls === 0`), so a refused document cannot be half-converted.
+
+**Second review pass** (an independent audit of this ticket, the same convention
+CNV-08 and CNV-09 followed) confirmed both acceptance criteria against real output
+bytes using tooling outside this repo entirely — Python's `expat` XML parser
+independently re-parsed a produced workbook, and the shared `table-regions.ts`
+extraction was differentially fuzz-tested (400 randomized pages against the
+pre-extraction code, byte-identical output) rather than trusted from the diff. It
+also found, and this pass fixed:
+
+- **The AC1 deviation's stated reason was factually wrong.** The first draft of this
+  entry claimed "this machine's `npm` refuses before it reaches a registry" as the
+  reason `xlsx` could not be added even as a devDependency. That is false: `npm`
+  refuses locally only because of this repo's own `devEngines.packageManager` guard
+  demanding `pnpm` — nothing to do with network reachability. `pnpm add -D xlsx`
+  works immediately. Fixed by actually adding it and writing the SheetJS round-trip
+  test described above, rather than correcting only the wording.
+- **The compensating control was never written.** This entry always intended to
+  defer real-application validation to a manual `QA-05` step, the same as CNV-08 and
+  CNV-09 do — but unlike theirs, the entry was never actually added to
+  `RELEASE_CHECKLIST.md`. Combined with the wrong justification above, no reader
+  outside this repo — not even a real one from the correct library — had ever
+  opened the file. Added, mirroring CNV-08/09's existing entries there.
+- **No cancellation test**, unlike CNV-09's own. The behaviour was already correct
+  (confirmed independently: an abort mid-extraction stops before all pages are read
+  and the writer is never reached; a pre-aborted signal does no work at all) but had
+  no regression cover. `describe('CNV-10 — cancellation', …)` in
+  `tests/unit/pdf-to-excel.test.ts` now formalizes both cases.
+- Two minor inaccuracies in this entry's own evidence bullets, corrected above: the
+  built-output grep for `extractPageSheet` had missed its call site in
+  `operations-*.js`, and the CNV-08 test count ("27") had been copied forward
+  already wrong from CNV-08's and CNV-09's own writeups (both actually 29).
 
 - **Requirements:** Detect table-like regions from pdf.js text-position data across
   the whole document (not just a manually-selected single table as OCR-03 does), and

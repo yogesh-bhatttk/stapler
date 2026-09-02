@@ -85,6 +85,11 @@ import {
   wordToPdfPreviewIsStale,
   wordToPdfSource
 } from './convert/word-to-pdf-state';
+import {
+  PDF_TO_EXCEL_GATE,
+  pdfToExcelPreview,
+  pdfToExcelPreviewIsStale
+} from './convert/pdf-to-excel-state';
 import { runOcr } from '../../core/ocr/runOcr';
 import { renderWorker } from '../../core/workers';
 import { altTextMap } from './acc/state';
@@ -1221,6 +1226,49 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         `${formatBytes(bytes.byteLength)} · ${preview.pageCount} page(s)` +
         (preview.notes.length > 0
           ? ` · ${preview.notes.length} item(s) could not be converted — see the panel`
+          : '')
+    });
+  },
+  /**
+   * CNV-10 — writes the `.xlsx` the panel has already converted and previewed.
+   *
+   * Deliberately does not convert here, for the same reason `pdf-to-word` above
+   * does not: the preview is mandatory (PLAN §5.5), and the only way to guarantee
+   * that what was reviewed is what gets written is to save the very bytes the
+   * preview was rendered from. That guarantee matters more here than for either
+   * sibling — every sheet in this output is the result of a guess about where a
+   * table was, and re-running the guess at save time would reopen the gap
+   * between what was checked and what lands on disk.
+   *
+   * The gate in `commit-gate.ts` already disables the action bar's button; this
+   * check is the guarantee behind that courtesy, and it also catches a preview
+   * belonging to a document the user has since closed — or one edited since the
+   * conversion ran, which `pdfToExcelPreviewIsStale` decides from
+   * `historyVersion` rather than from the document id alone.
+   */
+  'pdf-to-excel': async ({ doc }) => {
+    const preview = pdfToExcelPreview.value;
+    if (!preview || pdfToExcelPreviewIsStale(doc.id)) {
+      notify('warning', translate('Nothing was saved.'), {
+        detail: PDF_TO_EXCEL_GATE,
+        timeout: 0
+      });
+      return;
+    }
+
+    // `platform.saveFileAs`, not the shared `save`: that helper runs the bytes
+    // through `applyProtection`, which encrypts a *PDF*. Running an `.xlsx`
+    // through it would produce an unopenable file — the same reason CNV-08's
+    // `.docx` and OCR-03's own XLSX export take this path.
+    const name = `${stem(doc.name)}.xlsx`;
+    const saved = await platform.saveFileAs(preview.bytes, name);
+    if (!saved) return;
+    notify('success', translate('Saved {name}', { name }), {
+      detail:
+        `${formatBytes(preview.bytes.byteLength)} · ${preview.sheetCount} sheet(s) · ` +
+        `${preview.tableCount} detected table(s)` +
+        (preview.skipped.length > 0
+          ? ` · ${preview.skipped.length} item(s) were left out — see the panel`
           : '')
     });
   },

@@ -63,6 +63,12 @@ import type { WatermarkData } from './workers/process.worker';
 import { internal, unsupported, cancelled, isCancellation, fromUnknown } from './errors';
 import { hasXfaMarker, XFA_CONVERT_MESSAGE } from './pdf/xfa';
 import type { DocxModel, DocxPage, DocxPreviewItem } from './convert/blocks';
+import {
+  hasNoText,
+  NO_TEXT_LAYER_MESSAGE,
+  type PageSheetData,
+  type XlsxPreviewItem
+} from './convert/sheets';
 import type { LayoutBlock, PdfPreviewItem } from './convert/html-to-pdf-blocks';
 import type { PdfPageSize } from './convert/pdf-block-layout';
 import type { ExtractedImageEntry } from './workers/process.worker';
@@ -1879,6 +1885,111 @@ export async function convertDocxToPdf(
     notes: [...read.notes, ...laid.notes],
     warnings: read.warnings,
     hadUnsupportedCharacters: laid.hadUnsupportedCharacters
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * CNV-10 — PDF → Excel (XLSX)
+ * ------------------------------------------------------------------ */
+
+export interface PdfToXlsxOptions {
+  /**
+   * Whether lines that are *not* inside a detected table get a sheet of their
+   * own, one row per line.
+   *
+   * On by default, and the ticket's second acceptance criterion is exactly this
+   * case: a PDF with no detectable table must still produce a usable sheet. Off
+   * is for someone who came for the tables and does not want a text sheet per
+   * page beside them — and what it excludes is counted and reported, never
+   * silently dropped.
+   */
+  includePageText: boolean;
+  /**
+   * Title for the workbook's core-properties metadata. Passed by the caller for
+   * the reason `PdfToDocxOptions.documentName` gives: reading a live signal
+   * mid-conversion races a tab switch.
+   */
+  documentName?: string;
+}
+
+export interface PdfToXlsxResult {
+  /** The finished `.xlsx`. The same bytes the preview describes get saved. */
+  bytes: Uint8Array;
+  pageCount: number;
+  sheetCount: number;
+  /** How many sheets came from a detected table rather than from page text. */
+  tableCount: number;
+  /** Sheet-by-sheet description of the output, for the mandatory preview. */
+  outline: XlsxPreviewItem[];
+  /** What was recognised and deliberately not written, each with the reason. */
+  skipped: string[];
+}
+
+/**
+ * CNV-10 — the whole document's tables, as a workbook. Two workers deep.
+ *
+ * `render` (pdf.js) reduces each page to "the tables on it and the lines that
+ * are not in one"; `convert` plans the sheets and zips the OOXML. Sequenced here
+ * for the same library-split reason `convertPdfToDocx` is — reading the PDF
+ * needs pdf.js, which already has a worker, and the writer needs neither.
+ *
+ * The same three refusals as CNV-08, and one more of its own, all *before*
+ * anything is written:
+ *
+ *  • **encrypted** — raised by `loadDocument`; every stream is ciphertext.
+ *  • **XFA** — the page objects of a pure XFA form usually hold an "open this in
+ *    Adobe Reader" placeholder, and a spreadsheet of that, presented as the
+ *    user's form, is the silent-corruption outcome PLAN §5.2 forbids.
+ *  • **no text layer at all** — the scanned-PDF case. An empty workbook is a
+ *    file that looks like a failure the user has to diagnose; naming OCR is the
+ *    useful answer.
+ */
+export async function convertPdfToXlsx(
+  bytes: Uint8Array,
+  options: PdfToXlsxOptions,
+  jobOptions: JobOptions = {}
+): Promise<PdfToXlsxResult> {
+  if (hasXfaMarker(bytes)) throw unsupported(XFA_CONVERT_MESSAGE);
+
+  const pages: PageSheetData[] = [];
+
+  // `loadDocument` is also where encryption and an unreadable file surface, so
+  // nothing else runs until the document has been proved readable.
+  await renderWorker.lease(async api => {
+    const { handle, pageCount, isXfa } = await api.loadDocument(bytes);
+    try {
+      if (isXfa) throw unsupported(XFA_CONVERT_MESSAGE);
+      for (let i = 0; i < pageCount; i++) {
+        if (jobOptions.signal?.aborted) throw cancelled();
+        jobOptions.onProgress?.((i / pageCount) * 0.8, `Reading page ${i + 1} of ${pageCount}`);
+        pages.push(await api.extractPageSheet(handle, i));
+      }
+    } finally {
+      await api.closeDocument(handle).catch(() => {});
+    }
+  });
+
+  if (jobOptions.signal?.aborted) throw cancelled();
+  if (hasNoText(pages)) throw unsupported(NO_TEXT_LAYER_MESSAGE);
+
+  const built = await convertWorker.lease(api =>
+    api.buildXlsx(
+      pages,
+      { includePageText: options.includePageText, title: options.documentName },
+      createJobHandle({
+        signal: jobOptions.signal,
+        onProgress: (fraction, label) => jobOptions.onProgress?.(0.8 + (fraction ?? 0) * 0.2, label)
+      })
+    )
+  );
+
+  return {
+    bytes: built.bytes,
+    pageCount: pages.length,
+    sheetCount: built.sheetCount,
+    tableCount: built.tableCount,
+    outline: built.outline,
+    skipped: built.skipped
   };
 }
 

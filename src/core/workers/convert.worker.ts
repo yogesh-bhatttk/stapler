@@ -38,7 +38,14 @@ import {
 } from '../convert/blocks';
 import { readDocxAsHtml } from '../convert/docx-reader';
 import { parseHtmlBlocks, type LayoutBlock } from '../convert/html-to-pdf-blocks';
-import { fromUnknown } from '../errors';
+import {
+  EMPTY_WORKBOOK_MESSAGE,
+  planWorkbook,
+  type PageSheetData,
+  type XlsxPreviewItem
+} from '../convert/sheets';
+import { buildXlsx as buildXlsxFile } from '../convert/xlsx-writer';
+import { fromUnknown, unsupported } from '../errors';
 import { checkpoint, type JobHandle } from './protocol';
 import type { ExtractedImageEntry } from './process.worker';
 
@@ -53,6 +60,19 @@ export interface DocxBuildResult {
   skipped: string[];
   /** Block-by-block description of what was written, for the mandatory preview. */
   outline: DocxPreviewItem[];
+}
+
+/** CNV-10 — what `buildXlsx` hands back. */
+export interface XlsxBuildResult {
+  bytes: Uint8Array;
+  /** How many sheets the workbook carries, tables and page text together. */
+  sheetCount: number;
+  /** How many of those came from a detected table. */
+  tableCount: number;
+  /** Everything recognised and deliberately not written, each with its reason. */
+  skipped: string[];
+  /** Sheet-by-sheet description of what was written, for the mandatory preview. */
+  outline: XlsxPreviewItem[];
 }
 
 /** CNV-09 — what `docxToBlocks` hands back to be laid out onto PDF pages. */
@@ -95,6 +115,21 @@ export interface ConvertJob {
     imageEntries: ExtractedImageEntry[],
     job?: JobHandle
   ): Promise<DocxBuildResult>;
+
+  /**
+   * CNV-10 — plans the workbook from the per-page data and writes the `.xlsx`.
+   *
+   * A method on this worker rather than a sixth worker, and rather than
+   * main-thread work: zipping a workbook's worth of XML is exactly the >50ms
+   * the NFRs keep off the main thread. Nothing here is transferred *in* — the
+   * page data is strings — so, unlike `buildDocx` and `docxToBlocks`, argument
+   * order carries no transfer meaning. The finished bytes are transferred out.
+   */
+  buildXlsx(
+    pages: PageSheetData[],
+    options: { includePageText: boolean; title?: string },
+    job?: JobHandle
+  ): Promise<XlsxBuildResult>;
 }
 
 export const convertWorkerImpl: ConvertJob = {
@@ -143,6 +178,36 @@ export const convertWorkerImpl: ConvertJob = {
     // the preview and the bytes cannot describe different documents.
     const outline = previewOutline(model.pages);
     return Comlink.transfer({ bytes, imageCount, skipped, outline }, [bytes.buffer]);
+  },
+
+  async buildXlsx(pages, options, job) {
+    await checkpoint(job, 0.1, 'Planning the workbook');
+    const plan = planWorkbook(pages, options.includePageText);
+
+    if (plan.sheets.length === 0) {
+      // Reached only when every page's text was excluded by the caller's own
+      // option, since a document with no text at all is refused earlier, in
+      // `operations.ts`, before this worker is leased. Writing a workbook with
+      // no sheets would produce a file Excel offers to repair.
+      throw unsupported(EMPTY_WORKBOOK_MESSAGE);
+    }
+
+    await checkpoint(job, 0.4, 'Writing the spreadsheet');
+    const bytes = buildXlsxFile(plan.sheets, { title: options.title });
+    await checkpoint(job, 1, 'Writing the spreadsheet');
+
+    // The outline is derived from the very plan the file was written from, so
+    // the preview and the bytes cannot describe different workbooks.
+    return Comlink.transfer(
+      {
+        bytes,
+        sheetCount: plan.sheets.length,
+        tableCount: plan.tableCount,
+        skipped: plan.skipped,
+        outline: plan.outline
+      },
+      [bytes.buffer]
+    );
   }
 };
 

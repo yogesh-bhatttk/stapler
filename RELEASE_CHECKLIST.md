@@ -66,6 +66,23 @@ so it gets its own explicit step below rather than being buried inside "run veri
        `tests/unit/word-to-pdf.test.ts` (re-extracted with pdf.js and re-parsed
        with pdf-lib) — this step is specifically about the real viewers, which no
        test in this repo can launch.
+ - [ ] **QA-05 — Microsoft Excel and LibreOffice Calc (manual, CNV-10):** open an
+       `.xlsx` produced by PDF → Excel from `tests/fixtures/pdf-to-excel.pdf`.
+       Confirm **no repair prompt**, that the workbook carries the three sheets
+       the preview listed (`Page 1 Table`, `Page 1 Text`, `Page 2 Text`) in that
+       order, that `Page 1 Table` renders as a 5 × 4 grid with `Region /
+       Revenue / Units / Change` as its first row, and that the two text sheets
+       render one line of the page per row. Check that every cell is still
+       **text**: `1,204` and `318` must read exactly as drawn, left-aligned and
+       unconverted, not re-formatted as numbers — that is the writer's
+       deliberate choice, not a defect. Borders, merged cells, column widths and
+       formulas are *not* reconstructed and their absence is the tool's stated
+       limitation, not something to raise here. The cell grid, the package's
+       relationship graph and every part's XML are already asserted against the
+       output bytes by `tests/unit/pdf-to-excel.test.ts` (read back both with
+       SheetJS's `XLSX.read` and by unzipping the OPC package with `fflate`) —
+       this step is specifically about the two real applications, which no test
+       in this repo can launch.
 - [ ] **Feature Complete:** All features for this release are implemented; any
       known limitation is disclosed in the relevant panel, not silent.
 

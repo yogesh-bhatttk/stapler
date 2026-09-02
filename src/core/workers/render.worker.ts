@@ -24,6 +24,7 @@ import {
 } from '../pdf/image-redaction';
 import { findAcrossRuns } from '../pdf/text-search';
 import { pageBlocks, type DocxBlock } from '../convert/blocks';
+import { pageSheet, type PageSheetData } from '../convert/sheets';
 import { formattedRuns } from '../convert/pdf-runs';
 import { pixelateRects, type BlurStrength } from '../faceblur/blur';
 import {
@@ -216,6 +217,20 @@ export interface RenderJob {
    * and the text export never disagree about where a paragraph starts.
    */
   extractPageBlocks(handle: string, pageIndex: number): Promise<DocxBlock[]>;
+  /**
+   * CNV-10 — the page reduced to "the tables on it, and the lines that are not
+   * in one".
+   *
+   * Separate from `extractPageBlocks` rather than derived from it, for two
+   * reasons that both cost correctness if ignored. A spreadsheet row is a
+   * *line*, and `pageBlocks` deliberately merges a wrapped paragraph's lines
+   * into one block — so a block model can no longer answer the question this
+   * tool's acceptance criterion is stated in. And an XLSX cell carries no bold
+   * or italic, so this path uses `textRuns` rather than `formattedRuns` and
+   * skips the `getOperatorList()` call per page that resolving font descriptors
+   * needs. The table detection itself is shared (`table-regions.ts`).
+   */
+  extractPageSheet(handle: string, pageIndex: number): Promise<PageSheetData>;
   extractPageTextItems(
     handle: string,
     pageIndex: number
@@ -1262,6 +1277,19 @@ const api: RenderJob = {
       // own y-up baselines rather than viewport coordinates.
       const { height } = page.getViewport({ scale: 1, rotation: 0 });
       return pageBlocks(runs, height);
+    } finally {
+      page.cleanup();
+    }
+  },
+
+  async extractPageSheet(handle, pageIndex) {
+    const page = await entry(handle).doc.getPage(pageIndex + 1);
+    try {
+      // The unrotated media height, because `textRuns` hands back pdf.js's own
+      // y-up baselines rather than viewport coordinates — the same reason
+      // `extractPageBlocks` above asks for `rotation: 0`.
+      const { height } = page.getViewport({ scale: 1, rotation: 0 });
+      return pageSheet(await textRuns(page), height, pageIndex);
     } finally {
       page.cleanup();
     }

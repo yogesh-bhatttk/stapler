@@ -1,5 +1,5 @@
 import { expect, test, type Request } from '@playwright/test';
-import { ensureFixture, pdfToWordPdf, textPdf, wordToPdfDocx } from './fixtures';
+import { ensureFixture, pdfToExcelPdf, pdfToWordPdf, textPdf, wordToPdfDocx } from './fixtures';
 import { gotoTool, importFile, openApp } from './helpers';
 
 /**
@@ -100,6 +100,9 @@ test.describe('zero network', () => {
         // dedicated tests below.
         'pdf-to-word',
         'word-to-pdf',
+        // CNV-10. Same reasoning as the two above — the panel is the cheap half,
+        // and the conversion has its own test below.
+        'pdf-to-excel',
         'table-extract',
         'acc',
         'contact-sheet',
@@ -242,6 +245,71 @@ test.describe('zero network', () => {
       await save.click();
       const saved = await download;
       expect(saved.suggestedFilename()).toMatch(/\.pdf$/);
+    });
+  });
+
+  /**
+   * CNV-10 — the tool sweep above only *renders* this panel, and the comment on
+   * it already says why that is not enough: the code that could reach the
+   * network runs when the operation runs. This conversion is the one that pulls
+   * in the convert worker's chunk, and the one that touches pdf.js's text layer
+   * across every page of a document.
+   *
+   * Its lazy-chunk story is milder than CNV-08's — the XLSX writer is
+   * hand-rolled on `fflate`, so there is no `docx`- or `mammoth`-sized bundle
+   * behind it — which is exactly why the assertion below is about *observed
+   * requests*, not about a specific chunk: what matters is that the whole
+   * conversion and save ran under the monitor and asked for nothing external.
+   */
+  test('makes no external request while actually converting a PDF to Excel', async ({
+    page,
+    baseURL
+  }) => {
+    const origin = new URL(baseURL!).origin;
+    const fixture = await ensureFixture('pdf-to-excel.pdf', pdfToExcelPdf);
+
+    // Every request, not only the offending ones: this test has to be able to
+    // prove the conversion really ran while the monitor was attached. A test
+    // that silently stopped converting — a renamed button, a click that no-ops —
+    // would otherwise still pass by observing nothing.
+    const seen: string[] = [];
+    page.on('request', request => seen.push(request.url()));
+
+    await withNetworkWatch(page, origin, async () => {
+      await openApp(page);
+      await importFile(page, fixture);
+      // A hash change rather than `page.goto`, so the imported document survives.
+      await gotoTool(page, 'pdf-to-excel');
+
+      const panel = page.getByRole('complementary', { name: /PDF to Excel options/ });
+      await expect(panel).toBeVisible();
+
+      const beforeConversion = seen.length;
+
+      // The conversion itself: render worker (pdf.js text layer, every page) →
+      // convert worker (the workbook).
+      await panel.getByRole('button', { name: 'Preview conversion' }).click();
+      await expect(panel.getByRole('list', { name: /Sheets that will be written/ })).toBeVisible({
+        timeout: 90_000
+      });
+
+      // The convert worker's own module only ever loads here, so seeing it
+      // fetched inside the watched window is the proof that the conversion ran
+      // rather than silently no-op'd.
+      const duringConversion = seen.slice(beforeConversion);
+      expect(
+        duringConversion.some(url => /convert\.worker/.test(url)),
+        `The conversion must load the convert worker inside the watched window; saw:\n${duringConversion.join('\n')}`
+      ).toBe(true);
+
+      // And the save, because writing the file is a separate code path from
+      // building it.
+      const save = page.getByRole('button', { name: 'Save .xlsx' });
+      await expect(save).toBeEnabled();
+      const download = page.waitForEvent('download', { timeout: 60_000 });
+      await save.click();
+      const saved = await download;
+      expect(saved.suggestedFilename()).toMatch(/\.xlsx$/);
     });
   });
 

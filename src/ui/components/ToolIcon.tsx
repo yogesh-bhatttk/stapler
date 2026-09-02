@@ -25,6 +25,7 @@ import {
   ShieldAlert,
   Sparkles,
   SplitSquareHorizontal,
+  Table,
   Volume2,
   type LucideIcon
 } from 'lucide-preact';
@@ -50,6 +51,7 @@ const ICONS: Record<string, LucideIcon> = {
   ShieldAlert,
   Sparkles,
   SplitSquareHorizontal,
+  Table,
   Volume2
 };
 
