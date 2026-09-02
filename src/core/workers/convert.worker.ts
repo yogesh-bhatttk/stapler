@@ -36,6 +36,8 @@ import {
   type DocxModel,
   type DocxPreviewItem
 } from '../convert/blocks';
+import { readDocxAsHtml } from '../convert/docx-reader';
+import { parseHtmlBlocks, type LayoutBlock } from '../convert/html-to-pdf-blocks';
 import { fromUnknown } from '../errors';
 import { checkpoint, type JobHandle } from './protocol';
 import type { ExtractedImageEntry } from './process.worker';
@@ -53,7 +55,31 @@ export interface DocxBuildResult {
   outline: DocxPreviewItem[];
 }
 
+/** CNV-09 — what `docxToBlocks` hands back to be laid out onto PDF pages. */
+export interface DocxBlocksResult {
+  blocks: LayoutBlock[];
+  /** Everything recognised and deliberately not carried across, with reasons. */
+  notes: string[];
+  /** `mammoth`'s own warnings, verbatim. */
+  warnings: string[];
+}
+
 export interface ConvertJob {
+  /**
+   * CNV-09 — reads a `.docx` and returns the generalized block model.
+   *
+   * It stops at the model rather than producing the PDF for the same
+   * library-split reason this worker exists at all (see `index.ts`): drawing
+   * pages needs pdf-lib, which already lives in the `process` worker, and
+   * pulling a second copy of it in here to save one Comlink hop would undo the
+   * split. `operations.ts`'s `convertDocxToPdf` sequences the two.
+   *
+   * The `.docx` bytes are a top-level parameter so the caller can `handOver`
+   * them — Comlink reads a transfer marker off top-level arguments only, which
+   * CNV-08's audit finding 1 established the hard way.
+   */
+  docxToBlocks(bytes: Uint8Array, job?: JobHandle): Promise<DocxBlocksResult>;
+
   /**
    * Writes the block model out as a `.docx`, embedding what it can of CNV-06's
    * image archive. Progress and cancellation ride the shared job protocol, same
@@ -72,6 +98,23 @@ export interface ConvertJob {
 }
 
 export const convertWorkerImpl: ConvertJob = {
+  async docxToBlocks(bytes, job) {
+    const { html, messages } = await readDocxAsHtml(bytes, job);
+    await checkpoint(job, 0.6, 'Reading the document structure');
+    const { blocks, notes } = parseHtmlBlocks(html);
+    await checkpoint(job, 0.95, 'Reading the document structure');
+
+    // Image bytes are transferred rather than cloned on the way out — they came
+    // straight out of a base64 decode here and nothing in this worker reads them
+    // again. Dedup guards against two blocks ever sharing one buffer, which
+    // would make `postMessage` throw on a repeated transferable.
+    const buffers = new Set<ArrayBuffer>();
+    for (const block of blocks) {
+      if (block.kind === 'image') buffers.add(block.data.buffer as ArrayBuffer);
+    }
+    return Comlink.transfer({ blocks, notes, warnings: messages }, [...buffers]);
+  },
+
   async buildDocx(model, imageArchive, imageEntries, job) {
     const skipped = [...model.skipped];
     let imageCount = 0;

@@ -3105,7 +3105,334 @@ above) found three more defects, all fixed:
 
 ### CNV-09 · Word (DOCX) → PDF — `L` `P1`
 
-**Status: Not started.**
+**Status: Done, after a second review pass (below) that fixed one silent text
+loss and corrected two claims this entry made about its own evidence. Both
+acceptance criteria met against real output bytes. Eight limitations, every one
+of them stated in the tool's own panel copy *and* in this entry; three deliberate
+deviations from the brief, all disclosed below.** Ships labeled beta with a
+mandatory preview per §5.5, same policy as CNV-08 and OCR-03.
+
+New tool `word-to-pdf` (group Convert, `Save PDF`, `worksWithoutDocument`). Its
+input is a `.docx` picked from disk, not the open document — requiring an
+unrelated PDF to be open first, just to convert a Word file, would be nonsense.
+Two workers, sequenced by `convertDocxToPdf` in `src/core/operations.ts`:
+
+- **`convert`** gains `docxToBlocks`. `src/core/convert/docx-reader.ts` owns the
+  `mammoth` call behind a dynamic `import()`, exactly as `docx-writer.ts` owns
+  `docx`; `src/core/convert/html-to-pdf-blocks.ts` turns its HTML into the block
+  model.
+- **`process`** gains `layoutBlocksToPdf`, which draws the model onto pages via
+  `src/core/convert/pdf-block-layout.ts`.
+
+**Why two workers rather than one.** The brief asked for a method on the
+`convert` worker rather than a sixth worker, and that is what this is — but the
+*drawing* stays in `process`, because `index.ts` splits workers by **library** so
+the build holds one copy of each, and pdf-lib already lives there. Putting the
+layout engine in `convert` would have added a second copy of pdf-lib to save one
+Comlink hop. The block model crosses that hop with its image bytes
+**transferred**, not cloned: `blocks` is argument 0 of `layoutBlocksToPdf` for
+precisely the reason CNV-08's audit finding 1 established — Comlink reads a
+transfer marker off top-level arguments only.
+
+**Reuse rather than reimplementation.** `StyledRun` extends CNV-08's `DocxRun`,
+so the two block models are one vocabulary rather than two. The layout engine
+extends `markdown-to-pdf.ts`'s approach as the requirements ask and imports its
+`sanitizeWinAnsiText` / `hadUnsupportedCharacter` pair and its
+`addLinkAnnotation` (newly exported for this) rather than copying them, so the
+Markdown and Word exports cannot disagree about which characters a standard font
+can draw or about how a `/Link` annotation is built. What is new is what Markdown
+never needed: wrapping *across* styled runs, real raster images, and tables whose
+cells are runs.
+
+**One thing this direction does better than CNV-08.** Table cells carry runs
+(`StyledRun[][][]`), not plain strings, so bold and italic survive *into* a cell
+— the exact loss CNV-08 records as its limitation 3. Proved twice over, both
+times against the `WORD_TO_PDF` fixture itself: the production read path
+(`readDocxAsHtml` → `parseHtmlBlocks`) marks that fixture's header row bold and
+its three body rows not, and the **content stream of the produced PDF** shows
+`Region`/`Revenue`/`Change` drawn with `/Helvetica-Bold` while every body row is
+drawn with `/Helvetica`. The second one is the load-bearing assertion: font
+*embedding* alone proves nothing here, because the fixture's headings and italic
+run embed those faces whatever the table does — see the second review pass below,
+where that is demonstrated rather than argued.
+
+**The eight limitations, none silent, all in the panel's own copy:**
+
+1. **Word's pagination, fonts, columns, headers/footers and footnotes are not
+   reproduced.** `mammoth` discards the section geometry, so there is nothing to
+   reproduce them *from*. Page size is therefore an explicit option (A4 or US
+   Letter, 1" margins — Word's own default) rather than a guess, and the panel
+   says outright that this is a structural conversion.
+2. **Text is drawn in Helvetica, via the WinAnsi standard fonts.** A character
+   outside WinAnsi (CJK, Cyrillic, most Arabic/Hebrew) is replaced with `?` and
+   the panel raises a non-dismissing warning saying so — the same honest
+   degradation CNV-05's Markdown export makes, and the same reason: embedding a
+   Unicode font is a separate piece of work with its own bundle cost.
+3. **Only PNG and JPEG images are embedded.** Word stores pasted vector art as
+   EMF/WMF, which `mammoth` hands over as a data URI no PDF can embed and this
+   build carries no decoder for. Each one appends a sentence to the preview's
+   "left out of the PDF" list rather than vanishing.
+4. **Underline, superscript and subscript are drawn as plain text.** pdf-lib's
+   `drawText` has no underline, and faking super/subscript would be a guess at a
+   baseline offset. Stated in the panel copy.
+5. **A table continued onto a second page does not repeat its header row**, and a
+   single row taller than a whole page is allowed to overflow rather than be
+   truncated — losing a cell's text is the worse outcome of the two.
+6. **An empty Word paragraph (the spacer people press Enter for) is dropped.**
+   Keeping them would fill the mandatory preview with blank rows, which makes the
+   preview harder to check — and checking it is the whole point.
+7. **An image inside a table cell is left out.** A cell in this engine is one
+   wrapped text box, and a row's height is measured from its text; placing a
+   raster inside one would need the cell to become a small layout of its own.
+   Each occurrence appends a sentence to the preview's "left out of the PDF"
+   list. Found undisclosed by the second review pass — the behaviour was already
+   surfaced at runtime, but it was in neither this list nor the panel.
+8. **A list nested more than eight levels deep is flattened to eight.** Word
+   offers nine levels; this engine indents eight. Every item's *text* is drawn,
+   at the deepest indent available, and a note says so. Before the second review
+   pass this was the one place in the converter where content really did vanish
+   — see below.
+
+**The preview is the gate, not a label**, on the same mechanism as CNV-08:
+`WordToPdfPanel` runs the whole conversion, **holds the produced bytes**, and only
+then clears `ui/tools/commit-gate.ts`'s block on the action bar's primary CTA.
+Saving writes those exact bytes. `commit.ts`'s handler refuses again if reached
+anyway — and that refusal is *executed* by a test, not merely asserted (see
+below), because CNV-08's audit finding 3 was a guarantee whose test never ran it.
+
+**How the staleness fix differs here, deliberately.** CNV-08 keys on the document
+id *plus* `historyVersion`, because editing a page leaves the id unchanged. This
+tool's input is not the workspace document at all, so `historyVersion` says
+nothing about it and gating on it would re-close the gate on an unrelated edit.
+The equivalent is an **input revision** — a counter that every change to the
+chosen file or to an option bumps — checked *alongside* the `File` object's own
+identity, not instead of it. It is the same shape of fix: identity alone is not
+enough. Two paths need it, and only the second is caught by clearing the preview
+on change: re-picking a different file that happens to have the same name, and a
+conversion that **finishes after its own input changed** (the revision is
+captured before the bytes are read, so a page-size change made mid-conversion
+invalidates the result that lands afterwards).
+
+**Unreadable input is refused before any conversion happens**, each with its own
+message rather than a generic failure — this was the sharpest correctness risk in
+the ticket, because `mammoth` reports a corrupt package by rejecting with a bare
+jszip `Error` ("Can't find end of central directory : is this a zip file ?") that
+an unhandled rejection would surface as nothing useful:
+
+- **Not a ZIP at all** and **empty file** — caught from the first bytes, before
+  `mammoth` is even loaded.
+- **A legacy binary `.doc`, or a password-protected `.docx`** — both are OLE2
+  compound files, caught by that signature, with a message naming both cases and
+  what to do.
+- **A valid ZIP with no `word/document.xml`** — only `mammoth` can tell, so its
+  error is translated (`translateMammothError`).
+- Anything unmatched is still wrapped as a refusal with the underlying text
+  attached. Every one of these leaves the user's `.docx` untouched and writes
+  nothing.
+
+- **Evidence** (re-measured after the second review pass; the figures before it
+  were 80 files · 958 tests and 360.94 KB). `pnpm check` green (type, lint,
+  format, 102 tokens, 30 contrast pairs × 2 themes, invariants). `pnpm test`:
+  **81 files · 964 tests · 0 failures**, including `tests/unit/word-to-pdf.test.ts`
+  (35, up from 32), `tests/unit/word-to-pdf-commit.test.ts` (5) and the new
+  `tests/unit/word-to-pdf-transfer.test.ts` (3); CNV-08's 27 + 3 + 3 are unchanged
+  and still pass. `pnpm test:e2e`: **111 passed / 0 failed** in one full run (up
+  from CNV-08's 107), including `tests/e2e/word-to-pdf.spec.ts` (3) and
+  `zero-network.spec.ts` (4, up from 3). The `compress-preview.spec.ts` render-
+  timing flake CNV-08 flagged for the next QA pass did **not** reproduce; it is
+  still an open pre-existing issue, not a fixed one. `a11y-and-perf.spec.ts`'s
+  "merges 10 × 5MB PDFs within 8 seconds" *did* fail twice under a loaded machine
+  (once on its 70ms main-thread gap, once on a 30s upload wait) and passes on its
+  own and in a clean full run — a second load-sensitive timing flake for the same
+  QA pass, in a test that touches no CNV-09 code. `pnpm check:bundle`:
+  **360.96 KB gzipped** initial JS against the 900 KB budget — 0.31 KB above
+  CNV-08's 360.65 KB, which is the tool-registry entry and the panel wiring; the
+  panel itself rides in the lazy `OptionsPanel` chunk. `manifest.json` still ships
+  `"permissions": []` with no `host_permissions`.
+- **One a11y regression, caught by the sweep and fixed before it shipped.** The
+  panel's new limitations list was first rendered with `panelStyles.list`, which
+  is a `max-height`/`overflow-y` scroll container of single-line rows: axe's
+  `scrollable-region-focusable` rule failed the whole-app sweep (a scrollable
+  region with nothing focusable inside is unreachable by keyboard in Safari), and
+  `.listRow`'s ellipsis would have truncated every sentence to one line anyway.
+  Replaced with a new `.proseList` class — wrapping, non-scrolling, token-styled
+  — and `a11y-and-perf.spec.ts`'s route sweep passes again.
+- **Evidence for AC 1 (the round trip).** `tests/e2e/fixtures.ts` gains
+  `WORD_TO_PDF` / `wordToPdfDocx()`, built in code with the `docx` package rather
+  than committed as a binary, with the same content categories as CNV-08's
+  fixture plus the two a `.docx` can state and a PDF's geometry cannot: a
+  bulleted list and a numbered one. The round-trip test converts it through the
+  production entry point and reads the produced PDF back with **CNV-04's own
+  `extractDocumentText`** — not by inspecting the model it was drawn from. Every
+  source paragraph, heading, list item and the inline bold/italic sentence comes
+  back, each after everything that precedes it; the four table rows each come
+  back as **one extracted line in column order**, matched cell-by-cell against
+  the fixture; the image is a real image XObject in the output (counted by
+  re-parsing with pdf-lib, not taken from the converter's own report); and the
+  requested page size really changes the output's `MediaBox`, so the option is
+  not decorative.
+- **Evidence for AC 2 (beta label and mandatory preview).**
+  `tests/e2e/word-to-pdf.spec.ts` drives it in a real browser: the CTA starts
+  disabled with a *readable* reason, a chosen file alone does not unlock it, the
+  preview control is keyboard-reachable and activates with Enter, the outline
+  then renders real structure (the h1, `Table, 4 rows × 3 columns`, the image,
+  a bullet) and only then does the CTA enable; changing the page size re-closes
+  it; and the file that finally lands on disk begins `%PDF-` and has the *second*
+  preview's page size, proving what was saved is what was last reviewed.
+- **Each guard was checked by making it fail, not only by watching it pass.**
+  Reverting `wordToPdfPreviewIsStale` to an identity-only check (revision
+  comparison removed) fails two tests, including "refuses a result that finished
+  after its own input changed". Removing the staleness check from `commit.ts`'s
+  handler fails "writes nothing when the preview finished after its own input
+  changed" — the handler wrote the stale bytes, which is the whole reason that
+  check exists. Two more were found this way during implementation rather than
+  after: the HTML tokenizer originally closed the *outermost* matching element,
+  which stranded every list item after a nested list outside its list; and the
+  `/Title` was never set because `documentName` was not being mapped onto the
+  engine's `title`. Both are now covered by the tests that caught them.
+- **Zero-network evidence.** `word-to-pdf` is in `zero-network.spec.ts`'s tool
+  sweep, *and* has a dedicated case that runs a real conversion and save under
+  the request monitor — the sweep alone would not do, for the reason its own
+  comment gives: a rendered panel loads none of `mammoth`, and the lazy
+  `await import('mammoth')` is what pulls the chunk in. That case asserts JS
+  chunks (the convert worker by name) really were fetched inside the watched
+  window, so a test that silently stopped converting would fail rather than pass
+  by observing nothing. In the built output, `mammoth`'s chunk
+  (`assets/lib-*.js`, 499,317 bytes raw) is referenced from exactly one place in
+  the whole build, `assets/convert.worker-*.js`, and only as
+  ``import(`./lib-*.js`)`` — checked by grepping the built output, not the
+  source. That chunk contains **zero** occurrences of `fetch(`,
+  `XMLHttpRequest`, `WebSocket`, `sendBeacon` or `EventSource`, and no
+  `require("fs")` (mammoth's package `browser` field swaps its Node `unzip.js`
+  and `docx/files.js` for browser versions, and Vite honours it). It has one
+  occurrence of the *string* `importScripts` — `setimmediate` reading it as a
+  property to detect whether it is in a worker, not a call — and a handful of
+  URL strings that are XML namespaces (`schemas.openxmlformats.org`) and library
+  documentation links in error text. Text, not requests.
+- **Three deliberate deviations from the brief, with reasons.**
+  1. **The engine is two files, not one.** The brief named
+     `html-to-pdf-blocks.ts` as "the layout engine"; it is split into
+     `html-to-pdf-blocks.ts` (block model + HTML parser, no pdf-lib) and
+     `pdf-block-layout.ts` (pdf-lib layout). One file importing both `mammoth`'s
+     consumer side and pdf-lib would have dragged pdf-lib into the `convert`
+     worker, which is the duplication `index.ts`'s library split exists to
+     prevent. Both are generalized over the block model, so CNV-11/CNV-13 can
+     reuse either half.
+  2. **`markdown-to-pdf.ts` was not rewritten on top of the new engine.** The
+     brief called that file "the base to extend", and the engine does extend its
+     approach and import its helpers — but converting CNV-05's own export to run
+     through it would put its link annotations, code blocks and 30-plus passing
+     tests at risk for no ticket, and CNV-09 does not need it. The reuse is real
+     (shared sanitiser, shared annotation builder); the migration is not attempted
+     and is not claimed.
+  3. **`mammoth` is called with both `arrayBuffer` and `buffer`.** Its package
+     `browser` field swaps `lib/unzip.js`, and the browser and Node versions read
+     *different* option keys. Passing both is what lets the shipped worker and the
+     Node unit test execute the identical call, rather than the test exercising a
+     path the browser never takes. The browser build ignores `buffer` entirely.
+- **Not verifiable here, and not claimed:** that the output opens correctly in
+  Acrobat, Preview, or Chrome's built-in viewer, and that it visually resembles
+  the source document in Word. No PDF viewer and no copy of Word is installed in
+  this environment. What is proved instead is structural, from the produced
+  bytes, two independent ways — pdf.js re-extracts every paragraph and table cell,
+  and pdf-lib re-parses the page count, page size, `/Title`, font resources and
+  image XObjects. Add "CNV-09 output opens in Acrobat and Preview with no
+  warning, and reads as a faithful structural copy of the source `.docx`" to the
+  `QA-05` manual checklist.
+- **Known gap, stated rather than papered over:** the HTML parser is a small
+  hand-written tokenizer, because a dedicated worker has no `DOMParser`. It is
+  scoped to what `mammoth` emits and covered by nine unit tests including
+  malformed markup, but it is not a general-purpose HTML parser. Anything it does
+  not recognise is *recursed into* rather than dropped, so the failure mode is
+  "an unusual wrapper's text arrives as plain paragraphs", never "text
+  disappears" — asserted directly by the "never loses text inside an element it
+  does not recognise" test. That claim was **true of unrecognised elements and
+  false of deeply nested lists** when this entry first made it; the second review
+  pass found the one construct that contradicted it and fixed it (finding 1
+  below).
+
+**Second review pass** (an independent audit of this ticket, the same convention
+CNV-08's entry uses). It confirmed both acceptance criteria against real output
+bytes, and found one real defect, two inaccurate claims in this entry, and four
+polish items. All seven are fixed:
+
+- **Silent text loss on lists nested deeper than eight levels** — the only
+  finding that was a live bug rather than a documentation problem.
+  `html-to-pdf-blocks.ts`'s `listBlocks` guarded its recursion with
+  `if (depth + 1 < MAX_LIST_DEPTH)` and simply returned otherwise: a 9- and a
+  10-level list each produced **8 blocks and 0 notes**, with the items below
+  level 8 gone from the model, gone from the preview, gone from the PDF and
+  unmentioned anywhere. Word supports nine list levels, so this was reachable,
+  and it contradicted both this entry's own "never text disappears" claim and
+  `CLAUDE.md`'s invariant. Fixed by *flattening* rather than skipping — the
+  deeper items are emitted at the deepest depth the engine indents — plus one
+  `DEEP_LIST_NOTE` in the same `notes` list an unembeddable image uses, which is
+  this file's established pattern for "recognised, carried across imperfectly,
+  and said so". Regression test: "flattens a list nested deeper than it can
+  indent, and never loses its text" asserts 9 and 10 items with the expected
+  clamped depths and exactly one note, *and* re-extracts `Level 1`…`Level 10`
+  from the produced PDF. Reverting the one-line guard fails it with the audit's
+  exact symptom (`expected … to have a length of 9 but got 8`).
+- **This entry overstated its own evidence for bold-in-table-cells.** It claimed
+  the behaviour was "asserted two ways: the parsed model marks the fixture's
+  header cells bold, and the produced PDF really embeds `Helvetica-Bold` and
+  `Helvetica-Oblique`". Neither assertion actually proved it: the model-level
+  one ran against a hand-written HTML snippet rather than the fixture, and the
+  font-embedding one is satisfied by the fixture's *heading* and italic run
+  whatever the table contains. Demonstrated, not argued: with `cellRuns`
+  patched to strip every cell's bold, the old font-embedding test still
+  **passed**. Closed by adding the coverage rather than by softening the words
+  — a fixture-level model assertion (header row `bold: true`, all three body
+  rows `false`, cell texts equal to `WORD_TO_PDF.table`) and, more to the point,
+  one that reads the produced PDF's **content stream**, maps each `Tf` resource
+  to its `/BaseFont`, and checks the face the cell strings were drawn with. Both
+  fail under that same patch.
+- **No transfer regression test**, where CNV-08 has one. `convertDocxToPdf` hands
+  the block model over with `Comlink.transfer(read.blocks, imageBuffersOf(…))`,
+  and CNV-08's audit finding 1 is the reason it is argument 0 — but nothing
+  executed that. `tests/unit/word-to-pdf-transfer.test.ts` now mirrors
+  `pdf-to-word-transfer.test.ts` exactly: a real `MessageChannel` with a real
+  `Comlink.expose`/`wrap` pair, asserting the sending realm's image buffer is
+  **detached** (`byteLength === 0`) and arrived intact on the other side.
+  Dropping the `Comlink.transfer(…)` call fails it. A second case covers the
+  `Set` in `imageBuffersOf`: one image reused across two blocks must not list the
+  same transferable twice — with the dedup removed, `postMessage` throws
+  `DataCloneError: Transfer list contains duplicate ArrayBuffer`, which would
+  have failed a perfectly ordinary document.
+- **Limitations were disclosed in inconsistent places.** Of the six this entry
+  listed, only two were in the panel's static copy; two were runtime-only (a
+  toast, a preview note) and two appeared nowhere but this ticket — so what a
+  user learned depended on which surface they happened to read. All eight
+  (the original six, plus images-in-table-cells and the flattened deep list) are
+  now in one `LIMITATIONS` list rendered by `WordToPdfPanel` *before* the
+  conversion runs, and in this entry, in the same order.
+- **`mammoth`'s warnings were being counted as dropped content.**
+  `convertDocxToPdf` merged `read.warnings` — mammoth's own structural remarks,
+  typically "unrecognised paragraph style: X" — into the same `notes` list the
+  panel renders under "Some content was left out of the PDF:" and the save toast
+  counts as "N item(s) could not be converted". A style that fell back to a
+  default is not missing content, so this overstated the damage. `warnings` is
+  now its own field on `DocxToPdfResult`, rendered in its own clearly-labeled
+  section and excluded from the toast's count. Covered by "keeps the reader's
+  warnings out of the 'left out of the PDF' list".
+- **Wrong error kind for a user-input condition.** `pdf-block-layout.ts` raised
+  `internal()` for "this document produced no text or images to convert", which
+  puts "Something went wrong inside Stapler." in front of someone whose only
+  mistake was converting a document with nothing convertible in it. Now
+  `corrupt()`, which is the kind `docx-reader.ts` already raises for the
+  neighbouring conditions (an empty file; a `.docx` with no `word/document.xml`,
+  i.e. "there is nothing to convert"), with a message naming the likely causes.
+  The existing refusal test now asserts the `kind` as well as the message.
+  CNV-08's `docx-writer.ts` has the same `internal()` on its mirror-image
+  refusal; it is **not** changed here, because it is CNV-08's line and this pass
+  did not re-open that ticket.
+- **Shared module-global state, documented rather than refactored.**
+  `markdown-to-pdf.ts`'s `sawUnsupportedCharacter` flag now has two callers in
+  the same pooled `process` worker (CNV-05's `markdownToPdfBytes` and CNV-09's
+  `layoutBlocksToPdf`). Neither is concurrently re-entrant today, so this is a
+  pre-existing pattern being reused rather than new risk; a comment at the flag's
+  definition now says so, and says what a third caller would have to do first.
+  Deliberately not refactored in this pass.
 
 - **Requirements:** Read `.docx` via `mammoth` (lazy-loaded) into structured HTML,
   convert to the shared block model, and lay it onto PDF pages via the new

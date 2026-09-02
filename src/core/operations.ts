@@ -63,6 +63,8 @@ import type { WatermarkData } from './workers/process.worker';
 import { internal, unsupported, cancelled, isCancellation, fromUnknown } from './errors';
 import { hasXfaMarker, XFA_CONVERT_MESSAGE } from './pdf/xfa';
 import type { DocxModel, DocxPage, DocxPreviewItem } from './convert/blocks';
+import type { LayoutBlock, PdfPreviewItem } from './convert/html-to-pdf-blocks';
+import type { PdfPageSize } from './convert/pdf-block-layout';
 import type { ExtractedImageEntry } from './workers/process.worker';
 
 /**
@@ -1767,6 +1769,126 @@ export async function convertPdfToDocx(
     outline: built.outline,
     skipped: built.skipped
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * CNV-09 — Word (DOCX) → PDF
+ * ------------------------------------------------------------------ */
+
+export interface DocxToPdfOptions {
+  /** Output page size. Word's own section geometry is not carried by `mammoth`. */
+  pageSize: PdfPageSize;
+  /**
+   * Title for the PDF's `/Title`. Callers that know which file `bytes` came from
+   * pass its name here rather than letting this read a live signal — the same
+   * mid-conversion race CNV-08's second review pass found in `convertPdfToDocx`.
+   */
+  documentName?: string;
+}
+
+export interface DocxToPdfResult {
+  /** The finished PDF. The same bytes the preview describes get saved. */
+  bytes: Uint8Array;
+  pageCount: number;
+  imageCount: number;
+  /** Block-by-block description of the output, for the mandatory preview. */
+  outline: PdfPreviewItem[];
+  /**
+   * Content that really was left out of the PDF, each with the reason — a
+   * dropped image, a flattened deep list. This is the list the UI renders as
+   * "left out" and the save toast counts, so nothing belongs here unless
+   * something the source document had is missing or degraded in the output.
+   */
+  notes: string[];
+  /**
+   * `mammoth`'s own structural warnings about the `.docx` (an unrecognised
+   * paragraph style, say), verbatim and separate.
+   *
+   * Deliberately *not* merged into `notes`: a mammoth warning usually means "a
+   * style was mapped to a default", not "this content was dropped", and counting
+   * it as lost content overstates the damage to the user. Two different claims,
+   * two different lists.
+   */
+  warnings: string[];
+  /** True when a character the standard fonts cannot draw was replaced. */
+  hadUnsupportedCharacters: boolean;
+}
+
+/**
+ * CNV-09 — best-effort structural conversion, two workers deep.
+ *
+ * `convert` (mammoth) reads the `.docx` into the generalized block model and
+ * `process` (pdf-lib) draws it onto pages. Sequenced here rather than inside one
+ * worker for the reason `workers/index.ts` gives: the split is by library, so the
+ * build holds one copy of each, and putting pdf-lib into the `convert` worker to
+ * save a hop would add a second.
+ *
+ * Unreadable input is refused by `readDocxAsHtml` before any conversion happens —
+ * a corrupt ZIP, a missing `word/document.xml`, a legacy `.doc` and a
+ * password-protected `.docx` each get their own message. Nothing is ever
+ * half-converted: the failure throws and the caller's file is untouched.
+ */
+export async function convertDocxToPdf(
+  bytes: Uint8Array,
+  options: DocxToPdfOptions,
+  jobOptions: JobOptions = {}
+): Promise<DocxToPdfResult> {
+  const read = await convertWorker.lease(api =>
+    api.docxToBlocks(
+      // Handed over rather than cloned, and at the top-level argument position
+      // that is the only place Comlink reads a transfer marker (CNV-08 audit
+      // finding 1). Safe because the caller reads the file fresh each run.
+      handOver(bytes),
+      createJobHandle({
+        signal: jobOptions.signal,
+        onProgress: (fraction, label) => jobOptions.onProgress?.((fraction ?? 0) * 0.45, label)
+      })
+    )
+  );
+
+  if (jobOptions.signal?.aborted) throw cancelled();
+
+  const laid = await processWorker.lease(api =>
+    api.layoutBlocksToPdf(
+      // Same rule again: `blocks` is argument 0 so the image buffers inside it
+      // are transferred, not structured-cloned. Nothing reads `read.blocks`
+      // after this call — its image buffers are detached by the transfer.
+      Comlink.transfer(read.blocks, imageBuffersOf(read.blocks)),
+      // The engine's own option shape: `documentName` is this function's
+      // vocabulary, `/Title` is the PDF's.
+      { pageSize: options.pageSize, title: options.documentName },
+      createJobHandle({
+        signal: jobOptions.signal,
+        onProgress: (fraction, label) =>
+          jobOptions.onProgress?.(0.45 + (fraction ?? 0) * 0.55, label)
+      })
+    )
+  );
+
+  return {
+    bytes: laid.bytes,
+    pageCount: laid.pageCount,
+    imageCount: laid.imageCount,
+    // Built by the layout engine from the very blocks it drew, so the preview
+    // and the file cannot describe different documents.
+    outline: laid.outline,
+    // Only genuine "this is not in the PDF" reasons. `read.warnings` is
+    // `mammoth`'s own commentary on the source document and rides separately —
+    // merging the two told the user that N items "could not be converted" when
+    // some of them had converted perfectly well.
+    notes: [...read.notes, ...laid.notes],
+    warnings: read.warnings,
+    hadUnsupportedCharacters: laid.hadUnsupportedCharacters
+  };
+}
+
+/** The distinct image buffers inside a block model, as a Comlink transfer list. */
+function imageBuffersOf(blocks: readonly LayoutBlock[]): ArrayBuffer[] {
+  const buffers = new Set<ArrayBuffer>();
+  for (const block of blocks) {
+    if (block.kind === 'image') buffers.add(block.data.buffer as ArrayBuffer);
+  }
+  return [...buffers];
 }
 
 /** ACC-01 — returns thumbnails of all images for the alt-text editor */

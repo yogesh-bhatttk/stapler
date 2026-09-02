@@ -12,6 +12,25 @@ onward, not the full development history before it.
 
 ### Added
 
+- **Word (`.docx`) → PDF, labelled beta (CNV-09).** Pick a Word document and get
+  a PDF carrying its headings, paragraphs, bulleted and numbered lists, tables
+  and images — with bold, italic and hyperlinks preserved, including inside table
+  cells. It is a structural conversion, not a copy of the page: Word's own
+  pagination, fonts, columns, headers and footers are not reproduced, the tool's
+  own copy says so, page size is your choice (A4 or US Letter) rather than a
+  guess, and a preview of the actual output is mandatory before the save button
+  unlocks. Choosing a different file or changing the page size throws the preview
+  away and re-locks the button, so the bytes that were reviewed are always the
+  bytes that land. A corrupt `.docx`, a legacy `.doc` and a password-protected
+  document are each refused with their own explanation and your file left
+  untouched, rather than half-converted; an image a PDF cannot embed (Word's
+  EMF/WMF vector art) is listed in the preview with the reason instead of
+  disappearing, as is an image inside a table cell and a list nested deeper than
+  eight levels (its text is all kept, flattened to eight). Text is drawn with the
+  built-in Latin fonts, so characters outside them (CJK, Cyrillic, Arabic) are
+  substituted and you are told. Everything the converter does not carry across is
+  now listed in the panel itself, before you convert. Still fully offline — no
+  permission and no network request was added.
 - **PDF → Word (`.docx`), labelled beta (CNV-08).** Produces an editable Word
   document with the source's paragraphs, headings, tables and embedded images,
   and preserves bold/italic in paragraphs and headings — inside a table the cell

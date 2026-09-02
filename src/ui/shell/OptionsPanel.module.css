@@ -54,6 +54,24 @@
   color: var(--ink-muted);
 }
 
+/*
+ * A short wrapping prose list — a tool's stated limitations (CNV-09), say.
+ * Deliberately *not* `.list`: that one is a scroll container of single-line rows
+ * that truncate with an ellipsis, which is exactly wrong for copy whose whole job
+ * is to be read, and a scrollable region with nothing focusable in it is an axe
+ * `scrollable-region-focusable` violation besides. Font and colour are inherited
+ * from whatever box this sits in.
+ */
+.proseList {
+  margin: var(--space-xs) 0 0;
+  padding-left: var(--space-md);
+  list-style: disc;
+}
+
+.proseList li {
+  margin-top: var(--space-xxs);
+}
+
 /* A row of small secondary actions above a list, e.g. RED-04's select all / none. */
 .actions {
   display: flex;

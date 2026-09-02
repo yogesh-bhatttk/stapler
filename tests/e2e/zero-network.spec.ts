@@ -1,5 +1,5 @@
 import { expect, test, type Request } from '@playwright/test';
-import { ensureFixture, pdfToWordPdf, textPdf } from './fixtures';
+import { ensureFixture, pdfToWordPdf, textPdf, wordToPdfDocx } from './fixtures';
 import { gotoTool, importFile, openApp } from './helpers';
 
 /**
@@ -94,10 +94,12 @@ test.describe('zero network', () => {
         // one deliberate exception to the zero-network guarantee was the one path
         // this suite never actually watched.
         'ocr',
-        // CNV-08. Visiting the panel is the cheap half of watching this tool; the
-        // half that matters is the conversion itself, which is the only thing
-        // that loads the `docx` chunk — see the dedicated test below.
+        // CNV-08 / CNV-09. Visiting the panel is the cheap half of watching
+        // these two tools; the half that matters is the conversion itself, which
+        // is the only thing that loads the `docx` and `mammoth` chunks — see the
+        // dedicated tests below.
         'pdf-to-word',
+        'word-to-pdf',
         'table-extract',
         'acc',
         'contact-sheet',
@@ -179,6 +181,67 @@ test.describe('zero network', () => {
       await save.click();
       const saved = await download;
       expect(saved.suggestedFilename()).toMatch(/\.docx$/);
+    });
+  });
+
+  /**
+   * CNV-09 — the same argument as the test above, for the opposite direction.
+   * A rendered panel loads none of `mammoth` (jszip, @xmldom/xmldom, bluebird,
+   * underscore, lop); the lazy `await import('mammoth')` inside
+   * `convert/docx-reader.ts` is what pulls the chunk in, and that only happens
+   * when a conversion actually runs. So the whole flow runs under the monitor:
+   * pick the file, convert, and write the PDF out.
+   */
+  test('makes no external request while actually converting a Word file to PDF', async ({
+    page,
+    baseURL
+  }) => {
+    const origin = new URL(baseURL!).origin;
+    const fixture = await ensureFixture('word-to-pdf.docx', wordToPdfDocx);
+
+    // Every request, not only the offending ones: this test has to be able to
+    // prove the lazily-imported code really was pulled in while the monitor was
+    // attached. A test that silently stopped converting would otherwise pass by
+    // observing nothing.
+    const seen: string[] = [];
+    page.on('request', request => seen.push(request.url()));
+
+    await withNetworkWatch(page, origin, async () => {
+      await openApp(page);
+      // A hash change rather than `page.goto`, so nothing reloads mid-watch.
+      await gotoTool(page, 'word-to-pdf');
+
+      const panel = page.getByRole('complementary', { name: /Word to PDF options/ });
+      await expect(panel).toBeVisible();
+
+      const chooser = page.waitForEvent('filechooser');
+      await panel.getByRole('button', { name: /Choose a \.docx file/ }).click();
+      await (await chooser).setFiles(fixture);
+
+      const beforeConversion = seen.length;
+
+      // The conversion itself: convert worker (mammoth) → process worker
+      // (pdf-lib), and the `mammoth` chunk's first and only load.
+      await panel.getByRole('button', { name: 'Preview conversion' }).click();
+      await expect(panel.getByRole('list', { name: /Blocks that will be written/ })).toBeVisible({
+        timeout: 90_000
+      });
+
+      const duringConversion = seen.slice(beforeConversion);
+      expect(
+        duringConversion.filter(url => /\/assets\/.*\.js(\?|$)/.test(url)),
+        `The conversion must load its lazy chunks inside the watched window; saw:\n${duringConversion.join('\n')}`
+      ).not.toEqual([]);
+      expect(duringConversion.some(url => /convert\.worker/.test(url))).toBe(true);
+
+      // And the save, because writing the file is a separate code path from
+      // building it.
+      const save = page.getByRole('button', { name: 'Save PDF' });
+      await expect(save).toBeEnabled();
+      const download = page.waitForEvent('download', { timeout: 60_000 });
+      await save.click();
+      const saved = await download;
+      expect(saved.suggestedFilename()).toMatch(/\.pdf$/);
     });
   });
 

@@ -51,6 +51,21 @@ so it gets its own explicit step below rather than being buried inside "run veri
        bytes by `tests/unit/pdf-to-word.test.ts` (via `mammoth` and by unzipping
        the OPC package) — this step is specifically about the two real
        applications, which no test in this repo can launch.
+ - [ ] **QA-05 — PDF viewers, Word → PDF output (manual, CNV-09):** open a PDF
+       produced by Word → PDF from `tests/fixtures/word-to-pdf.docx` in Acrobat
+       Reader, macOS Preview and Chrome's viewer. Confirm **no warning on open**,
+       and that it reads as a faithful *structural* copy of the source: both
+       headings are visibly larger and bold, the bulleted and numbered lists show
+       their markers and indents, the table is drawn with its rules and its
+       header row is bold, the bold/italic runs in the body sentence are
+       emphasised, and the image is visible and not distorted. Select the text
+       and confirm it copies out cleanly. Word's own pagination and fonts are
+       *not* reproduced — that is the tool's stated limitation, not a defect to
+       raise here. Text, table cell values, page size, `/Title`, fonts and the
+       image XObject are already asserted against the output bytes by
+       `tests/unit/word-to-pdf.test.ts` (re-extracted with pdf.js and re-parsed
+       with pdf-lib) — this step is specifically about the real viewers, which no
+       test in this repo can launch.
 - [ ] **Feature Complete:** All features for this release are implemented; any
       known limitation is disclosed in the relevant panel, not silent.
 

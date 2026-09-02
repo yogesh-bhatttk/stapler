@@ -105,6 +105,12 @@ import type { ImagesToPdfOptions } from '../operations';
 import type { ImageResultStat } from '../compress-report';
 import { DOC_HAIRLINE_RGB, DOC_INK_RGB, DOC_REDACT_RGB } from '../doc-colors';
 import { markdownToPdfBytes, hadUnsupportedCharacter } from '../markdown-to-pdf';
+import {
+  layoutBlocksToPdf,
+  type PdfLayoutOptions,
+  type PdfLayoutResult
+} from '../convert/pdf-block-layout';
+import type { LayoutBlock } from '../convert/html-to-pdf-blocks';
 import { batesLabel } from '../bates';
 import { generateQrRaster, encodeCode128Bars } from '../barcode';
 import { encodePng } from '../png';
@@ -626,6 +632,20 @@ export interface ProcessJob {
   markdownToPdf(
     markdown: string
   ): Promise<{ bytes: Uint8Array; hadUnsupportedCharacters: boolean }>;
+  /**
+   * CNV-09 — draws a generalized block model onto PDF pages.
+   *
+   * It lives here, not in the `convert` worker that produced the model, because
+   * pdf-lib lives here: `workers/index.ts` splits by *library* so the bundle
+   * holds one copy of each. `blocks` is the first argument precisely so the
+   * caller can transfer the image buffers inside it — Comlink reads a transfer
+   * marker off top-level arguments only.
+   */
+  layoutBlocksToPdf(
+    blocks: LayoutBlock[],
+    options: PdfLayoutOptions,
+    job?: JobHandle
+  ): Promise<PdfLayoutResult>;
   readMetadata(bytes: Uint8Array): Promise<MetadataFindings>;
   scrubMetadata(bytes: Uint8Array, settings?: ScrubSettings, job?: JobHandle): Promise<Uint8Array>;
   /**
@@ -4676,6 +4696,11 @@ Q
     return Comlink.transfer({ bytes, hadUnsupportedCharacters: hadUnsupportedCharacter() }, [
       bytes.buffer
     ]);
+  },
+
+  async layoutBlocksToPdf(blocks, options, job) {
+    const result = await layoutBlocksToPdf(blocks, options, job);
+    return Comlink.transfer(result, [result.bytes.buffer as ArrayBuffer]);
   },
 
   async imagesToPdf(images, options, job) {

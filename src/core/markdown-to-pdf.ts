@@ -89,6 +89,15 @@ function flattenInlineTokens(tokens: InlineToken[] | undefined, fallbackText: st
  * document. `sawUnsupportedCharacter` is set whenever a substitution happens,
  * so the caller can surface a clear, honest warning instead of pretending the
  * text made it through.
+ *
+ * **Two callers now share this flag** — `markdownToPdfBytes` here (CNV-05) and
+ * `pdf-block-layout.ts`'s `layoutBlocksToPdf` (CNV-09), which both live in the
+ * pooled `process` worker. It is module-global, so it is only correct while a
+ * single worker instance never interleaves two conversions that read it: each
+ * resets the flag at entry and reads it at exit, and an `await` from a second
+ * job in between would let one conversion's substitution be reported against the
+ * other's document. Do not add a third caller — or make either of these two
+ * concurrently re-entrant — without moving this into the call's own scope.
  */
 let sawUnsupportedCharacter = false;
 
@@ -182,8 +191,12 @@ function wrapWords(words: Word[], font: PDFFont, size: number, maxWidth: number)
  * `src/core/pdf/accessibility.ts` and `encrypt.ts` already use elsewhere in
  * this codebase. `Border: [0, 0, 0]` suppresses the default blue-box outline
  * most viewers would otherwise draw; the link text itself is colored instead.
+ *
+ * Exported for CNV-09's `convert/pdf-block-layout.ts`, which draws hyperlinks
+ * out of a Word document the same way: a second copy of this would be a second
+ * place for the `/Annots` merge below to be got subtly wrong.
  */
-function addLinkAnnotation(
+export function addLinkAnnotation(
   page: PDFPage,
   rect: [number, number, number, number],
   url: string

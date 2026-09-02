@@ -1073,3 +1073,150 @@ export async function pdfToWordPdf(): Promise<Uint8Array> {
 
   return doc.save();
 }
+
+/* ------------------------------------------------------------------ *
+ * CNV-09 — Word → PDF
+ * ------------------------------------------------------------------ */
+
+/**
+ * The exact content CNV-09's acceptance criteria are stated against, exported so
+ * the round-trip test asserts against these strings rather than against a copy of
+ * them that can drift from the fixture.
+ *
+ * Same content *categories* as `PDF_TO_WORD` — headings, a wrapped paragraph,
+ * bold and italic runs, a three-column table, an image — plus the two the
+ * opposite direction adds: a bulleted list and a numbered one, which a `.docx`
+ * states outright and a PDF's geometry never could.
+ */
+export const WORD_TO_PDF = {
+  h1: 'Quarterly Operations Report',
+  h2: 'Revenue by region',
+  appendixH2: 'Appendix A: method',
+  paragraph:
+    'This document exists so a converter can be graded against a file whose structure is ' +
+    'known: one title, one wrapped paragraph, a run of bold and a run of italic text, two ' +
+    'lists, a three column table, and one embedded raster image.',
+  boldRun: '12 percent',
+  italicRun: 'restated',
+  /** The sentence the bold and italic runs sit inside, as one flat string. */
+  inlineSentence: 'Revenue rose 12 percent against a restated baseline.',
+  bullets: ['Collected from the regional ledgers', 'Reconciled against the general ledger'],
+  numbered: ['Extract', 'Reconcile', 'Report'],
+  /** Header row first, in reading order. */
+  table: [
+    ['Region', 'Revenue', 'Change'],
+    ['North', '1,204', 'plus 8'],
+    ['South', '987', 'plus 3'],
+    ['East', '1,455', 'plus 12']
+  ],
+  appendixParagraph:
+    'The appendix section carries the image, so the conversion has to place a raster it ' +
+    'decoded from a data URI onto a page it laid out itself.',
+  image: { width: 480, height: 320 }
+} as const;
+
+/**
+ * A `.docx` with the same content categories as `pdfToWordPdf()`, built with the
+ * `docx` package rather than committed as a binary — the same policy the rest of
+ * this file follows, and the reason a fixture can be read as source instead of
+ * being taken on trust.
+ *
+ * The header row is bold so the round trip can prove CNV-09 carries character
+ * formatting *into* table cells, which is the one thing CNV-08 states it cannot
+ * carry out of them (`docs/TICKETS.md`, CNV-08 limitation 3).
+ */
+export async function wordToPdfDocx(): Promise<Uint8Array> {
+  const {
+    Document,
+    HeadingLevel,
+    ImageRun,
+    Packer,
+    Paragraph,
+    Table,
+    TableCell,
+    TableRow,
+    TextRun,
+    WidthType
+  } = await import('docx');
+
+  const { width, height } = WORD_TO_PDF.image;
+  const png = encodePng(photoPixels(width, height), width, height, false);
+
+  const cell = (text: string, bold: boolean) =>
+    new TableCell({ children: [new Paragraph({ children: [new TextRun({ text, bold })] })] });
+
+  const doc = new Document({
+    numbering: {
+      config: [
+        {
+          reference: 'word-to-pdf-steps',
+          levels: [{ level: 0, format: 'decimal', text: '%1.', alignment: 'start' }]
+        }
+      ]
+    },
+    sections: [
+      {
+        children: [
+          new Paragraph({
+            heading: HeadingLevel.HEADING_1,
+            children: [new TextRun(WORD_TO_PDF.h1)]
+          }),
+          new Paragraph({ children: [new TextRun(WORD_TO_PDF.paragraph)] }),
+          new Paragraph({
+            heading: HeadingLevel.HEADING_2,
+            children: [new TextRun(WORD_TO_PDF.h2)]
+          }),
+          // One sentence, five runs, three styles — the inline-formatting case.
+          new Paragraph({
+            children: [
+              new TextRun('Revenue rose '),
+              new TextRun({ text: WORD_TO_PDF.boldRun, bold: true }),
+              new TextRun(' against a '),
+              new TextRun({ text: WORD_TO_PDF.italicRun, italics: true }),
+              new TextRun(' baseline.')
+            ]
+          }),
+          ...WORD_TO_PDF.bullets.map(
+            text => new Paragraph({ children: [new TextRun(text)], bullet: { level: 0 } })
+          ),
+          ...WORD_TO_PDF.numbered.map(
+            text =>
+              new Paragraph({
+                children: [new TextRun(text)],
+                numbering: { reference: 'word-to-pdf-steps', level: 0 }
+              })
+          ),
+          new Table({
+            width: { size: 100, type: WidthType.PERCENTAGE },
+            rows: WORD_TO_PDF.table.map(
+              (row, index) => new TableRow({ children: row.map(text => cell(text, index === 0)) })
+            )
+          }),
+          // Word requires a paragraph after a table.
+          new Paragraph({ children: [] }),
+          new Paragraph({
+            heading: HeadingLevel.HEADING_2,
+            children: [new TextRun(WORD_TO_PDF.appendixH2)]
+          }),
+          new Paragraph({ children: [new TextRun(WORD_TO_PDF.appendixParagraph)] }),
+          new Paragraph({
+            children: [
+              new ImageRun({
+                type: 'png',
+                data: png,
+                transformation: { width: 360, height: 240 },
+                altText: {
+                  name: 'Fixture image',
+                  description: 'Fixture image',
+                  title: 'Fixture image'
+                }
+              })
+            ]
+          })
+        ]
+      }
+    ]
+  });
+
+  return new Uint8Array(await Packer.toArrayBuffer(doc));
+}

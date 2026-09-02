@@ -35,6 +35,7 @@ import { AnnotatePanel } from '../tools/annotate/AnnotatePanel';
 import { BatchPanel } from '../tools/batch/BatchPanel';
 import { MarkdownToPdfPanel } from '../tools/convert/MarkdownToPdfPanel';
 import { PdfToWordPanel } from '../tools/convert/PdfToWordPanel';
+import { WordToPdfPanel } from '../tools/convert/WordToPdfPanel';
 import { ContactSheetPanel } from '../tools/contact-sheet/ContactSheetPanel';
 import { ShortcutsPanel } from '../tools/shortcuts/ShortcutsPanel';
 import { ReadAloudPanel } from '../tools/read-aloud/ReadAloudPanel';
@@ -72,6 +73,7 @@ const BODIES: Record<string, () => preact.JSX.Element | null> = {
   batch: BatchPanel,
   'md-to-pdf': MarkdownToPdfPanel,
   'pdf-to-word': PdfToWordPanel,
+  'word-to-pdf': WordToPdfPanel,
   'contact-sheet': ContactSheetPanel,
   shortcuts: ShortcutsPanel,
   'read-aloud': ReadAloudPanel,

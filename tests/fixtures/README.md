@@ -105,6 +105,19 @@ git-ignored — deterministic, so re-running tests reproduces them identically:
   separates a table row from a sentence. Moving any of those numbers changes what
   `pageBlocks` produces, which is what `tests/unit/pdf-to-word.test.ts` grades.
 
+- `word-to-pdf.docx` — CNV-09's fixture and the corpus's only `.docx`, built with the
+  `docx` package rather than committed as a binary (`wordToPdfDocx`; expected strings
+  exported as `WORD_TO_PDF`). Same content categories as `pdf-to-word.pdf` — an H1, a
+  wrapped paragraph, an H2, a sentence mixing regular/bold/italic runs, a four-row
+  three-column table with a **bold header row**, and an embedded PNG — plus the two a
+  `.docx` can state outright and a PDF's geometry never could: a bulleted list and a
+  numbered one. **Must not regress:** unlike its PDF counterpart the geometry is *not*
+  the test here, the declared structure is — every heading level, list type, cell and run
+  style comes from the OOXML, so the conversion is graded on carrying declarations
+  across rather than on inferring them. The bold header row specifically exists to prove
+  character formatting survives *into* a table cell, which is the one thing CNV-08
+  states it cannot carry *out* of one.
+
 - `acroform.pdf` — a fillable text field with a hierarchical name (`name.first`) and a
   checkbox (`acroformPdf`). The hierarchy is the point: pdf-lib joins the `/T` of every node
   to name a field, so a two-level name is what catches a `/AcroForm` rebuild that dedupes

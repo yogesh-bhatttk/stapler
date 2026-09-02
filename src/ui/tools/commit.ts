@@ -79,6 +79,12 @@ import {
   pdfToWordPreview,
   pdfToWordPreviewIsStale
 } from './convert/pdf-to-word-state';
+import {
+  WORD_TO_PDF_GATE,
+  wordToPdfPreview,
+  wordToPdfPreviewIsStale,
+  wordToPdfSource
+} from './convert/word-to-pdf-state';
 import { runOcr } from '../../core/ocr/runOcr';
 import { renderWorker } from '../../core/workers';
 import { altTextMap } from './acc/state';
@@ -1174,6 +1180,47 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         `${formatBytes(preview.bytes.byteLength)} · ${preview.pageCount} page(s)` +
         (preview.skipped.length > 0
           ? ` · ${preview.skipped.length} item(s) could not be converted — see the panel`
+          : '')
+    });
+  },
+  /**
+   * CNV-09 — writes the PDF the panel has already converted and previewed.
+   *
+   * Deliberately does not convert here, for the same reason `pdf-to-word` above
+   * does not: the preview is mandatory (PLAN §5.5), and the only way to guarantee
+   * that what was reviewed is what gets written is to save the very bytes the
+   * preview was rendered from.
+   *
+   * The gate in `commit-gate.ts` already disables the action bar's button; this
+   * check is the guarantee behind that courtesy. `worksWithoutDocument` on the
+   * tool definition means `context.doc` may not be a real open document, so this
+   * handler never reads it — the file name comes from the chosen `.docx`.
+   */
+  'word-to-pdf': async ({ job }) => {
+    const preview = wordToPdfPreview.value;
+    const source = wordToPdfSource.value;
+    if (!preview || !source || wordToPdfPreviewIsStale()) {
+      notify('warning', translate('Nothing was saved.'), {
+        detail: WORD_TO_PDF_GATE,
+        timeout: 0
+      });
+      return;
+    }
+
+    const name = `${stem(source.name)}.pdf`;
+    // This output *is* a PDF, so unlike the `.docx` above it goes through the
+    // shared protection step — RED-06's password applies to every PDF this app
+    // writes, and skipping it here would be a silent exception to that.
+    const bytes = await applyProtection(preview.bytes, name, job);
+    if (!bytes) return;
+
+    const saved = await platform.saveFileAs(bytes, name);
+    if (!saved) return;
+    notify('success', translate('Saved {name}', { name }), {
+      detail:
+        `${formatBytes(bytes.byteLength)} · ${preview.pageCount} page(s)` +
+        (preview.notes.length > 0
+          ? ` · ${preview.notes.length} item(s) could not be converted — see the panel`
           : '')
     });
   },

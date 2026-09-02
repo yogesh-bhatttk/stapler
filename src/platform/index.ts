@@ -83,3 +83,8 @@ export const PDF_AND_IMAGES: Record<string, string[]> = {
   'application/pdf': ['.pdf'],
   ...IMAGES_ONLY
 };
+
+/** CNV-09 — the one MIME type an OOXML Word document has. */
+export const DOCX_ONLY: Record<string, string[]> = {
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx']
+};

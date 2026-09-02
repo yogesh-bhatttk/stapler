@@ -36,6 +36,7 @@ export type ToolId =
   | 'batch'
   | 'md-to-pdf'
   | 'pdf-to-word'
+  | 'word-to-pdf'
   | 'ocr'
   | 'table-extract'
   | 'acc'
@@ -404,6 +405,23 @@ export const TOOLS: readonly ToolDefinition[] = [
     canvasMode: 'grid',
     needsOptionsPanel: true,
     commitLabel: 'Save .docx',
+    selectable: false
+  },
+  {
+    id: 'word-to-pdf',
+    group: 'Convert',
+    title: 'Word to PDF',
+    // Same rule as `pdf-to-word` above: the summary is the panel's description
+    // and the palette's subtitle, so the fidelity limit PLAN §5.5 requires us to
+    // state has to fit inside it.
+    summary: 'Turn a .docx into a PDF. Content and structure, not Word’s layout. Beta.',
+    icon: 'FilePlus',
+    canvasMode: 'single',
+    needsOptionsPanel: true,
+    commitLabel: 'Save PDF',
+    // The input is a `.docx` picked from disk, not the open PDF — requiring a
+    // document first would mean opening an unrelated PDF to convert a Word file.
+    worksWithoutDocument: true,
     selectable: false
   },
   {
