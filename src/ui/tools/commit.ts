@@ -90,6 +90,12 @@ import {
   pdfToExcelPreview,
   pdfToExcelPreviewIsStale
 } from './convert/pdf-to-excel-state';
+import {
+  EXCEL_TO_PDF_GATE,
+  excelToPdfPreview,
+  excelToPdfPreviewIsStale,
+  excelToPdfSource
+} from './convert/excel-to-pdf-state';
 import { runOcr } from '../../core/ocr/runOcr';
 import { renderWorker } from '../../core/workers';
 import { altTextMap } from './acc/state';
@@ -1269,6 +1275,48 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         `${preview.tableCount} detected table(s)` +
         (preview.skipped.length > 0
           ? ` · ${preview.skipped.length} item(s) were left out — see the panel`
+          : '')
+    });
+  },
+  /**
+   * CNV-11 — writes the PDF the panel has already converted and previewed.
+   *
+   * Deliberately does not convert here, for the same reason its three siblings
+   * above do not: the preview is mandatory (PLAN §5.5), and the only way to
+   * guarantee that what was reviewed is what gets written is to save the very
+   * bytes the preview was rendered from.
+   *
+   * The gate in `commit-gate.ts` already disables the action bar's button; this
+   * check is the guarantee behind that courtesy. `worksWithoutDocument` on the
+   * tool definition means `context.doc` may not be a real open document, so this
+   * handler never reads it — the file name comes from the chosen `.xlsx`.
+   */
+  'excel-to-pdf': async ({ job }) => {
+    const preview = excelToPdfPreview.value;
+    const source = excelToPdfSource.value;
+    if (!preview || !source || excelToPdfPreviewIsStale()) {
+      notify('warning', translate('Nothing was saved.'), {
+        detail: EXCEL_TO_PDF_GATE,
+        timeout: 0
+      });
+      return;
+    }
+
+    const name = `${stem(source.name)}.pdf`;
+    // This output *is* a PDF, so it goes through the shared protection step —
+    // RED-06's password applies to every PDF this app writes, and skipping it
+    // here would be a silent exception to that.
+    const bytes = await applyProtection(preview.bytes, name, job);
+    if (!bytes) return;
+
+    const saved = await platform.saveFileAs(bytes, name);
+    if (!saved) return;
+    notify('success', translate('Saved {name}', { name }), {
+      detail:
+        `${formatBytes(bytes.byteLength)} · ${preview.sheets.length} sheet(s) · ` +
+        `${preview.pageCount} page(s)` +
+        (preview.notes.length > 0
+          ? ` · ${preview.notes.length} item(s) could not be converted — see the panel`
           : '')
     });
   },

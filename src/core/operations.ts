@@ -70,6 +70,7 @@ import {
   type XlsxPreviewItem
 } from './convert/sheets';
 import type { LayoutBlock, PdfPreviewItem } from './convert/html-to-pdf-blocks';
+import type { SheetSummary } from './convert/xlsx-reader';
 import type { PdfPageSize } from './convert/pdf-block-layout';
 import type { ExtractedImageEntry } from './workers/process.worker';
 
@@ -1990,6 +1991,106 @@ export async function convertPdfToXlsx(
     tableCount: built.tableCount,
     outline: built.outline,
     skipped: built.skipped
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * CNV-11 — Excel (XLSX) → PDF
+ * ------------------------------------------------------------------ */
+
+export interface XlsxToPdfOptions {
+  /**
+   * Output page size. A workbook's own print setup (paper size, orientation,
+   * fit-to-page, print area, repeated title rows) is not read — `xlsx`'s CE
+   * build reports almost none of it, and guessing at the rest would be worse
+   * than choosing here and saying so.
+   */
+  pageSize: PdfPageSize;
+  /**
+   * Title for the PDF's `/Title`, used only when the workbook does not carry one
+   * of its own. Passed by the caller for the reason `DocxToPdfOptions`
+   * documents: reading a live signal mid-conversion races a tab switch.
+   */
+  documentName?: string;
+}
+
+export interface XlsxToPdfResult {
+  /** The finished PDF. The same bytes the preview describes get saved. */
+  bytes: Uint8Array;
+  pageCount: number;
+  /** Block-by-block description of the output, for the mandatory preview. */
+  outline: PdfPreviewItem[];
+  /** One entry per converted sheet, in output order. */
+  sheets: SheetSummary[];
+  /**
+   * Content that really was left out of the PDF, each with the reason — a hidden
+   * sheet, hidden rows, a row past the cap, a shortened cell. This is the list
+   * the UI renders as "left out" and the save toast counts.
+   */
+  notes: string[];
+  /** True when a character the standard fonts cannot draw was replaced. */
+  hadUnsupportedCharacters: boolean;
+}
+
+/**
+ * CNV-11 — a workbook's sheets as a paginated PDF, two workers deep.
+ *
+ * `convert` (xlsx) reads the workbook into the generalized block model and
+ * `process` (pdf-lib) draws it onto pages. Sequenced here rather than inside one
+ * worker for the reason `workers/index.ts` gives: the split is by library, so the
+ * build holds one copy of each, and putting pdf-lib into the `convert` worker to
+ * save a hop would add a second.
+ *
+ * Unreadable input is refused by `readXlsxAsBlocks` before any conversion
+ * happens — a file that is not a ZIP, a legacy `.xls`, a password-protected
+ * `.xlsx`, a ZIP that is not a workbook, a workbook with no sheets, and a
+ * workbook whose every sheet is hidden each get their own message. Nothing is
+ * ever half-converted: the failure throws and the caller's file is untouched.
+ */
+export async function convertXlsxToPdf(
+  bytes: Uint8Array,
+  options: XlsxToPdfOptions,
+  jobOptions: JobOptions = {}
+): Promise<XlsxToPdfResult> {
+  const read = await convertWorker.lease(api =>
+    api.xlsxToBlocks(
+      // Handed over rather than cloned, and at the top-level argument position
+      // that is the only place Comlink reads a transfer marker (CNV-08 audit
+      // finding 1). Safe because the caller reads the file fresh each run.
+      handOver(bytes),
+      createJobHandle({
+        signal: jobOptions.signal,
+        onProgress: (fraction, label) => jobOptions.onProgress?.((fraction ?? 0) * 0.45, label)
+      })
+    )
+  );
+
+  if (jobOptions.signal?.aborted) throw cancelled();
+
+  const laid = await processWorker.lease(api =>
+    api.layoutBlocksToPdf(
+      read.blocks,
+      // The workbook's own title wins over the file name: a document that states
+      // its title is stating it, and overriding that with a file name would be
+      // this converter inventing metadata.
+      { pageSize: options.pageSize, title: read.title ?? options.documentName },
+      createJobHandle({
+        signal: jobOptions.signal,
+        onProgress: (fraction, label) =>
+          jobOptions.onProgress?.(0.45 + (fraction ?? 0) * 0.55, label)
+      })
+    )
+  );
+
+  return {
+    bytes: laid.bytes,
+    pageCount: laid.pageCount,
+    // Built by the layout engine from the very blocks it drew, so the preview
+    // and the file cannot describe different documents.
+    outline: laid.outline,
+    sheets: read.sheets,
+    notes: [...read.notes, ...laid.notes],
+    hadUnsupportedCharacters: laid.hadUnsupportedCharacters
   };
 }
 

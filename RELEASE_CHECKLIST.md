@@ -83,6 +83,45 @@ so it gets its own explicit step below rather than being buried inside "run veri
        SheetJS's `XLSX.read` and by unzipping the OPC package with `fflate`) —
        this step is specifically about the two real applications, which no test
        in this repo can launch.
+ - [ ] **QA-05 — PDF viewers, Excel → PDF output (manual, CNV-11):** open a PDF
+       produced by Excel → PDF from `tests/fixtures/excel-to-pdf.xlsx` in Acrobat
+       Reader, macOS Preview and Chrome's viewer. Confirm **no warning on open**,
+       and that it reads as a paginated grid: four sections headed `Summary`,
+       `Regions`, `Blank` and `Wide` in that order, each grid drawn with its
+       hairline cell borders, `Summary` showing `1,204.50` / `2026-01-15` /
+       `8.1%` as Excel displays them (not `1204.5` / an ISO timestamp / `0.081`)
+       and `2,191.50` where the formula was, `Regions` showing only its two
+       visible columns and three visible rows, `Blank` saying it is empty, and
+       `Wide` continued as three labelled column bands (`Columns A-H (1 of 3)`
+       and so on) with all twenty `Metric NN` headers present. The hidden sheet
+       `Notes` must not appear anywhere. Select the text and confirm it copies
+       out cleanly. Excel's own print setup, cell styling and merged cells are
+       *not* reproduced — that is the tool's stated limitation, not a defect to
+       raise here. Cell values, formatting, hidden-content exclusion, column
+       widths, page size, `/Title` and the section order are already asserted
+       against the output bytes by `tests/unit/excel-to-pdf.test.ts`
+       (re-extracted with pdf.js and re-parsed with pdf-lib, including the cell
+       widths read out of the content streams) — this step is specifically about
+       the real viewers, which no test in this repo can launch.
+ - [ ] **QA-05 — a workbook authored by real Microsoft Excel (manual, CNV-11):**
+       every `.xlsx` in this repo's test corpus — `tests/fixtures/excel-to-pdf.xlsx`
+       included — was **written by SheetJS's own writer**, so every automated
+       check of Excel → PDF reads back a file produced by the same library that
+       parses it. That is a real blind spot the second review pass recorded
+       rather than papered over: it cannot catch anything Excel writes
+       differently from SheetJS (styles inline vs. shared, `!cols`/`!rows`
+       shapes, shared strings, `dimension` vs. inferred ranges, a worksheet part
+       named something other than `sheetN.xml`). So convert **at least one
+       workbook saved by a real copy of Microsoft Excel** (not LibreOffice, not
+       Google Sheets export, not a round trip through this repo) containing:
+       currency, percentage and date formats; a formula; a hidden sheet, a
+       hidden row and a hidden column; one sheet left genuinely blank; and more
+       than twelve columns. Confirm the displayed values match Excel's, the
+       hidden content is absent, the blank sheet says "This sheet is empty."
+       (and **not** that it could not be read — that message means the reader
+       failed to parse a part it should have), and the wide sheet is continued
+       as labelled column bands. A workbook saved by LibreOffice Calc is worth a
+       second pass for the same reason.
 - [ ] **Feature Complete:** All features for this release are implemented; any
       known limitation is disclosed in the relevant panel, not silent.
 

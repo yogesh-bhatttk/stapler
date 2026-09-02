@@ -1319,3 +1319,143 @@ export async function pdfToExcelProsePdf(): Promise<Uint8Array> {
   });
   return doc.save();
 }
+
+/* ------------------------------------------------------------------ *
+ * CNV-11 — Excel → PDF
+ * ------------------------------------------------------------------ */
+
+/**
+ * The exact content CNV-11's acceptance criteria are stated against, exported so
+ * the round-trip test asserts against these strings rather than against a copy of
+ * them that can drift from the fixture.
+ *
+ * Every grid below is written as the **displayed** text, not the raw value: the
+ * ticket asks for "basic number/date formatting preserved", so `1204.5` under
+ * `#,##0.00` has to come back out of the PDF as `1,204.50`. The raw values and
+ * their formats are in `excelToPdfXlsx()`; these are what must survive.
+ */
+export const EXCEL_TO_PDF = {
+  /** Sheet names, in workbook order. `notes` is hidden; `blank` holds no cells. */
+  sheets: {
+    summary: 'Summary',
+    regions: 'Regions',
+    notes: 'Notes',
+    blank: 'Blank',
+    wide: 'Wide'
+  },
+  /**
+   * Header row first, in reading order. Row 4's revenue and share are formula
+   * cells with cached results — the computed value is what must appear, never
+   * `SUM(B2:B3)`.
+   */
+  summary: [
+    ['Region', 'Revenue', 'Booked', 'Share'],
+    ['North', '1,204.50', '2026-01-15', '8.1%'],
+    ['South', '987.00', '2026-02-01', '3.0%'],
+    ['Total', '2,191.50', '', '11.1%']
+  ],
+  /** What `Regions` must look like *after* its hidden row and column are dropped. */
+  regionsVisible: [
+    ['Region', 'Lead'],
+    ['North', 'Alice'],
+    ['South', 'Bob']
+  ],
+  /** Strings that live only in the hidden row, hidden column, or hidden sheet. */
+  hiddenOnly: [
+    'Withdrawn',
+    'W-000',
+    'Confidential',
+    'S-101',
+    'S-102',
+    'This sheet is hidden in Excel'
+  ],
+  /** The `Wide` sheet's 20 headers — wide enough to need more than one band. */
+  wideHeaders: Array.from(
+    { length: 20 },
+    (_, index) => `Metric ${String(index + 1).padStart(2, '0')}`
+  ),
+  wideValues: Array.from({ length: 20 }, (_, index) => `v${index + 1}`)
+} as const;
+
+/**
+ * A multi-sheet `.xlsx` built with the `xlsx` package's own writer rather than
+ * committed as a binary — the same policy the rest of this file follows, and the
+ * reason a fixture can be read as source instead of being taken on trust.
+ *
+ * It is deliberately not just a grid. Each sheet is one of the cases CNV-11 has
+ * to make a decision about and disclose:
+ *
+ *  • `Summary` — number formats, a date column, and two formula cells with
+ *    cached results, so the round trip can prove the *computed value* is drawn
+ *    and the formula text is not.
+ *  • `Regions` — one hidden row and one hidden column, so the round trip can
+ *    prove hidden content is excluded (and say so) rather than leaking.
+ *  • `Notes` — a hidden *sheet*, same reason.
+ *  • `Blank` — a sheet with no cells at all, which must still produce a section
+ *    rather than vanishing from the output.
+ *  • `Wide` — 20 columns, which no page width fits, so the column-band split has
+ *    a fixture that exercises it and can be shown to lose no column.
+ */
+export async function excelToPdfXlsx(): Promise<Uint8Array> {
+  const XLSX = await import('xlsx');
+
+  const summary = XLSX.utils.aoa_to_sheet([
+    ['Region', 'Revenue', 'Booked', 'Share'],
+    ['North', 1204.5, new Date(Date.UTC(2026, 0, 15)), 0.081],
+    ['South', 987, new Date(Date.UTC(2026, 1, 1)), 0.03],
+    ['Total', 0, '', 0]
+  ]);
+  // Number and date formats, which are what `w` (the string Excel displays) is
+  // computed from on the way back in.
+  summary.B2.z = '#,##0.00';
+  summary.B3.z = '#,##0.00';
+  summary.C2.z = 'yyyy-mm-dd';
+  summary.C3.z = 'yyyy-mm-dd';
+  summary.D2.z = '0.0%';
+  summary.D3.z = '0.0%';
+  // Two formula cells, each with the cached result Excel would have stored. The
+  // conversion must draw 2,191.50 and 11.1%, not "SUM(B2:B3)".
+  summary.B4 = { t: 'n', f: 'SUM(B2:B3)', v: 2191.5, z: '#,##0.00' };
+  summary.D4 = { t: 'n', f: 'SUM(D2:D3)', v: 0.111, z: '0.0%' };
+  summary.C4 = { t: 'z' };
+  summary['!cols'] = [{ wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 8 }];
+
+  const regions = XLSX.utils.aoa_to_sheet([
+    ['Region', 'Lead', 'Confidential'],
+    ['North', 'Alice', 'S-101'],
+    ['Withdrawn', 'Nobody', 'W-000'],
+    ['South', 'Bob', 'S-102']
+  ]);
+  // Row 3 (0-based index 2) and column C (index 2) are hidden in Excel.
+  regions['!rows'] = [{}, {}, { hidden: true }, {}];
+  regions['!cols'] = [{ wch: 14 }, { wch: 12 }, { wch: 16, hidden: true }];
+
+  const notes = XLSX.utils.aoa_to_sheet([['This sheet is hidden in Excel']]);
+
+  // `aoa_to_sheet([])` produces a sheet with no `!ref` at all, which is what
+  // Excel writes for a sheet the user never typed in.
+  const blank = XLSX.utils.aoa_to_sheet([]);
+
+  const wide = XLSX.utils.aoa_to_sheet([
+    [...EXCEL_TO_PDF.wideHeaders],
+    [...EXCEL_TO_PDF.wideValues]
+  ]);
+
+  const book = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(book, summary, EXCEL_TO_PDF.sheets.summary);
+  XLSX.utils.book_append_sheet(book, regions, EXCEL_TO_PDF.sheets.regions);
+  XLSX.utils.book_append_sheet(book, notes, EXCEL_TO_PDF.sheets.notes);
+  XLSX.utils.book_append_sheet(book, blank, EXCEL_TO_PDF.sheets.blank);
+  XLSX.utils.book_append_sheet(book, wide, EXCEL_TO_PDF.sheets.wide);
+  // Sheet visibility is workbook-level and positional: 0 = visible, 1 = hidden.
+  book.Workbook = {
+    Sheets: book.SheetNames.map(name => ({
+      name,
+      Hidden: name === EXCEL_TO_PDF.sheets.notes ? (1 as const) : (0 as const)
+    }))
+  };
+
+  return new Uint8Array(
+    XLSX.write(book, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer
+  ) as Uint8Array;
+}

@@ -88,3 +88,14 @@ export const PDF_AND_IMAGES: Record<string, string[]> = {
 export const DOCX_ONLY: Record<string, string[]> = {
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx']
 };
+
+/**
+ * CNV-11 — the one MIME type an OOXML Excel workbook has.
+ *
+ * `.xls`, `.xlsm` and `.csv` are deliberately absent: the reader refuses a legacy
+ * binary workbook outright (see `xlsx-reader.ts`), and offering a file type the
+ * next screen rejects is worse than not offering it.
+ */
+export const XLSX_ONLY: Record<string, string[]> = {
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx']
+};

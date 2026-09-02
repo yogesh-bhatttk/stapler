@@ -363,12 +363,38 @@ export async function layoutBlocksToPdf(
   };
 
   /** Draws one table, breaking rows across pages. Returns its first page. */
-  const drawTable = (rows: readonly StyledRun[][][]): number => {
+  const drawTable = (
+    rows: readonly StyledRun[][][],
+    requestedWidths?: readonly number[]
+  ): number => {
     const columnCount = rows.reduce((max, row) => Math.max(max, row.length), 0);
     if (columnCount === 0) return pageIndex;
 
-    const columnWidth = contentWidth / columnCount;
-    const innerWidth = columnWidth - CELL_PADDING_X * 2;
+    // CNV-11 — a producer that knows its column geometry (a spreadsheet) says
+    // so; one that does not (`mammoth`'s HTML) gets the equal split it always
+    // got. The requested widths are *relative*: they are normalised to the
+    // content width here, so the same block lays out correctly on A4 and Letter.
+    // A malformed list — wrong length, a non-finite or non-positive entry, or a
+    // total of zero — falls back to the equal split rather than dividing by
+    // zero and drawing the whole grid at x = NaN.
+    const usable =
+      requestedWidths !== undefined &&
+      requestedWidths.length === columnCount &&
+      requestedWidths.every(width => Number.isFinite(width) && width > 0)
+        ? requestedWidths
+        : null;
+    const total = usable?.reduce((sum, width) => sum + width, 0) ?? 0;
+    const columnWidths =
+      usable && total > 0
+        ? usable.map(width => (width / total) * contentWidth)
+        : Array.from({ length: columnCount }, () => contentWidth / columnCount);
+    /** x offset of each column, so a cell never has to re-sum the widths. */
+    const columnOffsets: number[] = [];
+    let offset = 0;
+    for (const width of columnWidths) {
+      columnOffsets.push(offset);
+      offset += width;
+    }
     const lineHeight = TABLE_FONT_SIZE * LINE_RATIO;
 
     y -= SPACE_AROUND_TABLE;
@@ -376,7 +402,16 @@ export async function layoutBlocksToPdf(
     let drawnAny = false;
 
     for (const row of rows) {
-      const wrapped = row.map(cell => wrapRuns(cell, fonts, TABLE_FONT_SIZE, innerWidth));
+      const wrapped = row.map((cell, column) =>
+        wrapRuns(
+          cell,
+          fonts,
+          TABLE_FONT_SIZE,
+          // A column narrower than its own padding would give a negative wrap
+          // width, which `wrapRuns` would turn into one character per line.
+          Math.max(1, (columnWidths[column] ?? columnWidths[0]) - CELL_PADDING_X * 2)
+        )
+      );
       const lineCount = Math.max(1, ...wrapped.map(lines => lines.length));
       const rowHeight = textHeight(lineCount, TABLE_FONT_SIZE) + CELL_PADDING_Y * 2;
 
@@ -390,11 +425,11 @@ export async function layoutBlocksToPdf(
 
       const top = y;
       for (let column = 0; column < columnCount; column++) {
-        const x = MARGIN + column * columnWidth;
+        const x = MARGIN + columnOffsets[column];
         page.drawRectangle({
           x,
           y: top - rowHeight,
-          width: columnWidth,
+          width: columnWidths[column],
           height: rowHeight,
           borderColor: RULE_COLOR,
           borderWidth: RULE_WIDTH
@@ -503,7 +538,7 @@ export async function layoutBlocksToPdf(
       }
 
       case 'table': {
-        const at = drawTable(block.rows);
+        const at = drawTable(block.rows, block.columnWidths);
         outline.push({
           pageIndex: at,
           kind: 'table',

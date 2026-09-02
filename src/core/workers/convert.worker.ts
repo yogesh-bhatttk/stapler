@@ -26,7 +26,11 @@
  * exists to avoid. Keep the `Uint8Array` at the top level.
  *
  * `docx` itself is loaded lazily inside `docx-writer.ts`, so importing this module
- * costs nothing until a conversion runs.
+ * costs nothing until a conversion runs. The same is true of the two libraries
+ * later tickets added behind the same rule — `mammoth` (CNV-09, in
+ * `docx-reader.ts`) and `xlsx` (CNV-11, in `xlsx-reader.ts`) — which is why they
+ * are methods here rather than a sixth and seventh worker: this worker is where
+ * the Office-format libraries live, one lazy chunk each.
  */
 import * as Comlink from 'comlink';
 import { buildDocx } from '../convert/docx-writer';
@@ -37,6 +41,7 @@ import {
   type DocxPreviewItem
 } from '../convert/blocks';
 import { readDocxAsHtml } from '../convert/docx-reader';
+import { readXlsxAsBlocks, type SheetSummary } from '../convert/xlsx-reader';
 import { parseHtmlBlocks, type LayoutBlock } from '../convert/html-to-pdf-blocks';
 import {
   EMPTY_WORKBOOK_MESSAGE,
@@ -84,6 +89,17 @@ export interface DocxBlocksResult {
   warnings: string[];
 }
 
+/** CNV-11 — what `xlsxToBlocks` hands back to be laid out onto PDF pages. */
+export interface XlsxBlocksResult {
+  blocks: LayoutBlock[];
+  /** Everything recognised and deliberately not carried across, with reasons. */
+  notes: string[];
+  /** One entry per converted sheet, in output order. */
+  sheets: SheetSummary[];
+  /** The workbook's own title from its core properties, if it set one. */
+  title?: string;
+}
+
 export interface ConvertJob {
   /**
    * CNV-09 — reads a `.docx` and returns the generalized block model.
@@ -99,6 +115,23 @@ export interface ConvertJob {
    * CNV-08's audit finding 1 established the hard way.
    */
   docxToBlocks(bytes: Uint8Array, job?: JobHandle): Promise<DocxBlocksResult>;
+
+  /**
+   * CNV-11 — reads an `.xlsx` and returns the same generalized block model,
+   * one heading plus one grid per visible sheet.
+   *
+   * Here for the same two reasons `docxToBlocks` is. First the library split
+   * (see `index.ts`): this worker owns the Office-format libraries, and
+   * `xlsx` is loaded lazily inside `xlsx-reader.ts`, so importing this module
+   * still costs nothing until a conversion runs. Second, it stops at the model
+   * rather than producing the PDF, because drawing pages needs pdf-lib, which
+   * already lives in the `process` worker — `operations.ts`'s
+   * `convertXlsxToPdf` sequences the two.
+   *
+   * The workbook bytes are a top-level parameter so the caller can `handOver`
+   * them; Comlink reads a transfer marker off top-level arguments only.
+   */
+  xlsxToBlocks(bytes: Uint8Array, job?: JobHandle): Promise<XlsxBlocksResult>;
 
   /**
    * Writes the block model out as a `.docx`, embedding what it can of CNV-06's
@@ -148,6 +181,15 @@ export const convertWorkerImpl: ConvertJob = {
       if (block.kind === 'image') buffers.add(block.data.buffer as ArrayBuffer);
     }
     return Comlink.transfer({ blocks, notes, warnings: messages }, [...buffers]);
+  },
+
+  async xlsxToBlocks(bytes, job) {
+    const { blocks, notes, sheets, title } = await readXlsxAsBlocks(bytes, job);
+    await checkpoint(job, 1, 'Reading the workbook');
+    // Nothing to transfer: a spreadsheet's blocks are headings, paragraphs and
+    // grids of strings — there is no image buffer in the model, so a transfer
+    // list would be empty and the structured clone is the whole cost.
+    return { blocks, notes, sheets, ...(title !== undefined ? { title } : {}) };
   },
 
   async buildDocx(model, imageArchive, imageEntries, job) {

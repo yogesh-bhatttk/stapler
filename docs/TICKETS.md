@@ -3665,7 +3665,343 @@ also found, and this pass fixed:
 
 ### CNV-11 · Excel (XLSX) → PDF — `M` `P1`
 
-**Status: Not started.**
+**Status: Done.** Both acceptance criteria are met against real output bytes. Nine
+limitations, all nine named in the tool's own panel copy (the list is a `core/`
+constant the panel renders, so the panel and the reader cannot state different
+ones); six of them additionally report *counts* at runtime in the preview's "left
+out" list. Ships labeled beta with a mandatory preview per §5.5, same policy as
+CNV-08, CNV-09 and CNV-10.
+
+New tool `excel-to-pdf` (group Convert, `Save PDF`, `worksWithoutDocument`). Two
+workers, sequenced by `convertXlsxToPdf` in `src/core/operations.ts`:
+
+- **`convert`** gains `xlsxToBlocks`, which reads the workbook into the shared
+  block model (`src/core/convert/xlsx-reader.ts`, new).
+- **`process`** reuses `layoutBlocksToPdf` **unchanged apart from one additive
+  option** (below). CNV-09 built that engine "deliberately generalized over
+  `html-to-pdf-blocks.ts`'s `LayoutBlock` rather than over anything Word-shaped,
+  because CNV-11 … is planned to feed the same engine". That claim held: row
+  pagination, page breaking, WinAnsi sanitising, link annotations and the
+  `PdfPreviewItem` outline all worked for a spreadsheet with no change.
+
+**The one change to the shared engine, and why it is not a hack.** The table block
+gained an optional `columnWidths?: number[]` and `drawTable` honours it. Without
+it the engine divides the content width equally, which is the only honest reading
+of a `.docx` table (`mammoth` reports no column geometry) but is plainly wrong for
+a spreadsheet, which states its widths. The widths are *relative weights*
+normalised to the content width inside the engine, so page size stays the engine's
+business; absent, present-but-malformed (wrong length, zero, negative, `NaN`) and
+zero-total all fall back to the old equal split, which has its own test. CNV-08's
+and CNV-09's existing table tests are the regression cover and pass unchanged.
+
+**Formulas: the computed value, never the formula text.** SheetJS exposes a
+formula cell's cached result in `v`/`w` and the formula itself in `f`; this reader
+draws the former and never the latter. `tests/unit/excel-to-pdf.test.ts` asserts
+both halves against the extracted PDF text — `2,191.50` and `11.1%` present,
+`SUM(B2:B3)`, `SUM(D2:D3)` and `=SUM` absent. A formula cell with **no** cached
+result (a file written by a tool that stores formulas without values, or saved
+before recalculation) is blank and *counted* in the "left out" list; nothing is
+calculated here.
+
+**Number and date formatting is preserved by asking for the string Excel
+displayed.** The read passes `cellNF` + `cellText` + `cellDates`, so each cell
+carries `w` — SheetJS's own rendering of the value against its number format — and
+that is what gets drawn. `1204.5` under `#,##0.00` reaches the PDF as `1,204.50`,
+`0.081` under `0.0%` as `8.1%`, a date under `yyyy-mm-dd` as `2026-01-15`. The
+test asserts the formatted forms are present **and the raw ones are not**, which
+is the assertion that fails if the reader ever falls back to `v`.
+
+**Hidden content is excluded, by name and by count.** Hidden sheets (from the
+workbook-level `Hidden` flag), hidden rows and hidden columns (from `!rows`/`!cols`,
+which is why the read passes `cellStyles`) are left out, matching what Excel itself
+prints. Each exclusion is disclosed — sheets by name, rows and columns by count —
+and the round-trip test asserts that six strings living only behind hidden
+sheets/rows/columns appear **nowhere** in the produced PDF. Publishing what Excel
+was hiding would be the worse failure of the two.
+
+**Six refusals, all before anything is drawn**, on CNV-09's pattern: an empty
+file, an OLE2 file (legacy `.xls` **or** a password-protected `.xlsx` — OOXML
+encryption wraps the ZIP in an OLE container), a file that is not a ZIP at all, a
+ZIP that holds no workbook part, a workbook with no sheets, and a workbook every
+sheet of which is hidden. Each asserts the layout engine was **never reached**, so
+a refused file cannot be half-converted.
+
+**The refusal that is doing the most work here.** `XLSX.read` is markedly more
+permissive than `mammoth.convertToHtml`: handed twelve bytes of binary garbage it
+does **not throw** — it sniffs the buffer as delimiter-separated text and returns
+a one-sheet workbook whose cells hold the control characters it found. A CSV
+renamed `.xlsx` is read the same way. Converting either would hand the user a PDF
+of nonsense presented as their spreadsheet. So `xlsx-reader.ts` decides what an
+`.xlsx` is (a ZIP, by magic bytes) *before* SheetJS gets to guess, and the test
+asserts SheetJS's permissiveness first (so the test cannot silently stop being
+about anything) and then the refusal.
+
+**Caps, because Excel's limits are not document-shaped.** A sheet may legally hold
+1,048,576 × 16,384 cells. This engine draws at most 50 sheets, 1,000 rows and 32
+columns per sheet, and 500 characters per cell. Each cap reports exactly what it
+left out and by how much — the shape CNV-09's audit had to retrofit after its list
+recursion was found deleting items below the indent limit with nothing anywhere to
+say so. A declared `!ref` larger than the cells that exist (a generator writing
+`A1:B1048576` for a one-cell sheet) is ignored in favour of the real extent read
+from the cell keys, which has its own timing-bounded test.
+
+**Wide sheets are continued, not truncated.** Columns are grouped into bands that
+each fit a printable width (at most 12, or fewer if the approximated widths do not
+fit), and each band becomes its own grid under a `Columns A-H (1 of 3)` label
+drawn into the document itself. This mirrors Excel's own print behaviour and means
+**no column is ever dropped for want of page width** — the 20-column fixture sheet
+is asserted to have every header and every value in the produced PDF.
+
+**Empty sheets still get a section, and a *damaged* sheet says so instead.** A
+sheet with no cells, or one whose every row with content is hidden, produces its
+heading plus a paragraph saying so. Otherwise "one section per sheet" would
+quietly be false for exactly the sheet a user is most likely to wonder about. A
+sheet whose worksheet part exists but did not parse gets a **different**
+paragraph — `XLSX_SHEET_UNREADABLE_TEXT`, plus a note in the "left out" list —
+because calling that one empty is a false claim about the user's document, which
+is what the second review pass found and fixed (finding 1 below). "Empty" is now
+proved from the ZIP's own bytes and never inferred from SheetJS returning
+nothing.
+
+**`xlsx` promoted from devDependency to a real runtime dependency.** CNV-10 added
+it test-only, for verification; this is the ticket that needs it at runtime, the
+same lifecycle `mammoth` went through (test-only in CNV-08, promoted in CNV-09).
+It is loaded through a dynamic `import()` inside `xlsx-reader.ts` only — never a
+static top-level import — so it lands in its own lazy chunk. **Verified in the
+built output, not from the source:** `assets/xlsx-*.js` is 331 KB, is referenced
+from exactly one place in the whole build (`assets/convert.worker-*.js`) and only
+as `import(...)`, and appears in none of the 11 initial chunks. Scanned for
+network reachability too: 0 occurrences of `fetch(`, `XMLHttpRequest` or
+`WebSocket`, and its only `http://` literals are OOXML/Dublin-Core XML namespace
+URIs, which are identifiers and are never dereferenced.
+
+**The ten limitations**, all in the panel copy before the conversion runs:
+computed values only and no recalculation; hidden sheets/rows/columns excluded;
+cell fonts, colours, fills, borders and alignment not reproduced; merged cells
+drawn as the grid beneath them (the value survives in the first cell, the merge
+does not); charts, images, pivot tables, shapes, comments and conditional
+formatting not carried across at all; column widths approximated then scaled, with
+wide sheets continued as further bands; Helvetica only, so non-Latin-1 characters
+become `?` and the conversion says so when it happens; the sheet/row/column caps;
+the 500-character per-cell cap (added by the second review pass — it was reported
+at runtime but missing from the static list, which is half a disclosure); and a
+grid split across pages not repeating its header row (inherited from CNV-09's
+engine and stated rather than half-implemented).
+
+**The preview is the gate, not a label**, on the same mechanism as its three
+siblings: `ExcelToPdfPanel` runs the whole conversion, **holds the produced
+bytes**, and only then clears `ui/tools/commit-gate.ts`'s block on the action bar's
+primary CTA. Saving writes those exact bytes. Because the input is a picked file
+rather than the open document, staleness keys on CNV-09's *input revision* (a
+counter every file or option change bumps) alongside the `File` object's identity
+— `historyVersion` would say nothing here and would re-close the gate on an
+unrelated edit. The revision is captured **before** the input bytes are read, so a
+change made mid-conversion invalidates the result that lands afterwards. Built in
+from the start, not retrofitted.
+
+- **Evidence.** `pnpm check` green — run step by step (`tsc --noEmit`, `eslint .`,
+  `prettier --check .`, 102 tokens, 30 contrast pairs × 2 themes, invariants),
+  because this machine has only `npm` and the repo's `devEngines.packageManager`
+  guard makes `npm-run-all`'s inner `npm run` calls fail before they start; each
+  underlying step was run directly and all six pass. `pnpm test`: **85 files ·
+  1050 tests · 0 failures** (up from CNV-10's 83 · 1007), including
+  `tests/unit/excel-to-pdf.test.ts` (37) and `tests/unit/excel-to-pdf-commit.test.ts`
+  (6). No existing test changed. `pnpm test:e2e`: **119 tests, 117 passed / 2
+  failed** in one full run (up from 115), the new ones being
+  `tests/e2e/excel-to-pdf.spec.ts` (3) and `zero-network.spec.ts`'s sixth case. Both
+  failures are load-sensitive timing flakes untouched by this ticket:
+  `a11y-and-perf.spec.ts`'s 10 × 5MB merge (the flake CNV-08/09/10 already flagged
+  — and confirmed pre-existing here by stashing this ticket's entire diff and
+  re-running it on a clean tree, where it fails *worse*: 100 ms max main-thread gap
+  against the 70 ms assertion, versus 83 ms with the changes applied), and
+  `compress-preview.spec.ts`'s CMP-05 latency assertion, which passes in isolation
+  at 356 ms against its 400 ms budget. CNV-10's two other known flakes
+  (`import.spec.ts`'s full-corpus import and its CNV-07 clipboard paste) did not
+  reproduce. All four new e2e tests pass in isolation. `pnpm check:bundle`:
+  **361.42 KB gzipped** initial JS against the 900 KB budget — 0.20 KB above
+  CNV-10's 361.22 KB, which is the tool-registry entry, the `Sheet` icon and the
+  panel wiring, and **unchanged by `xlsx` becoming a runtime dependency** because
+  it is a lazy chunk (see the built-output verification above). `manifest.json`
+  still ships `"permissions": []` with no `host_permissions`; this ticket adds no
+  network call anywhere, and the `excel-to-pdf` conversion now runs end to end
+  under `zero-network.spec.ts`'s monitor — pick the file, convert, save — with the
+  assertion that lazy chunks really were fetched inside the watched window, so a
+  test that stopped converting cannot pass by observing nothing.
+- **Evidence specific to the gate.** Both guards were checked by making them
+  *fail*, not only by watching them pass.
+  - Weakening `commit.ts`'s handler check from
+    `!preview || !source || excelToPdfPreviewIsStale()` to `if (!preview)` —
+    trusting the disabled button — fails two of the six commit tests ("writes
+    nothing when the preview finished after its own input changed" and "…when a
+    preview is held with no revision recorded at all"). Removing the check
+    altogether fails all five refusal cases. The handler's refusal is executed,
+    not asserted.
+  - The e2e spec drives the whole gating cycle in a real browser: disabled with no
+    file → file chosen, still disabled → previewed via **keyboard only** (focus +
+    Enter), enabled → page size changed, disabled again → previewed again, enabled
+    → saved, and the file on disk is re-parsed with pdf-lib and asserted to be US
+    Letter, i.e. the *second* preview's bytes rather than the first's. A second
+    spec proves a re-pick of the same file re-closes the gate (a new `File`, same
+    bytes) and that converting again re-opens it.
+  - Dark theme and token compliance are asserted behaviourally: the panel's own
+    computed text colour must change when the theme flips, which a hard-coded
+    literal would not do.
+- **Deliberate deviations, disclosed.**
+  1. **Hidden rows and columns are excluded, not drawn.** The ticket does not say;
+     Excel does not print them, and a converter that published hidden content would
+     be the more surprising of the two. Excluded *and* counted in the preview.
+  2. **Legacy `.xls` is refused even though SheetJS CE can read it.** The tool is
+     "Excel (XLSX) → PDF"; claiming a format with no fixture and no test would be
+     worse than the clear refusal that names what to do instead.
+  3. **An external cell hyperlink becomes a real PDF link annotation**, which the
+     ticket does not ask for. It is one line on top of CNV-09's existing `href`
+     support and dropping it would lose content the workbook had. In-workbook
+     references (`#'Sheet2'!A1`) are dropped, because there is no second sheet in a
+     PDF for them to reach.
+  4. **No character formatting is read from the workbook** — not even a bold first
+     row. SheetJS CE's style reporting is partial and undocumented, and guessing
+     that row 1 is a header would be a guess presented as fact. Stated as a
+     limitation instead.
+  5. **The caps (50/1,000/32/500) are chosen, not derived.** They are the point at
+     which the output stops being a document; each is a named export with its own
+     note and its own test, so raising one is a one-line change with visible
+     consequences.
+- **Not verifiable here:** whether Acrobat, macOS Preview or Chrome's viewer render
+  the result acceptably. Added to the `QA-05` manual checklist in
+  `RELEASE_CHECKLIST.md` with the specific things to look at, mirroring CNV-08/09/10's
+  entries.
+
+**Second review pass** (an independent audit of this ticket, the same convention
+CNV-08, CNV-09 and CNV-10 followed). It confirmed **both acceptance criteria
+against real output bytes**, and found the highest-risk claim in this entry — that
+displayed/formatted cell values are drawn and never raw numbers or formula source
+text — held up under adversarial probing beyond what the shipped tests check. It
+also found one real defect, one refusal message that misdescribed its own input,
+one untested (and possibly dead) refusal, and four coverage gaps. All seven are
+fixed:
+
+- **A corrupted worksheet part was reported as an empty sheet** — the only finding
+  that was a live defect, and it is the exact class the CNV-08/09/10 audits were
+  all fishing for: not a crash, a **false claim about the user's document**.
+  Reproduced by replacing `xl/worksheets/sheet1.xml` with non-XML content inside
+  an otherwise-valid `.xlsx`. `XLSX.read` does **not** fail on that: SheetJS's
+  `safe_parse_sheet` swallows a per-sheet parse error and its `parse_ws_xml`
+  simply matches no `sheetData` in garbage, so the sheet arrives as a *truthy,
+  key-less* `{}` — byte for byte the value a genuinely blank sheet produces. The
+  reader fell into its `lastRow < 0` branch and drew "This sheet is empty." into
+  the PDF for a sheet that has content and could not be read. Three signals were
+  tried and rejected before the fix: `opts.WTF: true` (does not help — nothing
+  *throws*, the regexes just find nothing), a per-sheet re-read with
+  `{ sheets: index, WTF: true }` (same reason), and testing the parsed object for
+  `!ref`/`!cols` (SheetJS's *own* writer emits a blank sheet that also parses to
+  `{}`, so this would have called real blank sheets damaged). What works is
+  positive evidence from the bytes: `xlsx-reader.ts` now resolves the sheet's
+  worksheet part through `xl/_rels/workbook.xml.rels` (falling back to
+  `sheetN.xml`, the same two-step SheetJS uses), reads just that one entry out of
+  the ZIP with `fflate`, and requires it to be a **complete worksheet document**
+  — a `worksheet` root element that closes — before it will say "empty".
+  Everything else, including "the part is not in the package at all", is reported
+  as unreadable, in the PDF *and* as a note in the panel's "left out" list, with
+  a new `SheetSummary.unreadable` field so the panel and the document cannot
+  disagree. `zipOpens`/`zipPart` inflate nothing they do not need and run only on
+  a failure or empty-sheet path, so an ordinary conversion still opens the
+  archive once. Six regression tests, including the audit's exact repro; reverting
+  the one-line decision fails two of them with the audit's exact symptom
+  (`expected '… Broken This sheet is empty. …' to contain 'This sheet could not be
+  read…'`). Four *valid* blank-worksheet shapes — self-closed `sheetData` with no
+  `dimension`, open/close `sheetData`, what Excel actually writes, and a
+  namespace-prefixed root — are asserted to still be called empty, because
+  over-reporting damage would be its own false claim.
+- **A refusal message misdescribed its input.** A valid ZIP holding just
+  `hello.txt` was told "its ZIP container could not be opened", about a ZIP that
+  opened fine. The cause is that SheetJS throws the *same* `Unsupported ZIP file`
+  string for a container it could not open **and** for one it opened perfectly
+  that holds no `[Content_Types].xml` — so the message alone cannot tell them
+  apart, and the shipped test at `excel-to-pdf.test.ts` was codifying the wrong
+  answer. `translateSheetJsError` now takes the evidence of this module's own ZIP
+  probe (`unzipSync` over the central directory, `filter: () => false`, inflating
+  nothing) and routes a *proved-openable* archive to
+  `XLSX_NOT_A_WORKBOOK_MESSAGE`. `Could not find workbook` (one step further into
+  the package) and `Unsupported NUMBERS …` were unhandled and fell through to the
+  generic wrapper; both now land on the same message. `Unsupported ZIP
+  Compression method` deliberately still blames the container, because the probe
+  inflates nothing and so never meets the method SheetJS refused. Both directions
+  are tested end to end — the `hello.txt` ZIP and a real workbook cut in half —
+  and the message table keeps its evidence-free behaviour for the unit case.
+- **`XLSX_NO_SHEETS_MESSAGE` had no test, and the audit's doubt was whether it was
+  reachable at all.** It is. SheetJS's *writer* refuses to emit a sheetless
+  workbook (`XLSX.write` throws "Workbook is empty"), but its *reader* parses a
+  hand-built package whose `<sheets/>` is empty perfectly happily and returns
+  `SheetNames: []`. The new test assembles that package by hand, asserts SheetJS
+  really does return no sheet names, and then asserts the refusal — so the branch
+  is proved live rather than annotated as defensive.
+- **A test comment claimed something the test did not do.** "Cancels
+  mid-conversion, once the read has already started" said "the per-sheet
+  checkpoint is what has to notice"; the audit found the synchronous `abort()`
+  lands before checkpoint 0's continuation runs, so checkpoint 0 notices, exactly
+  as in the test above it. The comment now describes what the test actually
+  covers (a signal live at start-up rather than pre-aborted) and says so.
+  Alongside it, the phase nothing exercised now has a test:
+  `pdf-block-layout.ts` checkpoints once per block and `convertXlsxToPdf` maps
+  that band onto 0.45..1, so a 20-sheet workbook aborted on the first progress
+  report strictly above 0.45 aborts **inside the layout engine** — asserted by
+  `layoutCalls === before + 1`, the opposite of what the two read-phase
+  cancellation tests assert.
+- **No Comlink transfer test.** `xlsxToBlocks(handOver(bytes), …)` has the same
+  shape as the two calls CNV-08's audit found *broken* (a transfer marker on a
+  nested value is silently dropped and every byte copied), and cited that finding
+  in a comment without testing it. New `tests/unit/excel-to-pdf-transfer.test.ts`
+  mirrors CNV-08's and CNV-09's: a real `MessageChannel` with a real
+  `Comlink.expose`/`wrap` pair, nothing about Comlink mocked, proving the sending
+  realm's `ArrayBuffer` is detached (`byteLength === 0`) and arrived intact on the
+  far side — plus the same "a marker nested in an object is dropped" regression
+  pin. Removing `handOver` fails it (`expected 1024 to be +0`).
+- **The 500-character per-cell cap was disclosed only after the fact**, via
+  `truncatedCellsNote`, while the sheet/row/column caps were also in the panel's
+  static list. Added to `EXCEL_LIMITATIONS` (now ten items), per the standard
+  CNV-09's audit set: state a limitation in the static copy *and* at runtime when
+  it triggers, not one or the other.
+- **An error cell could in principle have printed a bare number.** The audit
+  could not trigger it with ten real-world number formats, but the mechanism is
+  concrete: an error cell stores a *code* in `v` (`#DIV/0!` is 7) and relies on
+  `w` for its token, and `w` is absent whenever SSF cannot parse the cell's
+  format — at which point the general `String(value)` fallback would have drawn
+  `7` where the spreadsheet shows `#DIV/0!`, a wrong value presented as a right
+  one. `cellText` now special-cases `t === 'e'` and is symbolic always: the eight
+  documented codes by name, a producer-supplied `#…` token kept as-is, and
+  `#ERROR!` for anything else — deliberately not a real Excel token, because
+  inventing `#N/A` for an unknown code would be as wrong as printing the number.
+  The broader SSF-parse-failure fallback is left alone and disclosed rather than
+  fixed: it is a very low-probability edge the audit could not reach, and
+  guessing a format SheetJS could not parse would be this converter inventing a
+  value.
+
+**Deliberately deferred by the second review pass, and disclosed rather than
+fixed:** every `.xlsx` in the corpus, this ticket's fixture included, is written
+by **SheetJS's own writer**, so every automated check reads back a file produced
+by the same library that parses it. Nothing here can catch a construct Excel
+writes differently. That is a fixture-provenance gap, not something a new unit
+test can close, so it is now a named `QA-05` manual step in `RELEASE_CHECKLIST.md`
+listing the specific constructs to convert from a workbook saved by a real copy of
+Excel — including the check that a genuinely blank sheet still reads "This sheet
+is empty." and not the new damaged-sheet message.
+
+- **Evidence, second pass.** `pnpm test`: **86 files · 1065 tests · 0 failures**
+  (up from 85 · 1050), of which `tests/unit/excel-to-pdf.test.ts` is 50 (up from
+  37) and `tests/unit/excel-to-pdf-transfer.test.ts` is 2 (new). One existing
+  assertion changed, deliberately and called out above: the `hello.txt` ZIP
+  refusal now expects `XLSX_NOT_A_WORKBOOK_MESSAGE`, because the old expectation
+  was codifying finding 2. `pnpm check` green, run step by step for the same
+  `devEngines.packageManager` reason as the first pass (`tsc --noEmit`,
+  `eslint .`, `prettier --check .`, 102 tokens, 30 contrast pairs × 2 themes,
+  invariants). `pnpm check:bundle`: **361.42 KB gzipped**, byte-identical to the
+  first pass — `fflate` was already in the initial bundle (`core/png.ts`), and
+  everything this pass added lives in the lazy `xlsx-reader.ts` chunk.
+  `pnpm test:e2e`: **119 tests, 118 passed / 1 failed**, the failure being
+  `a11y-and-perf.spec.ts`'s 10 × 5MB merge — the same load-sensitive flake
+  CNV-08/09/10 and this ticket's first pass all recorded, untouched by this pass
+  and passing in isolation. `compress-preview.spec.ts`'s CMP-05 latency
+  assertion, the first pass's other flake, did not reproduce.
 
 - **Requirements:** Read `.xlsx` via the `xlsx` (SheetJS CE) reader (lazy-loaded,
   read-only usage), render each sheet as a paginated grid through the shared

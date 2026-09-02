@@ -38,6 +38,7 @@ export type ToolId =
   | 'pdf-to-word'
   | 'word-to-pdf'
   | 'pdf-to-excel'
+  | 'excel-to-pdf'
   | 'ocr'
   | 'table-extract'
   | 'acc'
@@ -438,6 +439,24 @@ export const TOOLS: readonly ToolDefinition[] = [
     canvasMode: 'grid',
     needsOptionsPanel: true,
     commitLabel: 'Save .xlsx',
+    selectable: false
+  },
+  {
+    id: 'excel-to-pdf',
+    group: 'Convert',
+    title: 'Excel to PDF',
+    // Same rule as the three above: the summary is the panel's description and
+    // the palette's subtitle, so the fidelity limit PLAN §5.5 requires us to
+    // state has to fit inside it. "Grid" is the load-bearing word — this draws
+    // the cells, it does not reproduce Excel's own printed page.
+    summary: 'Draw each sheet as a paginated grid. Cell values, not Excel’s layout. Beta.',
+    icon: 'Sheet',
+    canvasMode: 'single',
+    needsOptionsPanel: true,
+    commitLabel: 'Save PDF',
+    // The input is an `.xlsx` picked from disk, not the open PDF — requiring a
+    // document first would mean opening an unrelated PDF to convert a workbook.
+    worksWithoutDocument: true,
     selectable: false
   },
   {

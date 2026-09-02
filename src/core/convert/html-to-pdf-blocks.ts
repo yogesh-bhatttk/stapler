@@ -70,7 +70,23 @@ export type LayoutBlock =
    * limitation; there is no reason to inherit that here, because the source
    * document says outright which cell text is bold.
    */
-  | { kind: 'table'; rows: StyledRun[][][] }
+  | {
+      kind: 'table';
+      rows: StyledRun[][][];
+      /**
+       * CNV-11 — relative column widths, one per column, in any consistent unit.
+       *
+       * Absent (the CNV-08/CNV-09 case) the layout engine divides the content
+       * width equally, which is what HTML gives it: `mammoth` reports no column
+       * geometry, so an equal split is the only honest reading of a `.docx`
+       * table. A spreadsheet *does* state its column widths, and a grid drawn
+       * with them is far closer to what the user is converting — so the engine
+       * normalises these to the content width when they are present. Relative,
+       * not absolute, because the page size (and therefore the content width) is
+       * the layout engine's business, not the producer's.
+       */
+      columnWidths?: number[];
+    }
   | {
       kind: 'image';
       data: Uint8Array;

@@ -1,5 +1,12 @@
 import { expect, test, type Request } from '@playwright/test';
-import { ensureFixture, pdfToExcelPdf, pdfToWordPdf, textPdf, wordToPdfDocx } from './fixtures';
+import {
+  ensureFixture,
+  excelToPdfXlsx,
+  pdfToExcelPdf,
+  pdfToWordPdf,
+  textPdf,
+  wordToPdfDocx
+} from './fixtures';
 import { gotoTool, importFile, openApp } from './helpers';
 
 /**
@@ -100,9 +107,10 @@ test.describe('zero network', () => {
         // dedicated tests below.
         'pdf-to-word',
         'word-to-pdf',
-        // CNV-10. Same reasoning as the two above — the panel is the cheap half,
-        // and the conversion has its own test below.
+        // CNV-10 / CNV-11. Same reasoning as the two above — the panel is the
+        // cheap half, and each conversion has its own test below.
         'pdf-to-excel',
+        'excel-to-pdf',
         'table-extract',
         'acc',
         'contact-sheet',
@@ -310,6 +318,69 @@ test.describe('zero network', () => {
       await save.click();
       const saved = await download;
       expect(saved.suggestedFilename()).toMatch(/\.xlsx$/);
+    });
+  });
+
+  /**
+   * CNV-11 — the same argument again, for the direction that reads a workbook.
+   * A rendered panel loads none of `xlsx` (SheetJS CE, one large pure-JS
+   * bundle); the lazy `await import('xlsx')` inside `convert/xlsx-reader.ts` is
+   * what pulls the chunk in, and that only happens when a conversion actually
+   * runs. This is also the ticket that promoted `xlsx` from a test-only
+   * devDependency to a real runtime dependency, so it is the first time that
+   * package's code is in the shipped build at all — which makes watching its
+   * first load the assertion that matters most here.
+   */
+  test('makes no external request while actually converting an Excel file to PDF', async ({
+    page,
+    baseURL
+  }) => {
+    const origin = new URL(baseURL!).origin;
+    const fixture = await ensureFixture('excel-to-pdf.xlsx', excelToPdfXlsx);
+
+    // Every request, not only the offending ones: this test has to be able to
+    // prove the lazily-imported code really was pulled in while the monitor was
+    // attached. A test that silently stopped converting would otherwise pass by
+    // observing nothing.
+    const seen: string[] = [];
+    page.on('request', request => seen.push(request.url()));
+
+    await withNetworkWatch(page, origin, async () => {
+      await openApp(page);
+      // A hash change rather than `page.goto`, so nothing reloads mid-watch.
+      await gotoTool(page, 'excel-to-pdf');
+
+      const panel = page.getByRole('complementary', { name: /Excel to PDF options/ });
+      await expect(panel).toBeVisible();
+
+      const chooser = page.waitForEvent('filechooser');
+      await panel.getByRole('button', { name: /Choose an \.xlsx file/ }).click();
+      await (await chooser).setFiles(fixture);
+
+      const beforeConversion = seen.length;
+
+      // The conversion itself: convert worker (xlsx) → process worker (pdf-lib),
+      // and the `xlsx` chunk's first and only load.
+      await panel.getByRole('button', { name: 'Preview conversion' }).click();
+      await expect(
+        panel.getByRole('list', { name: /Sheets that will be drawn into the PDF/ })
+      ).toBeVisible({ timeout: 90_000 });
+
+      const duringConversion = seen.slice(beforeConversion);
+      expect(
+        duringConversion.filter(url => /\/assets\/.*\.js(\?|$)/.test(url)),
+        `The conversion must load its lazy chunks inside the watched window; saw:\n${duringConversion.join('\n')}`
+      ).not.toEqual([]);
+      expect(duringConversion.some(url => /convert\.worker/.test(url))).toBe(true);
+
+      // And the save, because writing the file is a separate code path from
+      // building it.
+      const save = page.getByRole('button', { name: 'Save PDF' });
+      await expect(save).toBeEnabled();
+      const download = page.waitForEvent('download', { timeout: 60_000 });
+      await save.click();
+      const saved = await download;
+      expect(saved.suggestedFilename()).toMatch(/\.pdf$/);
     });
   });
 
