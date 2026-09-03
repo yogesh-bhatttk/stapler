@@ -22,6 +22,7 @@
  */
 
 import { strToU8, zipSync } from 'fflate';
+import { columnRef } from './column-ref';
 import { internal } from '../errors';
 
 /** One worksheet: a name and a rectangular-ish grid of already-stringified cells. */
@@ -34,6 +35,18 @@ export interface XlsxSheet {
 export interface XlsxOptions {
   /** Written to `docProps/core.xml` as `<dc:title>`. Omitted when absent. */
   title?: string;
+  /**
+   * Called once, with the number of cells **this writer** had to shorten to
+   * Excel's {@link MAX_CELL_CHARS} limit, when that number is not zero.
+   *
+   * Normally it never fires: a caller that cares about the loss (CNV-10's
+   * `planWorkbook`) truncates first, so it can say *which* cells and count them
+   * into its own disclosure. This is the backstop underneath that, for the
+   * caller that forgets — the truncation happens either way, because an
+   * over-long cell makes Excel offer to repair the file, but it is never allowed
+   * to happen *silently*.
+   */
+  onTruncatedCells?: (cells: number) => void;
 }
 
 /**
@@ -47,8 +60,14 @@ const ILLEGAL_SHEET_NAME = /[\\/?*[\]:]/g;
 
 /**
  * Excel's hard cap on the characters one cell can hold. Past it the file opens
- * with a repair prompt, which is worse than a truncated cell — callers that care
- * about the loss (CNV-10 does) truncate *before* this and report it.
+ * with a repair prompt, which is worse than a truncated cell.
+ *
+ * Enforced *here*, in the one writer, as well as by the callers that care about
+ * the loss (CNV-10's `planWorkbook` truncates first so it can count and disclose
+ * it). Leaving a hard format limit to caller discipline means the first caller
+ * that forgets ships a workbook Excel offers to repair — the failure this
+ * codebase treats as worse than a visibly shortened cell. See
+ * {@link XlsxOptions.onTruncatedCells} for how the writer says it did.
  */
 export const MAX_CELL_CHARS = 32767;
 
@@ -166,9 +185,13 @@ export function buildXlsx(sheets: readonly XlsxSheet[], options: XlsxOptions = {
     'xl/workbook.xml': strToU8(workbookXml)
   };
 
+  // Counted across every sheet, reported once: a caller wants "17 cells were
+  // shortened", not seventeen callbacks.
+  const truncated = { cells: 0 };
   sheets.forEach((sheet, i) => {
-    files[`xl/worksheets/sheet${i + 1}.xml`] = strToU8(sheetXml(sheet.rows));
+    files[`xl/worksheets/sheet${i + 1}.xml`] = strToU8(sheetXml(sheet.rows, truncated));
   });
+  if (truncated.cells > 0) options.onTruncatedCells?.(truncated.cells);
 
   if (hasTitle) {
     files['docProps/core.xml'] = strToU8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -181,15 +204,23 @@ export function buildXlsx(sheets: readonly XlsxSheet[], options: XlsxOptions = {
 }
 
 /** One worksheet part. Empty cells are omitted, which is what a sparse grid is. */
-function sheetXml(rows: readonly (readonly string[])[]): string {
+function sheetXml(rows: readonly (readonly string[])[], truncated: { cells: number }): string {
   const sheetRowsXml = rows
     .map((row, rIdx) => {
       const rowNum = rIdx + 1;
       const cellsXml = row
         .map((cell, cIdx) => {
           if (!cell) return '';
-          const ref = `${getColRef(cIdx)}${rowNum}`;
-          return `<c r="${ref}" t="inlineStr"><is><t>${xmlEscape(cell)}</t></is></c>`;
+          const ref = `${columnRef(cIdx)}${rowNum}`;
+          // Measured before escaping, because the limit is on the cell's own
+          // characters — `&amp;` is one character to Excel and five here, and
+          // cutting the escaped form could also split an entity in half.
+          let text = cell;
+          if (text.length > MAX_CELL_CHARS) {
+            text = text.slice(0, MAX_CELL_CHARS);
+            truncated.cells += 1;
+          }
+          return `<c r="${ref}" t="inlineStr"><is><t>${xmlEscape(text)}</t></is></c>`;
         })
         .join('');
       return `<row r="${rowNum}">${cellsXml}</row>`;
@@ -246,13 +277,12 @@ export function xmlEscape(str: string): string {
     .replace(/'/g, '&apos;');
 }
 
-/** 0 → "A", 25 → "Z", 26 → "AA". */
-export function getColRef(colIndex: number): string {
-  let temp = colIndex;
-  let letter = '';
-  while (temp >= 0) {
-    letter = String.fromCharCode((temp % 26) + 65) + letter;
-    temp = Math.floor(temp / 26) - 1;
-  }
-  return letter;
-}
+/**
+ * 0 → "A", 25 → "Z", 26 → "AA".
+ *
+ * Re-exported rather than implemented here: `xlsx-reader.ts` needs the same
+ * bijective base-26 to look a cell up and to label a column band, and two copies
+ * of it were two places for the same off-by-one past column Z. See
+ * `column-ref.ts`.
+ */
+export { columnRef as getColRef } from './column-ref';

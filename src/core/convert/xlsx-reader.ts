@@ -32,6 +32,7 @@ import { unzipSync } from 'fflate';
 import { corrupt, fromUnknown, unsupported } from '../errors';
 import { checkpoint, type JobHandle } from '../workers/protocol';
 import type { LayoutBlock, StyledRun } from './html-to-pdf-blocks';
+import { columnRef } from './column-ref';
 
 /** `PK\x03\x04` — the local file header every ZIP, and so every `.xlsx`, opens with. */
 const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04];
@@ -85,6 +86,21 @@ export const XLSX_SHEET_EMPTY_TEXT = 'This sheet is empty.';
 export const XLSX_SHEET_UNREADABLE_TEXT =
   'This sheet could not be read: its worksheet data is damaged or in a form this converter ' +
   'cannot parse. It is not empty; nothing from it is in the PDF.';
+
+/**
+ * The third reason a sheet draws no grid, and the one that used to be reported
+ * as the first: every cell in it is a formula whose cached result is missing.
+ *
+ * A formula cell with no cached value has nothing to draw, so it does not widen
+ * the grid — which meant a sheet made only of such cells produced no extent at
+ * all and fell into "This sheet is empty." It is not empty; it is full of
+ * formulas nobody has calculated. Same rule as `XLSX_SHEET_UNREADABLE_TEXT`:
+ * this module never tells someone their sheet is empty unless it is.
+ */
+export const XLSX_SHEET_FORMULAS_ONLY_TEXT =
+  'This sheet holds only formulas with no cached results, so there is nothing to draw. It is ' +
+  'not empty. Excel stores the last computed value alongside each formula; open it in Excel ' +
+  'or LibreOffice, let it recalculate, save, and convert again.';
 
 /* ------------------------------------------------------------------ *
  * Caps
@@ -200,6 +216,25 @@ export function unreadableSheetNote(name: string): string {
   );
 }
 
+/**
+ * A workbook whose `SheetNames` holds the same name twice.
+ *
+ * Excel will not write one and refuses to open one, so this only ever comes from
+ * a malformed producer — but SheetJS parses it, and its `Sheets` map is keyed by
+ * *name*, so the second sheet has already overwritten the first by the time this
+ * module sees either. There is nothing left to recover, which makes saying so
+ * the whole of the fix: the alternative is a PDF that quietly shows one sheet's
+ * grid twice under the same heading with the other sheet's rows nowhere in it.
+ */
+export function duplicateSheetNamesNote(names: readonly string[]): string {
+  return (
+    `This workbook declares more than one sheet called ${names.map(n => `"${n}"`).join(', ')}. ` +
+    'A workbook cannot legally do that, and only one sheet of each name can be read — the ' +
+    'sections under a repeated name show the same grid, and the other sheet of that name is ' +
+    'not in the PDF. Rename the sheets in Excel or LibreOffice and convert again.'
+  );
+}
+
 export function uncachedFormulaNote(count: number): string {
   return (
     `${count} formula cell${count === 1 ? '' : 's'} carried no cached result, so there is ` +
@@ -294,18 +329,12 @@ function startsWith(bytes: Uint8Array, magic: readonly number[]): boolean {
 
 /** A1-style address for a 0-based row/column, without loading SheetJS. */
 export function cellAddress(row: number, column: number): string {
-  let name = '';
-  let rest = column;
-  do {
-    name = String.fromCharCode(65 + (rest % 26)) + name;
-    rest = Math.floor(rest / 26) - 1;
-  } while (rest >= 0);
-  return `${name}${row + 1}`;
+  return `${columnRef(column)}${row + 1}`;
 }
 
 /** `0` → `A`, `26` → `AA` — used to name a band's column range. */
 export function columnName(column: number): string {
-  return cellAddress(0, column).replace(/\d+$/, '');
+  return columnRef(column);
 }
 
 /** The shape of a SheetJS cell this module reads. Never written to. */
@@ -509,10 +538,71 @@ function zipPart(bytes: Uint8Array, path: string): Uint8Array | undefined {
 /** Where the workbook's relationships live in every `.xlsx` SheetJS will read. */
 const WORKBOOK_RELS_PATH = 'xl/_rels/workbook.xml.rels';
 
-/** A workbook rel target is relative to `xl/`, and some producers write it absolute. */
-function resolveWorkbookTarget(target: string): string {
-  const clean = target.replace(/^\/+/, '').replace(/^\.\//, '');
-  return clean.startsWith('xl/') ? clean : `xl/${clean}`;
+/**
+ * A workbook rel target is relative to `xl/`, and some producers write it
+ * absolute, or reach back out of `xl/` with `../`.
+ *
+ * The `..` case is the one worth spelling out: `Target="../xl/worksheets/s1.xml"`
+ * is legal OPC and, left unresolved, produces a path no ZIP entry matches — which
+ * this module reads as "the worksheet part could not be located" and reports as
+ * an *unreadable* sheet. A blank sheet misdescribed as damaged is a smaller lie
+ * than the other way round, but it is still a wrong statement about the file.
+ */
+export function resolveWorkbookTarget(target: string): string {
+  const clean = target.replace(/^\/+/, '');
+  // A target that already starts at the package's `xl/` folder is taken as
+  // written; anything else is relative to it.
+  const joined = clean.startsWith('xl/') ? clean : `xl/${clean}`;
+  const out: string[] = [];
+  for (const segment of joined.split('/')) {
+    if (segment === '' || segment === '.') continue;
+    // A `..` that would climb above the package root is dropped, not honoured:
+    // there is no entry up there to name.
+    if (segment === '..') {
+      out.pop();
+      continue;
+    }
+    out.push(segment);
+  }
+  return out.join('/');
+}
+
+/**
+ * Decodes one XML part, honouring what it says about its own encoding.
+ *
+ * Almost every `.xlsx` in existence is UTF-8, and a plain `TextDecoder` is right
+ * for all of them. The exception is cheap to handle and expensive to get wrong:
+ * a UTF-16 part decoded as UTF-8 is a string full of NULs in which none of this
+ * module's patterns match, so an intact worksheet would be reported as damaged
+ * and a workbook's relationships would come back empty. The BOM is checked
+ * first, then the XML declaration's own `encoding=`, and an encoding the
+ * platform does not know falls back to UTF-8 rather than throwing.
+ */
+export function decodeXmlPart(bytes: Uint8Array): string {
+  const [b0, b1] = [bytes[0], bytes[1]];
+  if (b0 === 0xff && b1 === 0xfe) return new TextDecoder('utf-16le').decode(bytes);
+  if (b0 === 0xfe && b1 === 0xff) return new TextDecoder('utf-16be').decode(bytes);
+  // No BOM, but a UTF-16 part still starts with `<` in one byte and NUL in the
+  // other — the shape of `<?xml` in each order.
+  if (b0 === 0x3c && b1 === 0x00) return new TextDecoder('utf-16le').decode(bytes);
+  if (b0 === 0x00 && b1 === 0x3c) return new TextDecoder('utf-16be').decode(bytes);
+
+  const utf8 = new TextDecoder().decode(bytes);
+  // Only the declaration itself, which is by definition at the very start; a
+  // stray `encoding="…"` in the body is an attribute, not a claim about bytes.
+  const declared = /^<\?xml\b[^>]*\bencoding\s*=\s*["']([A-Za-z0-9._-]+)["']/.exec(utf8)?.[1];
+  if (declared === undefined) return utf8;
+  const label = declared.toLowerCase();
+  if (label === 'utf-8' || label === 'utf8' || label === 'us-ascii' || label === 'ascii') {
+    return utf8;
+  }
+  try {
+    return new TextDecoder(label).decode(bytes);
+  } catch {
+    // An encoding this platform has no decoder for. UTF-8 is the better guess of
+    // the two available, and every caller here fails closed on nonsense anyway.
+    return utf8;
+  }
 }
 
 /**
@@ -527,7 +617,7 @@ function workbookRelTargets(bytes: Uint8Array): Map<string, string> {
   const targets = new Map<string, string>();
   const rels = zipPart(bytes, WORKBOOK_RELS_PATH);
   if (!rels) return targets;
-  const text = new TextDecoder().decode(rels);
+  const text = decodeXmlPart(rels);
   const tag = /<(?:[A-Za-z0-9_.-]+:)?Relationship\b[^>]*>/g;
   let match: RegExpExecArray | null;
   while ((match = tag.exec(text)) !== null) {
@@ -551,7 +641,7 @@ function workbookRelTargets(bytes: Uint8Array): Map<string, string> {
  * decided on the bytes rather than inferred from an empty result.
  */
 export function isCompleteWorksheetPart(part: Uint8Array): boolean {
-  const text = new TextDecoder().decode(part);
+  const text = decodeXmlPart(part);
   const open = /<(?:[A-Za-z0-9_.-]+:)?worksheet(?=[\s/>])/.exec(text);
   if (!open) return false;
   const tagEnd = text.indexOf('>', open.index);
@@ -687,6 +777,20 @@ export async function readXlsxAsBlocks(
 
   const notes: string[] = [];
 
+  // A repeated name is malformed input that parses cleanly and loses a sheet
+  // silently — SheetJS keys `Sheets` by name, so the collision happened before
+  // this module was handed the workbook. Detected here, once, over the names.
+  const seenNames = new Set<string>();
+  const repeatedNames: string[] = [];
+  for (const name of names) {
+    if (seenNames.has(name)) {
+      if (!repeatedNames.includes(name)) repeatedNames.push(name);
+    } else {
+      seenNames.add(name);
+    }
+  }
+  if (repeatedNames.length > 0) notes.push(duplicateSheetNamesNote(repeatedNames));
+
   // Visibility lives in the workbook-level sheet list, positionally aligned with
   // `SheetNames`. 0 = visible, 1 = hidden, 2 = very hidden. `id` is the `r:id`
   // SheetJS parses off `<sheet>` and does not declare in its types; it is what
@@ -715,20 +819,38 @@ export async function readXlsxAsBlocks(
    */
   let relTargets: Map<string, string> | undefined;
 
-  /** The section and summary for a sheet with no grid to draw, honestly labelled. */
-  const noGrid = (name: string, unreadable: boolean) => {
-    if (unreadable) notes.push(unreadableSheetNote(name));
+  /**
+   * The section and summary for a sheet with no grid to draw, honestly labelled.
+   *
+   * Three reasons, three different sentences, and only one of them is "empty":
+   * the part did not parse (`unreadable`), every cell is an uncalculated formula
+   * (`formulas`), or the sheet really does hold nothing.
+   */
+  const noGrid = (name: string, reason: 'empty' | 'unreadable' | 'formulas') => {
+    if (reason === 'unreadable') notes.push(unreadableSheetNote(name));
     blocks.push({
       kind: 'paragraph',
       runs: [
         {
-          text: unreadable ? XLSX_SHEET_UNREADABLE_TEXT : XLSX_SHEET_EMPTY_TEXT,
+          text:
+            reason === 'unreadable'
+              ? XLSX_SHEET_UNREADABLE_TEXT
+              : reason === 'formulas'
+                ? XLSX_SHEET_FORMULAS_ONLY_TEXT
+                : XLSX_SHEET_EMPTY_TEXT,
           bold: false,
           italic: false
         }
       ]
     });
-    sheets.push({ name, rows: 0, columns: 0, bands: 0, empty: !unreadable, unreadable });
+    sheets.push({
+      name,
+      rows: 0,
+      columns: 0,
+      bands: 0,
+      empty: reason === 'empty',
+      unreadable: reason === 'unreadable'
+    });
   };
 
   for (let position = 0; position < selected.length; position++) {
@@ -746,7 +868,7 @@ export async function readXlsxAsBlocks(
       // A name in `SheetNames` with no sheet object behind it: `safe_parse_sheet`
       // threw before it could assign one. Reported as a section rather than
       // skipped, so the PDF still has one per sheet.
-      noGrid(name, true);
+      noGrid(name, 'unreadable');
       continue;
     }
 
@@ -757,6 +879,15 @@ export async function readXlsxAsBlocks(
     let lastRow = -1;
     let firstColumn = Number.POSITIVE_INFINITY;
     let lastColumn = -1;
+    /**
+     * Where this sheet's formula cells with no cached result sit. Collected
+     * rather than counted on the spot, because whether one is worth reporting
+     * depends on the range the sheet actually draws — which is not known until
+     * hidden rows and the row/column caps below have been applied. Counting them
+     * here made the diagnostic claim uncalculated formulas were why a capped
+     * sheet's 5,000th row is missing, when the cap was.
+     */
+    const uncachedAt: { row: number; column: number }[] = [];
     for (const key of Object.keys(sheet)) {
       if (key.startsWith('!')) continue;
       const at = XLSX.utils.decode_cell(key);
@@ -765,11 +896,11 @@ export async function readXlsxAsBlocks(
       if (cellText(cell).length === 0) {
         // A cell that draws nothing does not widen the grid — otherwise a stray
         // formatted-but-empty cell in column ZZ would add 700 blank columns. It
-        // is still counted here if it is a formula with no cached result, which
-        // is the one case where "nothing to draw" is worth telling the user
-        // about; counting it inside the grid loop below would miss it, since it
-        // is exactly the cell the extent excludes.
-        if (cell?.f !== undefined) uncachedFormulas += 1;
+        // is still noted here if it is a formula with no cached result, which is
+        // the one case where "nothing to draw" is worth telling the user about;
+        // looking for it inside the grid loop below would miss it, since it is
+        // exactly the cell the extent excludes.
+        if (cell?.f !== undefined) uncachedAt.push({ row: at.r, column: at.c });
         continue;
       }
       if (at.r < firstRow) firstRow = at.r;
@@ -779,13 +910,22 @@ export async function readXlsxAsBlocks(
     }
 
     if (lastRow < 0 || lastColumn < 0) {
+      if (uncachedAt.length > 0) {
+        // Not empty, and the sheet object itself proves it: it holds cells, all
+        // of them formulas whose cached result is missing. Every one of them is
+        // counted, because here they are not "some cells outside the drawn
+        // range" — they are the whole sheet, and the reason it draws nothing.
+        uncachedFormulas += uncachedAt.length;
+        noGrid(name, 'formulas');
+        continue;
+      }
       // Nothing to draw — and the reason is *not* knowable from `sheet`, which is
       // the identical `{}` whether the sheet is blank or its worksheet part never
       // parsed (see `XLSX_SHEET_UNREADABLE_TEXT`). So it is settled against the
       // bytes: "empty" requires finding an intact worksheet part.
       relTargets ??= workbookRelTargets(bytes);
       const state = worksheetPartState(bytes, relTargets, sheetIndex, props[sheetIndex]?.id);
-      noGrid(name, state === 'unreadable');
+      noGrid(name, state === 'unreadable' ? 'unreadable' : 'empty');
       continue;
     }
 
@@ -826,6 +966,24 @@ export async function readXlsxAsBlocks(
       });
       sheets.push({ name, rows: 0, columns: 0, bands: 0, empty: true, unreadable: false });
       continue;
+    }
+
+    // An uncalculated formula is counted only where *it* is the reason nothing
+    // was drawn for that cell. One in a hidden row, or past the row/column cap,
+    // is absent from the PDF for a reason that already has its own note, and
+    // counting it here would tell the user their missing rows were formulas when
+    // the cap was. A cell beyond the extent of everything that has text *is*
+    // counted: nothing but its own missing value put it there.
+    const lastDrawnRow = rows[rows.length - 1];
+    const lastDrawnColumn = columns[columns.length - 1];
+    const rowCapped = allRows.length > MAX_SHEET_ROWS;
+    const columnCapped = allColumns.length > MAX_SHEET_COLUMNS;
+    for (const at of uncachedAt) {
+      if (rowInfo[at.row]?.hidden === true) continue;
+      if (columnInfo[at.column]?.hidden === true) continue;
+      if (rowCapped && at.row > lastDrawnRow) continue;
+      if (columnCapped && at.column > lastDrawnColumn) continue;
+      uncachedFormulas += 1;
     }
 
     // The grid, read once: the layout below needs both the text (to draw) and its

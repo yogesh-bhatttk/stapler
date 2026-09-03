@@ -55,6 +55,7 @@ import {
 } from '../../src/core/convert/sheets';
 import {
   buildXlsx,
+  MAX_CELL_CHARS,
   sanitizeSheetName,
   uniqueSheetNames,
   getColRef,
@@ -62,7 +63,7 @@ import {
 } from '../../src/core/convert/xlsx-writer';
 import { findTableRegions } from '../../src/core/convert/table-regions';
 import { layoutLines } from '../../src/core/text-layout';
-import { hasXfaMarker, XFA_CONVERT_MESSAGE } from '../../src/core/pdf/xfa';
+import { hasXfaMarker, xfaConvertMessage } from '../../src/core/pdf/xfa';
 import { StaplerError } from '../../src/core/errors';
 
 vi.mock('comlink', () => ({
@@ -563,7 +564,10 @@ describe('CNV-10 — unsupported input is refused, not half-converted', () => {
     );
     expect(failure).toBeInstanceOf(StaplerError);
     expect((failure as StaplerError).kind).toBe('UnsupportedFeature');
-    expect((failure as StaplerError).message).toBe(XFA_CONVERT_MESSAGE);
+    expect((failure as StaplerError).message).toBe(xfaConvertMessage('Excel workbook'));
+    // The refusal names *this* conversion's output, not another tool's: a shared
+    // constant used to tell every caller their "Word document" would be wrong.
+    expect((failure as StaplerError).message).toContain('a converted Excel workbook would');
     expect(buildXlsxCalls).toBe(0);
 
     // …and the fixture the conversion is meant to accept is not a false positive.
@@ -780,6 +784,37 @@ describe('CNV-10 — the XLSX writer', () => {
     expect(colIndexOf(getColRef(701))).toBe(701);
   });
 
+  it('shortens a cell past Excel\u2019s limit itself, and says it did', () => {
+    // The limit was documented here and enforced only by callers. This is the
+    // one XLSX writer in the build, and an over-long cell does not produce a
+    // slightly wrong workbook — Excel offers to repair the file. A future caller
+    // that forgets to truncate must not be able to ship that.
+    const long = 'x'.repeat(MAX_CELL_CHARS + 500);
+    let reported = 0;
+    const bytes = buildXlsx([{ name: 'Long', rows: [[long, 'short']] }], {
+      onTruncatedCells: cells => {
+        reported = cells;
+      }
+    });
+
+    const cell = readXlsx(bytes).sheets.get('Long')?.[0][0] ?? '';
+    expect(cell).toHaveLength(MAX_CELL_CHARS);
+    expect(cell.startsWith('xxx')).toBe(true);
+    expect(reported, 'and the caller is told, never silently').toBe(1);
+    // The neighbouring cell is untouched, and the part still parses.
+    expect(readXlsx(bytes).sheets.get('Long')?.[0][1]).toBe('short');
+  });
+
+  it('says nothing when no cell needed shortening', () => {
+    let called = false;
+    buildXlsx([{ name: 'S', rows: [['a'.repeat(MAX_CELL_CHARS)]] }], {
+      onTruncatedCells: () => {
+        called = true;
+      }
+    });
+    expect(called, 'a cell exactly at the limit is not truncated').toBe(false);
+  });
+
   it("omits an empty cell rather than writing a blank one, and keeps the row's shape", () => {
     const book = readXlsx(buildXlsx([{ name: 'S', rows: [['a', '', 'c']] }]));
     // Read back by cell reference: the gap is still column B, not a lost column.
@@ -901,19 +936,33 @@ describe('CNV-10 — the mandatory-preview gate', () => {
   it('starts closed, opens only on a preview, and closes again on reset', async () => {
     const { commitGate } = await import('../../src/ui/tools/commit-gate');
     const state = await import('../../src/ui/tools/convert/pdf-to-excel-state');
+    const store = await import('../../src/core/store');
+    const { historyVersion } = await import('../../src/core/history');
 
     // Importing the panel's state module is what arms the gate, so the save
     // action is blocked before the panel has ever been mounted.
     expect(commitGate('pdf-to-excel')).toBe(state.PDF_TO_EXCEL_GATE);
     expect(state.pdfToExcelPreview.value).toBeNull();
 
-    state.setPdfToExcelPreview(result(), 'doc-1', 0);
+    // A preview is only *valid* for the document that is actually open, at the
+    // revision it was read at — so the gate is armed with both.
+    store.activeDocId.value = 'doc-1';
+    state.setPdfToExcelPreview(result(), 'doc-1', historyVersion.value);
+    expect(commitGate('pdf-to-excel')).toBeNull();
+
+    // A preview of *another* document leaves it shut. The gate now computes the
+    // same staleness rule the save handler enforces, so it cannot render an
+    // enabled button over bytes that handler would refuse.
+    state.setPdfToExcelPreview(result(), 'doc-other', historyVersion.value);
+    expect(commitGate('pdf-to-excel')).toBe(state.PDF_TO_EXCEL_GATE);
+    state.setPdfToExcelPreview(result(), 'doc-1', historyVersion.value);
     expect(commitGate('pdf-to-excel')).toBeNull();
     expect(state.pdfToExcelPreviewDocId.value).toBe('doc-1');
 
     state.resetPdfToExcelPreview();
     expect(commitGate('pdf-to-excel')).toBe(state.PDF_TO_EXCEL_GATE);
     expect(state.pdfToExcelPreview.value).toBeNull();
+    store.activeDocId.value = null;
   });
 
   it('closes again when the document is edited, not only when it is switched', async () => {
@@ -947,6 +996,13 @@ describe('CNV-10 — the mandatory-preview gate', () => {
     expect(historyVersion.value).not.toBe(before);
 
     expect(state.pdfToExcelPreviewIsStale(doc.id)).toBe(true);
+    // …and the gate closed on the edit *itself*, with no panel mounted to
+    // notice. It used to be set only where a preview was installed, so the
+    // action bar kept rendering an enabled Save button over the pre-edit bytes
+    // until the panel re-rendered and dropped them.
+    expect(commitGate('pdf-to-excel'), 'the gate closed without the panel').toBe(
+      state.PDF_TO_EXCEL_GATE
+    );
 
     // …and it is not a permanent lock.
     state.setPdfToExcelPreview(result(), doc.id, historyVersion.value);

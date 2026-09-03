@@ -375,6 +375,69 @@ async function finalize(
   return result.bytes;
 }
 
+/**
+ * CNV-08..13 — the one save path the six Office conversions share.
+ *
+ * All six do exactly the same four things, and each of the four is a place to
+ * get it wrong once per tool: refuse when the preview is missing or stale (the
+ * gate on the button is a courtesy; *this* is the guarantee), name the file,
+ * run a PDF output — and only a PDF output — through RED-06's protection step,
+ * and report what was written. Written six times, a fix to any of them was five
+ * more edits nobody was reminded to make.
+ *
+ * What stays per-tool is only what genuinely differs: the preview, its
+ * staleness rule, the sentence shown when the gate is closed, the file name, and
+ * the notification's detail line.
+ *
+ * Deliberately never converts. The preview is mandatory (PLAN §5.5), and the
+ * only way to guarantee that what was reviewed is what gets written is to save
+ * the very bytes the preview was rendered from — re-running the conversion here
+ * would reopen the gap between the two.
+ */
+async function commitConvertedPreview<P extends { bytes: Uint8Array }>(input: {
+  /** The previewed result, or nothing when the panel has not produced one. */
+  preview: P | null;
+  /** True when the preview no longer describes its input — see the state modules. */
+  stale: boolean;
+  /** The sentence that explains a closed gate, shown as a warning that does not time out. */
+  gate: string;
+  /** The output file name. Read only once there is something to save. */
+  name: (preview: P) => string;
+  /** The notification's detail line, from the bytes actually written. */
+  detail: (preview: P, bytes: Uint8Array) => string;
+  /**
+   * Present only when the output is a **PDF**: RED-06's password applies to
+   * every PDF this app writes, and skipping it for these three would be a
+   * silent exception to that. Absent for `.docx`/`.xlsx`/`.pptx`, which
+   * `applyProtection` would turn into an unopenable file — the same reason
+   * OCR-03's CSV/XLSX export takes the unprotected path.
+   */
+  protectAsPdf?: JobOptions;
+}): Promise<void> {
+  const preview = input.preview;
+  if (!preview || input.stale) {
+    notify('warning', translate('Nothing was saved.'), { detail: input.gate, timeout: 0 });
+    return;
+  }
+
+  const name = input.name(preview);
+  let bytes = preview.bytes;
+  if (input.protectAsPdf) {
+    const protectedBytes = await applyProtection(bytes, name, input.protectAsPdf);
+    if (!protectedBytes) return;
+    bytes = protectedBytes;
+  }
+
+  const saved = await platform.saveFileAs(bytes, name);
+  if (!saved) return;
+  notify('success', translate('Saved {name}', { name }), { detail: input.detail(preview, bytes) });
+}
+
+/** " · 3 item(s) could not be converted — see the panel", or nothing at all. */
+function unconvertedSuffix(items: readonly unknown[], phrase: string): string {
+  return items.length > 0 ? ` · ${items.length} item(s) ${phrase} — see the panel` : '';
+}
+
 const HANDLERS: Record<ToolId, CommitHandler> = {
   // `worksWithoutDocument` (merge now builds a document from scratch, same as
   // images-to-pdf) means `context.doc` may not correspond to a real open
@@ -1169,251 +1232,127 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   /**
    * CNV-08 — writes the `.docx` the panel has already converted and previewed.
    *
-   * It deliberately does not convert here. The preview is mandatory (PLAN §5.5),
-   * and the only way to guarantee that what was reviewed is what gets written is
-   * to save the very bytes the preview was rendered from. Re-running the
-   * conversion at save time would reopen the gap between the two.
-   *
-   * The gate in `commit-gate.ts` already disables the action bar's button; this
-   * check is the guarantee behind that courtesy, and it also catches a preview
-   * that belongs to a document the user has since closed — or one edited since
-   * the conversion ran, which `pdfToWordPreviewIsStale` decides from
-   * `historyVersion` rather than from the document id alone.
+   * The shared `commitConvertedPreview` above holds the save path all six
+   * conversions follow; what is here is only what is specific to this one. The
+   * gate in `commit-gate.ts` already disables the action bar's button; the
+   * refusal in that helper is the guarantee behind that courtesy, and it also
+   * catches a preview belonging to a document the user has since closed — or
+   * one edited since the conversion ran, which `pdfToWordPreviewIsStale`
+   * decides from `historyVersion` rather than from the document id alone.
    */
   'pdf-to-word': async ({ doc }) => {
     const preview = pdfToWordPreview.value;
-    if (!preview || pdfToWordPreviewIsStale(doc.id)) {
-      notify('warning', translate('Nothing was saved.'), {
-        detail: PDF_TO_WORD_GATE,
-        timeout: 0
-      });
-      return;
-    }
-
-    // Deliberately `platform.saveFileAs`, not the shared `save`: that helper runs
-    // the bytes through `applyProtection`, which encrypts a *PDF*. Running a
-    // `.docx` through it would produce an unopenable file — the same reason
-    // OCR-03's CSV/XLSX export takes this path.
-    const name = `${stem(doc.name)}.docx`;
-    const saved = await platform.saveFileAs(preview.bytes, name);
-    if (!saved) return;
-    notify('success', translate('Saved {name}', { name }), {
-      detail:
-        `${formatBytes(preview.bytes.byteLength)} · ${preview.pageCount} page(s)` +
-        (preview.skipped.length > 0
-          ? ` · ${preview.skipped.length} item(s) could not be converted — see the panel`
-          : '')
+    await commitConvertedPreview({
+      preview,
+      stale: pdfToWordPreviewIsStale(doc.id),
+      gate: PDF_TO_WORD_GATE,
+      name: () => `${stem(doc.name)}.docx`,
+      detail: (result, bytes) =>
+        `${formatBytes(bytes.byteLength)} · ${result.pageCount} page(s)` +
+        unconvertedSuffix(result.skipped, 'could not be converted')
     });
   },
   /**
    * CNV-09 — writes the PDF the panel has already converted and previewed.
    *
-   * Deliberately does not convert here, for the same reason `pdf-to-word` above
-   * does not: the preview is mandatory (PLAN §5.5), and the only way to guarantee
-   * that what was reviewed is what gets written is to save the very bytes the
-   * preview was rendered from.
-   *
-   * The gate in `commit-gate.ts` already disables the action bar's button; this
-   * check is the guarantee behind that courtesy. `worksWithoutDocument` on the
-   * tool definition means `context.doc` may not be a real open document, so this
-   * handler never reads it — the file name comes from the chosen `.docx`.
+   * `worksWithoutDocument` on the tool definition means `context.doc` may not be
+   * a real open document, so this handler never reads it — the file name comes
+   * from the chosen `.docx`. The output *is* a PDF, so it goes through
+   * `protectAsPdf`.
    */
   'word-to-pdf': async ({ job }) => {
     const preview = wordToPdfPreview.value;
     const source = wordToPdfSource.value;
-    if (!preview || !source || wordToPdfPreviewIsStale()) {
-      notify('warning', translate('Nothing was saved.'), {
-        detail: WORD_TO_PDF_GATE,
-        timeout: 0
-      });
-      return;
-    }
-
-    const name = `${stem(source.name)}.pdf`;
-    // This output *is* a PDF, so unlike the `.docx` above it goes through the
-    // shared protection step — RED-06's password applies to every PDF this app
-    // writes, and skipping it here would be a silent exception to that.
-    const bytes = await applyProtection(preview.bytes, name, job);
-    if (!bytes) return;
-
-    const saved = await platform.saveFileAs(bytes, name);
-    if (!saved) return;
-    notify('success', translate('Saved {name}', { name }), {
-      detail:
-        `${formatBytes(bytes.byteLength)} · ${preview.pageCount} page(s)` +
-        (preview.notes.length > 0
-          ? ` · ${preview.notes.length} item(s) could not be converted — see the panel`
-          : '')
+    await commitConvertedPreview({
+      preview,
+      stale: !source || wordToPdfPreviewIsStale(),
+      gate: WORD_TO_PDF_GATE,
+      name: () => `${stem(source?.name ?? 'document')}.pdf`,
+      protectAsPdf: job,
+      detail: (result, bytes) =>
+        `${formatBytes(bytes.byteLength)} · ${result.pageCount} page(s)` +
+        unconvertedSuffix(result.notes, 'could not be converted')
     });
   },
   /**
    * CNV-10 — writes the `.xlsx` the panel has already converted and previewed.
    *
-   * Deliberately does not convert here, for the same reason `pdf-to-word` above
-   * does not: the preview is mandatory (PLAN §5.5), and the only way to guarantee
-   * that what was reviewed is what gets written is to save the very bytes the
-   * preview was rendered from. That guarantee matters more here than for either
-   * sibling — every sheet in this output is the result of a guess about where a
-   * table was, and re-running the guess at save time would reopen the gap
-   * between what was checked and what lands on disk.
-   *
-   * The gate in `commit-gate.ts` already disables the action bar's button; this
-   * check is the guarantee behind that courtesy, and it also catches a preview
-   * belonging to a document the user has since closed — or one edited since the
-   * conversion ran, which `pdfToExcelPreviewIsStale` decides from
-   * `historyVersion` rather than from the document id alone.
+   * Saving the previewed bytes matters more here than for either sibling: every
+   * sheet in this output is the result of a guess about where a table was, and
+   * re-running the guess at save time would reopen the gap between what was
+   * checked and what lands on disk.
    */
   'pdf-to-excel': async ({ doc }) => {
     const preview = pdfToExcelPreview.value;
-    if (!preview || pdfToExcelPreviewIsStale(doc.id)) {
-      notify('warning', translate('Nothing was saved.'), {
-        detail: PDF_TO_EXCEL_GATE,
-        timeout: 0
-      });
-      return;
-    }
-
-    // `platform.saveFileAs`, not the shared `save`: that helper runs the bytes
-    // through `applyProtection`, which encrypts a *PDF*. Running an `.xlsx`
-    // through it would produce an unopenable file — the same reason CNV-08's
-    // `.docx` and OCR-03's own XLSX export take this path.
-    const name = `${stem(doc.name)}.xlsx`;
-    const saved = await platform.saveFileAs(preview.bytes, name);
-    if (!saved) return;
-    notify('success', translate('Saved {name}', { name }), {
-      detail:
-        `${formatBytes(preview.bytes.byteLength)} · ${preview.sheetCount} sheet(s) · ` +
-        `${preview.tableCount} detected table(s)` +
-        (preview.skipped.length > 0
-          ? ` · ${preview.skipped.length} item(s) were left out — see the panel`
-          : '')
+    await commitConvertedPreview({
+      preview,
+      stale: pdfToExcelPreviewIsStale(doc.id),
+      gate: PDF_TO_EXCEL_GATE,
+      name: () => `${stem(doc.name)}.xlsx`,
+      detail: (result, bytes) =>
+        `${formatBytes(bytes.byteLength)} · ${result.sheetCount} sheet(s) · ` +
+        `${result.tableCount} detected table(s)` +
+        unconvertedSuffix(result.skipped, 'were left out')
     });
   },
   /**
-   * CNV-11 — writes the PDF the panel has already converted and previewed.
-   *
-   * Deliberately does not convert here, for the same reason its three siblings
-   * above do not: the preview is mandatory (PLAN §5.5), and the only way to
-   * guarantee that what was reviewed is what gets written is to save the very
-   * bytes the preview was rendered from.
-   *
-   * The gate in `commit-gate.ts` already disables the action bar's button; this
-   * check is the guarantee behind that courtesy. `worksWithoutDocument` on the
-   * tool definition means `context.doc` may not be a real open document, so this
-   * handler never reads it — the file name comes from the chosen `.xlsx`.
+   * CNV-11 — writes the PDF the panel has already converted and previewed. Like
+   * CNV-09, the name comes from the chosen workbook rather than from
+   * `context.doc`, and the PDF output takes RED-06's protection step.
    */
   'excel-to-pdf': async ({ job }) => {
     const preview = excelToPdfPreview.value;
     const source = excelToPdfSource.value;
-    if (!preview || !source || excelToPdfPreviewIsStale()) {
-      notify('warning', translate('Nothing was saved.'), {
-        detail: EXCEL_TO_PDF_GATE,
-        timeout: 0
-      });
-      return;
-    }
-
-    const name = `${stem(source.name)}.pdf`;
-    // This output *is* a PDF, so it goes through the shared protection step —
-    // RED-06's password applies to every PDF this app writes, and skipping it
-    // here would be a silent exception to that.
-    const bytes = await applyProtection(preview.bytes, name, job);
-    if (!bytes) return;
-
-    const saved = await platform.saveFileAs(bytes, name);
-    if (!saved) return;
-    notify('success', translate('Saved {name}', { name }), {
-      detail:
-        `${formatBytes(bytes.byteLength)} · ${preview.sheets.length} sheet(s) · ` +
-        `${preview.pageCount} page(s)` +
-        (preview.notes.length > 0
-          ? ` · ${preview.notes.length} item(s) could not be converted — see the panel`
-          : '')
+    await commitConvertedPreview({
+      preview,
+      stale: !source || excelToPdfPreviewIsStale(),
+      gate: EXCEL_TO_PDF_GATE,
+      name: () => `${stem(source?.name ?? 'document')}.pdf`,
+      protectAsPdf: job,
+      detail: (result, bytes) =>
+        `${formatBytes(bytes.byteLength)} · ${result.sheets.length} sheet(s) · ` +
+        `${result.pageCount} page(s)` +
+        unconvertedSuffix(result.notes, 'could not be converted')
     });
   },
   /**
    * CNV-12 — writes the `.pptx` the panel has already converted and previewed.
    *
-   * Deliberately does not convert here, for the same reason its four siblings
-   * above do not: the preview is mandatory (PLAN §5.5), and the only way to
-   * guarantee that what was reviewed is what gets written is to save the very
-   * bytes the preview was rendered from. The guarantee matters more here than
-   * anywhere else in the series — every box on every slide is an approximation
-   * of where the page drew something, so re-running the conversion at save time
-   * would reopen the gap between what was checked and what lands on disk.
-   *
-   * The gate in `commit-gate.ts` already disables the action bar's button; this
-   * check is the guarantee behind that courtesy, and it also catches a preview
-   * belonging to a document the user has since closed — or one edited since the
-   * conversion ran, which `pdfToPptPreviewIsStale` decides from
-   * `historyVersion` rather than from the document id alone.
+   * The preview guarantee matters more here than anywhere else in the series:
+   * every box on every slide is an approximation of where the page drew
+   * something, so re-running the conversion at save time would reopen the gap
+   * between what was checked and what lands on disk.
    */
   'pdf-to-ppt': async ({ doc }) => {
     const preview = pdfToPptPreview.value;
-    if (!preview || pdfToPptPreviewIsStale(doc.id)) {
-      notify('warning', translate('Nothing was saved.'), {
-        detail: PDF_TO_PPT_GATE,
-        timeout: 0
-      });
-      return;
-    }
-
-    // `platform.saveFileAs`, not the shared `save`: that helper runs the bytes
-    // through `applyProtection`, which encrypts a *PDF*. Running a `.pptx`
-    // through it would produce an unopenable file — the same reason CNV-08's
-    // `.docx` and CNV-10's `.xlsx` take this path.
-    const name = `${stem(doc.name)}.pptx`;
-    const saved = await platform.saveFileAs(preview.bytes, name);
-    if (!saved) return;
-    notify('success', translate('Saved {name}', { name }), {
-      detail:
-        `${formatBytes(preview.bytes.byteLength)} · ${preview.slideCount} slide(s) · ` +
-        `${preview.textBoxCount} text box(es)` +
-        (preview.notes.length > 0
-          ? ` · ${preview.notes.length} item(s) were left out — see the panel`
-          : '')
+    await commitConvertedPreview({
+      preview,
+      stale: pdfToPptPreviewIsStale(doc.id),
+      gate: PDF_TO_PPT_GATE,
+      name: () => `${stem(doc.name)}.pptx`,
+      detail: (result, bytes) =>
+        `${formatBytes(bytes.byteLength)} · ${result.slideCount} slide(s) · ` +
+        `${result.textBoxCount} text box(es)` +
+        unconvertedSuffix(result.notes, 'were left out')
     });
   },
   /**
-   * CNV-13 — writes the PDF the panel has already converted and previewed.
-   *
-   * Deliberately does not convert here, for the same reason its five siblings
-   * above do not: the preview is mandatory (PLAN §5.5), and the only way to
-   * guarantee that what was reviewed is what gets written is to save the very
-   * bytes the preview was rendered from.
-   *
-   * The gate in `commit-gate.ts` already disables the action bar's button; this
-   * check is the guarantee behind that courtesy. `worksWithoutDocument` on the
-   * tool definition means `context.doc` may not be a real open document, so this
-   * handler never reads it — the file name comes from the chosen `.pptx`.
+   * CNV-13 — writes the PDF the panel has already converted and previewed. Named
+   * from the chosen `.pptx`, and protected as the PDF it is.
    */
   'ppt-to-pdf': async ({ job }) => {
     const preview = pptToPdfPreview.value;
     const source = pptToPdfSource.value;
-    if (!preview || !source || pptToPdfPreviewIsStale()) {
-      notify('warning', translate('Nothing was saved.'), {
-        detail: PPT_TO_PDF_GATE,
-        timeout: 0
-      });
-      return;
-    }
-
-    const name = `${stem(source.name)}.pdf`;
-    // This output *is* a PDF, so it goes through the shared protection step —
-    // RED-06's password applies to every PDF this app writes, and skipping it
-    // here would be a silent exception to that.
-    const bytes = await applyProtection(preview.bytes, name, job);
-    if (!bytes) return;
-
-    const saved = await platform.saveFileAs(bytes, name);
-    if (!saved) return;
-    notify('success', translate('Saved {name}', { name }), {
-      detail:
-        `${formatBytes(bytes.byteLength)} · ${preview.slideCount} slide(s) · ` +
-        `${preview.pageCount} page(s)` +
-        (preview.notes.length > 0
-          ? ` · ${preview.notes.length} item(s) could not be converted — see the panel`
-          : '')
+    await commitConvertedPreview({
+      preview,
+      stale: !source || pptToPdfPreviewIsStale(),
+      gate: PPT_TO_PDF_GATE,
+      name: () => `${stem(source?.name ?? 'document')}.pdf`,
+      protectAsPdf: job,
+      detail: (result, bytes) =>
+        `${formatBytes(bytes.byteLength)} · ${result.slideCount} slide(s) · ` +
+        `${result.pageCount} page(s)` +
+        unconvertedSuffix(result.notes, 'could not be converted')
     });
   },
   shortcuts: async () => {}

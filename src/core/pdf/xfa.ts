@@ -94,13 +94,24 @@ export function isXfaDocument(bytes: Uint8Array, parserSaysXfa: boolean): boolea
  * viewer cannot show this" placeholder, and a `.docx` containing only that,
  * handed over as a converted form, is silent corruption of the user's
  * expectations if not of their bytes.
+ *
+ * Parameterised by the target format because all three conversions out of PDF
+ * (CNV-08 Word, CNV-10 Excel, CNV-12 PowerPoint) refuse for the same reason, and
+ * a shared constant naming one of them told an Excel user their *Word document*
+ * would be wrong — a refusal that describes an output they never asked for reads
+ * as a bug in the tool rather than a fact about their file.
  */
-export const XFA_CONVERT_MESSAGE =
-  'This is an XFA form. What it shows on screen is generated from an XML payload, not ' +
-  'from the page content Stapler can read, so a converted Word document would contain ' +
-  'the dead AcroForm shadow layer — usually a "open this in Adobe Reader" placeholder — ' +
-  'rather than the form. Nothing was converted. Print or export the form to a flat PDF ' +
-  'from a viewer that renders XFA, then convert that.';
+export type XfaConvertTarget = 'Word document' | 'Excel workbook' | 'PowerPoint presentation';
+
+export function xfaConvertMessage(target: XfaConvertTarget): string {
+  return (
+    'This is an XFA form. What it shows on screen is generated from an XML payload, not ' +
+    `from the page content Stapler can read, so a converted ${target} would contain ` +
+    'the dead AcroForm shadow layer — usually a "open this in Adobe Reader" placeholder — ' +
+    'rather than the form. Nothing was converted. Print or export the form to a flat PDF ' +
+    'from a viewer that renders XFA, then convert that.'
+  );
+}
 
 /**
  * The refusal for operations that rebuild a document page by page — merge,

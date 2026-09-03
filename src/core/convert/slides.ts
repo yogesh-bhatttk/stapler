@@ -825,8 +825,9 @@ export function planSlides(pages: readonly PageSlideData[], options: SlidePlanOp
         if (!placement.axisAligned && !reportedObjects.has(`${key}:skew`)) {
           reportedObjects.add(`${key}:skew`);
           notes.push(
-            `Page ${human}: an image is drawn rotated or skewed on the page. PowerPoint places ` +
-              'it upright inside the same rectangle, so its orientation is not reproduced.'
+            `Page ${human}: an image is drawn rotated, mirrored or skewed on the page. ` +
+              'PowerPoint places it upright inside the same rectangle, so its orientation is ' +
+              'not reproduced.'
           );
         }
         if (entry?.maskFileName && !reportedObjects.has(`${key}:mask`)) {

@@ -48,7 +48,7 @@ import {
 } from '../../src/core/convert/blocks';
 import { buildDocx } from '../../src/core/convert/docx-writer';
 import { layoutLines } from '../../src/core/text-layout';
-import { hasXfaMarker, XFA_CONVERT_MESSAGE } from '../../src/core/pdf/xfa';
+import { hasXfaMarker, xfaConvertMessage } from '../../src/core/pdf/xfa';
 import { StaplerError } from '../../src/core/errors';
 
 vi.mock('comlink', () => ({
@@ -70,6 +70,12 @@ vi.mock('../../src/core/workers/pdfjs-setup', async () => {
 
 /** How many times the writer was reached. A refusal must leave this at 0. */
 let buildDocxCalls = 0;
+/**
+ * Every text/image worker entry, in the order it happened. The two passes are
+ * meant to *overlap*, and the only way to see that from outside is the order
+ * their calls land in.
+ */
+let passOrder: string[] = [];
 
 vi.mock('../../src/core/workers', async () => {
   const { renderWorkerImpl } = await import('../../src/core/workers/render.worker');
@@ -85,13 +91,17 @@ vi.mock('../../src/core/workers', async () => {
   const renderApi = {
     loadDocument: (bytes: Bytes, password?: string) =>
       renderWorkerImpl.loadDocument(bytes.slice(), password),
-    extractPageBlocks: (handle: string, pageIndex: number) =>
-      renderWorkerImpl.extractPageBlocks(handle, pageIndex),
+    extractPageBlocks: (handle: string, pageIndex: number) => {
+      passOrder.push('text');
+      return renderWorkerImpl.extractPageBlocks(handle, pageIndex);
+    },
     closeDocument: (handle: string) => renderWorkerImpl.closeDocument(handle)
   };
   const processApi = {
-    extractImages: (bytes: Bytes, pageIndices: number[]) =>
-      processWorkerImpl.extractImages(bytes.slice(), pageIndices)
+    extractImages: (bytes: Bytes, pageIndices: number[]) => {
+      passOrder.push('images');
+      return processWorkerImpl.extractImages(bytes.slice(), pageIndices);
+    }
   };
   const convertApi = {
     buildDocx: (...args: Parameters<typeof convertWorkerImpl.buildDocx>) => {
@@ -290,6 +300,26 @@ describe('CNV-08 — PDF to DOCX round trip', () => {
     expect(html).toContain('<table>');
   }, 120_000);
 
+  it('reads the text and the images at the same time, not one after the other', async () => {
+    // Two passes over the same bytes on two different worker pools. Run in
+    // sequence, the shorter one's time was simply added to the wait. The proof
+    // has to be observable rather than a stopwatch: with the passes overlapped
+    // the image call lands *between* page reads, and with them sequenced it can
+    // only land after the last one.
+    passOrder = [];
+    const result = await convert(await pdfToWordPdf(), { includeImages: true });
+    expect(result.pageCount).toBeGreaterThan(1);
+    expect(passOrder).toContain('images');
+    expect(
+      passOrder.indexOf('images'),
+      'the image pass started before the last page was read'
+    ).toBeLessThan(passOrder.lastIndexOf('text'));
+
+    // Overlapping must not have cost the progress bar its monotonicity: the two
+    // fractions are combined into one rising number, not two adjacent bands.
+    expect([...result.progress].sort((a, b) => a - b)).toEqual(result.progress);
+  }, 120_000);
+
   it('reports determinate, monotonic progress across all three passes', async () => {
     // Not decoration: this is the evidence that the *real* `convertPdfToDocx`
     // ran its own sequence rather than a test helper standing in for it — the
@@ -345,7 +375,10 @@ describe('CNV-08 — unsupported input is refused, not half-converted', () => {
     );
     expect(failure).toBeInstanceOf(StaplerError);
     expect((failure as StaplerError).kind).toBe('UnsupportedFeature');
-    expect((failure as StaplerError).message).toBe(XFA_CONVERT_MESSAGE);
+    expect((failure as StaplerError).message).toBe(xfaConvertMessage('Word document'));
+    // The refusal names *this* conversion's output, not another tool's: a shared
+    // constant used to tell every caller their "Word document" would be wrong.
+    expect((failure as StaplerError).message).toContain('a converted Word document would');
     // Nothing was written, and nothing was even attempted: no `.docx` exists to
     // be half-saved.
     expect(buildDocxCalls).toBe(0);
@@ -624,6 +657,8 @@ describe('CNV-08 — the mandatory-preview gate', () => {
   it('starts closed, opens only on a preview, and closes again on reset', async () => {
     const { commitGate } = await import('../../src/ui/tools/commit-gate');
     const state = await import('../../src/ui/tools/convert/pdf-to-word-state');
+    const store = await import('../../src/core/store');
+    const { historyVersion } = await import('../../src/core/history');
 
     // Importing the panel's state module is what arms the gate, so the save
     // action is blocked before the panel has ever been mounted.
@@ -637,7 +672,18 @@ describe('CNV-08 — the mandatory-preview gate', () => {
       outline: [],
       skipped: []
     };
-    state.setPdfToWordPreview(result, 'doc-1');
+    // A preview is only *valid* for the document that is actually open, at the
+    // revision it was read at — so the gate is armed with both.
+    store.activeDocId.value = 'doc-1';
+    state.setPdfToWordPreview(result, 'doc-1', historyVersion.value);
+    expect(commitGate('pdf-to-word')).toBeNull();
+
+    // A preview of *another* document leaves it shut. The gate now computes the
+    // same staleness rule the save handler enforces, so it cannot render an
+    // enabled button over bytes that handler would refuse.
+    state.setPdfToWordPreview(result, 'doc-other', historyVersion.value);
+    expect(commitGate('pdf-to-word')).toBe(state.PDF_TO_WORD_GATE);
+    state.setPdfToWordPreview(result, 'doc-1', historyVersion.value);
     expect(commitGate('pdf-to-word')).toBeNull();
     expect(state.pdfToWordPreviewDocId.value).toBe('doc-1');
 
@@ -646,6 +692,7 @@ describe('CNV-08 — the mandatory-preview gate', () => {
     state.resetPdfToWordPreview();
     expect(commitGate('pdf-to-word')).toBe(state.PDF_TO_WORD_GATE);
     expect(state.pdfToWordPreview.value).toBeNull();
+    store.activeDocId.value = null;
     expect(state.pdfToWordPreviewDocId.value).toBeNull();
   });
 
@@ -691,6 +738,13 @@ describe('CNV-08 — the mandatory-preview gate', () => {
     // Same document, same id — and the preview is stale, so the panel's effect
     // drops it and `commit.ts` refuses even if the disabled button is bypassed.
     expect(state.pdfToWordPreviewIsStale(doc.id)).toBe(true);
+    // …and the gate closed on the edit *itself*, with no panel mounted to
+    // notice. It used to be set only where a preview was installed, so the
+    // action bar kept rendering an enabled Save button over the pre-edit bytes
+    // until the panel re-rendered and dropped them.
+    expect(commitGate('pdf-to-word'), 'the gate closed without the panel').toBe(
+      state.PDF_TO_WORD_GATE
+    );
     state.resetPdfToWordPreview();
     expect(commitGate('pdf-to-word')).toBe(state.PDF_TO_WORD_GATE);
     expect(state.pdfToWordPreview.value).toBeNull();

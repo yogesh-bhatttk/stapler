@@ -183,7 +183,7 @@ describe('inkCoverage and blankCoverageLimit', () => {
 import {
   sanitizeWinAnsiText,
   markdownToPdfBytes,
-  hadUnsupportedCharacter
+  newSubstitutionTally
 } from '../../src/core/markdown-to-pdf';
 
 describe('sanitizeWinAnsiText and markdownToPdfBytes', () => {
@@ -194,8 +194,9 @@ describe('sanitizeWinAnsiText and markdownToPdfBytes', () => {
   });
 
   it('passes through Windows-1252 characters WinAnsi actually supports, like the euro sign', () => {
-    expect(sanitizeWinAnsiText('Price: €50')).toBe('Price: €50');
-    expect(hadUnsupportedCharacter()).toBe(false);
+    const tally = newSubstitutionTally();
+    expect(sanitizeWinAnsiText('Price: €50', tally)).toBe('Price: €50');
+    expect(tally.substituted).toBe(false);
   });
 
   it('substitutes CJK/non-Latin1 text with "?" instead of crashing, and flags it', async () => {
@@ -203,21 +204,45 @@ describe('sanitizeWinAnsiText and markdownToPdfBytes', () => {
     // so `page.drawText` (WinAnsi-only) threw on any CJK/Cyrillic/Arabic
     // character instead of degrading. This must never throw.
     const md = '# 日本語のタイトル\n\nSome mixed 中文 text.';
-    const bytes = await markdownToPdfBytes(md);
+    const { bytes, hadUnsupportedCharacters } = await markdownToPdfBytes(md);
     expect(bytes).toBeInstanceOf(Uint8Array);
     expect(bytes.length).toBeGreaterThan(0);
-    expect(hadUnsupportedCharacter()).toBe(true);
+    expect(hadUnsupportedCharacters).toBe(true);
   });
 
   it('does not flag unsupported characters for plain ASCII/Latin1 input', async () => {
-    await markdownToPdfBytes('# Plain ASCII title\n\nNothing exotic here.');
-    expect(hadUnsupportedCharacter()).toBe(false);
+    const result = await markdownToPdfBytes('# Plain ASCII title\n\nNothing exotic here.');
+    expect(result.hadUnsupportedCharacters).toBe(false);
+  });
+
+  it('reports each conversion\u2019s own substitutions, whatever order they run in', async () => {
+    // The flag used to be a module-level global that every call reset on entry
+    // and read at exit. Both callers (`markdownToPdfBytes` and CNV-09's
+    // `layoutBlocksToPdf`) live in the *pooled* `process` worker, which shares
+    // one instance at capacity — so a second conversion starting inside the
+    // first one's `await` reset the flag and the first document came back
+    // reported as clean. Running the two overlapped is what would have caught
+    // it: with the old design the ASCII job's reset lands mid-CJK-job.
+    const [cjk, ascii] = await Promise.all([
+      markdownToPdfBytes('# \u65e5\u672c\u8a9e\n\nMixed \u4e2d\u6587 text.'),
+      markdownToPdfBytes('# Plain ASCII\n\nNothing exotic here.')
+    ]);
+    expect(cjk.hadUnsupportedCharacters, 'the CJK document kept its own answer').toBe(true);
+    expect(ascii.hadUnsupportedCharacters, 'and did not leak into the ASCII one').toBe(false);
+
+    // The reverse order, in case one interleaving happens to be benign.
+    const [ascii2, cjk2] = await Promise.all([
+      markdownToPdfBytes('# Plain ASCII\n\nNothing exotic here.'),
+      markdownToPdfBytes('# \u65e5\u672c\u8a9e\n\nMixed \u4e2d\u6587 text.')
+    ]);
+    expect(ascii2.hadUnsupportedCharacters).toBe(false);
+    expect(cjk2.hadUnsupportedCharacters).toBe(true);
   });
 
   it('converts Markdown containing non-ASCII characters to PDF bytes without throwing', async () => {
     const md =
       '# Title with “Smart Quotes”\n\nSome paragraph with an em-dash — and bullet points • plus non-ASCII: € §.';
-    const bytes = await markdownToPdfBytes(md);
+    const { bytes } = await markdownToPdfBytes(md);
     expect(bytes).toBeInstanceOf(Uint8Array);
     expect(bytes.length).toBeGreaterThan(0);
   });
@@ -225,7 +250,7 @@ describe('sanitizeWinAnsiText and markdownToPdfBytes', () => {
   describe('links become real PDF link annotations, not literal markdown syntax', () => {
     it('adds a /Link annotation with the right URI for an inline link', async () => {
       const md = 'See [the Stapler repo](https://example.com/stapler) for details.';
-      const bytes = await markdownToPdfBytes(md);
+      const { bytes } = await markdownToPdfBytes(md);
 
       const { PDFDocument: PDFLib, PDFName, PDFDict, PDFString } = await import('pdf-lib');
       const doc = await PDFLib.load(bytes);
@@ -246,7 +271,7 @@ describe('sanitizeWinAnsiText and markdownToPdfBytes', () => {
 
     it('renders the link’s visible text, not the raw [text](url) syntax', async () => {
       const md = 'See [the Stapler repo](https://example.com/stapler) for details.';
-      const bytes = await markdownToPdfBytes(md);
+      const { bytes } = await markdownToPdfBytes(md);
 
       const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
       const pdf = await pdfjsLib.getDocument({ data: bytes.slice(), useSystemFonts: false })
@@ -261,7 +286,7 @@ describe('sanitizeWinAnsiText and markdownToPdfBytes', () => {
 
     it('gives multiple links on the page distinct URIs', async () => {
       const md = '[One](https://example.com/one) and [Two](https://example.com/two).';
-      const bytes = await markdownToPdfBytes(md);
+      const { bytes } = await markdownToPdfBytes(md);
 
       const { PDFDocument: PDFLib, PDFName, PDFDict, PDFString } = await import('pdf-lib');
       const doc = await PDFLib.load(bytes);
@@ -281,7 +306,7 @@ describe('sanitizeWinAnsiText and markdownToPdfBytes', () => {
     it('keeps the full text of a cell longer than the old 30-character cutoff', async () => {
       const longCell = 'This cell has considerably more than thirty characters of content in it';
       const md = `| Field | Value |\n| --- | --- |\n| Note | ${longCell} |\n`;
-      const bytes = await markdownToPdfBytes(md);
+      const { bytes } = await markdownToPdfBytes(md);
 
       const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
       const pdf = await pdfjsLib.getDocument({ data: bytes.slice(), useSystemFonts: false })

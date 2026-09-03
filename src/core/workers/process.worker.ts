@@ -74,6 +74,7 @@ import {
   PDFName,
   PDFNumber,
   PDFObjectCopier,
+  type PDFObject,
   PDFOptionList,
   PDFPage,
   PDFRadioGroup,
@@ -104,7 +105,7 @@ import { corrupt, encrypted, fromUnknown, internal, unsupported } from '../error
 import type { ImagesToPdfOptions } from '../operations';
 import type { ImageResultStat } from '../compress-report';
 import { DOC_HAIRLINE_RGB, DOC_INK_RGB, DOC_REDACT_RGB } from '../doc-colors';
-import { markdownToPdfBytes, hadUnsupportedCharacter } from '../markdown-to-pdf';
+import { markdownToPdfBytes } from '../markdown-to-pdf';
 import {
   layoutBlocksToPdf,
   type PdfLayoutOptions,
@@ -2905,6 +2906,25 @@ async function pageContentStatements(
   return parseContentStream(tokenizeContentStream(merged));
 }
 
+/** What one `placementResolver` build produced, and whether it may be reused. */
+interface PlacementResolverBuild {
+  resolve: PlacementResolver;
+  /**
+   * False when anything in this subtree resolved its names against an
+   * *inherited* resource scope — a Form XObject with no `/Resources` of its own,
+   * which per spec reads the invoking scope's dictionary.
+   *
+   * This is what makes the decode cache safe to share across pages. A form that
+   * carries its own resources resolves to the same thing wherever it is drawn,
+   * so a letterhead repeated on 300 pages is decoded once. A form *without* them
+   * resolves against whichever page invoked it, so a cached entry would put page
+   * 1's images inside page 2's header — a wrong picture on a slide, silently.
+   * Those are never cached, and the flag bubbles up so a form that contains one
+   * is not cached either.
+   */
+  selfContained: boolean;
+}
+
 /**
  * A synchronous resolver over one `/Resources /XObject` dict, for
  * `findImagePlacements`.
@@ -2915,6 +2935,11 @@ async function pageContentStatements(
  * `MAX_FORM_DEPTH`, the same one the walker enforces, and `decoding` breaks a
  * cycle (a form that paints itself) without penalising a form legitimately
  * reachable from two places, which a plain "visited" set would.
+ *
+ * `cache` is shared across every page of one `imagePlacements` call, so the
+ * header form a 300-page document repeats is decoded once rather than once per
+ * page; see {@link PlacementResolverBuild.selfContained} for the one kind of
+ * form that is deliberately kept out of it.
  */
 async function placementResolver(
   xobjects: PDFDict | undefined,
@@ -2922,14 +2947,18 @@ async function placementResolver(
   depth: number,
   cache: Map<number, PlacementXObject>,
   decoding: Set<number>
-): Promise<PlacementResolver> {
+): Promise<PlacementResolverBuild> {
   const table = new Map<string, PlacementXObject>();
-  if (!xobjects || depth > MAX_FORM_DEPTH) return () => undefined;
+  let selfContained = true;
+  if (!xobjects || depth > MAX_FORM_DEPTH) return { resolve: () => undefined, selfContained };
 
   for (const [key, value] of xobjects.entries()) {
     const name = key.asString().replace(/^\//, '');
     const ref = value instanceof PDFRef ? value : undefined;
-    const stream = xobjects.lookup(key);
+    // Annotated, not inferred: this function is recursive and `selfContained`
+    // below is decided from the recursive call's own result, which is enough for
+    // TypeScript to call the chain from here to that call circular (TS7022).
+    const stream: PDFObject | undefined = xobjects.lookup(key);
     if (!(stream instanceof PDFStream)) continue;
     const subtype = nameOf(stream.dict.get(PDFName.of('Subtype')));
 
@@ -2974,7 +3003,7 @@ async function placementResolver(
     }
 
     const formResourcesRaw = stream.dict.get(PDFName.of('Resources'));
-    const formResources =
+    const formResources: PDFDict | undefined =
       formResourcesRaw instanceof PDFDict
         ? formResourcesRaw
         : formResourcesRaw instanceof PDFRef
@@ -2986,26 +3015,41 @@ async function placementResolver(
       formResources === xobjects
         ? xobjects
         : formResources?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+    // "Its own resources" in the sense the cache cares about: names resolved
+    // from the form's own dictionary rather than borrowed from the invoker's.
+    const inheritsScope = formResources === xobjects;
 
     // `numberArray` is the existing helper CMP/RED already read `/BBox` with —
     // it looks a ref through and refuses a short or non-numeric array.
     const matrix = numberArray(stream.dict, 'Matrix', 6);
     const bbox = numberArray(stream.dict, 'BBox', 4);
+    const nested: PlacementResolverBuild = await placementResolver(
+      nestedXObjects,
+      context,
+      depth + 1,
+      cache,
+      decoding
+    );
     const entry: PlacementXObject = {
       subtype: 'Form',
       ...(matrix ? { matrix: matrix as Matrix } : {}),
       ...(bbox ? { bbox: bbox as [number, number, number, number] } : {}),
       statements,
-      resolve: await placementResolver(nestedXObjects, context, depth + 1, cache, decoding)
+      resolve: nested.resolve
     };
+    // Reusable only if neither this form nor anything under it read a name out
+    // of an inherited scope; otherwise the entry belongs to the page that built
+    // it, and so does everything holding it.
+    const reusable = !inheritsScope && nested.selfContained;
+    if (!reusable) selfContained = false;
     if (ref) {
       decoding.delete(ref.objectNumber);
-      cache.set(ref.objectNumber, entry);
+      if (reusable) cache.set(ref.objectNumber, entry);
     }
     table.set(name, entry);
   }
 
-  return name => table.get(name);
+  return { resolve: name => table.get(name), selfContained };
 }
 
 /**
@@ -4899,10 +4943,11 @@ Q
   async markdownToPdf(
     markdown: string
   ): Promise<{ bytes: Uint8Array; hadUnsupportedCharacters: boolean }> {
-    const bytes = await markdownToPdfBytes(markdown);
-    return Comlink.transfer({ bytes, hadUnsupportedCharacters: hadUnsupportedCharacter() }, [
-      bytes.buffer
-    ]);
+    // The flag comes back with the bytes, from state local to that call: two
+    // conversions sharing this pooled worker instance used to read it off a
+    // module-level flag either could reset. See `markdown-to-pdf.ts`.
+    const { bytes, hadUnsupportedCharacters } = await markdownToPdfBytes(markdown);
+    return Comlink.transfer({ bytes, hadUnsupportedCharacters }, [bytes.buffer]);
   },
 
   async layoutBlocksToPdf(blocks, options, job) {
@@ -5130,6 +5175,18 @@ Q
     const dropped: Record<number, number> = {};
     const unreadable: { pageIndex: number; reason: string }[] = [];
 
+    // One cache for the whole call, not one per page. A letterhead, logo or
+    // watermark drawn through the same Form XObject on every page is one object,
+    // and rebuilding this map per page re-decoded and re-parsed its content
+    // stream once per page — N times the work for an answer that cannot differ.
+    // Only forms that carry their own `/Resources` are put in it; see
+    // `PlacementResolverBuild.selfContained` for why the rest must not be.
+    const formCache = new Map<number, PlacementXObject>();
+    // Shared for the same reason sharing it is safe: every path that adds to it
+    // removes again before returning, so it is empty between pages and only ever
+    // guards one in-flight recursion.
+    const decodingForms = new Set<number>();
+
     for (let i = 0; i < wanted.length; i++) {
       const pageIndex = wanted[i];
       await checkpoint(
@@ -5154,12 +5211,12 @@ Q
       }
       if (!statements) continue;
 
-      const resolve = await placementResolver(
+      const { resolve } = await placementResolver(
         pageXObjectDictOf(page, doc.context),
         doc.context,
         0,
-        new Map(),
-        new Set()
+        formCache,
+        decodingForms
       );
       // No `initialCtm`, deliberately: the walk reports **raw** user space, the
       // space the content stream's own `cm` operands are in. A page's displayed

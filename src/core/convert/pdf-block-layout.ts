@@ -26,9 +26,9 @@ import { DOC_HAIRLINE_RGB, SUMMARY_ACCENT_RGB } from '../doc-colors';
 import { corrupt } from '../errors';
 import {
   addLinkAnnotation,
-  hadUnsupportedCharacter,
-  resetUnsupportedCharacterFlag,
-  sanitizeWinAnsiText
+  newSubstitutionTally,
+  sanitizeWinAnsiText,
+  type SubstitutionTally
 } from '../markdown-to-pdf';
 import { checkpoint, type JobHandle } from '../workers/protocol';
 import {
@@ -186,7 +186,15 @@ export function wrapRuns(
   runs: readonly StyledRun[],
   fonts: FontSet,
   size: number,
-  maxWidth: number
+  maxWidth: number,
+  /**
+   * Records the WinAnsi substitutions this wrap made. Passed in by the caller
+   * rather than accumulated in a module-level flag: `layoutBlocksToPdf` shares a
+   * pooled worker with `markdownToPdfBytes`, and a shared flag let one job's
+   * reset erase the other's evidence. Optional so a caller that only measures
+   * text need not care.
+   */
+  tally?: SubstitutionTally
 ): Piece[][] {
   const lines: Piece[][] = [];
   let line: Piece[] = [];
@@ -218,7 +226,7 @@ export function wrapRuns(
     // Sanitise here rather than at parse time: the substitution is a *rendering*
     // limitation of the standard fonts, and a caller measuring the model's text
     // should see the document's own characters.
-    const clean = sanitizeWinAnsiText(run.text);
+    const clean = sanitizeWinAnsiText(run.text, tally);
 
     for (const token of clean.match(/\n|[^\S\n]+|\S+/g) ?? []) {
       if (token === '\n') {
@@ -324,7 +332,9 @@ export async function layoutBlocksToPdf(
   }
 
   await checkpoint(job, 0, 'Laying out the PDF');
-  resetUnsupportedCharacterFlag();
+  // Call-local, so a second conversion on this same pooled worker cannot reset
+  // it mid-layout and have this document reported as substitution-free.
+  const tally = newSubstitutionTally();
 
   const notes: string[] = [];
   const named = PAGE_SIZES[options.pageSize] ?? PAGE_SIZES.a4;
@@ -411,7 +421,7 @@ export async function layoutBlocksToPdf(
     markerText?: string,
     markerX?: number
   ): number => {
-    const lines = wrapRuns(runs, fonts, size, width);
+    const lines = wrapRuns(runs, fonts, size, width, tally);
     const lineHeight = size * LINE_RATIO;
     let firstPage = pageIndex;
     let drawnAny = false;
@@ -421,7 +431,7 @@ export async function layoutBlocksToPdf(
       if (!drawnAny) firstPage = pageIndex;
       y -= lineHeight;
       if (!drawnAny && markerText !== undefined && markerX !== undefined) {
-        page.drawText(sanitizeWinAnsiText(markerText), {
+        page.drawText(sanitizeWinAnsiText(markerText, tally), {
           x: markerX,
           y,
           size,
@@ -483,7 +493,8 @@ export async function layoutBlocksToPdf(
           TABLE_FONT_SIZE,
           // A column narrower than its own padding would give a negative wrap
           // width, which `wrapRuns` would turn into one character per line.
-          Math.max(1, (columnWidths[column] ?? columnWidths[0]) - CELL_PADDING_X * 2)
+          Math.max(1, (columnWidths[column] ?? columnWidths[0]) - CELL_PADDING_X * 2),
+          tally
         )
       );
       const lineCount = Math.max(1, ...wrapped.map(lines => lines.length));
@@ -637,7 +648,7 @@ export async function layoutBlocksToPdf(
       size: number,
       align: 'left' | 'center' | 'right'
     ): boolean => {
-      const lines = wrapRuns(runs, fonts, size, width);
+      const lines = wrapRuns(runs, fonts, size, width, tally);
       const lineHeight = size * LINE_RATIO;
       lines.forEach((pieces, index) => {
         if (pieces.length === 0) return;
@@ -704,7 +715,7 @@ export async function layoutBlocksToPdf(
       for (let rowIndex = 0; rowIndex < item.rows.length; rowIndex++) {
         const row = item.rows[rowIndex];
         const wrapped = row.map((cell, column) =>
-          wrapRuns(cell, fonts, size, Math.max(1, widths[column] - CELL_PADDING_X * 2))
+          wrapRuns(cell, fonts, size, Math.max(1, widths[column] - CELL_PADDING_X * 2), tally)
         );
         const lineCount = Math.max(1, ...wrapped.map(lines => lines.length));
         // A row states a *minimum* height in OOXML; the drawn height is whatever
@@ -864,6 +875,6 @@ export async function layoutBlocksToPdf(
     imageCount,
     outline,
     notes,
-    hadUnsupportedCharacters: hadUnsupportedCharacter()
+    hadUnsupportedCharacters: tally.substituted
   };
 }

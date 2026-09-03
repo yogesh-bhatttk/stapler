@@ -49,7 +49,7 @@ import {
   type PageSheetData,
   type XlsxPreviewItem
 } from '../convert/sheets';
-import { buildXlsx as buildXlsxFile } from '../convert/xlsx-writer';
+import { buildXlsx as buildXlsxFile, MAX_CELL_CHARS } from '../convert/xlsx-writer';
 import {
   EMPTY_DECK_MESSAGE,
   isEmptyPlan,
@@ -253,6 +253,40 @@ export interface ConvertJob {
   ): Promise<PptxBuildResult>;
 }
 
+/**
+ * Opens CNV-06's image archive inside the worker, or explains why it could not.
+ *
+ * Two builders need this and needed it identically: `buildDocx` embeds what is
+ * in the archive, `buildPptx` places it. Both open it *here* rather than on the
+ * main thread — unzipping a document's worth of image bytes is exactly the >50ms
+ * work the NFRs forbid there — and both have to treat a ZIP that will not reopen
+ * as costing the images and not the conversion: the text is already extracted
+ * and is worth handing over with the gap named.
+ *
+ * `{ level: 0 }` on the way in (CNV-06 stores rather than deflates, since PNG
+ * and JPEG are already compressed), so this is a copy per entry, not an inflate.
+ *
+ * The failure message differs by what the caller was going to do with the files,
+ * which is the only reason `kind` exists: "no images were embedded" and "no
+ * images were placed" are two different facts about the output.
+ */
+async function openImageArchive(
+  archive: Uint8Array,
+  kind: 'embedded' | 'placed'
+): Promise<{ files: Record<string, Uint8Array>; failure?: string }> {
+  try {
+    const { unzipSync } = await import('fflate');
+    return { files: unzipSync(archive) };
+  } catch (err) {
+    return {
+      files: {},
+      failure:
+        `No images were ${kind}: their archive could not be read ` +
+        `(${fromUnknown(err).message}).`
+    };
+  }
+}
+
 export const convertWorkerImpl: ConvertJob = {
   async docxToBlocks(bytes, job) {
     const { html, messages } = await readDocxAsHtml(bytes, job);
@@ -310,20 +344,8 @@ export const convertWorkerImpl: ConvertJob = {
 
     if (imageArchive && imageEntries.length > 0) {
       await checkpoint(job, 0, 'Reading the embedded images');
-      let files: Record<string, Uint8Array> = {};
-      try {
-        // `{ level: 0 }` on the way in (CNV-06 stores rather than deflates, since
-        // PNG and JPEG are already compressed), so this is a copy per entry, not
-        // an inflate.
-        const { unzipSync } = await import('fflate');
-        files = unzipSync(imageArchive);
-      } catch (err) {
-        // A ZIP we cannot reopen costs the images, not the conversion — the text
-        // is already extracted and is worth handing over with an explanation.
-        skipped.push(
-          `No images were embedded: their archive could not be read (${fromUnknown(err).message}).`
-        );
-      }
+      const { files, failure } = await openImageArchive(imageArchive, 'embedded');
+      if (failure) skipped.push(failure);
       imageCount = attachImageBlocks(model.pages, imageEntries, files, skipped);
     }
 
@@ -347,7 +369,20 @@ export const convertWorkerImpl: ConvertJob = {
     }
 
     await checkpoint(job, 0.4, 'Writing the spreadsheet');
-    const bytes = buildXlsxFile(plan.sheets, { title: options.title });
+    // `planWorkbook` has already shortened anything over Excel's cell limit and
+    // counted it into `plan.skipped`, so this never fires today. It is wired up
+    // anyway: the writer enforces the limit itself, and a shortened cell it had
+    // to fix on its own would otherwise be the one edit to the user's content
+    // nobody told them about.
+    const skipped = [...plan.skipped];
+    const bytes = buildXlsxFile(plan.sheets, {
+      title: options.title,
+      onTruncatedCells: cells =>
+        skipped.push(
+          `${cells} cell(s) were longer than Excel's ${MAX_CELL_CHARS}-character limit and were ` +
+            'truncated to fit.'
+        )
+    });
     await checkpoint(job, 1, 'Writing the spreadsheet');
 
     // The outline is derived from the very plan the file was written from, so
@@ -357,7 +392,7 @@ export const convertWorkerImpl: ConvertJob = {
         bytes,
         sheetCount: plan.sheets.length,
         tableCount: plan.tableCount,
-        skipped: plan.skipped,
+        skipped,
         outline: plan.outline
       },
       [bytes.buffer]
@@ -373,18 +408,9 @@ export const convertWorkerImpl: ConvertJob = {
     let files: Record<string, Uint8Array> = {};
     if (input.includeImages && imageArchive && imageArchive.length > 0) {
       await checkpoint(job, 0, 'Reading the embedded images');
-      try {
-        // `{ level: 0 }` on the way in (CNV-06 stores rather than deflates), so
-        // this is a copy per entry, not an inflate.
-        const { unzipSync } = await import('fflate');
-        files = unzipSync(imageArchive);
-      } catch (err) {
-        // A ZIP we cannot reopen costs the pictures, not the deck — the text is
-        // already extracted and is worth handing over with an explanation.
-        notes.push(
-          `No images were placed: their archive could not be read (${fromUnknown(err).message}).`
-        );
-      }
+      const opened = await openImageArchive(imageArchive, 'placed');
+      files = opened.files;
+      if (opened.failure) notes.push(opened.failure);
     }
 
     await checkpoint(job, 0.1, 'Planning the slides');

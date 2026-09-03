@@ -61,7 +61,7 @@ import {
 } from '../ui/tools/watermark/state';
 import type { WatermarkData } from './workers/process.worker';
 import { internal, unsupported, cancelled, isCancellation, fromUnknown } from './errors';
-import { hasXfaMarker, XFA_CONVERT_MESSAGE } from './pdf/xfa';
+import { hasXfaMarker, xfaConvertMessage } from './pdf/xfa';
 import type { DocxModel, DocxPage, DocxPreviewItem } from './convert/blocks';
 import {
   hasNoText,
@@ -1658,6 +1658,32 @@ export async function extractEmbeddedImages(
   return processWorker.lease(api => api.extractImages(bytes, pageIndices, job));
 }
 
+/**
+ * An `AbortController` that also aborts when `outer` does, plus the `release`
+ * that stops listening.
+ *
+ * Used where one conversion runs two passes at once (CNV-08 and CNV-12 read a
+ * page's text and its images from two different worker pools). The passes have
+ * to be cancellable *together*: the caller's own cancel must reach both, and a
+ * refusal raised by one — an XFA form, an encrypted file — must stop the other
+ * rather than leave a worker chewing through a document nobody will receive.
+ */
+function linkedAbort(outer?: AbortSignal): {
+  signal: AbortSignal;
+  abort: () => void;
+  release: () => void;
+} {
+  const controller = new AbortController();
+  if (outer?.aborted) controller.abort();
+  const forward = () => controller.abort();
+  outer?.addEventListener('abort', forward, { once: true });
+  return {
+    signal: controller.signal,
+    abort: () => controller.abort(),
+    release: () => outer?.removeEventListener('abort', forward)
+  };
+}
+
 /* ------------------------------------------------------------------ *
  * CNV-08 — PDF → Word (DOCX)
  * ------------------------------------------------------------------ */
@@ -1711,21 +1737,42 @@ export async function convertPdfToDocx(
   options: PdfToDocxOptions,
   jobOptions: JobOptions = {}
 ): Promise<PdfToDocxResult> {
-  if (hasXfaMarker(bytes)) throw unsupported(XFA_CONVERT_MESSAGE);
+  if (hasXfaMarker(bytes)) throw unsupported(xfaConvertMessage('Word document'));
 
   const skipped: string[] = [];
   const pages: DocxPage[] = [];
 
-  // Text first, and on its own document handle: `loadDocument` is also where
-  // encryption and an unreadable file surface, so nothing else runs until the
-  // document has been proved readable.
-  await renderWorker.lease(async api => {
+  // The two reads run *at once*. They take the same bytes, share nothing, and
+  // sit on different worker pools — `render` (pdf.js) for the text, `process`
+  // (pdf-lib) for the images — so running them one after the other only added
+  // the shorter one's time to the wait.
+  //
+  // Two things make that safe. The image pass gets a signal linked to the
+  // caller's, so a refusal from the text pass (XFA, encryption, an unreadable
+  // file) cancels it instead of leaving it running for a document nobody will
+  // receive. And the text pass is still *awaited first*, so it remains the
+  // authority on why a document was refused: a corrupt file has a pdf.js
+  // message and a pdf-lib message, and which one the user saw must not depend
+  // on which worker happened to fail first.
+  const images = linkedAbort(jobOptions.signal);
+
+  // Progress is combined rather than banded, because two concurrent passes
+  // reporting into two adjacent bands would move the bar backwards every time
+  // the slower one reported. Each fraction only rises, so their weighted sum
+  // only rises.
+  let textFraction = 0;
+  let imageFraction = 0;
+  const report = (label: string) =>
+    jobOptions.onProgress?.(textFraction * 0.6 + imageFraction * 0.15, label);
+
+  const textPass = renderWorker.lease(async api => {
     const { handle, pageCount, isXfa } = await api.loadDocument(bytes);
     try {
-      if (isXfa) throw unsupported(XFA_CONVERT_MESSAGE);
+      if (isXfa) throw unsupported(xfaConvertMessage('Word document'));
       for (let i = 0; i < pageCount; i++) {
         if (jobOptions.signal?.aborted) throw cancelled();
-        jobOptions.onProgress?.((i / pageCount) * 0.6, `Reading page ${i + 1} of ${pageCount}`);
+        textFraction = i / pageCount;
+        report(`Reading page ${i + 1} of ${pageCount}`);
         pages.push({ pageIndex: i, blocks: await api.extractPageBlocks(handle, i) });
       }
     } finally {
@@ -1733,18 +1780,35 @@ export async function convertPdfToDocx(
     }
   });
 
+  const imagePass = options.includeImages
+    ? extractEmbeddedImages(bytes, [], {
+        signal: images.signal,
+        onProgress: fraction => {
+          imageFraction = fraction ?? imageFraction;
+          report('Collecting embedded images');
+        }
+      })
+    : Promise.resolve(null);
+
   let imageArchive: Uint8Array | null = null;
   let imageEntries: ExtractedImageEntry[] = [];
-  if (options.includeImages) {
-    if (jobOptions.signal?.aborted) throw cancelled();
-    jobOptions.onProgress?.(0.6, 'Collecting embedded images');
-    const extracted = await extractEmbeddedImages(bytes, [], {
-      signal: jobOptions.signal,
-      onProgress: fraction =>
-        jobOptions.onProgress?.(0.6 + (fraction ?? 0) * 0.15, 'Collecting embedded images')
-    });
-    imageArchive = extracted.bytes;
-    imageEntries = extracted.entries;
+  try {
+    try {
+      await textPass;
+    } catch (err) {
+      // The text pass decides. Its failure cancels the image pass, and that
+      // pass's own rejection is swallowed so it cannot replace this one.
+      images.abort();
+      await imagePass.catch(() => {});
+      throw err;
+    }
+    const extracted = await imagePass;
+    if (extracted) {
+      imageArchive = extracted.bytes;
+      imageEntries = extracted.entries;
+    }
+  } finally {
+    images.release();
   }
 
   if (jobOptions.signal?.aborted) throw cancelled();
@@ -1952,7 +2016,7 @@ export async function convertPdfToXlsx(
   options: PdfToXlsxOptions,
   jobOptions: JobOptions = {}
 ): Promise<PdfToXlsxResult> {
-  if (hasXfaMarker(bytes)) throw unsupported(XFA_CONVERT_MESSAGE);
+  if (hasXfaMarker(bytes)) throw unsupported(xfaConvertMessage('Excel workbook'));
 
   const pages: PageSheetData[] = [];
 
@@ -1961,7 +2025,7 @@ export async function convertPdfToXlsx(
   await renderWorker.lease(async api => {
     const { handle, pageCount, isXfa } = await api.loadDocument(bytes);
     try {
-      if (isXfa) throw unsupported(XFA_CONVERT_MESSAGE);
+      if (isXfa) throw unsupported(xfaConvertMessage('Excel workbook'));
       for (let i = 0; i < pageCount; i++) {
         if (jobOptions.signal?.aborted) throw cancelled();
         jobOptions.onProgress?.((i / pageCount) * 0.8, `Reading page ${i + 1} of ${pageCount}`);
@@ -2163,22 +2227,38 @@ export async function convertPdfToPptx(
   options: PdfToPptxOptions,
   jobOptions: JobOptions = {}
 ): Promise<PdfToPptxResult> {
-  if (hasXfaMarker(bytes)) throw unsupported(XFA_CONVERT_MESSAGE);
+  if (hasXfaMarker(bytes)) throw unsupported(xfaConvertMessage('PowerPoint presentation'));
 
   const pages: PageSlideData[] = [];
   const notes: string[] = [];
 
-  // Text first, and on its own document handle: `loadDocument` is also where
-  // encryption and an unreadable file surface, so nothing else runs until the
-  // document has been proved readable — the same order `convertPdfToDocx` uses,
-  // and the reason a refused file cannot be half-converted.
-  await renderWorker.lease(async api => {
+  // The page text and the embedded images are read *at once*, from two
+  // different worker pools over the same bytes — `render` (pdf.js) and
+  // `process` (pdf-lib) — for the reason `convertPdfToDocx` gives at the same
+  // point: sequencing them only added the shorter pass's time to the wait.
+  //
+  // The text pass is still the one awaited first, so it stays the authority on
+  // why a document was refused (a corrupt file has both a pdf.js message and a
+  // pdf-lib one), and its failure aborts the image pass rather than leaving it
+  // reading a document nobody will receive. The *placement* pass still runs
+  // after both: it is only worth doing once there are images to place.
+  const images = linkedAbort(jobOptions.signal);
+
+  // Combined, not banded: two concurrent passes reporting into two adjacent
+  // bands would move the bar backwards whenever the slower one reported.
+  let textFraction = 0;
+  let imageFraction = 0;
+  const report = (label: string) =>
+    jobOptions.onProgress?.(textFraction * 0.5 + imageFraction * 0.12, label);
+
+  const textPass = renderWorker.lease(async api => {
     const { handle, pageCount, isXfa } = await api.loadDocument(bytes);
     try {
-      if (isXfa) throw unsupported(XFA_CONVERT_MESSAGE);
+      if (isXfa) throw unsupported(xfaConvertMessage('PowerPoint presentation'));
       for (let i = 0; i < pageCount; i++) {
         if (jobOptions.signal?.aborted) throw cancelled();
-        jobOptions.onProgress?.((i / pageCount) * 0.5, `Reading page ${i + 1} of ${pageCount}`);
+        textFraction = i / pageCount;
+        report(`Reading page ${i + 1} of ${pageCount}`);
         pages.push(await api.extractPageSlide(handle, i));
       }
     } finally {
@@ -2186,19 +2266,36 @@ export async function convertPdfToPptx(
     }
   });
 
+  const imagePass = options.includeImages
+    ? extractEmbeddedImages(bytes, [], {
+        signal: images.signal,
+        onProgress: fraction => {
+          imageFraction = fraction ?? imageFraction;
+          report('Collecting embedded images');
+        }
+      })
+    : Promise.resolve(null);
+
   let imageArchive: Uint8Array | null = null;
   let imageEntries: ExtractedImageEntry[] = [];
   let placements: ImagePlacementReport[] = [];
   let droppedPlacements: Record<number, number> = {};
 
-  if (options.includeImages) {
-    if (jobOptions.signal?.aborted) throw cancelled();
-    jobOptions.onProgress?.(0.5, 'Collecting embedded images');
-    const extracted = await extractEmbeddedImages(bytes, [], {
-      signal: jobOptions.signal,
-      onProgress: fraction =>
-        jobOptions.onProgress?.(0.5 + (fraction ?? 0) * 0.12, 'Collecting embedded images')
-    });
+  let extracted: Awaited<typeof imagePass>;
+  try {
+    try {
+      await textPass;
+    } catch (err) {
+      images.abort();
+      await imagePass.catch(() => {});
+      throw err;
+    }
+    extracted = await imagePass;
+  } finally {
+    images.release();
+  }
+
+  if (extracted) {
     imageArchive = extracted.bytes;
     imageEntries = extracted.entries;
 

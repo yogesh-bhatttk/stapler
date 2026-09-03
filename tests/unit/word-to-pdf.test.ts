@@ -41,6 +41,8 @@ import {
   DOCX_NOT_A_ZIP_MESSAGE,
   translateMammothError
 } from '../../src/core/convert/docx-reader';
+import { layoutBlocksToPdf } from '../../src/core/convert/pdf-block-layout';
+import { markdownToPdfBytes } from '../../src/core/markdown-to-pdf';
 import { StaplerError } from '../../src/core/errors';
 
 vi.mock('comlink', () => ({
@@ -429,6 +431,35 @@ describe('CNV-09 — DOCX to PDF round trip', () => {
     expect(result.hadUnsupportedCharacters).toBe(false);
     expect(result.notes).toEqual([]);
   }, 120_000);
+
+  it('does not report another conversion\u2019s substitutions as its own', async () => {
+    // `layoutBlocksToPdf` (this tool) and `markdownToPdfBytes` (CNV-05) both run
+    // inside the pooled `process` worker, which shares one instance once the
+    // pool is at capacity. They used to read one module-level flag that each
+    // reset on entry, so a Markdown export starting inside this layout's `await`
+    // decided what this document reported. Both answers must be the call's own.
+    const asciiBlocks: LayoutBlock[] = [
+      { kind: 'paragraph', runs: [{ text: 'Plain ASCII, nothing exotic.' }] }
+    ];
+    const cjkBlocks: LayoutBlock[] = [
+      { kind: 'paragraph', runs: [{ text: '\u65e5\u672c\u8a9e \u4e2d\u6587' }] }
+    ];
+
+    const [ascii, cjkMarkdown] = await Promise.all([
+      layoutBlocksToPdf(asciiBlocks, { pageSize: 'a4' }),
+      markdownToPdfBytes('# \u65e5\u672c\u8a9e\n\nMixed \u4e2d\u6587 text.')
+    ]);
+    expect(ascii.hadUnsupportedCharacters, 'the layout kept its own answer').toBe(false);
+    expect(cjkMarkdown.hadUnsupportedCharacters, 'and so did the Markdown export').toBe(true);
+
+    // …and the other way round: a substituting layout beside a clean export.
+    const [cjk, asciiMarkdown] = await Promise.all([
+      layoutBlocksToPdf(cjkBlocks, { pageSize: 'a4' }),
+      markdownToPdfBytes('# Plain ASCII\n\nNothing exotic here.')
+    ]);
+    expect(cjk.hadUnsupportedCharacters).toBe(true);
+    expect(asciiMarkdown.hadUnsupportedCharacters).toBe(false);
+  }, 60_000);
 
   it('paginates: content longer than one page produces more pages, in order', async () => {
     // The fixture fits on a single A4 page, so the page-break path needs its own

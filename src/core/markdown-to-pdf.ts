@@ -86,27 +86,28 @@ function flattenInlineTokens(tokens: InlineToken[] | undefined, fallbackText: st
  * failure, not a degradation. Until this exports through an embedded Unicode
  * font, the least-bad option is what a WinAnsi-only fallback has always had
  * to do: substitute and say so, never crash and never silently drop the whole
- * document. `sawUnsupportedCharacter` is set whenever a substitution happens,
- * so the caller can surface a clear, honest warning instead of pretending the
- * text made it through.
+ * document. The optional {@link SubstitutionTally} records that it happened, so
+ * the caller can surface a clear, honest warning instead of pretending the text
+ * made it through.
  *
- * **Two callers now share this flag** — `markdownToPdfBytes` here (CNV-05) and
- * `pdf-block-layout.ts`'s `layoutBlocksToPdf` (CNV-09), which both live in the
- * pooled `process` worker. It is module-global, so it is only correct while a
- * single worker instance never interleaves two conversions that read it: each
- * resets the flag at entry and reads it at exit, and an `await` from a second
- * job in between would let one conversion's substitution be reported against the
- * other's document. Do not add a third caller — or make either of these two
- * concurrently re-entrant — without moving this into the call's own scope.
+ * **The tally is deliberately a parameter, not a module-level flag.** It used to
+ * be one, shared by `markdownToPdfBytes` here (CNV-05) and `pdf-block-layout.ts`'s
+ * `layoutBlocksToPdf` (CNV-09) — both of which run inside the *pooled* `process`
+ * worker, which shares one instance once the pool is at capacity (capacity is 1
+ * on a two-core machine). Each call reset the flag on entry and read it at exit,
+ * so a second conversion starting during the first one's `await` reset the flag
+ * out from under it and the first document was reported as clean however much
+ * text it had substituted. A tally created inside the call cannot be reached by
+ * another job, whatever interleaves.
  */
-let sawUnsupportedCharacter = false;
-
-export function resetUnsupportedCharacterFlag(): void {
-  sawUnsupportedCharacter = false;
+export interface SubstitutionTally {
+  /** True once any codepoint has been replaced by `?` for this call. */
+  substituted: boolean;
 }
 
-export function hadUnsupportedCharacter(): boolean {
-  return sawUnsupportedCharacter;
+/** A fresh, call-local tally. */
+export function newSubstitutionTally(): SubstitutionTally {
+  return { substituted: false };
 }
 
 const WIN_ANSI_MAX_CODE_POINT = 0xff;
@@ -124,7 +125,7 @@ const WIN_ANSI_EXTRA_CODE_POINTS = new Set(
   )
 );
 
-export function sanitizeWinAnsiText(text: string): string {
+export function sanitizeWinAnsiText(text: string, tally?: SubstitutionTally): string {
   if (!text) return '';
   const mapped = text
     .replace(/[“”]/g, '"')
@@ -141,7 +142,7 @@ export function sanitizeWinAnsiText(text: string): string {
   for (const char of mapped) {
     const codePoint = char.codePointAt(0)!;
     if (codePoint > WIN_ANSI_MAX_CODE_POINT && !WIN_ANSI_EXTRA_CODE_POINTS.has(codePoint)) {
-      sawUnsupportedCharacter = true;
+      if (tally) tally.substituted = true;
       out += '?';
     } else {
       out += char;
@@ -151,10 +152,10 @@ export function sanitizeWinAnsiText(text: string): string {
 }
 
 /** Splits sanitized runs into words, dropping empty tokens from whitespace collapse. */
-function runsToWords(runs: InlineRun[]): Word[] {
+function runsToWords(runs: InlineRun[], tally: SubstitutionTally): Word[] {
   const words: Word[] = [];
   for (const run of runs) {
-    const clean = sanitizeWinAnsiText(run.text.replace(/\r/g, '').replace(/\n/g, ' '));
+    const clean = sanitizeWinAnsiText(run.text.replace(/\r/g, '').replace(/\n/g, ' '), tally);
     for (const part of clean.split(/\s+/)) {
       if (part.length > 0) words.push({ text: part, href: run.href });
     }
@@ -227,8 +228,19 @@ export function addLinkAnnotation(
   );
 }
 
-export async function markdownToPdfBytes(markdown: string): Promise<Uint8Array> {
-  resetUnsupportedCharacterFlag();
+/** A rendered markdown document, plus whether anything had to be substituted. */
+export interface MarkdownPdfResult {
+  bytes: Uint8Array;
+  /**
+   * True when at least one codepoint was replaced by `?`. Returned rather than
+   * read back off a module-level flag so two conversions sharing one pooled
+   * worker cannot report each other's substitutions — see {@link SubstitutionTally}.
+   */
+  hadUnsupportedCharacters: boolean;
+}
+
+export async function markdownToPdfBytes(markdown: string): Promise<MarkdownPdfResult> {
+  const tally = newSubstitutionTally();
   const doc = await PDFDocument.create();
   const fontNormal = await doc.embedFont(StandardFonts.Helvetica);
   const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
@@ -281,7 +293,7 @@ export async function markdownToPdfBytes(markdown: string): Promise<Uint8Array> 
   };
 
   const drawInlineWrapped = (runs: InlineRun[], font: PDFFont, size: number, indent = 0) => {
-    const words = runsToWords(runs);
+    const words = runsToWords(runs, tally);
     const lines = wrapWords(words, font, size, PAGE_WIDTH - MARGIN * 2 - indent);
     for (const line of lines) {
       advanceY(size * 1.5);
@@ -295,7 +307,7 @@ export async function markdownToPdfBytes(markdown: string): Promise<Uint8Array> 
 
   /** Word-wraps a table cell into as many lines as it needs, instead of truncating it. */
   const wrapCellLines = (text: string, font: PDFFont, size: number, maxWidth: number): string[] => {
-    const clean = sanitizeWinAnsiText(text);
+    const clean = sanitizeWinAnsiText(text, tally);
     if (!clean) return [''];
     return wordWrapPlain(clean, font, size, maxWidth);
   };
@@ -386,7 +398,7 @@ export async function markdownToPdfBytes(markdown: string): Promise<Uint8Array> 
     }
   }
 
-  return await doc.save();
+  return { bytes: await doc.save(), hadUnsupportedCharacters: tally.substituted };
 }
 
 /** The original flat-string word-wrap, kept for table cells and code lines. */

@@ -32,6 +32,7 @@
  *    The caller reports the image as left out; see `slides.ts`.
  */
 
+import { polygonBounds, type Box } from '../geometry';
 import {
   multiplyMatrix,
   transformPoint,
@@ -70,10 +71,17 @@ export interface PlacedImage {
   width: number;
   height: number;
   /**
-   * False when the CTM rotated, skewed or mirrored the unit square, so the
-   * rectangle above is its *bounding box* rather than its outline. A caller that
-   * cannot draw a rotated image (a PowerPoint picture frame can rotate, but only
-   * about its own centre) needs to know it is placing an approximation.
+   * False when the CTM rotated, skewed or mirrored the unit square, so drawing
+   * the image upright inside the rectangle above is an approximation of what the
+   * page paints. A caller that cannot reproduce the transform (a PowerPoint
+   * picture frame can rotate, but only about its own centre) needs to know that.
+   *
+   * Note the mirror case: `[-w 0 0 h x y]` is *geometrically* axis-aligned — the
+   * rectangle is its exact outline — but the image inside it is flipped, and a
+   * caller that placed it without saying so would draw the page wrong and call
+   * it exact. Same for a 180° turn, `[-w 0 0 -h x y]`, which has no skew at all.
+   * Both are reported here as not axis-aligned, because the question every
+   * caller is actually asking is "can I place this as-is?".
    */
   axisAligned: boolean;
 }
@@ -131,6 +139,23 @@ export const MAX_PLACEMENTS_PER_PAGE = 400;
 /** Below this, a matrix component counts as zero for the axis-aligned test. */
 const SKEW_EPSILON = 1e-6;
 
+/**
+ * True when the image can be drawn upright inside the reported rectangle and
+ * look like the page does.
+ *
+ * Two conditions, and the second one is the easy one to miss. Zero skew (`b`
+ * and `c`) means the rectangle is the outline rather than a bounding box — but
+ * a zero-skew matrix can still flip the unit square, and `[-w 0 0 h …]` (a
+ * horizontal mirror) or `[-w 0 0 -h …]` (a 180° turn) draw an image that is not
+ * the image a caller would place from these numbers alone. A negative scale
+ * term is exactly that flip, so both are excluded. `unitSquareBounds` has
+ * already rejected a zero scale by the time this is asked.
+ */
+function isAxisAligned(ctm: Matrix): boolean {
+  if (Math.abs(ctm[1]) >= SKEW_EPSILON || Math.abs(ctm[2]) >= SKEW_EPSILON) return false;
+  return ctm[0] > 0 && ctm[3] > 0;
+}
+
 function numberAt(operands: readonly Token[], index: number): number {
   const token = operands[index];
   if (!token) return NaN;
@@ -150,64 +175,51 @@ function nameOperand(operands: readonly Token[]): string {
   return String.fromCharCode(...token.bytes).slice(1);
 }
 
-/** The unit square through `ctm`, as an axis-aligned box in device space. */
-function unitSquareBounds(ctm: Matrix): {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-} | null {
-  const corners = [
-    transformPoint(ctm, 0, 0),
-    transformPoint(ctm, 1, 0),
-    transformPoint(ctm, 1, 1),
-    transformPoint(ctm, 0, 1)
-  ];
-  for (const corner of corners) {
-    if (!Number.isFinite(corner.x) || !Number.isFinite(corner.y)) return null;
+/**
+ * A quadrilateral through `ctm`, as an axis-aligned box in device space.
+ *
+ * The min/max is `geometry.ts`'s `polygonBounds` — the same one RED-07's marks
+ * are measured with — rather than a fourth hand-rolled copy of it. What is added
+ * here is the two rejections a placement needs and a bounding box does not: a
+ * corner that is not a finite number (a `cm` with a division by zero in it, or a
+ * matrix a producer wrote as garbage), and a zero-area result, which is a
+ * degenerate CTM painting no pixels. Reporting either would put an invisible,
+ * unplaceable object on the slide.
+ */
+function transformedBounds(
+  ctm: Matrix,
+  corners: readonly (readonly [number, number])[]
+): Box | null {
+  const points = corners.map(([x, y]) => transformPoint(ctm, x, y));
+  for (const point of points) {
+    if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return null;
   }
-  const xs = corners.map(corner => corner.x);
-  const ys = corners.map(corner => corner.y);
-  const x = Math.min(...xs);
-  const y = Math.min(...ys);
-  const width = Math.max(...xs) - x;
-  const height = Math.max(...ys) - y;
-  // A zero-area placement is a degenerate CTM (a zero scale, or a `cm` of
-  // nothing). It paints no pixels, so reporting it as an image on the slide
-  // would add an invisible, unplaceable object.
-  if (!(width > 0) || !(height > 0)) return null;
-  return { x, y, width, height };
+  const box = polygonBounds(points);
+  if (!(box.width > 0) || !(box.height > 0)) return null;
+  return box;
+}
+
+/** The unit square through `ctm` — where an image XObject's `Do` paints. */
+function unitSquareBounds(ctm: Matrix): Box | null {
+  return transformedBounds(ctm, [
+    [0, 0],
+    [1, 0],
+    [1, 1],
+    [0, 1]
+  ]);
 }
 
 /** A form's `/BBox` through `ctm`, as an axis-aligned device-space box. */
 function bboxBounds(
   ctm: Matrix,
   [llx, lly, urx, ury]: [number, number, number, number]
-): { x: number; y: number; width: number; height: number } | null {
-  const corners = [
-    transformPoint(ctm, llx, lly),
-    transformPoint(ctm, urx, lly),
-    transformPoint(ctm, urx, ury),
-    transformPoint(ctm, llx, ury)
-  ];
-  for (const corner of corners) {
-    if (!Number.isFinite(corner.x) || !Number.isFinite(corner.y)) return null;
-  }
-  const xs = corners.map(corner => corner.x);
-  const ys = corners.map(corner => corner.y);
-  const x = Math.min(...xs);
-  const y = Math.min(...ys);
-  const width = Math.max(...xs) - x;
-  const height = Math.max(...ys) - y;
-  if (!(width > 0) || !(height > 0)) return null;
-  return { x, y, width, height };
-}
-
-interface Box {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
+): Box | null {
+  return transformedBounds(ctm, [
+    [llx, lly],
+    [urx, lly],
+    [urx, ury],
+    [llx, ury]
+  ]);
 }
 
 /** `box` clipped to `clip`, or `null` when they do not meet. */
@@ -308,7 +320,7 @@ function walk(
         name,
         objectNumber: info.objectNumber,
         ...bounds,
-        axisAligned: Math.abs(ctm[1]) < SKEW_EPSILON && Math.abs(ctm[2]) < SKEW_EPSILON
+        axisAligned: isAxisAligned(ctm)
       });
       continue;
     }

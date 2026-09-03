@@ -34,7 +34,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { strFromU8, unzipSync } from 'fflate';
-import { PDFDocument, StandardFonts } from 'pdf-lib';
+import { PDFDocument, PDFName, StandardFonts } from 'pdf-lib';
 import {
   inlineImagePdf,
   PDF_TO_PPT,
@@ -72,7 +72,9 @@ import {
   readPptx,
   resolvePart
 } from '../../src/core/convert/pptx-reader';
-import { hasXfaMarker, XFA_CONVERT_MESSAGE } from '../../src/core/pdf/xfa';
+import { findImagePlacements } from '../../src/core/pdf/image-placements';
+import { parseContentStream, tokenizeContentStream } from '../../src/core/pdf/interpreter';
+import { hasXfaMarker, xfaConvertMessage } from '../../src/core/pdf/xfa';
 import { StaplerError } from '../../src/core/errors';
 import { encodePng } from '../../src/core/png';
 
@@ -96,6 +98,8 @@ vi.mock('../../src/core/workers/pdfjs-setup', async () => {
 let buildPptxCalls = 0;
 /** How many times the placement walk ran, so its phase can be told apart. */
 let placementCalls = 0;
+/** Text and image worker entries in the order they happened, to see the overlap. */
+let passOrder: string[] = [];
 
 vi.mock('../../src/core/workers', async () => {
   const { renderWorkerImpl } = await import('../../src/core/workers/render.worker');
@@ -111,15 +115,19 @@ vi.mock('../../src/core/workers', async () => {
   const renderApi = {
     loadDocument: (bytes: Bytes, password?: string) =>
       renderWorkerImpl.loadDocument(bytes.slice(), password),
-    extractPageSlide: (handle: string, pageIndex: number) =>
-      renderWorkerImpl.extractPageSlide(handle, pageIndex),
+    extractPageSlide: (handle: string, pageIndex: number) => {
+      passOrder.push('text');
+      return renderWorkerImpl.extractPageSlide(handle, pageIndex);
+    },
     extractText: (handle: string, pageIndex: number, mode: 'text' | 'markdown') =>
       renderWorkerImpl.extractText(handle, pageIndex, mode),
     closeDocument: (handle: string) => renderWorkerImpl.closeDocument(handle)
   };
   const processApi = {
-    extractImages: (bytes: Bytes, pageIndices: number[]) =>
-      processWorkerImpl.extractImages(bytes.slice(), pageIndices),
+    extractImages: (bytes: Bytes, pageIndices: number[]) => {
+      passOrder.push('images');
+      return processWorkerImpl.extractImages(bytes.slice(), pageIndices);
+    },
     imagePlacements: (
       bytes: Bytes,
       pageIndices: number[],
@@ -567,6 +575,29 @@ describe('CNV-12 — PDF to PPTX round trip', () => {
     expect(read.slides[0].shapes.filter(shape => shape.kind === 'picture')).toHaveLength(1);
   }, 180_000);
 
+  it('reads the text and the images at the same time, not one after the other', async () => {
+    // The same overlap `convertPdfToDocx` does, and the same evidence for it:
+    // sequenced, the image call can only land after the last page is read.
+    passOrder = [];
+    const progress: number[] = [];
+    const result = await convert(
+      await source(),
+      {},
+      {
+        onProgress: fraction => progress.push(fraction ?? 0)
+      }
+    );
+    expect(result.slideCount).toBeGreaterThan(1);
+    expect(passOrder).toContain('images');
+    expect(
+      passOrder.indexOf('images'),
+      'the image pass started before the last page was read'
+    ).toBeLessThan(passOrder.lastIndexOf('text'));
+    // And the bar still only moves forwards, with the two passes combined into
+    // one rising fraction rather than two adjacent bands.
+    expect([...progress].sort((a, b) => a - b)).toEqual(progress);
+  }, 180_000);
+
   it('reports determinate, monotonic progress across all three passes', async () => {
     // Not decoration: this is the evidence that the *real* `convertPdfToPptx`
     // ran its own sequence rather than a helper standing in for it — the text
@@ -792,7 +823,12 @@ describe('CNV-12 — unsupported input is refused, not half-converted', () => {
     );
     expect(failure).toBeInstanceOf(StaplerError);
     expect((failure as StaplerError).kind).toBe('UnsupportedFeature');
-    expect((failure as StaplerError).message).toBe(XFA_CONVERT_MESSAGE);
+    expect((failure as StaplerError).message).toBe(xfaConvertMessage('PowerPoint presentation'));
+    // The refusal names *this* conversion's output, not another tool's: a shared
+    // constant used to tell every caller their "Word document" would be wrong.
+    expect((failure as StaplerError).message).toContain(
+      'a converted PowerPoint presentation would'
+    );
     // Nothing was written, and nothing was even attempted.
     expect(buildPptxCalls).toBe(0);
     // …and the fixture the conversion is meant to accept is not a false positive.
@@ -1062,12 +1098,143 @@ describe('CNV-12 — image placement comes from the content stream', () => {
     expect(read.slides[0].text).toContain('Page with an inline image');
   }, 120_000);
 
+  /** `findImagePlacements` over a literal content stream, with one image resource. */
+  function placementsFor(stream: string) {
+    const statements = parseContentStream(tokenizeContentStream(new TextEncoder().encode(stream)));
+    return findImagePlacements(statements, name =>
+      name === 'Im0' ? { subtype: 'Image', objectNumber: 7 } : undefined
+    );
+  }
+
+  it('reports a mirrored image as not axis-aligned, so the caller can disclose it', () => {
+    // Zero skew, so the old test (`|b| < ε && |c| < ε`) called this exact — but
+    // a negative `a` flips the image left-to-right inside the very same
+    // rectangle. Placed upright and reported as exact, the deck would show the
+    // picture backwards and say nothing.
+    const mirrored = placementsFor('q -100 0 0 100 200 200 cm /Im0 Do Q');
+    expect(mirrored.placements).toHaveLength(1);
+    expect(mirrored.placements[0].axisAligned).toBe(false);
+    // The bounding box is still right: the mirror is about orientation only.
+    expect(mirrored.placements[0].x).toBeCloseTo(100, 6);
+    expect(mirrored.placements[0].width).toBeCloseTo(100, 6);
+    expect(mirrored.placements[0].height).toBeCloseTo(100, 6);
+
+    // A vertical flip is the same problem the other way round, and a 180° turn
+    // (both terms negative) has no skew at all yet draws upside down.
+    expect(placementsFor('q 100 0 0 -100 200 300 cm /Im0 Do Q').placements[0].axisAligned).toBe(
+      false
+    );
+    expect(placementsFor('q -100 0 0 -100 300 300 cm /Im0 Do Q').placements[0].axisAligned).toBe(
+      false
+    );
+
+    // The ordinary placement is unchanged — this must not warn on every image.
+    const plain = placementsFor('q 100 0 0 100 200 200 cm /Im0 Do Q');
+    expect(plain.placements[0].axisAligned).toBe(true);
+    expect(plain.placements[0].x).toBeCloseTo(200, 6);
+  });
+
   it('places nothing, and complains about nothing, for a page with no images', async () => {
     const result = await convert(await textPdf(2));
     expect(result.imageCount).toBe(0);
     expect(result.slideCount).toBe(2);
     expect(result.notes).toEqual([]);
   }, 120_000);
+});
+
+describe('CNV-12 — the Form XObject decode cache is shared across pages, and safe', () => {
+  /**
+   * Two pages, three forms:
+   *
+   *  • `/Shared` carries its own `/Resources` and is drawn by both pages — the
+   *    letterhead case the cache exists for. One object, one decode.
+   *  • `/Borrow` has *no* `/Resources`, so per spec its `/Im Do` reads the
+   *    invoking page's dictionary — and each page maps `/Im` to a different
+   *    image. A cache keyed only by object number would hand page 2 the entry
+   *    built for page 1 and place page 1's picture on page 2's slide.
+   */
+  async function twoPagesSharingForms() {
+    const doc = await PDFDocument.create();
+    const context = doc.context;
+    const image = (label: string) =>
+      context.register(
+        context.stream(new Uint8Array([0, 255, 0, 255]), {
+          Type: 'XObject',
+          Subtype: 'Image',
+          Width: 2,
+          Height: 2,
+          ColorSpace: 'DeviceGray',
+          BitsPerComponent: 8,
+          Name: label
+        })
+      );
+
+    const sharedImage = image('Shared');
+    const pageOneImage = image('One');
+    const pageTwoImage = image('Two');
+
+    const shared = context.register(
+      context.stream('q 40 0 0 40 10 10 cm /ImS Do Q', {
+        Type: 'XObject',
+        Subtype: 'Form',
+        BBox: [0, 0, 400, 400],
+        Resources: { XObject: { ImS: sharedImage } }
+      })
+    );
+    // No `/Resources` at all: this is the form that inherits the page's scope.
+    const borrow = context.register(
+      context.stream('q 60 0 0 60 100 100 cm /Im Do Q', {
+        Type: 'XObject',
+        Subtype: 'Form',
+        BBox: [0, 0, 400, 400]
+      })
+    );
+
+    for (const own of [pageOneImage, pageTwoImage]) {
+      const page = doc.addPage([400, 400]);
+      page.node.set(
+        PDFName.of('Resources'),
+        context.obj({ XObject: { Shared: shared, Borrow: borrow, Im: own } })
+      );
+      page.node.set(
+        PDFName.of('Contents'),
+        context.register(context.stream('/Shared Do /Borrow Do'))
+      );
+    }
+
+    return {
+      bytes: await doc.save(),
+      shared: sharedImage.objectNumber,
+      one: pageOneImage.objectNumber,
+      two: pageTwoImage.objectNumber
+    };
+  }
+
+  it('reuses a self-contained form across pages without leaking a page-scoped one', async () => {
+    const { processWorkerImpl } = await import('../../src/core/workers/process.worker');
+    const fixture = await twoPagesSharingForms();
+    const { placements } = await processWorkerImpl.imagePlacements(fixture.bytes, []);
+
+    const onPage = (index: number) =>
+      placements.filter(placement => placement.pageIndex === index).map(p => p.objectNumber);
+
+    // The shared letterhead lands on both pages — the cache hit that makes this
+    // one decode instead of one per page.
+    expect(onPage(0)).toContain(fixture.shared);
+    expect(onPage(1)).toContain(fixture.shared);
+
+    // …and the resource-less form still resolves against *its own* page. This is
+    // the assertion a naively shared cache fails: page 2 would report page 1's
+    // image, drawn at page 1's picture, silently.
+    expect(onPage(0)).toContain(fixture.one);
+    expect(onPage(0)).not.toContain(fixture.two);
+    expect(onPage(1)).toContain(fixture.two);
+    expect(onPage(1)).not.toContain(fixture.one);
+
+    // Each page paints exactly the two images its content stream names.
+    expect(onPage(0)).toHaveLength(2);
+    expect(onPage(1)).toHaveLength(2);
+  }, 60_000);
 });
 
 describe('CNV-12 — a page whose box does not start at the origin', () => {
@@ -1688,19 +1855,33 @@ describe('CNV-12 — the mandatory-preview gate', () => {
   it('starts closed, opens only on a preview, and closes again on reset', async () => {
     const { commitGate } = await import('../../src/ui/tools/commit-gate');
     const state = await import('../../src/ui/tools/convert/pdf-to-ppt-state');
+    const store = await import('../../src/core/store');
+    const { historyVersion } = await import('../../src/core/history');
 
     // Importing the panel's state module is what arms the gate, so the save
     // action is blocked before the panel has ever been mounted.
     expect(commitGate('pdf-to-ppt')).toBe(state.PDF_TO_PPT_GATE);
     expect(state.pdfToPptPreview.value).toBeNull();
 
-    state.setPdfToPptPreview(result(), 'doc-1');
+    // A preview is only *valid* for the document that is actually open, at the
+    // revision it was read at — so the gate is armed with both.
+    store.activeDocId.value = 'doc-1';
+    state.setPdfToPptPreview(result(), 'doc-1', historyVersion.value);
+    expect(commitGate('pdf-to-ppt')).toBeNull();
+
+    // A preview of *another* document leaves it shut. The gate now computes the
+    // same staleness rule the save handler enforces, so it cannot render an
+    // enabled button over bytes that handler would refuse.
+    state.setPdfToPptPreview(result(), 'doc-other', historyVersion.value);
+    expect(commitGate('pdf-to-ppt')).toBe(state.PDF_TO_PPT_GATE);
+    state.setPdfToPptPreview(result(), 'doc-1', historyVersion.value);
     expect(commitGate('pdf-to-ppt')).toBeNull();
     expect(state.pdfToPptPreviewDocId.value).toBe('doc-1');
 
     state.resetPdfToPptPreview();
     expect(commitGate('pdf-to-ppt')).toBe(state.PDF_TO_PPT_GATE);
     expect(state.pdfToPptPreview.value).toBeNull();
+    store.activeDocId.value = null;
     expect(state.pdfToPptPreviewDocId.value).toBeNull();
   });
 
@@ -1736,6 +1917,13 @@ describe('CNV-12 — the mandatory-preview gate', () => {
     expect(store.documents.value[0].pages[0].rotation).toBe(90);
 
     expect(state.pdfToPptPreviewIsStale(doc.id)).toBe(true);
+    // …and the gate closed on the edit *itself*, with no panel mounted to
+    // notice. It used to be set only where a preview was installed, so the
+    // action bar kept rendering an enabled Save button over the pre-edit bytes
+    // until the panel re-rendered and dropped them.
+    expect(commitGate('pdf-to-ppt'), 'the gate closed without the panel').toBe(
+      state.PDF_TO_PPT_GATE
+    );
     state.resetPdfToPptPreview();
     expect(commitGate('pdf-to-ppt')).toBe(state.PDF_TO_PPT_GATE);
 

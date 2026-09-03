@@ -23,7 +23,7 @@
  * opens Acrobat, Preview or Chrome's viewer.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { zipSync, strToU8, unzipSync, unzlibSync } from 'fflate';
+import { zipSync, strFromU8, strToU8, unzipSync, unzlibSync } from 'fflate';
 import { PDFDocument, PDFName, PDFArray, PDFRawStream } from 'pdf-lib';
 import { EXCEL_TO_PDF, excelToPdfXlsx } from '../e2e/fixtures';
 import {
@@ -39,6 +39,7 @@ import {
   XLSX_NOT_A_ZIP_MESSAGE,
   XLSX_NO_SHEETS_MESSAGE,
   XLSX_SHEET_EMPTY_TEXT,
+  XLSX_SHEET_FORMULAS_ONLY_TEXT,
   XLSX_SHEET_UNREADABLE_TEXT,
   bandColumns,
   cellAddress,
@@ -48,8 +49,11 @@ import {
   hiddenColumnsNote,
   hiddenRowsNote,
   hiddenSheetsNote,
+  decodeXmlPart,
+  duplicateSheetNamesNote,
   isCompleteWorksheetPart,
   readXlsxAsBlocks,
+  resolveWorkbookTarget,
   rowCapNote,
   columnCapNote,
   translateSheetJsError,
@@ -908,6 +912,57 @@ describe('CNV-11 — the caps, each of which reports what it left out', () => {
     expect(table.rows).toHaveLength(1);
   }, 60_000);
 
+  it('does not call a sheet of uncalculated formulas empty', async () => {
+    // Every cell is a formula whose cached value is missing, so nothing widens
+    // the grid and the extent stays empty — which used to land on "This sheet is
+    // empty." The sheet is not empty; it is full of formulas nobody calculated,
+    // and this module's own rule is that emptiness is never assumed.
+    const bytes = await sheetFrom([[]], 'Formulas', sheet => {
+      sheet.A1 = { t: 'n', f: 'SUM(B1:B2)' };
+      sheet.A2 = { t: 'n', f: 'SUM(B1:B3)' };
+      sheet['!ref'] = 'A1:A2';
+    });
+    const { blocks, sheets, notes } = await readXlsxAsBlocks(bytes);
+
+    expect(sheets[0].empty, 'not empty — it holds cells').toBe(false);
+    expect(sheets[0].unreadable, 'and not damaged either').toBe(false);
+    expect(blocks.map(textOf)).toEqual(['Formulas', XLSX_SHEET_FORMULAS_ONLY_TEXT]);
+    expect(blocks.map(textOf)).not.toContain(XLSX_SHEET_EMPTY_TEXT);
+    // Reported through the diagnostic that names the real cause, with both cells.
+    expect(notes).toContain(uncachedFormulaNote(2));
+  }, 60_000);
+
+  it('does not blame uncalculated formulas for rows the row cap removed', async () => {
+    // The count is a diagnostic: it says "these cells are blank because nobody
+    // calculated them". A formula past the row cap is missing because of the
+    // cap, which has its own note, so counting it there sends the user looking
+    // in the wrong place.
+    const rows = Array.from({ length: MAX_SHEET_ROWS + 5 }, (_, index) => [`r${index + 1}`]);
+    const bytes = await sheetFrom(rows, 'Capped', sheet => {
+      // One inside the drawn range, one well past the cap.
+      sheet.B1 = { t: 'n', f: 'SUM(A1:A1)' };
+      sheet[`B${MAX_SHEET_ROWS + 4}`] = { t: 'n', f: 'SUM(A1:A2)' };
+      sheet['!ref'] = `A1:B${MAX_SHEET_ROWS + 5}`;
+    });
+    const { notes } = await readXlsxAsBlocks(bytes);
+
+    expect(notes).toContain(rowCapNote('Capped', MAX_SHEET_ROWS + 5));
+    expect(notes, 'only the in-range formula is counted').toContain(uncachedFormulaNote(1));
+    expect(notes).not.toContain(uncachedFormulaNote(2));
+  }, 60_000);
+
+  it('does not count an uncalculated formula in a hidden row', async () => {
+    const bytes = await sheetFrom([['visible'], ['also visible']], 'Masked2', sheet => {
+      sheet['!rows'] = [undefined, { hidden: true }];
+      sheet.B2 = { t: 'n', f: 'SUM(A1:A1)' };
+      sheet['!ref'] = 'A1:B2';
+    });
+    const { notes } = await readXlsxAsBlocks(bytes);
+
+    expect(notes).toContain(hiddenRowsNote('Masked2', 1));
+    expect(notes.some(note => note.includes('carried no cached result'))).toBe(false);
+  }, 60_000);
+
   it('says a sheet is empty when every row with content in it is hidden', async () => {
     const bytes = await sheetFrom([['visible header'], ['hidden body']], 'Masked', sheet => {
       sheet['!rows'] = [{ hidden: true }, { hidden: true }];
@@ -1085,6 +1140,77 @@ describe('CNV-11 — a damaged worksheet is never reported as an empty one', () 
       expect(result.notes.join(' ')).not.toContain('could not be read');
     }
   }, 180_000);
+
+  it('reads a part that declares itself UTF-16 instead of calling it damaged', () => {
+    // Rare, but not hypothetical: the OOXML spec allows it, and a UTF-16 part
+    // decoded as UTF-8 is a string of NULs in which none of this module's
+    // patterns match — so an intact worksheet would be reported as *damaged*,
+    // which is a false statement about the user's file.
+    const xml = '<?xml version="1.0" encoding="UTF-16"?><worksheet><sheetData/></worksheet>';
+    const utf16 = (text: string, bom: boolean) => {
+      const source = bom ? `\ufeff${text}` : text;
+      const out = new Uint8Array(source.length * 2);
+      for (let i = 0; i < source.length; i++) {
+        const code = source.charCodeAt(i);
+        out[i * 2] = code & 0xff;
+        out[i * 2 + 1] = code >> 8;
+      }
+      return out;
+    };
+
+    expect(decodeXmlPart(utf16(xml, true))).toBe(xml);
+    // No BOM either: `<` followed by NUL is the shape of a UTF-16LE declaration.
+    expect(decodeXmlPart(utf16(xml, false))).toBe(xml);
+    expect(isCompleteWorksheetPart(utf16(xml, true))).toBe(true);
+    expect(isCompleteWorksheetPart(utf16(xml, false))).toBe(true);
+
+    // UTF-8 is unchanged, and an encoding nothing can decode falls back to it
+    // rather than throwing.
+    expect(decodeXmlPart(strToU8('<?xml version="1.0" encoding="UTF-8"?><a/>'))).toBe(
+      '<?xml version="1.0" encoding="UTF-8"?><a/>'
+    );
+    expect(decodeXmlPart(strToU8('<?xml version="1.0" encoding="x-made-up"?><a/>'))).toContain(
+      '<a/>'
+    );
+  });
+
+  it('resolves a rel target that climbs out of xl/, and one written absolute', () => {
+    // `Target="../xl/sheets/custom.xml"` is legal OPC. Left unresolved it names
+    // no ZIP entry at all, the worksheet part cannot be located, and this module
+    // reports a sheet it could have read as damaged.
+    expect(resolveWorkbookTarget('../xl/sheets/custom.xml')).toBe('xl/sheets/custom.xml');
+    expect(resolveWorkbookTarget('worksheets/../worksheets/sheet2.xml')).toBe(
+      'xl/worksheets/sheet2.xml'
+    );
+    // The three shapes that already worked, unchanged.
+    expect(resolveWorkbookTarget('worksheets/sheet1.xml')).toBe('xl/worksheets/sheet1.xml');
+    expect(resolveWorkbookTarget('./worksheets/sheet1.xml')).toBe('xl/worksheets/sheet1.xml');
+    expect(resolveWorkbookTarget('/xl/worksheets/sheet1.xml')).toBe('xl/worksheets/sheet1.xml');
+    // A `..` that would climb above the package root is dropped: there is no
+    // entry up there, and a path outside the ZIP is not one this reads.
+    expect(resolveWorkbookTarget('../../../etc/passwd')).toBe('etc/passwd');
+  });
+
+  it('says so when a workbook declares the same sheet name twice', async () => {
+    // Malformed input Excel will not write and refuses to open, but SheetJS
+    // parses: its `Sheets` map is keyed by name, so the second sheet has already
+    // overwritten the first before this module sees either. Nothing can recover
+    // the lost sheet — but a PDF showing one grid twice under one heading, with
+    // no mention that a sheet is missing, is the silent loss.
+    const XLSX = await import('xlsx');
+    const book = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([['first']]), 'Alpha');
+    XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([['second']]), 'Beta');
+    const parts = unzipSync(
+      new Uint8Array(XLSX.write(book, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer)
+    );
+    parts['xl/workbook.xml'] = strToU8(
+      strFromU8(parts['xl/workbook.xml']).replace('name="Beta"', 'name="Alpha"')
+    );
+
+    const { notes } = await readXlsxAsBlocks(zipSync(parts));
+    expect(notes).toContain(duplicateSheetNamesNote(['Alpha']));
+  }, 60_000);
 
   it('decides intactness from the part itself, so the rule is checkable in isolation', () => {
     const part = (xml: string) => isCompleteWorksheetPart(strToU8(xml));
