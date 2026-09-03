@@ -4015,9 +4015,324 @@ is empty." and not the new damaged-sheet message.
 
 ### CNV-12 · PDF → PowerPoint (PPTX) — `XL` `P2`
 
-**Status: Not started.** The most novel surface of the six — no existing reader
-precedent in the codebase for the source direction, since PDF→PPTX still starts from
-pdf.js's existing page/text/image extraction, same as CNV-08.
+**Status: Done, reviewed.** Both acceptance criteria are met against real output
+bytes, with one half of the first explicitly **unverifiable here** (see "Not
+verifiable here" below). Ships labeled beta with a mandatory preview per §5.5,
+same policy as CNV-08..11. An independent audit followed; it confirmed the
+`pptxgenjs` zero-network argument and found one real correctness bug (a cropped
+page displaced every line and picture by the crop's origin) plus one undisclosed
+gap (in-page rotated text flattened to horizontal at the wrong size). Both are
+fixed, and limitations 10 and 11 now say what remains — see **"Second review
+pass"** at the end of this entry.
+
+**Read the limitations before the rest of this entry.** This is the widest
+fidelity gap of the six conversion tools and the ticket says the beta copy has to
+say so plainly, so the twelve limitations are a `core/` constant
+(`PPTX_LIMITATIONS` in `src/core/convert/slides.ts`) that the panel renders in
+full **before** the conversion runs — the panel and the converter cannot state
+different ones, and `pdf-to-ppt.spec.ts` asserts three of them as *rendered
+text*. In plain terms, what this tool produces is:
+
+1. **One text box per line of the page, and nothing else.** No paragraphs, no
+   bullets, no outline, no title placeholders, no grouping. A PDF states none of
+   those and none is invented.
+2. **No reflow.** Edit a box and it will not re-wrap with the rest of the slide,
+   because nothing on the slide is connected to anything else on it. This is the
+   single biggest gap between "a deck" and what this writes.
+3. **No fonts.** Every box uses the deck's own theme font at the size the PDF
+   used, so line widths differ from the original and a long line can overrun its
+   box (`wrap: false` — see below for why that is the lesser evil).
+4. **All text is black.** The PDF's text colour is not read, so white-on-dark or
+   coloured type arrives as black type.
+5. **No vectors at all.** Tables, columns, rules, borders, backgrounds, every
+   other drawing on the page: absent. Only text and embedded raster images are
+   placed. A PDF table therefore arrives as a scatter of individually positioned
+   cell boxes with no grid drawn around them.
+6. **An OCR'd scan's invisible text layer becomes *visible* black text over the
+   page image**, because PowerPoint has no invisible text. The tool ships two
+   switches for exactly this and names the case in its copy.
+7. **One slide size for the whole deck** — PowerPoint allows no other. It is the
+   *first page's* displayed size; every other size is scaled uniformly, centred,
+   and *reported per document* in the "left out" list.
+8. **JBIG2 and JPEG 2000 images cannot be embedded**, are named in the preview,
+   and are left in the PDF rather than re-encoded (CMP-03's and CNV-08's rule).
+9. **Image transparency is not carried across** — a masked image is opaque, and
+   says so.
+10. **Positioning is approximate, and the approximation is *vertical*.**
+    Rewritten in the second review pass: this used to say a line "can sit a point
+    or two" from where the PDF drew it, which understated a real bug — see
+    "Second review pass" below. What is measured from the page is where a line
+    starts and how wide it is; what is *not* stated by any PDF is how far above
+    its baseline a box has to begin, so ordinary Latin text metrics are assumed
+    (0.80 em ascent, 1.20 em line height — chosen, not derived). A line of Latin
+    text lands within about a point of where the page drew it; a face with
+    unusual metrics, or a script whose glyphs rise higher than Latin ones (CJK,
+    Devanagari), can sit further off. Nothing is displaced by the page's **crop**
+    — a cropped or offset-origin page is placed against the box the reader sees,
+    not against raw PDF coordinates. `W n` clip paths are still not applied, so
+    an image the page clips with one is placed at its unclipped size (a Form
+    XObject's own `/BBox` **is** applied — see below).
+11. **Text drawn at an angle is placed at that angle, but not reproduced
+    exactly.** Added in the second review pass, where the previous behaviour —
+    silently flattening it to horizontal at a hardcoded 12pt — was found
+    undisclosed. A diagonal watermark or a sideways column header now gets its
+    real angle and its real type size, both read off the run's own transform.
+    What is still not reproduced: each *run* of a rotated line becomes its own
+    text box rather than being joined into one, and a **mirrored** transform is
+    placed upright inside the same frame rather than turned. Both are named per
+    page in the preview, the way a rotated *image* already was.
+12. **Links, annotations, form fields, bookmarks and page labels** are not
+    carried into the deck.
+
+New tool `pdf-to-ppt` (group Convert, `Save .pptx`, canvas `grid`). Three
+workers, sequenced by `convertPdfToPptx` in `src/core/operations.ts`, on
+CNV-08's shape:
+
+- **`render`** (pdf.js) gains `extractPageSlide`, which reduces a page to "one
+  positioned line of text per line" plus the geometry a slide needs. A third page
+  pass rather than a re-use of `extractPageBlocks` or `extractPageSheet`, for the
+  reason the latter's own comment gives about the former: the answer is a
+  different shape, and deriving it from a block model would mean un-merging
+  paragraphs that model deliberately merged. Line grouping is still
+  `text-layout.ts`'s `layoutLines`, so a line here is the same line CNV-04's
+  text export writes.
+- **`process`** (pdf-lib) gains `imagePlacements`, and this is the real new
+  capability of the ticket — see below.
+- **`convert`** gains `buildPptx`, which plans the deck (`convert/slides.ts`,
+  pure) and writes it (`convert/pptx-writer.ts`, the only module that touches
+  `pptxgenjs`).
+
+**The thing this ticket had to build that no prior one did: where a page
+*draws* an image.** CNV-06's `extractImages` answers "which images does this
+page hold", from the page's `/Resources /XObject` dictionary — and CNV-08's
+`blocks.ts` states outright that it therefore cannot reconstruct where an image
+sat, appending images after the page's text instead. That is an honest answer for
+a Word document and a useless one for a slide: "one slide per page at the page's
+own size" only means something if a picture lands where the page put it. So
+`src/core/pdf/image-placements.ts` walks the page's **content stream** and reports
+the device-space rectangle of every `Do` that paints an image. It is not new
+machinery: the tokenizer, the parser, the matrix algebra and the graphics-state
+stack are all RED-02's `interpreter.ts`, the same code that decides which
+operators a redaction removes, and this is a second (much smaller) consumer of
+them. A private `q`/`Q`/`cm` walker for the PowerPoint export would have been two
+implementations that could disagree about one page.
+
+Four things about that walk are worth stating because each is a decision:
+
+- **Nothing is decoded.** CMP-03 resolves an image's object number by *awaiting
+  pdf.js's decoded pixels* — seconds of work and tens of megabytes for a number
+  the resource dictionary already states. Here the object number comes from the
+  `/XObject` entry's own indirect reference, and matching to `extractImages` is by
+  `(pageIndex, objectNumber)`, the one identifier both halves share.
+- **Form XObjects are followed**, with the form's `/Matrix` composed in the same
+  order `interpreter.ts` uses and the form's `/BBox` applied as a clip, because a
+  form's content is clipped to it per spec — without that, a large image shown
+  through a small window would be placed at its unclipped size, which is a visible
+  lie about the page. `tests/e2e/fixtures.ts`'s `pdfToPptFormXObjectPdf()` is a
+  page whose *only* image is inside a form with a non-trivial matrix **and** a
+  clipping `/BBox`; the test asserts the picture comes out 60 × 100 pt at
+  (100, 100) from the top, and that it is narrower than it is tall — which it
+  would not be if the clip were skipped.
+- **Every placement is its own picture.** CMP-03's `imagePlacements` in
+  `render.worker.ts` collapses repeated draws to the largest, because it only
+  wants a re-encode size; collapsing here would silently drop the second copy of a
+  logo drawn in a header and again in a footer. The test asserts the same image
+  object comes out at *two different sizes* on slides 1 and 4.
+- **A placement that cannot be matched is reported, never guessed.** A direct
+  (non-indirect) image object has no number, so it names itself in the "left out"
+  list (`/Im9 … stored directly in the page`). A page whose content stream uses a
+  filter chain we cannot decode is named too — "their text is still on the slide;
+  their pictures were left out" — rather than reported as having no images, which
+  would be a false claim about the user's document. And an image present in the
+  resources but *never painted* is reported as left out with "nothing visible on
+  the page is missing", because the two lists are compared rather than assumed to
+  agree.
+
+**One real defect found and fixed while building this, worth naming because it
+is the class the CNV-11 audit was fishing for: a message that misdescribed its
+own input.** RED-02's `parseContentStream` **throws** on the `ID` operator — an
+inline image's binary payload sits directly in the operator stream, so tokenising
+it yields garbage tokens that can contain byte sequences reading as `q`, `Q`,
+`cm` or `Do`, which would corrupt the CTM and could emit a placement for an image
+that is not on the page. Refusing is right. But the first version of
+`convertPdfToPptx` collapsed every walk failure into one summary line saying "the
+page's content stream uses a filter Stapler cannot decode" — which is a false
+claim about a page whose only problem is an inline image, and exactly the shape
+of thing that makes a user distrust every other message the tool prints. The
+worker now returns `unreadable: { pageIndex, reason }[]`, carrying each page's
+*own* reason (`decodeContentStreamBytes` names the filter chain,
+`parseContentStream` names inline images), and `operations.ts` emits one note per
+page. `tests/e2e/fixtures.ts`'s `inlineImagePdf()` is a page that draws a real
+inline image alongside real text — appended as a second `/Contents` entry, which
+also proves the placement pass concatenates the array rather than walking its
+entries separately — and the test asserts the note *names inline images*, does
+**not** mention a filter, and that the page's text still reaches its slide.
+
+**Rotation is applied, not ignored, and it is one transform.** `/Rotate 90` and
+`/Rotate 270` display a page landscape while its content is drawn upright, so
+using the unrotated media box for the slide would produce a portrait slide for a
+landscape page. `slides.ts` maps a box's **centre** through the rotation and sets
+PowerPoint's own `rotate` on the shape, which rotates about the centre — mapping
+a *corner* instead would put a rotated box a half-diagonal from where it belongs.
+All four rotations are unit-tested at the page corner, where a sign error is
+unmistakable, and the end-to-end test asserts `rot="5400000"` (OOXML's 60000ths
+of a degree) on slide 3's heading *and* that an unrotated page's boxes carry no
+rotation at all — so `rot` is written from the page rather than always.
+
+Since the second review pass a text box's `rotate` is the page's `/Rotate`
+**plus the line's own baseline angle**, so a diagonal watermark on an upright
+page and an upright line on a sideways page both land at the angle the page draws
+them at. It is still one transform and still mapped through the centre; the angle
+is simply no longer restricted to the four quarter turns. See "Second review
+pass", finding 2.
+
+**`wrap: false` is a choice between two bad options, and it is the disclosed
+one.** With wrapping on, a line measured in the PDF's font but drawn in
+PowerPoint's would wrap and push its second half down onto the *next* line's box.
+With it off, one PDF line stays one visual line at the position the page drew it,
+and a long line may overrun its box instead. Position is what this tool promises,
+so overrun is the cost — stated in limitation 3.
+
+**Two options, and one of them exists for a single document type.**
+`includeText` and `includeImages` both default on. `includeText` off is the
+switch an OCR'd scan needs (limitation 6): the invisible text layer would
+otherwise be visible black type over the page image, and pdf.js's
+`getTextContent` does not report text rendering mode, so the invisible-text case
+cannot be detected and silently skipped. Disclosing it and offering the switch is
+the honest answer; guessing would not be. Pictures are added to each slide
+**before** its text boxes, so text sits over images — the z-order the page itself
+has, and the only order that leaves that text layer legible rather than hidden.
+Both switches off is refused, not written.
+
+**`pptxgenjs` is a genuinely new dependency, and it carries an
+`XMLHttpRequest`.** This is the sharpest zero-network question any ticket in this
+series has raised. `encodeSlideMediaRels` in the library's bundle resolves any
+media relationship whose `data` is unset with `new XMLHttpRequest()`.
+
+**The argument that it is unreachable rests on three facts, not on a test.**
+(Corrected in the second review pass — see below; the first version of this
+entry leant on a test that does not exercise the branch it claimed to rule out.)
+
+1. `addImage` is called from **exactly one place in the whole application**, the
+   loop at the bottom of `pptx-writer.ts`. Grep the source tree: there is no
+   other call site.
+2. That call sets `data` **unconditionally** and never sets `path`. There is no
+   branch on which `data` is absent — a placement whose bytes are missing is
+   refused by `planSlides` and skipped before the call.
+3. The library picks the relationships it has to resolve with **one filter**,
+   `rel.type !== 'online' && !rel.data && …`, and **that same filter gates every
+   branch**: the browser's `XMLHttpRequest`, and the `node:fs` and `node:https`
+   branches it takes instead under Node. A relationship carrying its own bytes
+   is excluded before any of them is chosen.
+
+Because the candidate list is shared across branches, a conversion that
+*completes at all*, in any environment, is evidence that the list was empty: had
+this writer produced an XHR-eligible relationship, Node's own branch would have
+tried to read it off a filesystem and failed. `tests/unit/pdf-to-ppt.test.ts`
+converts a document that embeds real images and asserts two of them arrived in
+the package, so that evidence is exercised on every run.
+
+Two further things, and it matters what each does and does not show:
+
+- `zero-network.spec.ts` runs the whole flow (import → convert → save) in a
+  **real browser** under its request monitor, with the assertion that the lazy
+  chunks really were fetched inside the watched window. This is the only place
+  the claim is measured in the environment it is actually about, and it is the
+  layer that would catch the argument above being wrong.
+- The unit suite also installs a **throwing** `XMLHttpRequest`, `fetch` and
+  `WebSocket` around a real conversion. It is kept, but as a *regression
+  tripwire*, not as proof: it runs under Vitest's Node environment, where
+  `pptxgenjs` checks `process.versions?.node` and takes its Node branch, so the
+  browser XHR call is never a candidate there and the stub going unfired proves
+  nothing about it. What it would still catch is a future `addImage` that passed
+  a `path` — that breaks fact 2, and the run fails loudly.
+
+**How this surfaces in an offline audit, stated accurately.** The built chunk
+`assets/pptxgen.es-*.js` holds **1** occurrence of `XMLHttpRequest` (that
+branch), **0** of `fetch(` and **0** of `WebSocket`; its only `http(s)://`
+literals are OOXML/Dublin-Core/W3C XML namespace URIs (identifiers, never
+dereferenced) and `gitbrent.github.io` / `github.com` links inside the library's
+own `throw new Error(...)` message strings. `node:fs`, `node:https` and
+`image-size` are stubbed out by the package's own `browser` field.
+
+The `verify-offline` skill's **layer 2** will hit this chunk — for those URL
+literals, which is what layer 2 greps for (`http://`, `https://`, `fetch(`, the
+known CDN hosts). It will **not** report the `XMLHttpRequest`: that term appears
+only in the skill's layer 1, which is `src/`-only and so never reaches a
+dependency's chunk. Since a reviewer may reasonably widen the layer-2 grep and
+find it, the finding is written down where a release pass will meet it rather
+than left to be rediscovered as an unexplained hit: `RELEASE_CHECKLIST.md`
+§ "Known, analysed bundle findings", with a pointer in
+`scripts/check-bundle-size.js` (the script a reviewer already runs against
+`dist/`). Layer 3 — the runtime monitor, i.e. the zero-network spec above — is
+the layer that actually covers it.
+
+**One media part per distinct image, which the library does not give you.**
+`pptxgenjs` performs **no deduplication at all** for the way this writer calls
+it. Its only collapsing rule compares the `path` a caller passed, and this writer
+never passes one — so a picture handed over as `data` always becomes a new media
+part, even twice on the same slide, and every part is named
+`image-<slideNum>-<n>`. That is measured rather than read off the source: the
+first of the three dedup tests asserts the *library's own* behaviour (three
+slides drawing one image → three parts) before asserting this pass collapses
+them, so the test cannot silently stop being about anything. A logo drawn on 300
+pages is therefore 300 identical parts, i.e. a 400 KB letterhead on a 300-page
+document is a ~120 MB deck. This codebase's rule for a shared image (CNV-06,
+CMP-03) is *encode once, not once per page*, so `pptx-writer.ts` does two things:
+it base64-encodes each distinct archive entry once, and `dedupeMediaParts` then
+collapses byte-identical `ppt/media/` parts in the finished package and repoints
+the relationships that named the copies. It is safe because a media part is
+referenced only from a `_rels` `Target` and `[Content_Types].xml` types these by
+*extension*, not per part. Identity is compared **byte for byte** (grouped by
+length first), never by a hash: a hash collision here would silently swap one
+image for another, which is the exact class of failure this codebase refuses. When
+nothing is duplicated the original bytes are returned untouched — not unzipped
+and re-zipped for nothing. Three tests: the library's own behaviour is asserted
+*first* (three slides → three parts) so the test cannot silently stop being about
+anything, then the pass is shown to collapse them to one with all three
+relationships repointed; a deck with no duplicates comes back as the identical
+array; and two genuinely different images stay two parts.
+
+**Caps, because a page is not a slide.** 400 text boxes and 1,000 characters per
+box per slide, 400 image placements per page, and a Form XObject chain followed 8
+deep. Each cap reports exactly what it left out and by how much, and each is a
+named export with its own test — the shape CNV-09's audit had to retrofit. Past
+400 boxes a deck has stopped being editable (every box is a separate object in
+PowerPoint's outliner); the 1,000-character cap is for the producer that draws a
+whole page on one text baseline; the placement cap is for a tiled background.
+PowerPoint's own 1–56 inch slide-size limits are enforced too, and a page outside
+them is scaled to fit rather than refused — an A0 poster is a legitimate PDF page.
+
+**`pptx-reader.ts` exists because the acceptance criterion asks for a round
+trip.** It is a hand-rolled zip-of-XML walker over the existing `fflate`
+dependency — no new library, which is what CNV-13's own ticket text requires —
+and it shares **no code with the writer**, so agreement between them is evidence
+rather than the writer confirming itself. Slide order comes from
+`ppt/presentation.xml`'s `<p:sldIdLst>` resolved through
+`ppt/_rels/presentation.xml.rels`, **not** from sorting part names: `slide10`
+sorts before `slide2`, so a filename sort silently reorders any deck of ten or
+more slides and a per-slide text assertion would then be comparing the wrong
+page. A 12-page test pins that. It is the mirror of CNV-11's finding about
+SheetJS: a hand-rolled reader's hazard is finding *nothing* in a valid file and
+reporting an empty deck as a success, so every failure is an explicit refusal —
+an empty file, an OLE2 container (a legacy `.ppt` **or** a password-protected
+`.pptx`), bytes that are not a ZIP, twelve bytes of binary garbage, a ZIP with no
+`ppt/presentation.xml`, a `<p:sldId>` whose part is missing from the package, and
+a deck listing no slides. "0 slides" is never returned as a success. It ships
+**unused by the product** until CNV-13 reads a real deck with it, so it is
+tree-shaken out of the build; CNV-13 is expected to consume it unchanged
+(per-slide runs, per-slide media parts, per-shape geometry) and no part of
+CNV-13's conversion, UI or worker method is built here.
+
+**The preview is the gate, not a label**, on the same mechanism as its four
+siblings: `PdfToPptPanel` runs the whole conversion, **holds the produced
+bytes**, and only then clears `ui/tools/commit-gate.ts`'s block on the action
+bar's primary CTA. Saving writes those exact bytes. Staleness keys on
+`historyVersion` alongside the document id from the start rather than as a
+follow-up fix — CNV-08's audit found that a doc-id-only check left a preview
+valid across an edit (delete a page, rotate one, crop) because none of those
+change the id. The revision is captured **before** the input bytes are read, so a
+change made mid-conversion invalidates the result that lands afterwards.
 
 - **Requirements:** One slide per PDF page: page rendered/extracted content (text
   blocks by position, embedded images) placed onto a same-size slide via `pptxgenjs`
@@ -4028,6 +4343,387 @@ pdf.js's existing page/text/image extraction, same as CNV-08.
   PowerPoint/LibreOffice Impress, and each slide's extracted text (via a round-trip
   through `pptx-reader.ts`) matches the source page's text content. Beta label and
   mandatory preview appear before save.
+- **Evidence.** `pnpm check` green — run step by step (`tsc --noEmit`,
+  `eslint .`, `prettier --check .`, 102 tokens, 30 contrast pairs × 2 themes,
+  invariants), because this machine has only `npm` and the repo's
+  `devEngines.packageManager` guard makes `npm-run-all`'s inner `npm run` calls
+  fail before they start; each underlying step was run directly and all six
+  pass. `pnpm test`: **89 files · 1129 tests · 0 failures** (up from CNV-11's
+  86 · 1065), the new ones being `tests/unit/pdf-to-ppt.test.ts` (54),
+  `tests/unit/pdf-to-ppt-commit.test.ts` (7) and
+  `tests/unit/pdf-to-ppt-transfer.test.ts` (3). No existing test changed. Three
+  consecutive full runs at 22.2 s, 27.7 s and 25.9 s wall against a 22.9 s
+  baseline (measured on this machine by stashing the whole diff), plus 28.1 s and
+  20.8 s on the two runs after that. One earlier run did time out three unrelated
+  tests (`encrypt.test.ts`, `ocr.test.ts`) at their default 5-second budget under
+  parallel load; that was traced to this file rebuilding its four-page fixture
+  ten times, which is now built once and its three read-only conversions cached —
+  the fixture cache is documented in the test file as a correctness-of-the-suite
+  measure, not a micro-optimisation, and the timeouts have not recurred in four
+  subsequent full runs. No existing test's timeout was raised.
+  `pnpm check:bundle`: **361.84 KB gzipped** initial JS against the 900 KB
+  budget — **0.42 KB** above CNV-11's 361.42 KB (measured on this tree by
+  stashing the whole diff and rebuilding), which is the tool-registry entry, the
+  `Presentation` icon and the panel wiring. `pptxgenjs` itself adds **272 KB raw
+  / 92.9 KB gzipped as its own lazy chunk**, and that is verified in the built
+  output rather than from the source: `assets/pptxgen.es-*.js` is referenced from
+  exactly one place in the whole build (`assets/convert.worker-*.js`), only as
+  ``import(`./pptxgen.es-*.js`)``, with no static `from"…pptxgen…"` anywhere, and
+  it is absent from the 11 initial chunks. A unit test also greps the **source
+  tree** and fails on any occurrence of `pptxgenjs` that is not the dynamic
+  `import()`, an erased `import type`, or a comment.
+  `pnpm test:e2e`: **123 tests, 121 passed / 2 failed** in one full run (up from
+  CNV-11's 119), the new ones being `tests/e2e/pdf-to-ppt.spec.ts` (3) and
+  `zero-network.spec.ts`'s seventh case. Both failures are load-sensitive timing
+  flakes untouched by this ticket, and both pass in isolation:
+  `a11y-and-perf.spec.ts`'s 10 × 5MB merge (the flake CNV-08/09/10/11 already
+  flagged — 6.3 s in isolation against its 8-second budget), and
+  `tool-flows.spec.ts`'s CMP-03 CMYK case, which failed inside the shared
+  `openApp` helper waiting for the app's `<header>` rather than on anything about
+  CMP-03, and passes in 11.7 s alone. An earlier full run instead flaked
+  `compress-preview.spec.ts`'s CMP-05 latency assertion and
+  `a11y-and-perf.spec.ts`'s per-route axe sweep (41.8 s in isolation, so that is
+  the sweep's own length under load and not a violation in the new panel — the
+  new route *is* in that sweep, and it passes); neither reproduced on the final
+  run. All four new e2e tests pass, in isolation and in the full suite.
+  `manifest.json` still ships
+  `"permissions": []` with no `host_permissions`, no `optional_permissions` and
+  no content scripts; this ticket adds no network call anywhere.
+- **Evidence for AC 1 (one slide per page, text matches the source page).**
+  Graded two independent ways at once, against real output bytes. The four-page
+  fixture `pdfToPptPdf()` is converted through the real `operations.convertPdfToPptx`
+  (workers leased as their real implementations, Comlink stubbed), then the
+  produced package is read back with `pptx-reader.ts` **and** the source PDF's
+  own per-page text is read with the same `render` worker method CNV-04's text
+  export uses. Slide *N*'s word sequence must equal page *N*'s word sequence, for
+  all four — and the test additionally asserts the four pages hold four
+  *different* texts and that page 1 holds more than twenty words, so the
+  comparison cannot pass vacuously. Neither side of that comparison is a copy of
+  the fixture's string constants. Beyond the criterion itself: the deck's slide
+  size is asserted in real EMU (7772400 × 10058400 = 8.5 × 11 in, from page 1);
+  the title box's `<a:off>` is asserted against the coordinate the fixture drew at
+  (within one point); the three body lines are asserted to be three separate
+  shapes (the case CNV-08's block model deliberately merges); bold and italic are
+  asserted off `b="1"`/`i="1"` on the `<a:rPr>` rather than off the model; the
+  picture's rectangle is asserted against the content stream's own placement, and
+  the *second* placement of the same object against its own, different rectangle;
+  pictures are asserted to precede text in painting order; the A4 page's scale
+  **and** centring offset are computed and compared; and the preview's per-slide
+  counts are compared against the shapes actually in each slide's XML.
+- **Evidence for AC 2 (beta label and mandatory preview gate the save).** Proven
+  by mutation, the standard every ticket in this series has met.
+  - Weakening `commit.ts`'s handler check from
+    `!preview || pdfToPptPreviewIsStale(doc.id)` to `if (!preview)` — trusting
+    the disabled button — fails **four** of the seven commit tests (a foreign
+    document's preview, an edit after the preview, a preview that finished after
+    its own input changed, and a preview held with no revision at all). Verified
+    by making the change, running the file, and restoring it. The handler's
+    refusal is executed, not asserted.
+  - The e2e spec drives the whole gating cycle in a real browser: disabled with
+    the document open → previewed via **keyboard only** (focus + Enter),
+    enabled → an option changed, disabled again → previewed again, enabled →
+    saved, and the file on disk is unzipped and asserted to be the *second*
+    preview's bytes (images were switched off for that run, so the package
+    carries no `ppt/media/` part at all). A second spec deletes a page in
+    Organize after a preview, confirms the gate re-closes, re-previews, and
+    asserts the deck on disk has **three** slides rather than four — so the
+    second preview really re-read the document.
+  - The beta badge and the limitation list are asserted as *rendered text* in
+    the panel, not as source constants, including three specific limitations.
+  - One trap this test caught, recorded because it is easy to get wrong in both
+    directions: `pptxgenjs` calls `zip.folder('ppt/media')` unconditionally, so
+    the ZIP always carries a `ppt/media/` **directory entry** even for a deck
+    with no images. A `names.some(n => n.startsWith('ppt/media/'))` assertion
+    therefore fails on a deck that genuinely has none, and the mirror mistake
+    would be an assertion that counts the directory entry as a picture. Every
+    media assertion in this ticket's tests filters `!name.endsWith('/')`.
+  - Dark theme and token compliance are asserted behaviourally: the panel's own
+    computed text colour must change when the theme flips, which a hard-coded
+    literal would not do.
+- **Evidence at document scale, which is the claim that decides usability.**
+  CMP-03's own `sharedImagePdf(6)` fixture — six A4 pages that all draw the same
+  1600 × 1200 photo — is converted end to end and asserted to produce six
+  placements, **one** media part, and a deck whose total size is within a third
+  again of that single image (a ratio, so it cannot drift with the fixture's
+  photo size); six copies would put it past 3x. Every slide is then asserted to
+  still reference the part that survived, so the collapse repointed rather than
+  dropped. Measured off-suite at twenty pages for the same fixture: 7.0 s, 20
+  slides, 220 text boxes, 20 placements, **one** 4.3 MB media part, 4.4 MB deck —
+  against roughly 86 MB if each placement wrote its own copy.
+- **Evidence for cancellation and progress.** Built in from the start, with both
+  phases covered — CNV-10's audit had to add the missing phase after the fact.
+  Three tests: a signal already aborted before the call (the writer is never
+  reached); an abort on the first progress report, which lands inside the
+  page-reading loop (asserted: the writer was not reached, the *image passes*
+  were not entered either, and progress never crossed 0.5); and an abort on the
+  first report above 0.75, which lands **inside** `buildPptx`'s per-slide
+  checkpoints (asserted: the writer really ran, progress really crossed the
+  inter-phase gate, and the run never reported itself finished). A fourth test
+  asserts progress is determinate, monotonic, within 0..1, and crosses all four
+  of `convertPdfToPptx`'s own band boundaries (0.5 / 0.62 / 0.75) — which is the
+  evidence that the real function ran its own sequence rather than a helper
+  standing in for it.
+- **Evidence for the Comlink transfer.** `tests/unit/pdf-to-ppt-transfer.test.ts`
+  measures `postMessage`'s own behaviour over a real `MessageChannel` with no
+  Comlink stub: the sending realm's `ArrayBuffer` must be **detached**
+  (`byteLength === 0`), which only a real transfer does, while arriving intact on
+  the other side. This mattered more here than for its siblings because
+  `buildPptx` has more to nest than they did — alongside the archive it passes
+  the per-image report, the placement list and the option flags, and putting the
+  archive in that object would have been the natural shape and the wrong one.
+  The file also pins Comlink's behaviour directly (a marker on a top-level
+  argument transfers; the same marker on an object property is silently dropped
+  and structured-cloned), so the signature cannot be tidied away without a test
+  going red.
+- **Deliberate deviations, disclosed.**
+  1. **Text is emitted one box per *line*, not per paragraph**, and CNV-08's
+     paragraph-merging heuristics are deliberately not reused. A merged paragraph
+     has no single position, which is the one thing this tool is for. Line
+     grouping is still shared (`layoutLines`); only the merging is not.
+  2. **Table detection is not run**, even though `table-regions.ts` is right
+     there and CNV-08 and CNV-10 both use it. A grid on the page is already a
+     grid of positioned boxes on the slide; turning it into a PowerPoint table
+     would move every cell to that table's own layout, which is the opposite of
+     what this tool promises. Stated as limitation 5 instead.
+  3. **Slide size is the *first* page's, not the most common one.** The first
+     page is the one a user comparing the deck's dimensions will look at, and
+     "most common" would silently letterbox page 1 of a document whose cover is a
+     different size from its body.
+  4. **Notes are aggregated where a per-page line would bury them.** An image
+     present in a page's resources but never painted by it is counted once for
+     the document, not reported once per page — an unused entry inherited by all
+     300 pages of a document would otherwise produce 300 identical lines. The
+     same is true of the mixed-size, dropped-line and shortened-box counts. A
+     *refusal* (a JBIG2 image, an unmatched object, an unreadable content stream)
+     is still reported per page with its own reason, because that is a specific
+     thing missing from a specific slide. Both halves have their own test.
+  5. **`dedupeMediaParts` re-zips the package.** The ticket does not ask for it;
+     without it a shared image is duplicated once per slide, which breaks this
+     codebase's own encode-once rule at the file level and makes a long document
+     unusable. It is a no-op (original bytes returned) when there is nothing to
+     collapse.
+  6. **The caps (400 boxes / 1,000 chars / 400 placements / 8 form levels) and
+     the text metrics (0.80 em ascent, 1.20 em line height) are chosen, not
+     derived.** Each is a named export with its own note and its own test, so
+     changing one is a one-line change with visible consequences.
+  7. **`pptx-reader.ts` ships unused by the product.** The acceptance criterion
+     names it, and CNV-13 will need it; shipping it now with its own refusal tests
+     is better than a test-only helper that CNV-13 would have to re-audit. It is
+     tree-shaken out of the build until something imports it.
+- **Not verifiable here:** whether Microsoft PowerPoint or LibreOffice Impress
+  open the result without a repair prompt and render it acceptably. Nothing in
+  this repo can launch either, and this is the half of AC 1 that must be reported
+  **unverified rather than met**. Added to the `QA-05` manual checklist in
+  `RELEASE_CHECKLIST.md` as two entries, mirroring CNV-08/09/10/11's: one for the
+  four-page fixture (with the specific things to look at, and an explicit list of
+  what must *not* be raised because it is disclosed), and one for an OCR'd scan,
+  which is the case where the default output is knowingly wrong-looking. Also not
+  verified here: how the output looks to a human. Every geometric claim above is
+  checked in EMU against the source page's own coordinates, which is a different
+  question from whether the slide reads well.
+
+**Second review pass** (an independent audit of this ticket, the same convention
+CNV-08 through CNV-11 followed). The headline finding is good news, and it is the
+claim this entry spent the most words on: the `pptxgenjs` `XMLHttpRequest` branch
+really is unreachable, independently verified — there is exactly one `addImage`
+call site in the whole application and it always sets `data`, never `path`, which
+is the only thing that could reach it. **No network violation, and the mechanism
+was left untouched.** The audit then found **one real, reachable correctness
+bug**, **one undisclosed fidelity gap**, and four documentation inaccuracies —
+including one in the very argument above. All are fixed below.
+
+**The two that matter, first, because this series' whole method is to err toward
+*finding* fidelity gaps rather than hiding them — and both of these were gaps
+this entry had described in terms that made them sound smaller than they were.**
+
+1. **A cropped or offset-origin page had everything displaced by the box's own
+   origin. Fixed.** pdf.js reports a text run's transform, and a content stream
+   states an image's `cm`, in **raw** PDF user space — but a page's `/MediaBox`
+   need not start at `(0, 0)` and its `/CropBox` usually does not. Stapler's own
+   Crop tool writes one (`composeDocument`, `process.worker.ts`). The size was
+   never wrong — `page.getViewport(...)` accounts for the crop, so a
+   `[50 50 562 742]` crop on a `612 × 792` media box correctly produced a
+   `512 × 692` slide — but every *position* on it was raw, so the whole page was
+   shifted by the crop's origin. The audit's worked example: on a page cropped to
+   `[100 100 612 792]`, a 24pt title drawn at PDF-space `(150, 700)` belongs at
+   `(50, 72.8)` on the slide and landed at `(150, −27.2)`, i.e. 100 pt to the
+   right and **off the top edge entirely**.
+   - The fix threads the box through both halves. `render.worker.ts`'s
+     `extractPageSlide` now reads **`page.view`** — pdf.js's own view box,
+     `/CropBox` ∩ `/MediaBox` falling back to the `/MediaBox`, which is the box
+     its viewport is built from and therefore the box its text transforms have to
+     be read against. All four numbers come from there rather than the extents
+     from a viewport and the origin from elsewhere, because a viewport's extents
+     are multiplied by `/UserUnit` and text transforms are not. This is the same
+     crop-first box selection the rest of the app already makes for edge-anchored
+     furniture, where `process.worker.ts` reads `getCropBox()` because a Bates
+     number once landed outside the crop the same export had just applied.
+   - `PageSlideData.mediaWidth/mediaHeight` are gone, replaced by a single
+     `box: PageBox` carrying `x`/`y` alongside `width`/`height` — the rename is
+     the point: those fields were never the media box, and calling them that is
+     part of how this was missed. `planSlides` subtracts the origin in **exactly
+     one place**, for text and pictures alike, before the y flip and before
+     `/Rotate`.
+   - `findImagePlacements` is still called with **no `initialCtm`**, deliberately.
+     Seeding a translated CTM there would work, and would also make the `process`
+     worker a second, independent opinion about which box governs the page —
+     pdf-lib's `getCropBox()` returns the `/CropBox` as written while pdf.js
+     intersects it with the `/MediaBox`, so on a malformed file the two could
+     disagree and the pictures would then sit at a constant offset from the text.
+     One origin, one subtraction. The reasoning is recorded at the call site.
+   - **Evidence.** Two new fixtures in `tests/e2e/fixtures.ts` in this series'
+     convention, each stating its expected slide coordinates as literals worked
+     out by hand from the box: `pdfToPptCroppedPdf()` reproduces the audit's exact
+     example (`/CropBox [100 100 612 792]`, a 24pt title at raw `(150, 700)`, plus
+     a second line and an image inside the crop) and `pdfToPptOffsetMediaBoxPdf()`
+     is a `/MediaBox [20 30 632 822]` with **no** `/CropBox` — the case that
+     proves the origin cannot simply be read off a crop. Five tests: the title
+     lands at `(50, 72.8)` and is asserted *not* to be at its raw coordinate; the
+     picture lands against the same origin and agrees with the text's left edge;
+     the offset-media-box page's heading and picture both land; the shift is a
+     no-op for a box already at `(0, 0)`; and the origin is removed *before* the
+     quarter turn on a `/Rotate 90` cropped page. Falsified by reverting the two
+     subtractions: **all five fail**, then pass again on restore.
+2. **In-page rotated text was silently flattened to horizontal *at the wrong
+   size*, with nothing said. Fixed rather than merely disclosed.** Page-level
+   `/Rotate` was handled and rotated *images* got an explicit per-instance note,
+   but text drawn at an angle inside a page — a diagonal watermark, a sideways
+   column header — came out horizontal, and because `layoutLines` takes its size
+   from `|transform[3]|`, which is **zero** for a quarter-turn run, at a hardcoded
+   12pt. Silent: no note, unlike the image case. The audit judged a real fix
+   possibly containable, and it was.
+   - `textBaselineAngle` reads the angle from `atan2(b, a)` and
+     `textTypeSize` reads the size from `hypot(c, d)` — the length of the
+     transformed up-vector, which equals `|d|` for horizontal text, so it agrees
+     with `layoutLines` on every ordinary page and is still right at an angle.
+     `planSlides` generalises the existing baseline→box arithmetic to any angle
+     (it reduces exactly to the old expression at 0°) and sets the shape's
+     `rotate` to `page /Rotate − baseline angle`, which lands correctly because
+     `placeByCentre` maps the box's **centre** and PowerPoint rotates about it.
+   - **Angled runs are separated out before `layoutLines` sees them.** That
+     function groups by shared `transform[5]` — right for horizontal text,
+     meaningless for a sideways run whose glyphs share an `x` — and it is shared
+     with CNV-04, CNV-05, CNV-08 and CNV-10, so it was not touched. Each angled
+     run becomes its own line instead. That accepts a rotated line split across
+     two show operations arriving as two correctly placed boxes, to avoid the
+     worse failure of merging two unrelated angled runs that happen to share a
+     `y`.
+   - **A mirrored transform is *not* turned into a rotation.** A negative
+     determinant is a reflection, and rotating the box by `atan2(b, a)` would flip
+     the glyphs the other way as well — so a mirrored run stays on the horizontal
+     path (its existing behaviour) and is **counted and reported**, rather than
+     being silently turned into something the page does not say.
+   - Both residuals are disclosed twice over: **new limitation 11** in
+     `PPTX_LIMITATIONS` (which is what the panel renders, so the copy and the
+     converter cannot disagree), and a **per-page note in the preview**, mirroring
+     how a rotated image already announced itself.
+   - **Evidence.** `pdfToPptRotatedTextPdf()` — an upright control line, a 90°
+     sideways header at 18pt and a 45° diagonal watermark at 30pt. Six tests,
+     graded off the produced package: the sideways shape carries
+     `rot="16200000"` (270° clockwise) and `sz="1800"` **in its own `<p:sp>`**,
+     the diagonal carries `rot="18900000"` and `sz="3000"`, the control line
+     carries no `rot` and is the page's only 12pt run; the angled run is kept out
+     of the horizontal grouping; the preview names the page; a mirrored run is
+     reported and left upright. Falsified by flattening every run back to
+     horizontal: **four fail**, then pass again on restore.
+
+**Limitation 10 was rewritten**, because "a line can sit a point or two from
+where the PDF drew it" understated the bug above and was the wording that made it
+easy to dismiss. It now says what is measured (where a line starts, how wide it
+is), what is assumed (the 0.80/1.20 em Latin metrics, because no PDF states an
+ascent), that a script with taller glyphs than Latin can sit further off, and —
+explicitly — that nothing is displaced by the page's crop.
+
+**The four documentation inaccuracies, all corrected, none a behaviour change:**
+
+3. **The throwing-XHR test's stated rationale was wrong, though its conclusion
+   still holds.** This entry and `pptx-writer.ts` both described a unit test that
+   makes `XMLHttpRequest`/`fetch`/`WebSocket` throw as *proof* the XHR path is
+   unreachable. It is not: that test runs under Vitest's Node environment, where
+   `pptxgenjs` checks `process.versions?.node` and takes an entirely different
+   internal branch, so the browser XHR call is never a candidate there and the
+   stub going unfired shows nothing about it. The sound argument needs no such
+   framing and is now what both places state: **one** `addImage` call site in the
+   whole app, `data` set **unconditionally** on it, and the library's **single
+   candidate filter** (`rel.type !== 'online' && !rel.data && …`) gating the
+   browser-XHR branch and the `node:fs`/`node:https` branches *alike* — so a
+   conversion that completes under Node's branch is itself evidence that no
+   XHR-eligible relationship exists under the browser's. The stubs are kept as a
+   **regression tripwire** (a future `path`-based call would make the app itself
+   throw), labelled as such, and `zero-network.spec.ts` — a real browser, a real
+   request log — is now correctly identified as the only place the claim is
+   measured in the environment it is about.
+4. **The `verify-offline` reference was wrong, and the known hit had no durable
+   record.** This entry claimed the skill's "layer-2 sweep" greps the built bundle
+   for `XMLHttpRequest` and would flag the `pptxgenjs` occurrence. It does not:
+   layer 2 greps for `http://`, `https://`, `fetch(` and the known CDN hosts, and
+   `XMLHttpRequest` appears only in layer 1, which is `src/`-only and never
+   reaches a dependency's chunk. Corrected above — layer 2 *will* hit the chunk,
+   but for its namespace URIs, and layer 3 (the runtime monitor) is what actually
+   covers the branch. More usefully, the finding is now written down where a
+   release pass will meet it: `RELEASE_CHECKLIST.md` gains a **"Known, analysed
+   bundle findings"** step naming both expected hits with their reasoning and a
+   pointer back here, and `scripts/check-bundle-size.js` — the script a reviewer
+   already runs against `dist/` — carries the same note at the top. Re-measured on
+   this build (`assets/pptxgen.es-DFh8Ui1o.js`): **1** `XMLHttpRequest`, **0**
+   `fetch(`, **0** `WebSocket`, and the only hosts are `schemas.openxmlformats.org`,
+   `schemas.microsoft.com`, `purl.org`, `www.w3.org` (namespace identifiers) plus
+   `gitbrent.github.io` / `github.com` in `throw new Error(...)` strings.
+5. **A wrong test count in `pdf-to-ppt-commit.test.ts`.** Its header said
+   "these five cases … weakening … fails the last three; removing it altogether
+   fails the first four". Re-measured by actually making both mutations: there are
+   **7 tests covering 5 refusal cases**; weakening the guard to `if (!preview)`
+   fails **four** (the last four refusals — the "no preview" case is the one the
+   weakened check still covers), and removing the check **altogether**, both
+   conditions, fails **all five**. The comment now states those numbers and says
+   they were measured, matching the "4 of 7" figure this entry already had right.
+6. **A wrong claim about `pptxgenjs`'s dedup behaviour.** `pptx-writer.ts` said a
+   shared image becomes one media part "because pptxgenjs dedupes identical
+   data". It does not dedupe at all for the way this writer calls it — its only
+   collapsing rule compares the `path` a caller passed, and this writer never
+   passes one, so every `addImage` writes a fresh part even twice on one slide.
+   `dedupeMediaParts` is correct and *necessary* for exactly that reason. Both the
+   comment and this entry now say so, and point at the test that measures the
+   library's own behaviour first.
+
+**Two minor findings, both fixed:**
+
+7. **D4 — a line of exactly the cap length was reported as shortened when
+   nothing was cut.** `planSlides` tested `chars >= MAX_BOX_CHARS` while
+   `lineToRuns` was already computing an exact `truncated` count that was being
+   discarded. The exact count is now carried on `PageTextLine` and used, so the
+   converter cannot misdescribe its own output — the same class of defect this
+   ticket already had to fix once, in the inline-image message. A boundary test
+   pins both sides: a line of exactly `MAX_BOX_CHARS` reports nothing, one
+   character more reports. Falsified by restoring a length-based check.
+8. **D7 — a zero-length archive entry was dropped in silence and could
+   over-report `imageCount` by one.** `addSlide` skips a zero-length image, but
+   `planSlides` had counted it as placed, so the plan (which `imageCount` and the
+   preview's per-slide counts are both read off) could claim a picture the file
+   does not carry. Fixed at the source rather than by plumbing a second report
+   back: `convert.worker.ts` now builds `archivedFiles` from the **non-empty**
+   entries, so `imageRefusal` names it in the notes and every count stays exact.
+   Practically unreachable, but it cost one line.
+
+**Verification after all eight fixes.** `pnpm check` green — run step by step for
+the reason this entry already gives (`tsc --noEmit`, `eslint .`,
+`prettier --check .`, 102 tokens, 30 contrast pairs × 2 themes, invariants); all
+six pass. `pnpm test`: **89 files · 1141 tests · 0 failures**, up from 1129 —
+the twelve new ones being five for the box origin, six for angled text and one
+for the truncation boundary. No existing test's *assertions* changed; the
+`PageSlideData` literals in `pdf-to-ppt.test.ts` and `pdf-to-ppt-transfer.test.ts`
+were updated for the `box` field and moved behind two builders. `pnpm test:e2e`:
+**123 tests, 123 passed / 0 failed** in one full run (7.9 min) — the first clean
+full run in this series, with none of the load-sensitive flakes CNV-08..12 have
+each had to note. `pnpm check:bundle`: **361.84 KB gzipped**, identical to the
+pre-audit figure — every change here is inside the workers and the lazy convert
+chunk, none in the initial bundle.
+
+Each of the three behavioural fixes was **falsified before being believed**: the
+change was reverted, the file was run, the expected tests failed, and the fix was
+restored. Five fail for the box origin, four for angled text, one for the
+truncation boundary. The two mutation counts in finding 5 were measured the same
+way.
 
 ### CNV-13 · PowerPoint (PPTX) → PDF — `L` `P2`
 

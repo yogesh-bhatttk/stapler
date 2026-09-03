@@ -1,4 +1,5 @@
 import {
+  PDFArray,
   PDFDict,
   PDFDocument,
   PDFName,
@@ -1458,4 +1459,411 @@ export async function excelToPdfXlsx(): Promise<Uint8Array> {
   return new Uint8Array(
     XLSX.write(book, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer
   ) as Uint8Array;
+}
+
+/* ------------------------------------------------------------------ *
+ * CNV-12 — PDF → PowerPoint
+ * ------------------------------------------------------------------ */
+
+/**
+ * The exact content CNV-12's acceptance criteria are stated against, exported so
+ * the round-trip test asserts against these strings and numbers rather than
+ * against a copy of them that can drift from the fixture.
+ *
+ * The geometry is part of the contract here in a way it is not for the other
+ * four converters: this ticket's whole claim is that a line lands *where the page
+ * drew it*, so the fixture states the point coordinates it drew at and the test
+ * checks the EMU that came out of the package against them.
+ */
+export const PDF_TO_PPT = {
+  /** Page 1, US Letter, upright. Slide size is taken from this page. */
+  page1: {
+    size: [612, 792] as const,
+    title: 'Quarterly Operations Review',
+    titleAt: { x: 56, y: 700, size: 24 },
+    body: [
+      'One slide is produced per page of this document.',
+      'Each line becomes its own positioned text box.',
+      'Nothing on the slide reflows, by design.'
+    ],
+    bodyAt: { x: 56, y: 640, size: 12, leading: 18 },
+    /** The inline sentence's bold and italic runs. */
+    boldRun: '17 percent',
+    italicRun: 'unaudited',
+    inlineAt: { x: 56, y: 560, size: 12 },
+    /** Placed image, in PDF points from the bottom-left. */
+    image: { x: 90, y: 180, width: 360, height: 240, pixels: { width: 480, height: 320 } }
+  },
+  /** Page 2, A4 portrait — a *different* size, so the one-slide-size rule bites. */
+  page2: {
+    size: [595.28, 841.89] as const,
+    heading: 'An A4 page, scaled to the deck',
+    headingAt: { x: 50, y: 760, size: 18 }
+  },
+  /** Page 3, Letter with `/Rotate 90` — displayed landscape. */
+  page3: {
+    size: [612, 792] as const,
+    rotation: 90,
+    heading: 'A page rotated ninety degrees',
+    headingAt: { x: 56, y: 700, size: 16 }
+  },
+  /** Page 4 draws the *same* image object as page 1, so sharing is testable. */
+  page4: {
+    size: [612, 792] as const,
+    heading: 'The same image again',
+    headingAt: { x: 56, y: 700, size: 16 },
+    image: { x: 200, y: 300, width: 180, height: 120 }
+  }
+} as const;
+
+/**
+ * A four-page document built for CNV-12, exercising every geometric case the
+ * conversion has to get right:
+ *
+ *  • **Page 1** — US Letter, upright: a title at 24pt, three body lines at 12pt
+ *    with an 18pt leading, an inline sentence carrying a bold and an italic run,
+ *    and one PNG at a stated rectangle. This page's size becomes the deck's.
+ *  • **Page 2** — A4, so the deck's single slide size has to scale and centre a
+ *    page that is not the size it was built at, and the conversion has to say so.
+ *  • **Page 3** — `/Rotate 90`, so the rotation transform is exercised against a
+ *    page whose displayed frame is landscape while its content is drawn upright.
+ *  • **Page 4** — draws page 1's *image object* a second time at a different
+ *    size, so "one media part, two references" is checkable rather than assumed.
+ *
+ * Every line is a positioned `drawText` rather than laid out by a producer, so
+ * the coordinates the assertions compare against are exactly what this builder
+ * wrote. Type sizes are 24 / 18 / 16 / 12, and 12pt covers by far the most
+ * characters — which matters because a text box's font size is the line's own
+ * largest glyph and nothing here should be promoted or merged.
+ */
+export async function pdfToPptPdf(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const body = await doc.embedFont(StandardFonts.Helvetica);
+  const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+  const italic = await doc.embedFont(StandardFonts.HelveticaOblique);
+
+  const p1 = PDF_TO_PPT.page1;
+  const one = doc.addPage([...p1.size] as [number, number]);
+  one.drawText(p1.title, { x: p1.titleAt.x, y: p1.titleAt.y, size: p1.titleAt.size, font: bold });
+  p1.body.forEach((line, i) => {
+    one.drawText(line, {
+      x: p1.bodyAt.x,
+      y: p1.bodyAt.y - i * p1.bodyAt.leading,
+      size: p1.bodyAt.size,
+      font: body
+    });
+  });
+
+  // One line, five runs, three fonts. Each run starts where the previous ended,
+  // so the gaps are near zero and the line stays one text box.
+  let x = p1.inlineAt.x;
+  const inline: [string, typeof body][] = [
+    ['Revenue rose ', body],
+    [p1.boldRun, bold],
+    [' against an ', body],
+    [p1.italicRun, italic],
+    [' baseline.', body]
+  ];
+  for (const [text, font] of inline) {
+    one.drawText(text, { x, y: p1.inlineAt.y, size: p1.inlineAt.size, font });
+    x += font.widthOfTextAtSize(text, p1.inlineAt.size);
+  }
+
+  const { width: pxW, height: pxH } = p1.image.pixels;
+  const image = await doc.embedPng(encodePng(photoPixels(pxW, pxH), pxW, pxH, false));
+  one.drawImage(image, {
+    x: p1.image.x,
+    y: p1.image.y,
+    width: p1.image.width,
+    height: p1.image.height
+  });
+
+  const p2 = PDF_TO_PPT.page2;
+  const two = doc.addPage([...p2.size] as [number, number]);
+  two.drawText(p2.heading, {
+    x: p2.headingAt.x,
+    y: p2.headingAt.y,
+    size: p2.headingAt.size,
+    font: bold
+  });
+
+  const p3 = PDF_TO_PPT.page3;
+  const three = doc.addPage([...p3.size] as [number, number]);
+  three.setRotation(degrees(p3.rotation));
+  three.drawText(p3.heading, {
+    x: p3.headingAt.x,
+    y: p3.headingAt.y,
+    size: p3.headingAt.size,
+    font: bold
+  });
+
+  const p4 = PDF_TO_PPT.page4;
+  const four = doc.addPage([...p4.size] as [number, number]);
+  four.drawText(p4.heading, {
+    x: p4.headingAt.x,
+    y: p4.headingAt.y,
+    size: p4.headingAt.size,
+    font: bold
+  });
+  // The same embedded image object, drawn at a different size — pdf-lib reuses
+  // the one XObject, which is what makes the sharing assertion meaningful.
+  four.drawImage(image, {
+    x: p4.image.x,
+    y: p4.image.y,
+    width: p4.image.width,
+    height: p4.image.height
+  });
+
+  return doc.save();
+}
+
+/**
+ * The two pages whose displayed box does **not** start at (0, 0), and the
+ * slide-space coordinates each one's content therefore has to land at.
+ *
+ * pdf.js reports a text run's transform, and a content stream states an image's
+ * `cm`, in *raw* user space. A page's `/MediaBox` need not begin at the origin
+ * and its `/CropBox` usually does not — Stapler's own Crop tool writes one —
+ * so treating a raw coordinate as a slide coordinate displaces everything on
+ * the page by the box's own origin. The `expected` numbers here are worked by
+ * hand from the box, not read back from the converter.
+ */
+export const PDF_TO_PPT_BOXES = {
+  /**
+   * A `/CropBox` smaller than and offset from the `/MediaBox` — the shape
+   * `composeDocument` produces for a cropped export, and the case the audit
+   * worked through: a 24pt title at raw (150, 700) belongs at (50, 72.8) on the
+   * slide and, before the origin was carried, landed at (150, −27.2), i.e. off
+   * the top edge entirely.
+   */
+  crop: {
+    mediaSize: [612, 792] as const,
+    /** `x, y, width, height`, so the box is `/CropBox [100 100 612 792]`. */
+    cropBox: { x: 100, y: 100, width: 512, height: 692 },
+    title: 'Cropped title lands on the slide',
+    titleAt: { x: 150, y: 700, size: 24 },
+    footer: 'A second line, well inside the crop',
+    footerAt: { x: 150, y: 200, size: 12 },
+    /** Drawn in raw space, inside the crop. */
+    image: { x: 150, y: 150, width: 200, height: 100, pixels: { width: 64, height: 64 } },
+    /** The deck's slide size: the crop's own size, not the media box's. */
+    expected: {
+      slide: { width: 512, height: 692 },
+      // 150 − 100, and 692 − ((700 − 100) + 24 × 0.80).
+      title: { x: 50, y: 72.8 },
+      // 150 − 100, and 692 − ((150 − 100) + 100).
+      image: { x: 50, y: 542, width: 200, height: 100 }
+    }
+  },
+  /**
+   * A `/MediaBox` that starts at (20, 30) with no `/CropBox` at all — the same
+   * defect from the other direction, and the reason the origin cannot simply be
+   * read off a `/CropBox` when one is present.
+   */
+  media: {
+    /** `x, y, width, height`, so the box is `/MediaBox [20 30 632 822]`. */
+    mediaBox: { x: 20, y: 30, width: 612, height: 792 },
+    heading: 'An offset media box',
+    headingAt: { x: 120, y: 700, size: 18 },
+    image: { x: 60, y: 130, width: 120, height: 80, pixels: { width: 64, height: 64 } },
+    expected: {
+      slide: { width: 612, height: 792 },
+      // 120 − 20, and 792 − ((700 − 30) + 18 × 0.80).
+      heading: { x: 100, y: 107.6 },
+      // 60 − 20, and 792 − ((130 − 30) + 80).
+      image: { x: 40, y: 612, width: 120, height: 80 }
+    }
+  }
+} as const;
+
+/**
+ * A page cropped to a box that does not start at the origin, with text at the
+ * top of the crop and one image inside it.
+ *
+ * The crop is written with `setCropBox` rather than by running the Crop tool,
+ * because `composeDocument`'s own output is a whole export pipeline and this
+ * fixture has to state the one number under test — the box's origin — as a
+ * literal the assertions can be worked out from by hand.
+ */
+export async function pdfToPptCroppedPdf(): Promise<Uint8Array> {
+  const f = PDF_TO_PPT_BOXES.crop;
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage([...f.mediaSize] as [number, number]);
+  page.setCropBox(f.cropBox.x, f.cropBox.y, f.cropBox.width, f.cropBox.height);
+
+  page.drawText(f.title, { x: f.titleAt.x, y: f.titleAt.y, size: f.titleAt.size, font });
+  page.drawText(f.footer, { x: f.footerAt.x, y: f.footerAt.y, size: f.footerAt.size, font });
+
+  const { width: pxW, height: pxH } = f.image.pixels;
+  const image = await doc.embedPng(encodePng(photoPixels(pxW, pxH), pxW, pxH, false));
+  page.drawImage(image, {
+    x: f.image.x,
+    y: f.image.y,
+    width: f.image.width,
+    height: f.image.height
+  });
+  return doc.save();
+}
+
+/** A page whose `/MediaBox` itself starts away from the origin, with no crop. */
+export async function pdfToPptOffsetMediaBoxPdf(): Promise<Uint8Array> {
+  const f = PDF_TO_PPT_BOXES.media;
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage([f.mediaBox.width, f.mediaBox.height]);
+  page.setMediaBox(f.mediaBox.x, f.mediaBox.y, f.mediaBox.width, f.mediaBox.height);
+
+  page.drawText(f.heading, { x: f.headingAt.x, y: f.headingAt.y, size: f.headingAt.size, font });
+
+  const { width: pxW, height: pxH } = f.image.pixels;
+  const image = await doc.embedPng(encodePng(photoPixels(pxW, pxH), pxW, pxH, false));
+  page.drawImage(image, {
+    x: f.image.x,
+    y: f.image.y,
+    width: f.image.width,
+    height: f.image.height
+  });
+  return doc.save();
+}
+
+/**
+ * What a page with text drawn *at an angle* holds, and what it has to become.
+ *
+ * Not page-level `/Rotate` — that turns the whole page and is handled elsewhere.
+ * This is text whose own matrix is rotated inside an upright page: a diagonal
+ * watermark, a sideways column header. pdf.js reports such a run as
+ * `[0, s, −s, 0, tx, ty]` for a quarter turn, so the `|transform[3]|` the line
+ * grouper reads for a type size is **zero** there — which is why this used to
+ * come out horizontal *and* at a hardcoded 12pt.
+ */
+export const PDF_TO_PPT_ROTATED_TEXT = {
+  size: [400, 400] as const,
+  upright: { text: 'Upright control line', x: 40, y: 360, size: 12 },
+  /** A quarter turn anticlockwise: reads bottom-to-top on the page. */
+  sideways: { text: 'Sideways column header', x: 100, y: 100, size: 18, rotation: 90 },
+  /** A diagonal watermark, the case a PDF most often draws at an angle. */
+  diagonal: { text: 'DRAFT DIAGONAL', x: 60, y: 200, size: 30, rotation: 45 }
+} as const;
+
+export async function pdfToPptRotatedTextPdf(): Promise<Uint8Array> {
+  const f = PDF_TO_PPT_ROTATED_TEXT;
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage([...f.size] as [number, number]);
+  page.drawText(f.upright.text, {
+    x: f.upright.x,
+    y: f.upright.y,
+    size: f.upright.size,
+    font
+  });
+  page.drawText(f.sideways.text, {
+    x: f.sideways.x,
+    y: f.sideways.y,
+    size: f.sideways.size,
+    font,
+    rotate: degrees(f.sideways.rotation)
+  });
+  page.drawText(f.diagonal.text, {
+    x: f.diagonal.x,
+    y: f.diagonal.y,
+    size: f.diagonal.size,
+    font,
+    rotate: degrees(f.diagonal.rotation)
+  });
+  return doc.save();
+}
+
+/**
+ * One page whose only image is drawn *inside a Form XObject*, with the form's
+ * own `/Matrix` and `/BBox` both non-trivial.
+ *
+ * The case a resource-dictionary walk gets right by accident and a
+ * content-stream walk has to handle deliberately: the page's own content stream
+ * never names the image at all, only the form. `collectImageRefs` (CNV-06)
+ * already recurses into form resources, so `extractImages` finds the bytes —
+ * this fixture is what proves the *placement* walk recurses too, applies the
+ * form's matrix, and clips to its `/BBox`.
+ *
+ * The form maps a 100×100 unit box to the page at (100, 400) via its `/Matrix`,
+ * and its `/BBox` is 60 wide, so the image inside it is clipped to 60 points.
+ */
+export async function pdfToPptFormXObjectPdf(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage([400, 600]);
+  page.drawText('The image on this page lives inside a form', { x: 40, y: 550, size: 11, font });
+
+  const image = await doc.embedPng(encodePng(photoPixels(64, 64), 64, 64, false));
+  const imageRef = image.ref;
+
+  // The form paints the image over its whole 100x100 space; its `/BBox` shows
+  // only the left 60 of that, and its `/Matrix` translates it onto the page.
+  const formContent = `q 100 0 0 100 0 0 cm /InnerIm Do Q`;
+  const formStream = doc.context.flateStream(formContent);
+  const formDict = doc.context.obj({
+    Type: 'XObject',
+    Subtype: 'Form',
+    BBox: [0, 0, 60, 100],
+    Matrix: [1, 0, 0, 1, 100, 400],
+    Resources: doc.context.obj({
+      XObject: doc.context.obj({ InnerIm: imageRef })
+    })
+  }) as PDFDict;
+  for (const [key, value] of formDict.entries()) formStream.dict.set(key, value);
+  const formRef = doc.context.register(formStream);
+
+  const resources = page.node.Resources();
+  const xobjects = doc.context.obj({ OuterForm: formRef }) as PDFDict;
+  resources?.set(PDFName.of('XObject'), xobjects);
+
+  page.pushOperators(pushGraphicsState(), drawObject('OuterForm'), popGraphicsState());
+  return doc.save();
+}
+
+/**
+ * One page that draws an **inline image** (`BI … ID … EI`) alongside real text.
+ *
+ * The case a content-stream walker has to refuse rather than mis-read. An inline
+ * image's binary payload sits directly in the operator stream, so tokenising it
+ * yields garbage tokens that can contain byte sequences reading as `q`, `Q`,
+ * `cm` or `Do` — which would corrupt the CTM and could emit a placement for an
+ * image that is not there. RED-02's `parseContentStream` therefore throws on
+ * `ID`, and CNV-12's placement pass reports the page with *that* reason rather
+ * than claiming a filter could not be decoded.
+ *
+ * The image is a 2 x 2 8-bit greyscale raster with no filter, so the `ID`
+ * payload is exactly four bytes and the fixture stays readable as source.
+ */
+export async function inlineImagePdf(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage([200, 200]);
+  page.drawText('Page with an inline image', { x: 20, y: 170, size: 10, font });
+
+  // `BI /W 2 /H 2 /CS /G /BPC 8 ID <4 bytes> EI`, scaled to 40 x 40 at (20, 60).
+  const prefix = 'q 40 0 0 40 20 60 cm BI /W 2 /H 2 /CS /G /BPC 8 ID ';
+  const suffix = ' EI Q';
+  const bytes = new Uint8Array(prefix.length + 4 + suffix.length);
+  for (let i = 0; i < prefix.length; i++) bytes[i] = prefix.charCodeAt(i);
+  bytes.set([0x00, 0x7f, 0xbf, 0xff], prefix.length);
+  for (let i = 0; i < suffix.length; i++) {
+    bytes[prefix.length + 4 + i] = suffix.charCodeAt(i);
+  }
+
+  // Appended as its own `/Contents` entry, which is how a producer that adds
+  // content to an existing page does it — and which also proves the placement
+  // pass concatenates the array rather than walking the entries separately.
+  const extra = doc.context.flateStream(bytes);
+  const existing = page.node.Contents();
+  const array = doc.context.obj([]) as PDFArray;
+  if (existing instanceof PDFArray) {
+    for (let i = 0; i < existing.size(); i++) array.push(existing.get(i));
+  } else if (existing) {
+    array.push(existing as never);
+  }
+  array.push(doc.context.register(extra));
+  page.node.set(PDFName.of('Contents'), array);
+
+  return doc.save();
 }

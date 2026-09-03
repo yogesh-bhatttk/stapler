@@ -100,7 +100,7 @@ import type { IFontNames } from '@pdf-lib/standard-fonts';
 import { zipSync } from 'fflate';
 import type { JobHandle } from './protocol';
 import { checkpoint, subJob } from './protocol';
-import { corrupt, encrypted, internal, unsupported } from '../errors';
+import { corrupt, encrypted, fromUnknown, internal, unsupported } from '../errors';
 import type { ImagesToPdfOptions } from '../operations';
 import type { ImageResultStat } from '../compress-report';
 import { DOC_HAIRLINE_RGB, DOC_INK_RGB, DOC_REDACT_RGB } from '../doc-colors';
@@ -131,7 +131,14 @@ import {
   decodeStream,
   areaTouches
 } from '../pdf/interpreter';
-import type { Rect, RedactionArea, GraphicsState, Matrix } from '../pdf/interpreter';
+import type { Rect, RedactionArea, GraphicsState, Matrix, Statement } from '../pdf/interpreter';
+import {
+  findImagePlacements,
+  MAX_FORM_DEPTH,
+  type PlacedImage,
+  type PlacementResolver,
+  type PlacementXObject
+} from '../pdf/image-placements';
 import { hasXfaMarker, XFA_COMPOSE_MESSAGE, XFA_MESSAGE } from '../pdf/xfa';
 import { encryptPdf, type ProtectionSettings } from '../pdf/encrypt';
 import { applyAltTextToDoc } from '../pdf/accessibility';
@@ -620,6 +627,26 @@ export interface ProcessJob {
     pageIndices: number[] | null,
     job?: JobHandle
   ): Promise<ExtractedImages>;
+  /**
+   * CNV-12 — the rectangle each page *draws* each of its image XObjects at.
+   *
+   * The companion to `extractImages`, which answers "which images does this page
+   * hold" from the page's resource dictionary. A resource dictionary is
+   * unordered and carries no geometry, which is why CNV-08's `blocks.ts` states
+   * it cannot reconstruct where an image sat. This asks the page's **content
+   * stream** instead, through RED-02's interpreter, and matches back to
+   * `extractImages` by object number — the one identifier both halves share.
+   *
+   * Nothing is decoded. CMP-03 resolves an image's object number by awaiting
+   * pdf.js's decoded pixels, which is seconds of work for a number the resource
+   * dictionary already states; here the number comes from the `/XObject` entry's
+   * own indirect reference.
+   */
+  imagePlacements(
+    bytes: Uint8Array,
+    pageIndices: number[] | null,
+    job?: JobHandle
+  ): Promise<PageImagePlacements>;
   /** ACC-01 — returns thumbnails of all images for the alt-text editor */
   findImagesForAltText(bytes: Uint8Array, job: JobHandle): Promise<ImageAltInfo[]>;
   /** ACC-01 — applies alt-text mapping and rewrites the Structure Tree */
@@ -2828,6 +2855,159 @@ function collectImageRefs(
   return found;
 }
 
+/* ------------------------------------------------------------------ *
+ * CNV-12 — image placement (see `pdf/image-placements.ts`)
+ * ------------------------------------------------------------------ */
+
+/**
+ * One page's whole `/Contents`, decoded and parsed as a single operator stream.
+ *
+ * A `/Contents` array is one logical stream that a producer happened to split,
+ * so the chunks are concatenated before parsing rather than walked separately —
+ * a `q` in one chunk and its `Q` in the next is legal and common, and parsing
+ * them independently loses the CTM across the boundary. Returns `null` for a
+ * page with no content at all, and throws for a filter chain we cannot decode
+ * (which the caller reports as "positions unknown for this page", never as "no
+ * images").
+ */
+async function pageContentStatements(
+  page: PDFPage,
+  context: PDFContext
+): Promise<Statement[] | null> {
+  const raw = page.node.Contents();
+  if (!raw) return null;
+  const refs: unknown[] = [];
+  if (raw instanceof PDFArray) {
+    for (let i = 0; i < raw.size(); i++) refs.push(raw.get(i));
+  } else {
+    refs.push(raw);
+  }
+
+  const chunks: Uint8Array[] = [];
+  for (const ref of refs) {
+    const resolved = ref instanceof PDFStream ? ref : context.lookup(ref as never);
+    // A dangling `/Contents` entry is what every viewer ignores; there is
+    // nothing to measure in it.
+    if (!(resolved instanceof PDFStream)) continue;
+    chunks.push(await decodeContentStreamBytes(resolved, context));
+  }
+  if (chunks.length === 0) return null;
+
+  let total = 0;
+  for (const chunk of chunks) total += chunk.length + 1;
+  const merged = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, at);
+    at += chunk.length;
+    merged[at++] = 0x0a;
+  }
+  return parseContentStream(tokenizeContentStream(merged));
+}
+
+/**
+ * A synchronous resolver over one `/Resources /XObject` dict, for
+ * `findImagePlacements`.
+ *
+ * It has to be synchronous — the walker is pure and recursive — but decoding a
+ * Form XObject's content stream is asynchronous, so every reachable form is
+ * decoded up front and the resolver just reads the table. The depth cap is
+ * `MAX_FORM_DEPTH`, the same one the walker enforces, and `decoding` breaks a
+ * cycle (a form that paints itself) without penalising a form legitimately
+ * reachable from two places, which a plain "visited" set would.
+ */
+async function placementResolver(
+  xobjects: PDFDict | undefined,
+  context: PDFContext,
+  depth: number,
+  cache: Map<number, PlacementXObject>,
+  decoding: Set<number>
+): Promise<PlacementResolver> {
+  const table = new Map<string, PlacementXObject>();
+  if (!xobjects || depth > MAX_FORM_DEPTH) return () => undefined;
+
+  for (const [key, value] of xobjects.entries()) {
+    const name = key.asString().replace(/^\//, '');
+    const ref = value instanceof PDFRef ? value : undefined;
+    const stream = xobjects.lookup(key);
+    if (!(stream instanceof PDFStream)) continue;
+    const subtype = nameOf(stream.dict.get(PDFName.of('Subtype')));
+
+    if (subtype === 'Image') {
+      // `-1` for a direct object: it has no number, so nothing can match it to
+      // an extracted file. The caller reports that rather than guessing.
+      table.set(name, { subtype: 'Image', objectNumber: ref ? ref.objectNumber : -1 });
+      continue;
+    }
+    if (subtype !== 'Form') {
+      table.set(name, { subtype: 'Other' });
+      continue;
+    }
+
+    if (ref) {
+      const cached = cache.get(ref.objectNumber);
+      if (cached) {
+        table.set(name, cached);
+        continue;
+      }
+      if (decoding.has(ref.objectNumber)) {
+        // A cycle. Treated as painting nothing, which is what a viewer's own
+        // recursion limit does with it.
+        table.set(name, { subtype: 'Other' });
+        continue;
+      }
+      decoding.add(ref.objectNumber);
+    }
+
+    let statements: Statement[];
+    try {
+      statements = parseContentStream(
+        tokenizeContentStream(await decodeContentStreamBytes(stream, context))
+      );
+    } catch {
+      // A form we cannot decode paints no *measurable* image. Its images are
+      // still reported by `extractImages`, so the caller sees them as "found in
+      // the resources but never drawn" and says so.
+      if (ref) decoding.delete(ref.objectNumber);
+      table.set(name, { subtype: 'Other' });
+      continue;
+    }
+
+    const formResourcesRaw = stream.dict.get(PDFName.of('Resources'));
+    const formResources =
+      formResourcesRaw instanceof PDFDict
+        ? formResourcesRaw
+        : formResourcesRaw instanceof PDFRef
+          ? context.lookupMaybe(formResourcesRaw, PDFDict)
+          : // A form with no `/Resources` of its own inherits the invoking
+            // scope, the same assumption `collectImageRefs` already makes.
+            xobjects;
+    const nestedXObjects =
+      formResources === xobjects
+        ? xobjects
+        : formResources?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+
+    // `numberArray` is the existing helper CMP/RED already read `/BBox` with —
+    // it looks a ref through and refuses a short or non-numeric array.
+    const matrix = numberArray(stream.dict, 'Matrix', 6);
+    const bbox = numberArray(stream.dict, 'BBox', 4);
+    const entry: PlacementXObject = {
+      subtype: 'Form',
+      ...(matrix ? { matrix: matrix as Matrix } : {}),
+      ...(bbox ? { bbox: bbox as [number, number, number, number] } : {}),
+      statements,
+      resolve: await placementResolver(nestedXObjects, context, depth + 1, cache, decoding)
+    };
+    if (ref) {
+      decoding.delete(ref.objectNumber);
+      cache.set(ref.objectNumber, entry);
+    }
+    table.set(name, entry);
+  }
+
+  return name => table.get(name);
+}
+
 /**
  * Walks a `/Resources/XObject` dict, collecting `ImageFacts` for every Image it
  * finds — recursing into Form XObjects along the way. A page whose only photo
@@ -3139,6 +3319,33 @@ export interface ExtractedImages {
   /** A ZIP of every extracted file. Empty ZIP when nothing could be extracted. */
   bytes: Uint8Array;
   entries: ExtractedImageEntry[];
+}
+
+/** CNV-12 — one image `Do`, in the page's unrotated user space (y up). */
+export interface ImagePlacementReport extends PlacedImage {
+  pageIndex: number;
+}
+
+export interface PageImagePlacements {
+  /** Every image the requested pages draw, in painting order within each page. */
+  placements: ImagePlacementReport[];
+  /** pageIndex → how many further placements the per-page cap left out. */
+  dropped: Record<number, number>;
+  /**
+   * Pages whose content stream could not be walked, each with **its own**
+   * reason. Named rather than reported as "no images", which would be a false
+   * claim about the user's document.
+   *
+   * The reason is carried per page rather than assumed, because the two live
+   * causes are genuinely different and a single message would misdescribe one of
+   * them: a filter chain pdf-lib cannot decode, and an **inline image** (the
+   * `BI … ID … EI` operators), which `parseContentStream` refuses outright
+   * because its binary payload tokenises as garbage. An inline image is a real
+   * picture on the page that this tool will not place, and saying "a filter
+   * could not be decoded" about it would be a false claim of the exact kind the
+   * CNV-11 audit was fishing for.
+   */
+  unreadable: { pageIndex: number; reason: string }[];
 }
 
 interface ExtractedFile {
@@ -4906,6 +5113,76 @@ Q
     // Store, not deflate: JPEG, JPEG 2000, and PNG are already compressed, so
     // deflating them again costs seconds and saves nothing (CNV-02 does the same).
     return { bytes: transfer(zipSync(files, { level: 0 })), entries };
+  },
+
+  async imagePlacements(bytes, pageIndices, job) {
+    // Not `allowEncrypted`, for the same reason `extractImages` is not: an
+    // encrypted document's content streams are ciphertext, so "where does this
+    // page draw its images" has no answer. `load` refuses with the explanation.
+    const doc = await load(bytes);
+    const pages = doc.getPages();
+    const wanted =
+      pageIndices && pageIndices.length > 0
+        ? pageIndices.filter(i => i >= 0 && i < pages.length)
+        : pages.map((_, i) => i);
+
+    const placements: ImagePlacementReport[] = [];
+    const dropped: Record<number, number> = {};
+    const unreadable: { pageIndex: number; reason: string }[] = [];
+
+    for (let i = 0; i < wanted.length; i++) {
+      const pageIndex = wanted[i];
+      await checkpoint(
+        job,
+        i / wanted.length,
+        `Locating images on page ${pageIndex + 1} of ${pages.length}`
+      );
+
+      const page = pages[pageIndex];
+      let statements: Statement[] | null;
+      try {
+        statements = await pageContentStatements(page, doc.context);
+      } catch (err) {
+        // A stream we cannot walk costs this page's *image positions*, not the
+        // conversion: its text is already extracted and is worth handing over
+        // with the gap named. Reported with the reason the failure gave —
+        // `decodeContentStreamBytes` names the filter chain, and
+        // `parseContentStream` names inline images — never inferred as "no
+        // images", and never described as a decode failure when it was not one.
+        unreadable.push({ pageIndex, reason: fromUnknown(err).message });
+        continue;
+      }
+      if (!statements) continue;
+
+      const resolve = await placementResolver(
+        pageXObjectDictOf(page, doc.context),
+        doc.context,
+        0,
+        new Map(),
+        new Set()
+      );
+      // No `initialCtm`, deliberately: the walk reports **raw** user space, the
+      // space the content stream's own `cm` operands are in. A page's displayed
+      // box (`/CropBox` ∩ `/MediaBox`, else the `/MediaBox`) need not start at
+      // (0, 0) — Stapler's own Crop tool writes one that does not — so that
+      // origin has to come off before anything is placed on a slide. Seeding a
+      // translated CTM here would do it, and would also make this worker a
+      // second, independent opinion about which box governs the page: pdf-lib's
+      // `getCropBox()` returns the `/CropBox` as written, while pdf.js
+      // intersects it with the `/MediaBox`, so the two can disagree on a
+      // malformed file and the pictures would then sit a constant offset from
+      // the text. Instead the origin has exactly one source — the render
+      // worker's own `page.view`, which is where the slide's width and height
+      // already come from — and `convert/slides.ts`'s `planSlides` subtracts it
+      // in exactly one place, for text and pictures alike.
+      const scan = findImagePlacements(statements, resolve);
+      if (scan.overflow > 0) dropped[pageIndex] = scan.overflow;
+      for (const placement of scan.placements) {
+        placements.push({ pageIndex, ...placement });
+      }
+    }
+
+    return { placements, dropped, unreadable };
   },
 
   async findImagesForAltText(bytes, job) {

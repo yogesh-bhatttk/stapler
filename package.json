@@ -56,6 +56,7 @@
     "marked": "^18.0.9",
     "pdf-lib": "npm:@cantoo/pdf-lib@^2.9.1",
     "pdfjs-dist": "^6.2.108",
+    "pptxgenjs": "^4.0.1",
     "preact": "^10.29.8",
     "qrcode": "^1.5.4",
     "tesseract.js": "^7.0.0",

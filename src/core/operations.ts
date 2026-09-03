@@ -72,7 +72,8 @@ import {
 import type { LayoutBlock, PdfPreviewItem } from './convert/html-to-pdf-blocks';
 import type { SheetSummary } from './convert/xlsx-reader';
 import type { PdfPageSize } from './convert/pdf-block-layout';
-import type { ExtractedImageEntry } from './workers/process.worker';
+import type { PageSlideData, PptxPreviewItem } from './convert/slides';
+import type { ExtractedImageEntry, ImagePlacementReport } from './workers/process.worker';
 
 /**
  * Maps the UI's `WatermarkSettings` onto the worker's `WatermarkData`. The two
@@ -2091,6 +2092,181 @@ export async function convertXlsxToPdf(
     sheets: read.sheets,
     notes: [...read.notes, ...laid.notes],
     hadUnsupportedCharacters: laid.hadUnsupportedCharacters
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * CNV-12 — PDF → PowerPoint (PPTX)
+ * ------------------------------------------------------------------ */
+
+export interface PdfToPptxOptions {
+  /**
+   * Place each page's lines of text as positioned text boxes. On by default.
+   *
+   * Worth switching off for one specific document: an OCR'd scan carries an
+   * *invisible* text layer over the page image, and PowerPoint has no invisible
+   * text — so that layer arrives as opaque black type on top of the scan. The
+   * panel says so, and this is the switch.
+   */
+  includeText: boolean;
+  /** Place the PDF's own image XObjects where the page draws them. On by default. */
+  includeImages: boolean;
+  /**
+   * Title for the deck's core-properties metadata. Passed by the caller for the
+   * reason `PdfToDocxOptions.documentName` documents: reading a live signal
+   * mid-conversion races a tab switch.
+   */
+  documentName?: string;
+}
+
+export interface PdfToPptxResult {
+  /** The finished `.pptx`. The same bytes the preview describes get saved. */
+  bytes: Uint8Array;
+  pageCount: number;
+  slideCount: number;
+  imageCount: number;
+  textBoxCount: number;
+  /** The deck's one slide size, in points. */
+  slideWidth: number;
+  slideHeight: number;
+  /** Slide-by-slide description of the output, for the mandatory preview. */
+  outline: PptxPreviewItem[];
+  /** What was recognised and deliberately not placed, each with the reason. */
+  notes: string[];
+}
+
+/**
+ * CNV-12 — one slide per page, three workers deep.
+ *
+ * `render` (pdf.js) reads each page's positioned lines, `process` (pdf-lib)
+ * hands over the embedded images *and* the rectangles the pages draw them at,
+ * and `convert` (`pptxgenjs`) plans the deck and writes it. Sequenced here
+ * rather than inside one worker because that is what keeps one copy of each
+ * library in the build — see `convert.worker.ts`.
+ *
+ * The two refusals are CNV-08's and CNV-10's, both *before* any deck exists:
+ *
+ *  • **encrypted** — every stream is ciphertext, so there is nothing to read.
+ *    `loadDocument` raises this itself.
+ *  • **XFA** — the visible content of an XFA form lives in an XML payload the
+ *    page objects do not carry, so a deck built from those pages would be a
+ *    deck of "please open this in Adobe Reader" placeholders presented as the
+ *    user's form. That is the silent-corruption outcome PLAN §5.2 forbids.
+ *
+ * A third refusal lives in the worker, at the point the plan exists: a document
+ * that would produce slides with nothing on any of them (a scan, or both options
+ * switched off) is refused with `EMPTY_DECK_MESSAGE` rather than written.
+ */
+export async function convertPdfToPptx(
+  bytes: Uint8Array,
+  options: PdfToPptxOptions,
+  jobOptions: JobOptions = {}
+): Promise<PdfToPptxResult> {
+  if (hasXfaMarker(bytes)) throw unsupported(XFA_CONVERT_MESSAGE);
+
+  const pages: PageSlideData[] = [];
+  const notes: string[] = [];
+
+  // Text first, and on its own document handle: `loadDocument` is also where
+  // encryption and an unreadable file surface, so nothing else runs until the
+  // document has been proved readable — the same order `convertPdfToDocx` uses,
+  // and the reason a refused file cannot be half-converted.
+  await renderWorker.lease(async api => {
+    const { handle, pageCount, isXfa } = await api.loadDocument(bytes);
+    try {
+      if (isXfa) throw unsupported(XFA_CONVERT_MESSAGE);
+      for (let i = 0; i < pageCount; i++) {
+        if (jobOptions.signal?.aborted) throw cancelled();
+        jobOptions.onProgress?.((i / pageCount) * 0.5, `Reading page ${i + 1} of ${pageCount}`);
+        pages.push(await api.extractPageSlide(handle, i));
+      }
+    } finally {
+      await api.closeDocument(handle).catch(() => {});
+    }
+  });
+
+  let imageArchive: Uint8Array | null = null;
+  let imageEntries: ExtractedImageEntry[] = [];
+  let placements: ImagePlacementReport[] = [];
+  let droppedPlacements: Record<number, number> = {};
+
+  if (options.includeImages) {
+    if (jobOptions.signal?.aborted) throw cancelled();
+    jobOptions.onProgress?.(0.5, 'Collecting embedded images');
+    const extracted = await extractEmbeddedImages(bytes, [], {
+      signal: jobOptions.signal,
+      onProgress: fraction =>
+        jobOptions.onProgress?.(0.5 + (fraction ?? 0) * 0.12, 'Collecting embedded images')
+    });
+    imageArchive = extracted.bytes;
+    imageEntries = extracted.entries;
+
+    if (jobOptions.signal?.aborted) throw cancelled();
+    jobOptions.onProgress?.(0.62, 'Locating images on the page');
+    // A second `process` pass rather than a field on `extractImages`: that
+    // method's contract is "the image bytes", it is shared with CNV-06's own
+    // tool and CNV-08, and widening it would make every caller pay for a
+    // content-stream parse none of them reads.
+    const located = await processWorker.lease(api =>
+      api.imagePlacements(
+        bytes,
+        [],
+        createJobHandle({
+          signal: jobOptions.signal,
+          onProgress: (fraction, label) =>
+            jobOptions.onProgress?.(0.62 + (fraction ?? 0) * 0.13, label)
+        })
+      )
+    );
+    placements = located.placements;
+    droppedPlacements = located.dropped;
+    // One note per page, carrying that page's *own* reason. A single summary
+    // line would have to pick one wording for two different causes — an
+    // undecodable filter chain and an inline image — and would misdescribe
+    // whichever it did not pick.
+    for (const { pageIndex, reason } of located.unreadable) {
+      notes.push(
+        `Page ${pageIndex + 1}: no image on this page could be placed, because where the page ` +
+          `draws them could not be read. ${reason} The page's text is still on its slide.`
+      );
+    }
+  }
+
+  if (jobOptions.signal?.aborted) throw cancelled();
+  const built = await convertWorker.lease(api =>
+    api.buildPptx(
+      pages,
+      // Unopened, and handed over rather than cloned. It has to be *this*
+      // argument position: Comlink only reads a transfer marker off a top-level
+      // argument, so nesting it in the options object below would
+      // structured-clone every image byte (CNV-08 audit finding 1).
+      imageArchive === null ? null : handOver(imageArchive),
+      {
+        includeText: options.includeText,
+        includeImages: options.includeImages,
+        placements,
+        entries: imageEntries,
+        droppedPlacements,
+        title: options.documentName ?? 'Converted presentation'
+      },
+      createJobHandle({
+        signal: jobOptions.signal,
+        onProgress: (fraction, label) =>
+          jobOptions.onProgress?.(0.75 + (fraction ?? 0) * 0.25, label)
+      })
+    )
+  );
+
+  return {
+    bytes: built.bytes,
+    pageCount: pages.length,
+    slideCount: built.slideCount,
+    imageCount: built.imageCount,
+    textBoxCount: built.textBoxCount,
+    slideWidth: built.slideWidth,
+    slideHeight: built.slideHeight,
+    outline: built.outline,
+    notes: [...notes, ...built.notes]
   };
 }
 

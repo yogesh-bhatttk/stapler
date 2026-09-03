@@ -39,6 +39,7 @@ export type ToolId =
   | 'word-to-pdf'
   | 'pdf-to-excel'
   | 'excel-to-pdf'
+  | 'pdf-to-ppt'
   | 'ocr'
   | 'table-extract'
   | 'acc'
@@ -457,6 +458,23 @@ export const TOOLS: readonly ToolDefinition[] = [
     // The input is an `.xlsx` picked from disk, not the open PDF — requiring a
     // document first would mean opening an unrelated PDF to convert a workbook.
     worksWithoutDocument: true,
+    selectable: false
+  },
+  {
+    id: 'pdf-to-ppt',
+    group: 'Convert',
+    title: 'PDF to PowerPoint',
+    // Same rule as the four above: the summary is the panel's description and
+    // the palette's subtitle, so the fidelity limit PLAN §5.5 requires us to
+    // state has to fit inside it. This is the widest gap of the six converters,
+    // so the summary leads with what the output *is* — boxes and pictures placed
+    // where the page drew them — rather than with the word "convert".
+    summary:
+      'Place each page’s text and images on a slide. Positioned boxes, not an editable deck. Beta.',
+    icon: 'Presentation',
+    canvasMode: 'grid',
+    needsOptionsPanel: true,
+    commitLabel: 'Save .pptx',
     selectable: false
   },
   {

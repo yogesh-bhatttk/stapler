@@ -50,9 +50,17 @@ import {
   type XlsxPreviewItem
 } from '../convert/sheets';
 import { buildXlsx as buildXlsxFile } from '../convert/xlsx-writer';
+import {
+  EMPTY_DECK_MESSAGE,
+  isEmptyPlan,
+  planSlides,
+  type PageSlideData,
+  type PptxPreviewItem
+} from '../convert/slides';
+import { buildPptx as buildPptxFile } from '../convert/pptx-writer';
 import { fromUnknown, unsupported } from '../errors';
-import { checkpoint, type JobHandle } from './protocol';
-import type { ExtractedImageEntry } from './process.worker';
+import { checkpoint, subJob, type JobHandle } from './protocol';
+import type { ExtractedImageEntry, ImagePlacementReport } from './process.worker';
 
 export interface DocxBuildResult {
   bytes: Uint8Array;
@@ -98,6 +106,23 @@ export interface XlsxBlocksResult {
   sheets: SheetSummary[];
   /** The workbook's own title from its core properties, if it set one. */
   title?: string;
+}
+
+/** CNV-12 — what `buildPptx` hands back. */
+export interface PptxBuildResult {
+  bytes: Uint8Array;
+  slideCount: number;
+  /** How many pictures were actually placed, across every slide. */
+  imageCount: number;
+  /** How many positioned text boxes were written, across every slide. */
+  textBoxCount: number;
+  /** Slide size in points, so the panel can state the deck's real dimensions. */
+  slideWidth: number;
+  slideHeight: number;
+  /** Everything recognised and deliberately not placed, each with its reason. */
+  notes: string[];
+  /** Slide-by-slide description of what was written, for the mandatory preview. */
+  outline: PptxPreviewItem[];
 }
 
 export interface ConvertJob {
@@ -163,6 +188,35 @@ export interface ConvertJob {
     options: { includePageText: boolean; title?: string },
     job?: JobHandle
   ): Promise<XlsxBuildResult>;
+
+  /**
+   * CNV-12 — plans the deck from the per-page data and writes the `.pptx`.
+   *
+   * A method here rather than a sixth worker, for the reason this module's
+   * comment gives: this worker owns the Office-format libraries, one lazy chunk
+   * each, and `pptxgenjs` is the fourth of them (loaded inside
+   * `pptx-writer.ts`, never statically).
+   *
+   * `imageArchive` is CNV-06's ZIP, unopened, and it is a **top-level
+   * parameter** for exactly the reason `buildDocx`'s is: Comlink reads a
+   * transfer marker off top-level arguments only, so nesting it inside the
+   * options object would silently structured-clone every image byte. That was
+   * CNV-08 audit finding 1 and it is pinned by
+   * `tests/unit/pdf-to-ppt-transfer.test.ts`.
+   */
+  buildPptx(
+    pages: PageSlideData[],
+    imageArchive: Uint8Array | null,
+    input: {
+      includeText: boolean;
+      includeImages: boolean;
+      placements: ImagePlacementReport[];
+      entries: ExtractedImageEntry[];
+      droppedPlacements: Record<number, number>;
+      title: string;
+    },
+    job?: JobHandle
+  ): Promise<PptxBuildResult>;
 }
 
 export const convertWorkerImpl: ConvertJob = {
@@ -246,6 +300,75 @@ export const convertWorkerImpl: ConvertJob = {
         sheetCount: plan.sheets.length,
         tableCount: plan.tableCount,
         skipped: plan.skipped,
+        outline: plan.outline
+      },
+      [bytes.buffer]
+    );
+  },
+
+  async buildPptx(pages, imageArchive, input, job) {
+    const notes: string[] = [];
+
+    // The archive is opened here, in the worker, for the reason `buildDocx`'s
+    // module comment gives: unzipping a document's worth of image bytes is
+    // exactly the >50ms main-thread work the NFRs forbid.
+    let files: Record<string, Uint8Array> = {};
+    if (input.includeImages && imageArchive && imageArchive.length > 0) {
+      await checkpoint(job, 0, 'Reading the embedded images');
+      try {
+        // `{ level: 0 }` on the way in (CNV-06 stores rather than deflates), so
+        // this is a copy per entry, not an inflate.
+        const { unzipSync } = await import('fflate');
+        files = unzipSync(imageArchive);
+      } catch (err) {
+        // A ZIP we cannot reopen costs the pictures, not the deck — the text is
+        // already extracted and is worth handing over with an explanation.
+        notes.push(
+          `No images were placed: their archive could not be read (${fromUnknown(err).message}).`
+        );
+      }
+    }
+
+    await checkpoint(job, 0.1, 'Planning the slides');
+    const plan = planSlides(pages, {
+      includeText: input.includeText,
+      includeImages: input.includeImages,
+      placements: input.includeImages ? input.placements : null,
+      entries: input.includeImages ? input.entries : null,
+      // Empty entries are excluded, not merely absent ones. `addSlide` skips a
+      // zero-length image rather than handing the library nothing, so counting
+      // it as archived here would make the plan claim a picture the file does
+      // not carry — and `imageCount` and the preview's per-slide counts are both
+      // read off this plan. Filtering here means `imageRefusal` names it in the
+      // notes and every count stays exact.
+      archivedFiles: new Set(Object.keys(files).filter(name => files[name].length > 0)),
+      droppedPlacements: input.droppedPlacements
+    });
+
+    if (isEmptyPlan(plan)) {
+      // Refused *before* any bytes exist. A deck of blank slides is a file the
+      // user has to diagnose; naming OCR and the two options is the useful
+      // answer, and it is the same policy CNV-10 applies to a scan.
+      throw unsupported(EMPTY_DECK_MESSAGE);
+    }
+
+    const bytes = await buildPptxFile(
+      plan,
+      { title: input.title, images: files },
+      subJob(job, 0.15, 1)
+    );
+
+    // Counted off the very plan the file was written from, so the preview and
+    // the bytes cannot describe different decks.
+    return Comlink.transfer(
+      {
+        bytes,
+        slideCount: plan.slides.length,
+        imageCount: plan.slides.reduce((n, slide) => n + slide.images.length, 0),
+        textBoxCount: plan.slides.reduce((n, slide) => n + slide.boxes.length, 0),
+        slideWidth: plan.slideWidth,
+        slideHeight: plan.slideHeight,
+        notes: [...notes, ...plan.notes],
         outline: plan.outline
       },
       [bytes.buffer]

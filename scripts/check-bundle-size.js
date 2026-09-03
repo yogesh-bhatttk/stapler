@@ -1,3 +1,19 @@
+/**
+ * Bundle *size* only. This script does not scan bundle **content** — but it is
+ * where a content scan would most naturally be added, and it is the script a
+ * reviewer runs against `dist/` before a release, so the known findings are
+ * recorded here rather than left to be rediscovered:
+ *
+ *  • `assets/pptxgen.es-*.js` (CNV-12's lazy `pptxgenjs` chunk) holds exactly
+ *    **one** occurrence of `XMLHttpRequest`, and its only `http(s)://` literals
+ *    are XML namespace URIs and GitHub links inside the library's own error
+ *    strings. Both are known, analysed and unreachable from this app's single
+ *    `addImage` call site. Do not treat either as a fresh finding.
+ *
+ * `RELEASE_CHECKLIST.md` § "Known, analysed bundle findings" carries the full
+ * reasoning and the reason the `verify-offline` skill's layer 2 does not surface
+ * the first of them; `docs/TICKETS.md` § CNV-12 is the primary record.
+ */
 import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';

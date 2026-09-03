@@ -25,6 +25,7 @@ import {
 import { findAcrossRuns } from '../pdf/text-search';
 import { pageBlocks, type DocxBlock } from '../convert/blocks';
 import { pageSheet, type PageSheetData } from '../convert/sheets';
+import { pageTextLines, slideRotation, type PageSlideData } from '../convert/slides';
 import { formattedRuns } from '../convert/pdf-runs';
 import { pixelateRects, type BlurStrength } from '../faceblur/blur';
 import {
@@ -231,6 +232,22 @@ export interface RenderJob {
    * needs. The table detection itself is shared (`table-regions.ts`).
    */
   extractPageSheet(handle: string, pageIndex: number): Promise<PageSheetData>;
+  /**
+   * CNV-12 — the page reduced to "one positioned text box per line of text",
+   * plus the geometry a slide needs: the unrotated **displayed box, origin
+   * included**, and `/Rotate`. The origin is not decoration — a `/CropBox` (or
+   * even a `/MediaBox`) may start anywhere, and everything on the page is
+   * reported relative to raw user space rather than to that corner.
+   *
+   * A third page pass rather than a re-use of either above, for the reason
+   * `extractPageSheet`'s comment gives about the second: the answer this tool
+   * needs is a different shape, and deriving it from a block model would mean
+   * un-merging paragraphs the block model deliberately merged. It reads
+   * `formattedRuns` (so bold and italic survive, which `extractPageSheet` has no
+   * use for) and keeps each line's *position*, which `extractPageBlocks`
+   * discards.
+   */
+  extractPageSlide(handle: string, pageIndex: number): Promise<PageSlideData>;
   extractPageTextItems(
     handle: string,
     pageIndex: number
@@ -1290,6 +1307,40 @@ const api: RenderJob = {
       // `extractPageBlocks` above asks for `rotation: 0`.
       const { height } = page.getViewport({ scale: 1, rotation: 0 });
       return pageSheet(await textRuns(page), height, pageIndex);
+    } finally {
+      page.cleanup();
+    }
+  },
+
+  async extractPageSlide(handle, pageIndex) {
+    const page = await entry(handle).doc.getPage(pageIndex + 1);
+    try {
+      const runs = await formattedRuns(page);
+      // `page.view` is pdf.js's own view box — `/CropBox` intersected with
+      // `/MediaBox`, falling back to the `/MediaBox` — and it is the box
+      // `getViewport` is built from, so it is the box a reader sees. All four
+      // numbers are taken from it rather than the width and height from a
+      // viewport and the origin from here, because a viewport's extents are
+      // multiplied by `/UserUnit` while the text transforms `formattedRuns`
+      // returns are not; mixing the two would put a box origin and a box size in
+      // different units on the rare page that sets one.
+      //
+      // The **origin** is the fix for a real defect: a page's box need not start
+      // at (0, 0), and Stapler's own Crop tool writes one that does not. pdf.js
+      // reports a run's transform in raw user space and folds the origin into the
+      // viewport matrix, which this pass does not use — so without carrying the
+      // origin, every line of a page cropped to [100 100 612 792] was placed
+      // 100 pt right of and 100 pt above where the page draws it, and a page-top
+      // title landed off the slide. `slides.ts` subtracts it, once, for text and
+      // pictures alike.
+      //
+      // Unrotated, for the reason the two passes above ask for `rotation: 0`:
+      // `formattedRuns` hands back y-up baselines in unrotated user space, and
+      // `slides.ts` applies `/Rotate` itself, so the whole rotation is one
+      // documented transform rather than two viewports that could disagree.
+      const [x0, y0, x1, y1] = page.view;
+      const box = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+      return pageTextLines(runs, pageIndex, box, slideRotation(page.rotate));
     } finally {
       page.cleanup();
     }

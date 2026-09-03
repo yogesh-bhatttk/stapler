@@ -96,6 +96,11 @@ import {
   excelToPdfPreviewIsStale,
   excelToPdfSource
 } from './convert/excel-to-pdf-state';
+import {
+  PDF_TO_PPT_GATE,
+  pdfToPptPreview,
+  pdfToPptPreviewIsStale
+} from './convert/pdf-to-ppt-state';
 import { runOcr } from '../../core/ocr/runOcr';
 import { renderWorker } from '../../core/workers';
 import { altTextMap } from './acc/state';
@@ -1317,6 +1322,49 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         `${preview.pageCount} page(s)` +
         (preview.notes.length > 0
           ? ` · ${preview.notes.length} item(s) could not be converted — see the panel`
+          : '')
+    });
+  },
+  /**
+   * CNV-12 — writes the `.pptx` the panel has already converted and previewed.
+   *
+   * Deliberately does not convert here, for the same reason its four siblings
+   * above do not: the preview is mandatory (PLAN §5.5), and the only way to
+   * guarantee that what was reviewed is what gets written is to save the very
+   * bytes the preview was rendered from. The guarantee matters more here than
+   * anywhere else in the series — every box on every slide is an approximation
+   * of where the page drew something, so re-running the conversion at save time
+   * would reopen the gap between what was checked and what lands on disk.
+   *
+   * The gate in `commit-gate.ts` already disables the action bar's button; this
+   * check is the guarantee behind that courtesy, and it also catches a preview
+   * belonging to a document the user has since closed — or one edited since the
+   * conversion ran, which `pdfToPptPreviewIsStale` decides from
+   * `historyVersion` rather than from the document id alone.
+   */
+  'pdf-to-ppt': async ({ doc }) => {
+    const preview = pdfToPptPreview.value;
+    if (!preview || pdfToPptPreviewIsStale(doc.id)) {
+      notify('warning', translate('Nothing was saved.'), {
+        detail: PDF_TO_PPT_GATE,
+        timeout: 0
+      });
+      return;
+    }
+
+    // `platform.saveFileAs`, not the shared `save`: that helper runs the bytes
+    // through `applyProtection`, which encrypts a *PDF*. Running a `.pptx`
+    // through it would produce an unopenable file — the same reason CNV-08's
+    // `.docx` and CNV-10's `.xlsx` take this path.
+    const name = `${stem(doc.name)}.pptx`;
+    const saved = await platform.saveFileAs(preview.bytes, name);
+    if (!saved) return;
+    notify('success', translate('Saved {name}', { name }), {
+      detail:
+        `${formatBytes(preview.bytes.byteLength)} · ${preview.slideCount} slide(s) · ` +
+        `${preview.textBoxCount} text box(es)` +
+        (preview.notes.length > 0
+          ? ` · ${preview.notes.length} item(s) were left out — see the panel`
           : '')
     });
   },

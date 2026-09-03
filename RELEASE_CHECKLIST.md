@@ -20,6 +20,41 @@ so it gets its own explicit step below rather than being buried inside "run veri
       a broader suite passing does not tell you *this specific* test ran and
       passed). This is the test that would catch an accidentally-added CDN
       import, Google Fonts link, or analytics snippet before it ships.
+- [ ] **Known, analysed bundle findings — read this before filing a panic:** a
+      content scan of the built output turns up two hits that are *expected*, and
+      a release should not be held for either. Anything **not** on this list is a
+      real finding and is a release blocker until it is explained.
+      1. **One `XMLHttpRequest` in `assets/pptxgen.es-*.js`** (CNV-12's
+         `pptxgenjs` chunk). This is the library's `encodeSlideMediaRels`, which
+         resolves a media relationship that has no `data` of its own. It is not
+         reachable from this app: `addImage` is called from exactly **one** place
+         in the whole source tree (`src/core/convert/pptx-writer.ts`), that call
+         sets `data` **unconditionally** and never sets `path`, and the library
+         picks its candidates with a single filter — `rel.type !== 'online' &&
+         !rel.data && …` — that gates the browser XHR branch and its `node:fs` /
+         `node:https` branches alike. A relationship carrying its own bytes is
+         excluded before any branch is chosen. Full reasoning: `docs/TICKETS.md`
+         § CNV-12, "`pptxgenjs` is a genuinely new dependency".
+         Note that this hit is **not** something the `verify-offline` skill's
+         layer 2 looks for — that layer greps the built bundle for `http://`,
+         `https://`, `fetch(` and the known CDN hosts, and `XMLHttpRequest`
+         appears only in its layer 1, which is `src/`-only and so never reaches a
+         dependency's chunk. It is recorded here because a reviewer who
+         reasonably *widens* that grep will find it, and an unexplained fresh hit
+         in a network-claim audit is exactly the thing that should stop a release
+         if nobody has written down why it does not.
+      2. **`http(s)://` literals inside that same chunk** — which layer 2 *does*
+         find. Measured on the built chunk: the only hosts are
+         `schemas.openxmlformats.org`, `schemas.microsoft.com`, `purl.org` and
+         `www.w3.org` — XML namespace URIs, i.e. identifiers that are never
+         dereferenced — plus `gitbrent.github.io` / `github.com` links inside the
+         library's own `throw new Error(...)` strings. The chunk holds **0**
+         occurrences of `fetch(` and **0** of `WebSocket`; `node:fs`,
+         `node:https` and `image-size` are stubbed out by the package's own
+         `browser` field.
+      Layer 3 of `verify-offline` (the runtime request monitor, i.e. the
+      zero-network test above) is what actually covers both, and it drives a real
+      PDF → PowerPoint conversion that embeds real images.
 - [ ] **QA-05 — automated structural validation:** run `pnpm run qa05` before each
        release. Validates that every P0 tool's PDF output round-trips through pdf-lib
        without XRef corruption or parse error. All 8 checks pass (Merge, Rotate,
@@ -122,6 +157,39 @@ so it gets its own explicit step below rather than being buried inside "run veri
        failed to parse a part it should have), and the wide sheet is continued
        as labelled column bands. A workbook saved by LibreOffice Calc is worth a
        second pass for the same reason.
+ - [ ] **QA-05 — Microsoft PowerPoint and LibreOffice Impress (manual, CNV-12):**
+       open a `.pptx` produced by PDF → PowerPoint from
+       `tests/fixtures/pdf-to-ppt.pdf`. Confirm **no repair prompt**; that the
+       deck holds four slides in page order; that the slide size reads 8.5 × 11
+       in (File → Page Setup / Slide Size), i.e. the *source page's* size and not
+       a 4:3 or 16:9 preset; that slide 1 shows the title, the three body lines
+       and the photo roughly where the PDF page draws them, with `17 percent`
+       bold and `unaudited` italic; that slide 2 (the A4 page) is scaled and
+       centred rather than stretched; that slide 3's text reads the same way up
+       as the rotated source page does; and that slide 4 shows the same photo
+       again at a smaller size. Click a text box and confirm it is an editable
+       text box, one per line of the page — that is the output's shape, not a
+       defect. **What must not be raised here**, because all of it is stated in
+       the panel before the conversion runs: text does not reflow, the deck's
+       theme font is used rather than the PDF's, all text is black, and no vector
+       drawing, rule, border or background is reproduced. Slide count and order,
+       per-slide text (compared against pdf.js's own reading of each page), box
+       and picture geometry in EMU, run properties, the media parts and their
+       relationships are already asserted against the output bytes by
+       `tests/unit/pdf-to-ppt.test.ts` (read back with `pptx-reader.ts` and by
+       unzipping the package with `fflate`) — this step is specifically about the
+       two real applications, which no test in this repo can launch, and about
+       whether the approximation is *usable*, which no test can judge.
+ - [ ] **QA-05 — an OCR'd scan through PDF → PowerPoint (manual, CNV-12):** the
+       one case where the tool's default is knowingly wrong-looking. Run the OCR
+       tool over a scanned page, then convert the result with **both** options
+       on: the invisible text layer becomes visible black type over the page
+       image, because PowerPoint has no invisible text. Confirm the panel's
+       limitation list says so, that switching "Place page text" off produces a
+       usable image-only deck, and that switching "Place embedded images" off
+       instead produces the text alone. If the black-over-scan result reads as a
+       bug rather than as the disclosed behaviour, the copy needs strengthening —
+       raise that, not the rendering.
 - [ ] **Feature Complete:** All features for this release are implemented; any
       known limitation is disclosed in the relevant panel, not silent.
 

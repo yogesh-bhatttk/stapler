@@ -3,6 +3,7 @@ import {
   ensureFixture,
   excelToPdfXlsx,
   pdfToExcelPdf,
+  pdfToPptPdf,
   pdfToWordPdf,
   textPdf,
   wordToPdfDocx
@@ -111,6 +112,10 @@ test.describe('zero network', () => {
         // cheap half, and each conversion has its own test below.
         'pdf-to-excel',
         'excel-to-pdf',
+        // CNV-12. Same reasoning again — the panel is the cheap half, and the
+        // conversion (which is the only thing that loads the `pptxgenjs` chunk)
+        // has its own test below.
+        'pdf-to-ppt',
         'table-extract',
         'acc',
         'contact-sheet',
@@ -381,6 +386,79 @@ test.describe('zero network', () => {
       await save.click();
       const saved = await download;
       expect(saved.suggestedFilename()).toMatch(/\.pdf$/);
+    });
+  });
+
+  /**
+   * CNV-12 — the sharpest case in the build for this argument, and the reason
+   * this test is not optional.
+   *
+   * `pptxgenjs` carries a browser media path that resolves an image with
+   * `new XMLHttpRequest()` — for any media relationship whose `data` is unset.
+   * `pptx-writer.ts` therefore sets `data` on every `addImage` and never sets
+   * `path`, and the library's own candidate filter (`!rel.data && …`) excludes
+   * such a relationship before any branch is chosen. That argument is made in
+   * full in `pptx-writer.ts`'s module comment; what it rests on is source
+   * reading, so **this test is the only place the claim is measured in the
+   * environment it is actually about**. The unit suite's throwing
+   * `XMLHttpRequest` stub does not substitute for it: Vitest runs under Node,
+   * where `pptxgenjs` takes its `process.versions?.node` branch and the browser
+   * XHR call is never a candidate at all.
+   *
+   * So: a real browser, its own request log, a conversion that really does embed
+   * images, and the lazy `await import('pptxgenjs')` loading inside the watched
+   * window.
+   */
+  test('makes no external request while actually converting a PDF to PowerPoint', async ({
+    page,
+    baseURL
+  }) => {
+    const origin = new URL(baseURL!).origin;
+    const fixture = await ensureFixture('pdf-to-ppt.pdf', pdfToPptPdf);
+
+    // Every request, not only the offending ones: this test has to be able to
+    // prove the lazily-imported code really was pulled in while the monitor was
+    // attached. A test that silently stopped converting would otherwise pass by
+    // observing nothing.
+    const seen: string[] = [];
+    page.on('request', request => seen.push(request.url()));
+
+    await withNetworkWatch(page, origin, async () => {
+      await openApp(page);
+      await importFile(page, fixture);
+      // A hash change rather than `page.goto`, so the imported document survives.
+      await gotoTool(page, 'pdf-to-ppt');
+
+      const panel = page.getByRole('complementary', { name: /PDF to PowerPoint options/ });
+      await expect(panel).toBeVisible();
+
+      // The `pptxgenjs` chunk is not loaded by rendering the panel — that is the
+      // whole reason the tool sweep above is not sufficient cover for this tool.
+      const beforeConversion = seen.length;
+
+      // The conversion itself: render worker (pdf.js text layer) → process
+      // worker (pdf-lib: image bytes, then image placements) → convert worker,
+      // and the `pptxgenjs` chunk's first and only load.
+      await panel.getByRole('button', { name: 'Preview conversion' }).click();
+      await expect(panel.getByRole('list', { name: /Slides that will be written/ })).toBeVisible({
+        timeout: 90_000
+      });
+
+      const duringConversion = seen.slice(beforeConversion);
+      expect(
+        duringConversion.filter(url => /\/assets\/.*\.js(\?|$)/.test(url)),
+        `The conversion must load its lazy chunks inside the watched window; saw:\n${duringConversion.join('\n')}`
+      ).not.toEqual([]);
+      expect(duringConversion.some(url => /convert\.worker/.test(url))).toBe(true);
+
+      // And the save, because writing the file is a separate code path from
+      // building it.
+      const save = page.getByRole('button', { name: 'Save .pptx' });
+      await expect(save).toBeEnabled();
+      const download = page.waitForEvent('download', { timeout: 60_000 });
+      await save.click();
+      const saved = await download;
+      expect(saved.suggestedFilename()).toMatch(/\.pptx$/);
     });
   });
 
