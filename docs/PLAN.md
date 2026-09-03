@@ -135,7 +135,7 @@ stapler/
 | Worker RPC | **Comlink**                                              | Removes postMessage boilerplate; transferable ArrayBuffers                    |
 | Zip        | **fflate**                                               | Smallest, fastest, streaming                                                  |
 | OCR        | **tesseract.js** (lazy)                                  | Only loaded when OCR is invoked                                               |
-| DOCX write | **docx** (lazy)                                          | Pure JS OOXML writer, no WASM/native deps; only loaded by CNV-08/12           |
+| DOCX write | **docx** (lazy)                                          | Pure JS OOXML writer, no WASM/native deps; only loaded by CNV-08              |
 | DOCX read  | **mammoth** (lazy)                                       | Structural docx→HTML for Word→PDF and PDF→Word round trips; not a renderer   |
 | XLSX read  | **xlsx** / SheetJS CE (lazy)                             | Apache-2.0, read-only usage for Excel→PDF                                     |
 | XLSX write | *(hand-rolled, via existing `fflate`)*                   | Same zip+XML builder OCR-03 already ships, generalized for CNV-10             |

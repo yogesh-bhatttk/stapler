@@ -71,6 +71,7 @@ import {
 } from './convert/sheets';
 import type { LayoutBlock, PdfPreviewItem } from './convert/html-to-pdf-blocks';
 import type { SheetSummary } from './convert/xlsx-reader';
+import type { SlideSummary } from './convert/pptx-slides';
 import type { PdfPageSize } from './convert/pdf-block-layout';
 import type { PageSlideData, PptxPreviewItem } from './convert/slides';
 import type { ExtractedImageEntry, ImagePlacementReport } from './workers/process.worker';
@@ -2270,13 +2271,153 @@ export async function convertPdfToPptx(
   };
 }
 
-/** The distinct image buffers inside a block model, as a Comlink transfer list. */
+/**
+ * The distinct image buffers inside a block model, as a Comlink transfer list.
+ *
+ * Distinct matters twice over: `postMessage` throws on a repeated transferable,
+ * and CNV-13's canvases deliberately share one `Uint8Array` between every slide
+ * that shows the same picture (which is what lets the layout engine embed it
+ * once). A stored ZIP entry is also a *subarray of the package*, so two
+ * different pictures can share one `ArrayBuffer`.
+ */
 function imageBuffersOf(blocks: readonly LayoutBlock[]): ArrayBuffer[] {
   const buffers = new Set<ArrayBuffer>();
   for (const block of blocks) {
     if (block.kind === 'image') buffers.add(block.data.buffer as ArrayBuffer);
+    if (block.kind === 'canvas') {
+      for (const item of block.items) {
+        if (item.kind === 'image') buffers.add(item.data.buffer as ArrayBuffer);
+      }
+    }
   }
   return [...buffers];
+}
+
+/* ------------------------------------------------------------------ *
+ * CNV-13 — PowerPoint (PPTX) → PDF
+ * ------------------------------------------------------------------ */
+
+/**
+ * How the deck's slides are fitted onto PDF pages.
+ *
+ * `slide` is the default and the honest one: a deck states its own size, so the
+ * page is made that size and every coordinate is the deck's own, at scale 1. The
+ * two paper sizes exist because a deck is often converted *in order to print
+ * it*, and they letterbox rather than stretch — the fit is uniform and centred,
+ * so a 16:9 deck on A4 is a scaled copy of itself with bands above and below.
+ */
+export type PptxPageFit = 'slide' | 'a4' | 'letter';
+
+export interface PptxToPdfOptions {
+  pageSize: PptxPageFit;
+  /**
+   * Title for the PDF's `/Title`, used only when the deck does not carry one of
+   * its own. Passed by the caller for the reason `XlsxToPdfOptions` documents:
+   * reading a live signal mid-conversion races a tab switch.
+   */
+  documentName?: string;
+}
+
+export interface PptxToPdfResult {
+  /** The finished PDF. The same bytes the preview describes get saved. */
+  bytes: Uint8Array;
+  /** One page per slide, which is the ticket's own acceptance criterion. */
+  pageCount: number;
+  slideCount: number;
+  /**
+   * How many pictures were *placed*. A picture shown on two slides counts twice
+   * here and is one object in the file — the layout engine embeds by id.
+   */
+  imageCount: number;
+  /** Page-by-page description of the output, for the mandatory preview. */
+  outline: PdfPreviewItem[];
+  /** One entry per converted slide, in the deck's own order. */
+  slides: SlideSummary[];
+  /** The deck's own slide size, in points. */
+  slideWidth: number;
+  slideHeight: number;
+  /** What was recognised and deliberately not drawn, each with the reason. */
+  notes: string[];
+  /** True when a character the standard fonts cannot draw was replaced. */
+  hadUnsupportedCharacters: boolean;
+}
+
+/**
+ * CNV-13 — a deck's slides as one PDF page each, two workers deep.
+ *
+ * `convert` reads the package into the generalized block model (one `canvas`
+ * block per slide) and `process` (pdf-lib) draws each canvas onto a page of its
+ * own. Sequenced here rather than inside one worker for the reason
+ * `workers/index.ts` gives: the split is by library, and putting pdf-lib into
+ * the `convert` worker to save a hop would add a second copy of it.
+ *
+ * Unreadable input is refused by `pptx-reader.ts` before any page exists — an
+ * empty file, an OLE2 container (a legacy `.ppt`, or a password-protected
+ * `.pptx`, which are the same container), a ZIP that is not a presentation
+ * package, a deck listing no slides, and a package listing a slide it does not
+ * contain each get their own message. A deck that would produce nothing but
+ * blank pages is refused too, by `deckToBlocks`. Nothing is ever half-converted:
+ * the failure throws and the user's `.pptx` is untouched.
+ */
+export async function convertPptxToPdf(
+  bytes: Uint8Array,
+  options: PptxToPdfOptions,
+  jobOptions: JobOptions = {}
+): Promise<PptxToPdfResult> {
+  const read = await convertWorker.lease(api =>
+    api.pptxToBlocks(
+      // Handed over rather than cloned, and at the top-level argument position
+      // that is the only place Comlink reads a transfer marker (CNV-08 audit
+      // finding 1). Safe because the caller reads the file fresh each run.
+      handOver(bytes),
+      createJobHandle({
+        signal: jobOptions.signal,
+        onProgress: (fraction, label) => jobOptions.onProgress?.((fraction ?? 0) * 0.5, label)
+      })
+    )
+  );
+
+  if (jobOptions.signal?.aborted) throw cancelled();
+
+  const laid = await processWorker.lease(api =>
+    api.layoutBlocksToPdf(
+      // Transferred, not cloned: the deck's pictures came back from the read
+      // worker as real bytes and this is their second and last hop.
+      Comlink.transfer(read.blocks, imageBuffersOf(read.blocks)),
+      {
+        // A named size is still passed when the deck's own size is used, because
+        // it is what `clampPageBox` falls back to for a deck that states no
+        // `<p:sldSz>` at all.
+        pageSize: options.pageSize === 'letter' ? 'letter' : 'a4',
+        ...(options.pageSize === 'slide'
+          ? { pageBox: { width: read.slideWidth, height: read.slideHeight } }
+          : {}),
+        // The deck's own title wins over the file name: a document that states
+        // its title is stating it, and overriding that with a file name would be
+        // this converter inventing metadata.
+        title: read.title ?? options.documentName
+      },
+      createJobHandle({
+        signal: jobOptions.signal,
+        onProgress: (fraction, label) => jobOptions.onProgress?.(0.5 + (fraction ?? 0) * 0.5, label)
+      })
+    )
+  );
+
+  return {
+    bytes: laid.bytes,
+    pageCount: laid.pageCount,
+    slideCount: read.slides.length,
+    imageCount: laid.imageCount,
+    // Built by the layout engine from the very blocks it drew, so the preview
+    // and the file cannot describe different documents.
+    outline: laid.outline,
+    slides: read.slides,
+    slideWidth: read.slideWidth,
+    slideHeight: read.slideHeight,
+    notes: [...read.notes, ...laid.notes],
+    hadUnsupportedCharacters: laid.hadUnsupportedCharacters
+  };
 }
 
 /** ACC-01 — returns thumbnails of all images for the alt-text editor */

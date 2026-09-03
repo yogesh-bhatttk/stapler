@@ -58,6 +58,7 @@ import {
   type PptxPreviewItem
 } from '../convert/slides';
 import { buildPptx as buildPptxFile } from '../convert/pptx-writer';
+import { readPptxAsBlocks, type SlideSummary } from '../convert/pptx-slides';
 import { fromUnknown, unsupported } from '../errors';
 import { checkpoint, subJob, type JobHandle } from './protocol';
 import type { ExtractedImageEntry, ImagePlacementReport } from './process.worker';
@@ -105,6 +106,20 @@ export interface XlsxBlocksResult {
   /** One entry per converted sheet, in output order. */
   sheets: SheetSummary[];
   /** The workbook's own title from its core properties, if it set one. */
+  title?: string;
+}
+
+/** CNV-13 — what `pptxToBlocks` hands back to be laid out onto PDF pages. */
+export interface PptxBlocksResult {
+  blocks: LayoutBlock[];
+  /** Everything recognised and deliberately not carried across, with reasons. */
+  notes: string[];
+  /** One entry per converted slide, in the deck's own order. */
+  slides: SlideSummary[];
+  /** The deck's slide size in points, so the caller can size the PDF page to it. */
+  slideWidth: number;
+  slideHeight: number;
+  /** The deck's own title from its core properties, if it set one. */
   title?: string;
 }
 
@@ -157,6 +172,25 @@ export interface ConvertJob {
    * them; Comlink reads a transfer marker off top-level arguments only.
    */
   xlsxToBlocks(bytes: Uint8Array, job?: JobHandle): Promise<XlsxBlocksResult>;
+
+  /**
+   * CNV-13 — reads a `.pptx` and returns the same generalized block model, one
+   * `canvas` block per slide.
+   *
+   * A method here rather than a sixth worker, and for a reason that is *not*
+   * the library split its two siblings cite: this reader owns no library at all.
+   * `pptx-reader.ts` is a hand-rolled walk over `fflate`, which is already a
+   * runtime dependency, so nothing lazy is loaded and no bundle argument is at
+   * stake. What puts it here instead is the other half of the same rule — it
+   * stops at the model, because drawing the pages needs pdf-lib, which lives in
+   * the `process` worker. `operations.ts`'s `convertPptxToPdf` sequences the
+   * two, and the read is real work over potentially hundreds of slides, which
+   * the NFRs keep off the main thread regardless of which library does it.
+   *
+   * The deck's bytes are a top-level parameter so the caller can `handOver`
+   * them; Comlink reads a transfer marker off top-level arguments only.
+   */
+  pptxToBlocks(bytes: Uint8Array, job?: JobHandle): Promise<PptxBlocksResult>;
 
   /**
    * Writes the block model out as a `.docx`, embedding what it can of CNV-06's
@@ -244,6 +278,30 @@ export const convertWorkerImpl: ConvertJob = {
     // grids of strings — there is no image buffer in the model, so a transfer
     // list would be empty and the structured clone is the whole cost.
     return { blocks, notes, sheets, ...(title !== undefined ? { title } : {}) };
+  },
+
+  async pptxToBlocks(bytes, job) {
+    const read = await readPptxAsBlocks(bytes, job);
+
+    // Picture bytes are *transferred* out rather than cloned. They are
+    // `fflate`'s own output — nothing in this worker reads them again once the
+    // model is built — and a deck's images are the only part of this model with
+    // any size to it.
+    //
+    // The dedup is not a nicety: `unzipSync` returns a stored entry as a
+    // *subarray of the package*, so several pictures can share one
+    // `ArrayBuffer`, and one image drawn on several slides is deliberately the
+    // same instance in every canvas that shows it (that shared identity is what
+    // lets the layout engine embed it once). `postMessage` throws on a repeated
+    // transferable, so the list has to be a set of distinct buffers.
+    const buffers = new Set<ArrayBuffer>();
+    for (const block of read.blocks) {
+      if (block.kind !== 'canvas') continue;
+      for (const item of block.items) {
+        if (item.kind === 'image') buffers.add(item.data.buffer as ArrayBuffer);
+      }
+    }
+    return Comlink.transfer(read, [...buffers]);
   },
 
   async buildDocx(model, imageArchive, imageEntries, job) {

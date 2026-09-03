@@ -40,6 +40,7 @@ export type ToolId =
   | 'pdf-to-excel'
   | 'excel-to-pdf'
   | 'pdf-to-ppt'
+  | 'ppt-to-pdf'
   | 'ocr'
   | 'table-extract'
   | 'acc'
@@ -475,6 +476,25 @@ export const TOOLS: readonly ToolDefinition[] = [
     canvasMode: 'grid',
     needsOptionsPanel: true,
     commitLabel: 'Save .pptx',
+    selectable: false
+  },
+  {
+    id: 'ppt-to-pdf',
+    group: 'Convert',
+    title: 'PowerPoint to PDF',
+    // Same rule as the five above: the summary is the panel's description and
+    // the palette's subtitle, so the fidelity limit PLAN §5.5 requires us to
+    // state has to fit inside it. "Where the deck put them" is the load-bearing
+    // phrase — this draws each slide's shapes at their own coordinates, and it
+    // draws nothing the deck did not store as text, a picture or a table.
+    summary: 'Draw each slide as its own page, text and pictures where the deck put them. Beta.',
+    icon: 'FilePlus',
+    canvasMode: 'single',
+    needsOptionsPanel: true,
+    commitLabel: 'Save PDF',
+    // The input is a `.pptx` picked from disk, not the open PDF — requiring a
+    // document first would mean opening an unrelated PDF to convert a deck.
+    worksWithoutDocument: true,
     selectable: false
   },
   {

@@ -5,6 +5,7 @@ import {
   pdfToExcelPdf,
   pdfToPptPdf,
   pdfToWordPdf,
+  pptToPdfPptx,
   textPdf,
   wordToPdfDocx
 } from './fixtures';
@@ -116,6 +117,12 @@ test.describe('zero network', () => {
         // conversion (which is the only thing that loads the `pptxgenjs` chunk)
         // has its own test below.
         'pdf-to-ppt',
+        // CNV-13. Same reasoning once more — the panel is the cheap half, and
+        // the conversion has its own test below. This one loads no third-party
+        // chunk at all (its reader is hand-rolled over `fflate`), which is
+        // exactly why watching it matters: there is no library to blame if a
+        // request ever appears.
+        'ppt-to-pdf',
         'table-extract',
         'acc',
         'contact-sheet',
@@ -459,6 +466,67 @@ test.describe('zero network', () => {
       await save.click();
       const saved = await download;
       expect(saved.suggestedFilename()).toMatch(/\.pptx$/);
+    });
+  });
+
+  /**
+   * CNV-13 — the opposite direction, and the one conversion in the six that
+   * pulls in no third-party library at all: `pptx-reader.ts` is a hand-rolled
+   * walk over `fflate`, which is already in the initial bundle. That makes the
+   * argument *narrower*, not weaker — there is no lazy chunk whose contents
+   * have to be taken on trust — but it still has to be watched, because the
+   * `convert` and `process` workers both start here for the first time.
+   */
+  test('makes no external request while actually converting a PowerPoint file to PDF', async ({
+    page,
+    baseURL
+  }) => {
+    const origin = new URL(baseURL!).origin;
+    const fixture = await ensureFixture('ppt-to-pdf.pptx', pptToPdfPptx);
+
+    // Every request, not only the offending ones: this test has to be able to
+    // prove the conversion really ran while the monitor was attached. A test
+    // that silently stopped converting would otherwise pass by observing
+    // nothing.
+    const seen: string[] = [];
+    page.on('request', request => seen.push(request.url()));
+
+    await withNetworkWatch(page, origin, async () => {
+      await openApp(page);
+      // A hash change rather than `page.goto`, so nothing reloads mid-watch.
+      await gotoTool(page, 'ppt-to-pdf');
+
+      const panel = page.getByRole('complementary', { name: /PowerPoint to PDF options/ });
+      await expect(panel).toBeVisible();
+
+      const chooser = page.waitForEvent('filechooser');
+      await panel.getByRole('button', { name: /Choose a \.pptx file/ }).click();
+      await (await chooser).setFiles(fixture);
+
+      const beforeConversion = seen.length;
+
+      // The conversion itself: convert worker (the hand-rolled reader) →
+      // process worker (pdf-lib), both starting for the first time here.
+      await panel.getByRole('button', { name: 'Preview conversion' }).click();
+      await expect(
+        panel.getByRole('list', { name: /Slides that will be drawn into the PDF/ })
+      ).toBeVisible({ timeout: 90_000 });
+
+      const duringConversion = seen.slice(beforeConversion);
+      expect(
+        duringConversion.filter(url => /\/assets\/.*\.js(\?|$)/.test(url)),
+        `The conversion must load its workers inside the watched window; saw:\n${duringConversion.join('\n')}`
+      ).not.toEqual([]);
+      expect(duringConversion.some(url => /convert\.worker/.test(url))).toBe(true);
+
+      // And the save, because writing the file is a separate code path from
+      // building it.
+      const save = page.getByRole('button', { name: 'Save PDF' });
+      await expect(save).toBeEnabled();
+      const download = page.waitForEvent('download', { timeout: 60_000 });
+      await save.click();
+      const saved = await download;
+      expect(saved.suggestedFilename()).toMatch(/\.pdf$/);
     });
   });
 

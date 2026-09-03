@@ -190,6 +190,40 @@ so it gets its own explicit step below rather than being buried inside "run veri
        instead produces the text alone. If the black-over-scan result reads as a
        bug rather than as the disclosed behaviour, the copy needs strengthening —
        raise that, not the rendering.
+ - [ ] **QA-05 — a deck a person actually authored, through PowerPoint → PDF
+       (manual, CNV-13):** the gap this tool cannot close in a test. Every
+       fixture in this repo is machine-written, so the two things no automated
+       check here has ever exercised are a real **slide master/layout** and a
+       real **theme**. Take a `.pptx` authored in PowerPoint or Impress — ideally
+       one using a built-in template — and convert it. Expect, and do **not**
+       raise, all of the following, because each is stated in the panel before
+       the conversion runs: any title, footer, slide number or background that
+       comes from the *layout* rather than from the slide is absent; all text is
+       black; no shape fill, outline, shadow or slide background is drawn; every
+       glyph is Helvetica at the deck's stated size, so lines are wider or
+       narrower than PowerPoint draws them and a box can overrun. **Do raise:**
+       a page count that is not one per slide; text that is on the wrong page;
+       a shape at visibly the wrong position (especially a *grouped* shape, or a
+       table, which are the two the reader had to learn for this ticket); a slide
+       that comes out blank when its text is visibly typed into the slide rather
+       than inherited; or a deck refused with a message that does not describe
+       what is actually wrong with it. A deck whose slides *are* entirely
+       inherited placeholders is refused by design, with a message naming that
+       cause — confirm the message reads as an explanation and not as a failure.
+ - [ ] **QA-05 — PDF viewers, PowerPoint → PDF output (manual, CNV-13):** open a
+       PDF produced from `tests/fixtures/ppt-to-pdf.pptx` in Acrobat, Preview and
+       Chrome's built-in viewer. Confirm four pages, each 13.33 × 7.5 in with
+       "Match the slide size" (File → Properties → Page Size), the title at the
+       *top* of page 1 and the footer at the *bottom* (an inverted y flip is the
+       one failure that would look internally consistent everywhere else), the
+       picture on pages 2 and 4, and the table's grid drawn on page 3. Then
+       convert again onto A4 and confirm each slide is scaled and centred between
+       two equal bands rather than stretched. Page count, per-page text (compared
+       against the source deck's own runs, read back with `pptx-reader.ts`), the
+       title and footer baselines, the picture's `cm` placement and the
+       one-object-for-two-placements image sharing are already asserted against
+       the output bytes by `tests/unit/ppt-to-pdf.test.ts` — this step is about
+       the three real viewers, which no test in this repo can launch.
 - [ ] **Feature Complete:** All features for this release are implemented; any
       known limitation is disclosed in the relevant panel, not silent.
 

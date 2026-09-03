@@ -39,6 +39,7 @@ import { WordToPdfPanel } from '../tools/convert/WordToPdfPanel';
 import { PdfToExcelPanel } from '../tools/convert/PdfToExcelPanel';
 import { ExcelToPdfPanel } from '../tools/convert/ExcelToPdfPanel';
 import { PdfToPptPanel } from '../tools/convert/PdfToPptPanel';
+import { PptToPdfPanel } from '../tools/convert/PptToPdfPanel';
 import { ContactSheetPanel } from '../tools/contact-sheet/ContactSheetPanel';
 import { ShortcutsPanel } from '../tools/shortcuts/ShortcutsPanel';
 import { ReadAloudPanel } from '../tools/read-aloud/ReadAloudPanel';
@@ -80,6 +81,7 @@ const BODIES: Record<string, () => preact.JSX.Element | null> = {
   'pdf-to-excel': PdfToExcelPanel,
   'excel-to-pdf': ExcelToPdfPanel,
   'pdf-to-ppt': PdfToPptPanel,
+  'ppt-to-pdf': PptToPdfPanel,
   'contact-sheet': ContactSheetPanel,
   shortcuts: ShortcutsPanel,
   'read-aloud': ReadAloudPanel,

@@ -99,3 +99,17 @@ export const DOCX_ONLY: Record<string, string[]> = {
 export const XLSX_ONLY: Record<string, string[]> = {
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx']
 };
+
+/**
+ * CNV-13 — the one MIME type an OOXML PowerPoint presentation has.
+ *
+ * `.ppt` and `.pps` are deliberately absent for the same reason `.xls` is above:
+ * a legacy binary presentation is an OLE2 container the reader refuses by name
+ * (see `pptx-reader.ts`), and offering a file type the next screen rejects is
+ * worse than not offering it. `.pptm` is absent too — a macro-enabled deck is a
+ * valid ZIP this reader could open, but its macros are the reason the user has
+ * it, and nothing here would carry them.
+ */
+export const PPTX_ONLY: Record<string, string[]> = {
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': ['.pptx']
+};

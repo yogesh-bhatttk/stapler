@@ -92,7 +92,93 @@ export type LayoutBlock =
       data: Uint8Array;
       format: PdfImageFormat;
       altText: string;
+    }
+  /**
+   * CNV-13 — a whole page of *positioned* content, drawn on a page of its own.
+   *
+   * Every other block in this model flows: the engine stacks it under the last
+   * one and breaks a page when it runs out of room. A slide does not flow. Its
+   * shapes have coordinates, two of them can sit side by side, and the thing a
+   * reader recognises as "the slide" is the arrangement rather than the reading
+   * order — so flowing a deck's text down an A4 page would be a different
+   * document, not a lower-fidelity version of the same one. This block is
+   * therefore not "a slide": it is the general case of *one page laid out by the
+   * producer*, and nothing in it names PowerPoint.
+   *
+   * One canvas is one page. The engine starts a fresh page for it and leaves it
+   * full afterwards, which is what makes "one PDF page per slide" a structural
+   * property of the model rather than a coincidence of how much text fits.
+   */
+  | {
+      kind: 'canvas';
+      /**
+       * The canvas's own coordinate space, in points, **origin at the top-left
+       * with y increasing downward** — which is what every producer of
+       * positioned content (OOXML, HTML, a screen) uses, and the opposite of
+       * PDF user space. The single y flip lives in the layout engine, so no
+       * producer does page geometry (see `pdf-block-layout.ts`'s `drawCanvas`).
+       */
+      width: number;
+      height: number;
+      /**
+       * Painted in order: item 0 is at the bottom. The producer states the
+       * z-order because only it knows one.
+       */
+      items: CanvasItem[];
+      /** What the preview calls this page, e.g. `Slide 3`. */
+      label: string;
+      /** The canvas's leading text, for the preview row. */
+      text: string;
     };
+
+/** Where one item sits on a canvas, in the canvas's own top-left-origin space. */
+export interface CanvasBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * A positioned run of text.
+ *
+ * `fontSize` is in the canvas's own points; the engine scales it by exactly the
+ * factor it scales the geometry by, so a canvas fitted to a different page size
+ * stays a uniform reduction of itself rather than a re-layout.
+ */
+export interface CanvasTextItem extends CanvasBox {
+  kind: 'text';
+  runs: StyledRun[];
+  fontSize: number;
+  align: 'left' | 'center' | 'right';
+}
+
+export interface CanvasImageItem extends CanvasBox {
+  kind: 'image';
+  data: Uint8Array;
+  format: PdfImageFormat;
+  altText: string;
+  /**
+   * A stable name for the *source* of these bytes, when the producer has one.
+   *
+   * Two canvases showing the same picture hand over the same id, and the engine
+   * embeds it once — the encode-once rule this codebase applies to a shared
+   * image everywhere else (CNV-06, CMP-03, `pptx-writer.ts`'s media dedup). An
+   * id is an identity claim, so it must never be reused for different bytes.
+   */
+  id?: string;
+}
+
+/** A positioned grid. Column widths and row heights are in canvas points. */
+export interface CanvasTableItem extends CanvasBox {
+  kind: 'table';
+  columnWidths: number[];
+  rowHeights: number[];
+  rows: StyledRun[][][];
+  fontSize: number;
+}
+
+export type CanvasItem = CanvasTextItem | CanvasImageItem | CanvasTableItem;
 
 /** What the parser produced, plus everything it could not carry across. */
 export interface ParsedHtmlBlocks {

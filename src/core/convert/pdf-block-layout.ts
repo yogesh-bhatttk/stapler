@@ -21,7 +21,7 @@
  * tool says so in its own copy and ships behind a mandatory preview (PLAN §5.5).
  */
 
-import { PDFDocument, PDFFont, PDFPage, StandardFonts, rgb } from 'pdf-lib';
+import { PDFDocument, PDFFont, PDFImage, PDFPage, StandardFonts, rgb } from 'pdf-lib';
 import { DOC_HAIRLINE_RGB, SUMMARY_ACCENT_RGB } from '../doc-colors';
 import { corrupt } from '../errors';
 import {
@@ -35,6 +35,7 @@ import {
   elide,
   runsToText,
   type LayoutBlock,
+  type PdfImageFormat,
   type PdfPreviewItem,
   type StyledRun
 } from './html-to-pdf-blocks';
@@ -45,6 +46,16 @@ const PAGE_SIZES: Record<PdfPageSize, readonly [number, number]> = {
   a4: [595.28, 841.89],
   letter: [612, 792]
 };
+
+/**
+ * The page-box limits the PDF format itself imposes, in points.
+ *
+ * 1/8 inch to 200 inches is Acrobat's stated range and what every viewer
+ * enforces; a page outside it is not opened rather than opened wrongly. Only
+ * reachable through `pageBox`, since the named sizes are both inside it.
+ */
+const MIN_PAGE_POINTS = 9;
+const MAX_PAGE_POINTS = 14400;
 
 /**
  * 1 inch, which is Word's own default margin. `markdown-to-pdf.ts` uses 50pt
@@ -91,6 +102,19 @@ const RULE_WIDTH = 0.5;
 
 export interface PdfLayoutOptions {
   pageSize: PdfPageSize;
+  /**
+   * CNV-13 — an exact page box in points, overriding `pageSize`.
+   *
+   * A `.docx` and an `.xlsx` state no page size worth honouring (Word's is a
+   * print setting `mammoth` does not report; Excel's is a print setup this
+   * codebase deliberately does not read), so those two tools ask for a named
+   * paper size and always will. A slide deck *does* state its size, and a
+   * 13.33 × 7.5 inch deck exported onto A4 is letterboxed on every page for no
+   * reason. So the producer may state the box instead of choosing from a menu
+   * of two. Out-of-range values are clamped to what the format allows and
+   * reported in `notes`, never written as-is.
+   */
+  pageBox?: { width: number; height: number };
   /** Written into the PDF's `/Title`. */
   title?: string;
 }
@@ -239,6 +263,41 @@ function textHeight(lineCount: number, size: number): number {
 }
 
 /**
+ * A producer-stated page box, brought inside what the PDF format allows.
+ *
+ * A box is *clamped and reported*, never refused and never written as given: a
+ * `/MediaBox` of `[0 0 0 0]` produces a file no viewer opens, and a deck whose
+ * slide size was recorded as zero is still a deck worth converting. A box that
+ * is not a pair of finite positive numbers states nothing at all, so the named
+ * paper size the caller also passed is used instead.
+ */
+export function clampPageBox(
+  box: { width: number; height: number },
+  fallback: readonly [number, number],
+  notes: string[]
+): [number, number] {
+  const usable =
+    Number.isFinite(box.width) && box.width > 0 && Number.isFinite(box.height) && box.height > 0;
+  if (!usable) {
+    notes.push(
+      'The document did not state a usable page size, so the pages are ' +
+        `${Math.round(fallback[0])} × ${Math.round(fallback[1])} pt.`
+    );
+    return [fallback[0], fallback[1]];
+  }
+  const width = Math.min(MAX_PAGE_POINTS, Math.max(MIN_PAGE_POINTS, box.width));
+  const height = Math.min(MAX_PAGE_POINTS, Math.max(MIN_PAGE_POINTS, box.height));
+  if (Math.abs(width - box.width) > 0.01 || Math.abs(height - box.height) > 0.01) {
+    notes.push(
+      `The document states a page of ${Math.round(box.width)} × ${Math.round(box.height)} pt, ` +
+        `which is outside what a PDF page may be; it was clamped to ${Math.round(width)} × ` +
+        `${Math.round(height)} pt and the content scaled to fit.`
+    );
+  }
+  return [width, height];
+}
+
+/**
  * Draws the blocks onto pages and returns the finished PDF.
  *
  * Nothing here throws away content on a per-block failure: an image pdf-lib
@@ -267,7 +326,11 @@ export async function layoutBlocksToPdf(
   await checkpoint(job, 0, 'Laying out the PDF');
   resetUnsupportedCharacterFlag();
 
-  const [pageWidth, pageHeight] = PAGE_SIZES[options.pageSize] ?? PAGE_SIZES.a4;
+  const notes: string[] = [];
+  const named = PAGE_SIZES[options.pageSize] ?? PAGE_SIZES.a4;
+  const [pageWidth, pageHeight] = options.pageBox
+    ? clampPageBox(options.pageBox, named, notes)
+    : named;
   const contentWidth = pageWidth - MARGIN * 2;
   const usableHeight = pageHeight - MARGIN * 2;
 
@@ -280,19 +343,29 @@ export async function layoutBlocksToPdf(
     boldItalic: await doc.embedFont(StandardFonts.HelveticaBoldOblique)
   };
 
-  const notes: string[] = [];
   const outline: PdfPreviewItem[] = [];
   let imageCount = 0;
+  /** How many positioned boxes hold more text than the producer sized them for. */
+  let overflowingBoxes = 0;
 
   let page: PDFPage = doc.addPage([pageWidth, pageHeight]);
   let pageIndex = 0;
   /** Baseline cursor: the y of the *top* of the next thing to draw. */
   let y = pageHeight - MARGIN;
+  /**
+   * Whether anything has been drawn on the current page.
+   *
+   * The flow path infers this from the cursor, which is enough for it; a canvas
+   * draws without moving the cursor, so "is this page free for a canvas?" needs
+   * its own answer or two slides would land on one page.
+   */
+  let pageUsed = false;
 
   const newPage = () => {
     page = doc.addPage([pageWidth, pageHeight]);
     pageIndex += 1;
     y = pageHeight - MARGIN;
+    pageUsed = false;
   };
 
   /** Starts a new page when `height` will not fit in what is left of this one. */
@@ -301,6 +374,7 @@ export async function layoutBlocksToPdf(
   };
 
   const drawLine = (pieces: readonly Piece[], x: number, baseline: number, size: number) => {
+    if (pieces.length > 0) pageUsed = true;
     let cursor = x;
     let index = 0;
     while (index < pieces.length) {
@@ -424,6 +498,7 @@ export async function layoutBlocksToPdf(
       if (!drawnAny) firstPage = pageIndex;
 
       const top = y;
+      pageUsed = true;
       for (let column = 0; column < columnCount; column++) {
         const x = MARGIN + columnOffsets[column];
         page.drawRectangle({
@@ -452,14 +527,29 @@ export async function layoutBlocksToPdf(
     return firstPage;
   };
 
-  /** Embeds and places one image, or records why it could not be. */
-  const drawImage = async (
-    block: Extract<LayoutBlock, { kind: 'image' }>
-  ): Promise<{ pageIndex: number; width: number; height: number } | null> => {
-    let embedded;
+  /**
+   * Image id → the embedded XObject, so a picture used on several canvases is
+   * decoded and written into the file **once**.
+   *
+   * This is the same rule CNV-06, CMP-03 and `pptx-writer.ts`'s media dedup all
+   * apply: a 400 KB logo on a 60-slide deck is one object, not 60. Only ids the
+   * producer supplied are cached — an image block with no id is embedded on its
+   * own, because an id is an identity claim and inventing one from, say, the
+   * byte length would eventually swap two different pictures.
+   */
+  const embeddedById = new Map<string, PDFImage>();
+
+  const embedImage = async (
+    data: Uint8Array,
+    format: PdfImageFormat,
+    id?: string
+  ): Promise<PDFImage | null> => {
+    const cached = id === undefined ? undefined : embeddedById.get(id);
+    if (cached) return cached;
     try {
-      embedded =
-        block.format === 'png' ? await doc.embedPng(block.data) : await doc.embedJpg(block.data);
+      const embedded = format === 'png' ? await doc.embedPng(data) : await doc.embedJpg(data);
+      if (id !== undefined) embeddedById.set(id, embedded);
+      return embedded;
     } catch (err) {
       notes.push(
         `An image could not be embedded and was left out (${
@@ -468,6 +558,14 @@ export async function layoutBlocksToPdf(
       );
       return null;
     }
+  };
+
+  /** Embeds and places one image, or records why it could not be. */
+  const drawImage = async (
+    block: Extract<LayoutBlock, { kind: 'image' }>
+  ): Promise<{ pageIndex: number; width: number; height: number } | null> => {
+    const embedded = await embedImage(block.data, block.format);
+    if (!embedded) return null;
 
     let width = embedded.width * PX_TO_PT;
     let height = embedded.height * PX_TO_PT;
@@ -480,8 +578,173 @@ export async function layoutBlocksToPdf(
     const at = pageIndex;
     y -= height;
     page.drawImage(embedded, { x: MARGIN, y, width, height });
+    pageUsed = true;
     y -= SPACE_AROUND_IMAGE;
     return { pageIndex: at, width, height };
+  };
+
+  /* ---------------------------------------------------------------- *
+   * CNV-13 — a producer-positioned page
+   * ---------------------------------------------------------------- */
+
+  /**
+   * Draws one canvas onto a page of its own and returns what it placed.
+   *
+   * **The coordinate change happens here and only here.** A canvas is stated in
+   * points from its *top-left* with y increasing downward; a PDF page is points
+   * from its *bottom-left* with y increasing upward. Getting that backwards puts
+   * a slide's title along the bottom edge and is invisible in any test that
+   * compares the output against the same wrong assumption — so
+   * `ppt-to-pdf.test.ts` re-extracts the produced page's text with pdf.js and
+   * asserts the title's baseline is in the *upper* part of the page, which is a
+   * fact about the file rather than about this function.
+   *
+   * The canvas is fitted to the page uniformly and centred, so a deck converted
+   * onto A4 is a scaled copy of itself rather than a stretched one. When the
+   * caller sized the page from the canvas (`pageBox`), the scale is 1 and both
+   * offsets are 0, and every coordinate is the producer's own.
+   */
+  const drawCanvas = async (
+    block: Extract<LayoutBlock, { kind: 'canvas' }>
+  ): Promise<{ pageIndex: number; images: number; overflowing: number }> => {
+    if (pageUsed) newPage();
+    const at = pageIndex;
+    let images = 0;
+    let overflowing = 0;
+
+    if (!(block.width > 0) || !(block.height > 0)) {
+      notes.push(`${block.label} states no size, so it was drawn as an empty page.`);
+      y = MARGIN;
+      pageUsed = true;
+      return { pageIndex: at, images, overflowing };
+    }
+
+    const scale = Math.min(pageWidth / block.width, pageHeight / block.height);
+    const offsetX = (pageWidth - block.width * scale) / 2;
+    const offsetY = (pageHeight - block.height * scale) / 2;
+    /** Canvas x → page x. */
+    const toX = (value: number) => offsetX + value * scale;
+    /** Canvas y (down from the top) → page y (up from the bottom). */
+    const toY = (value: number) => pageHeight - offsetY - value * scale;
+
+    /** Draws wrapped runs inside a box whose top-left is already in page space. */
+    const drawBoxText = (
+      runs: readonly StyledRun[],
+      left: number,
+      top: number,
+      width: number,
+      height: number,
+      size: number,
+      align: 'left' | 'center' | 'right'
+    ): boolean => {
+      const lines = wrapRuns(runs, fonts, size, width);
+      const lineHeight = size * LINE_RATIO;
+      lines.forEach((pieces, index) => {
+        if (pieces.length === 0) return;
+        const lineWidth = pieces.reduce((sum, piece) => sum + piece.width, 0);
+        const slack = Math.max(0, width - lineWidth);
+        const x = left + (align === 'center' ? slack / 2 : align === 'right' ? slack : 0);
+        drawLine(pieces, x, top - (index + 1) * lineHeight, size);
+      });
+      // Text taller than its own box is *drawn anyway*, overrunning downward,
+      // and counted. Clipping it would delete words the deck contains; shrinking
+      // it would be this converter inventing a layout PowerPoint did not state.
+      return lines.length * lineHeight > height + 0.5;
+    };
+
+    for (const item of block.items) {
+      if (item.kind === 'image') {
+        const embedded = await embedImage(item.data, item.format, item.id);
+        if (!embedded) continue;
+        const width = item.width > 0 ? item.width * scale : embedded.width * PX_TO_PT * scale;
+        const height = item.height > 0 ? item.height * scale : embedded.height * PX_TO_PT * scale;
+        page.drawImage(embedded, { x: toX(item.x), y: toY(item.y) - height, width, height });
+        pageUsed = true;
+        images += 1;
+        continue;
+      }
+
+      if (item.kind === 'text') {
+        const size = Math.max(1, item.fontSize * scale);
+        const width = Math.max(1, item.width * scale);
+        if (
+          drawBoxText(
+            item.runs,
+            toX(item.x),
+            toY(item.y),
+            width,
+            Math.max(0, item.height * scale),
+            size,
+            item.align
+          )
+        ) {
+          overflowing += 1;
+        }
+        continue;
+      }
+
+      // A grid. Column widths are *relative*, normalised to the frame's own
+      // width the same way `drawTable` normalises a spreadsheet's — a producer
+      // states proportions, and the frame states the total.
+      const columnCount = item.rows.reduce((max, row) => Math.max(max, row.length), 0);
+      if (columnCount === 0) continue;
+      const stated = item.columnWidths.slice(0, columnCount);
+      const total = stated.reduce((sum, width) => sum + (width > 0 ? width : 0), 0);
+      const frameWidth = Math.max(1, item.width * scale);
+      const widths =
+        stated.length === columnCount && total > 0
+          ? stated.map(width => (Math.max(0, width) / total) * frameWidth)
+          : Array.from({ length: columnCount }, () => frameWidth / columnCount);
+
+      const size = Math.max(1, item.fontSize * scale);
+      const lineHeight = size * LINE_RATIO;
+      let top = toY(item.y);
+      const left = toX(item.x);
+
+      for (let rowIndex = 0; rowIndex < item.rows.length; rowIndex++) {
+        const row = item.rows[rowIndex];
+        const wrapped = row.map((cell, column) =>
+          wrapRuns(cell, fonts, size, Math.max(1, widths[column] - CELL_PADDING_X * 2))
+        );
+        const lineCount = Math.max(1, ...wrapped.map(lines => lines.length));
+        // A row states a *minimum* height in OOXML; the drawn height is whatever
+        // its own text needs, so no cell is cut off by an optimistic stored one.
+        const rowHeight = Math.max(
+          (item.rowHeights[rowIndex] ?? 0) * scale,
+          textHeight(lineCount, size) + CELL_PADDING_Y * 2
+        );
+        let x = left;
+        for (let column = 0; column < columnCount; column++) {
+          page.drawRectangle({
+            x,
+            y: top - rowHeight,
+            width: widths[column],
+            height: rowHeight,
+            borderColor: RULE_COLOR,
+            borderWidth: RULE_WIDTH
+          });
+          (wrapped[column] ?? []).forEach((pieces, lineIndex) => {
+            drawLine(
+              pieces,
+              x + CELL_PADDING_X,
+              top - CELL_PADDING_Y - (lineIndex + 1) * lineHeight,
+              size
+            );
+          });
+          x += widths[column];
+        }
+        pageUsed = true;
+        top -= rowHeight;
+      }
+      if (toY(item.y) - top > item.height * scale + 0.5) overflowing += 1;
+    }
+
+    // The page is spoken for either way: an empty canvas is still its own page,
+    // and leaving the cursor at the top would let the next flowing block share
+    // it. `MARGIN` is "full", which is what `ensure` reads.
+    y = MARGIN;
+    pageUsed = true;
+    return { pageIndex: at, images, overflowing };
   };
 
   for (let index = 0; index < blocks.length; index++) {
@@ -550,6 +813,21 @@ export async function layoutBlocksToPdf(
         break;
       }
 
+      case 'canvas': {
+        const placed = await drawCanvas(block);
+        imageCount += placed.images;
+        overflowingBoxes += placed.overflowing;
+        outline.push({
+          pageIndex: placed.pageIndex,
+          kind: 'canvas',
+          // The label is the fallback rather than a prefix: a canvas that landed
+          // on the wrong page — the failure a mandatory preview exists to catch
+          // — is visible from its text, and `p3 · Slide` already names it.
+          text: block.text.trim().length > 0 ? elide(block.text) : block.label
+        });
+        break;
+      }
+
       case 'image': {
         const placed = await drawImage(block);
         if (placed) {
@@ -563,6 +841,18 @@ export async function layoutBlocksToPdf(
         break;
       }
     }
+  }
+
+  if (overflowingBoxes > 0) {
+    // Counted rather than silently tolerated: the text *is* in the PDF, but a
+    // box drawn taller than the producer sized it can run over what sits below
+    // it, and the fonts here are not the fonts the deck asked for — which is
+    // the usual reason a box that fitted in PowerPoint does not fit here.
+    notes.push(
+      `${overflowingBoxes} text box${overflowingBoxes === 1 ? '' : 'es'} hold more text than ` +
+        'the original sized them for, because this converter draws with its own fonts. All of ' +
+        'that text is in the PDF, but it overruns its box and may overlap what is below it.'
+    );
   }
 
   await checkpoint(job, 0.95, 'Saving the PDF');

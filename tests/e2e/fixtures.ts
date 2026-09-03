@@ -1867,3 +1867,228 @@ export async function inlineImagePdf(): Promise<Uint8Array> {
 
   return doc.save();
 }
+
+/* ------------------------------------------------------------------ *
+ * CNV-13 — PowerPoint → PDF
+ * ------------------------------------------------------------------ */
+
+/**
+ * The exact content CNV-13's acceptance criteria are stated against, exported so
+ * the round-trip test asserts against these strings and numbers rather than
+ * against a copy of them that can drift from the fixture.
+ *
+ * Geometry is part of the contract here for the same reason it is in
+ * `PDF_TO_PPT`, but in the opposite direction: this ticket's claim is that a
+ * shape lands where the *deck* put it, on a page whose y axis runs the other
+ * way. So the fixture states the inch coordinates it wrote and the test checks
+ * where the text came out of the produced PDF — a title near the deck's top edge
+ * has to be near the *top* of the page, which is exactly what a missing or
+ * inverted y flip gets wrong while every internally consistent check still
+ * passes.
+ */
+export const PPT_TO_PDF = {
+  /**
+   * 16:9, in inches — deliberately neither A4 nor Letter, so "the page is the
+   * slide's own size" is checkable rather than a coincidence. 960 × 540 pt.
+   */
+  slide: { widthIn: 13.333, heightIn: 7.5, widthPt: 959.976, heightPt: 540 },
+  slide1: {
+    title: 'Stapler Field Report',
+    /** Inches from the slide's top-left. Near the top edge: the y-flip probe. */
+    titleAt: { x: 0.6, y: 0.4, w: 8, h: 0.8, size: 32 },
+    bullets: [
+      'One PDF page is produced per slide.',
+      'Each shape is drawn where the deck puts it.',
+      'Nothing reflows across slides.'
+    ],
+    bulletsAt: { x: 0.6, y: 1.7, w: 9, h: 2.4, size: 18 },
+    /** One paragraph, four runs, two of them styled. */
+    inline: ['Growth of ', '17 percent', ' is ', 'unaudited', '.'],
+    boldRun: '17 percent',
+    italicRun: 'unaudited',
+    inlineAt: { x: 0.6, y: 4.4, w: 9, h: 0.5, size: 18 },
+    /** Near the bottom edge: the other half of the y-flip probe. */
+    footer: 'Footer at the foot of slide one',
+    footerAt: { x: 0.6, y: 6.9, w: 6, h: 0.4, size: 12 },
+    /** Centre-aligned, so `algn="ctr"` has a fixture. */
+    centred: 'Centred under the bullets',
+    centredAt: { x: 2, y: 5.2, w: 9.333, h: 0.5, size: 14 }
+  },
+  slide2: {
+    heading: 'A picture on slide two',
+    headingAt: { x: 0.6, y: 0.4, w: 9, h: 0.6, size: 24 },
+    /** Inches, from the slide's top-left. 480 × 320 px of PNG. */
+    image: { x: 1.2, y: 1.4, w: 4.8, h: 3.2, pixels: { width: 480, height: 320 } },
+    caption: 'The picture above is a PNG.',
+    captionAt: { x: 1.2, y: 4.8, w: 6, h: 0.4, size: 14 }
+  },
+  slide3: {
+    heading: 'A table on slide three',
+    headingAt: { x: 0.6, y: 0.4, w: 9, h: 0.6, size: 24 },
+    /** Header row first, in reading order. Every cell must survive. */
+    table: [
+      ['Region', 'Owner', 'Status'],
+      ['North', 'Alice', 'Committed'],
+      ['South', 'Bob', 'At risk']
+    ],
+    tableAt: { x: 0.6, y: 1.4, w: 8, colW: [3, 2.5, 2.5], size: 14 }
+  },
+  /** Draws the *same* picture object as slide 2, so sharing is testable. */
+  slide4: {
+    heading: 'The same picture again',
+    headingAt: { x: 0.6, y: 0.4, w: 9, h: 0.6, size: 24 },
+    image: { x: 6, y: 2, w: 3, h: 2 }
+  },
+  title: 'Stapler CNV-13 fixture deck'
+} as const;
+
+/**
+ * A four-slide `.pptx` built with `pptxgenjs` — the same writer CNV-12 ships,
+ * driven directly rather than through `buildPptx`.
+ *
+ * Going through `buildPptx` was the obvious route and is the wrong one for this
+ * fixture: that function takes CNV-12's `SlidePlan`, which models a slide as
+ * positioned text boxes and pictures and *cannot express a table*, because a PDF
+ * page never states one. CNV-13's acceptance criterion asks for a slide with a
+ * table. Driving the library directly also gets the fixture closer to a deck a
+ * person would author — bulleted paragraphs with `<a:buChar>`, a centred
+ * paragraph with `algn="ctr"`, per-run `b`/`i`/`sz` — none of which CNV-12's
+ * writer emits, and all of which this reader now has to handle.
+ *
+ * Every slide exercises something the conversion has to decide:
+ *
+ *  • **Slide 1** — a title at the top edge and a footer at the bottom edge (the
+ *    y-flip probe), a bulleted list, an inline sentence with a bold and an
+ *    italic run, and a centred paragraph.
+ *  • **Slide 2** — a PNG at a stated rectangle, with a caption under it.
+ *  • **Slide 3** — a 3 × 3 table with stated column widths.
+ *  • **Slide 4** — the *same* picture as slide 2, at a different size, so
+ *    "one image object however many slides show it" is checkable.
+ */
+export async function pptToPdfPptx(): Promise<Uint8Array> {
+  const { default: PptxGenJS } = await import('pptxgenjs');
+  const deck = new PptxGenJS();
+  deck.title = PPT_TO_PDF.title;
+  deck.defineLayout({
+    name: 'CNV13',
+    width: PPT_TO_PDF.slide.widthIn,
+    height: PPT_TO_PDF.slide.heightIn
+  });
+  deck.layout = 'CNV13';
+
+  const { width, height } = PPT_TO_PDF.slide2.image.pixels;
+  const png = encodePng(photoPixels(width, height), width, height, false);
+  let binary = '';
+  for (let i = 0; i < png.length; i += 0x8000) {
+    binary += String.fromCharCode(...png.subarray(i, i + 0x8000));
+  }
+  // `data`, never `path`: `path` is the one thing that makes `pptxgenjs` reach
+  // for XMLHttpRequest (see `pptx-writer.ts`'s module comment).
+  const data = `image/png;base64,${Buffer.from(binary, 'binary').toString('base64')}`;
+
+  const one = deck.addSlide();
+  const s1 = PPT_TO_PDF.slide1;
+  one.addText(s1.title, { ...s1.titleAt, fontSize: s1.titleAt.size, bold: true, margin: 0 });
+  one.addText(
+    // `bullet` per item, not only on the box: `pptxgenjs` writes `<a:buChar>`
+    // onto the paragraph it is set on, so setting it once would bullet the first
+    // line and leave the other two plain.
+    s1.bullets.map(text => ({ text, options: { breakLine: true, bullet: true } })),
+    { ...s1.bulletsAt, fontSize: s1.bulletsAt.size, margin: 0 }
+  );
+  one.addText(
+    [
+      { text: s1.inline[0] },
+      { text: s1.inline[1], options: { bold: true } },
+      { text: s1.inline[2] },
+      { text: s1.inline[3], options: { italic: true } },
+      { text: s1.inline[4] }
+    ],
+    { ...s1.inlineAt, fontSize: s1.inlineAt.size, margin: 0 }
+  );
+  one.addText(s1.centred, {
+    ...s1.centredAt,
+    fontSize: s1.centredAt.size,
+    align: 'center',
+    margin: 0
+  });
+  one.addText(s1.footer, { ...s1.footerAt, fontSize: s1.footerAt.size, margin: 0 });
+
+  const two = deck.addSlide();
+  const s2 = PPT_TO_PDF.slide2;
+  two.addText(s2.heading, { ...s2.headingAt, fontSize: s2.headingAt.size, margin: 0 });
+  two.addImage({ data, x: s2.image.x, y: s2.image.y, w: s2.image.w, h: s2.image.h });
+  two.addText(s2.caption, { ...s2.captionAt, fontSize: s2.captionAt.size, margin: 0 });
+
+  const three = deck.addSlide();
+  const s3 = PPT_TO_PDF.slide3;
+  three.addText(s3.heading, { ...s3.headingAt, fontSize: s3.headingAt.size, margin: 0 });
+  three.addTable(
+    s3.table.map(row => row.map(text => ({ text }))),
+    {
+      x: s3.tableAt.x,
+      y: s3.tableAt.y,
+      w: s3.tableAt.w,
+      colW: [...s3.tableAt.colW],
+      fontSize: s3.tableAt.size
+    }
+  );
+
+  const four = deck.addSlide();
+  const s4 = PPT_TO_PDF.slide4;
+  four.addText(s4.heading, { ...s4.headingAt, fontSize: s4.headingAt.size, margin: 0 });
+  four.addImage({ data, x: s4.image.x, y: s4.image.y, w: s4.image.w, h: s4.image.h });
+
+  const written = await deck.write({ outputType: 'uint8array', compression: true });
+  if (!(written instanceof Uint8Array)) throw new Error('pptxgenjs did not return bytes');
+
+  // `pptxgenjs` writes a *fresh* media part per `addImage`, so slides 2 and 4
+  // would carry two byte-identical copies of the same PNG — which PowerPoint
+  // itself never does, and which would make "one image object however many
+  // slides show it" untestable against this fixture. CNV-12's own dedup pass is
+  // exactly the function that collapses them, so the fixture is run through it:
+  // the deck that reaches CNV-13 then has one `ppt/media/` part referenced from
+  // two slides, the way an authored deck does.
+  const { dedupeMediaParts } = await import('../../src/core/convert/pptx-writer');
+  return dedupeMediaParts(written);
+}
+
+/**
+ * CNV-13, second review pass — a deck where **some** slides are blank.
+ *
+ * Three of its four slides carry no shape at all, which is what a deck whose
+ * text lives in inherited layout placeholders looks like to this converter: the
+ * page count is right, the pages are empty, and the all-or-nothing refusal does
+ * not fire because slide 1 has real content. The audit's finding was that the
+ * mandatory preview said nothing about the three that would come out blank even
+ * though `SlideSummary.empty` already knew, so this fixture exists to drive the
+ * panel's own per-slide row in a real browser rather than the model in a test.
+ */
+export const PPT_TO_PDF_PARTIAL = {
+  slides: 4,
+  /** The only slide with anything on it. */
+  content: 'Only this slide has content',
+  /** The slides that must be marked blank in the preview, 1-based. */
+  blank: [2, 3, 4]
+} as const;
+
+export async function pptToPdfPartiallyBlankPptx(): Promise<Uint8Array> {
+  const { default: PptxGenJS } = await import('pptxgenjs');
+  const deck = new PptxGenJS();
+  deck.title = 'Stapler CNV-13 partially blank deck';
+  deck.addSlide().addText(PPT_TO_PDF_PARTIAL.content, {
+    x: 0.6,
+    y: 0.4,
+    w: 8,
+    h: 0.8,
+    fontSize: 24,
+    margin: 0
+  });
+  // Slides 2–4: added and left alone. `pptxgenjs` writes a real slide part with
+  // an empty shape tree, which is exactly the case under test.
+  for (let i = 1; i < PPT_TO_PDF_PARTIAL.slides; i++) deck.addSlide();
+
+  const written = await deck.write({ outputType: 'uint8array', compression: true });
+  if (!(written instanceof Uint8Array)) throw new Error('pptxgenjs did not return bytes');
+  return written;
+}

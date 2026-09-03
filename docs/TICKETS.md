@@ -4727,7 +4727,422 @@ way.
 
 ### CNV-13 · PowerPoint (PPTX) → PDF — `L` `P2`
 
-**Status: Not started.**
+**Status: Done.** Both acceptance criteria are met against real output bytes.
+Ships labeled beta with a mandatory preview per §5.5, same policy as CNV-08..12.
+Ten limitations, all ten named in the tool's own panel copy (the list is a
+`core/` constant the panel renders, so the panel and the converter cannot state
+different ones); **ten** counted disclosures report numbers at runtime in the
+preview's "left out" list — six as shipped, four more added by the second review
+pass below. **Read "The honest fidelity statement" and the "Second review pass"
+below before the rest of this entry** — the gap between "converts a deck this
+codebase wrote" and "converts an arbitrary PowerPoint file" is real and is not
+fully closed.
+
+New tool `ppt-to-pdf` (group Convert, `Save PDF`, `worksWithoutDocument`). Two
+workers, sequenced by `convertPptxToPdf` in `src/core/operations.ts`:
+
+- **`convert`** gains `pptxToBlocks`, which reads the deck into the shared block
+  model (`src/core/convert/pptx-slides.ts`, new; `pptx-reader.ts` extended).
+- **`process`** reuses `layoutBlocksToPdf`, with one additive block kind and one
+  additive option (below).
+
+This is the **only one of the six conversions that adds no library at all.**
+CNV-12's `pptx-reader.ts` is a hand-rolled walk over `fflate`, which is already
+in the initial bundle, so there is no lazy chunk here whose contents have to be
+taken on trust. §2.4's "PPTX read — *(hand-rolled, via existing `fflate`)*" row
+is now actually exercised by a shipping tool rather than only by a test.
+
+#### The one new block kind, and why a slide is not a flow
+
+CNV-09's engine flows: it stacks each block under the last and breaks a page when
+it runs out of room. CNV-11 fed it a spreadsheet and needed one additive field
+(`columnWidths`). A deck cannot be fed to it that way, and the reason is not
+fidelity polish — it is that **a slide states where its content goes.** Two
+shapes sit side by side; a caption sits under a picture; the order the XML
+happens to use is not the order a reader sees. Flowed down an A4 page, that is a
+different document rather than a lower-fidelity copy of the same one, and "one
+PDF page per slide" would depend on how much text happened to fit.
+
+So the model gains a `canvas` block: **one page of producer-positioned content,
+drawn on a page of its own.** Nothing in its definition names PowerPoint — it
+carries its own coordinate space (points, origin top-left, y down), a z-ordered
+list of positioned text / image / table items, and a label. The engine starts a
+fresh page for it and leaves that page full, which is what makes one-page-per-
+slide a *structural* property of the model. `PdfLayoutOptions` also gains
+`pageBox`, an exact page size in points: a `.docx` and an `.xlsx` state no page
+size worth honouring, but a deck does, and a 13.33 × 7.5in deck exported onto A4
+is letterboxed on every page for no reason. Out-of-range boxes are clamped to
+what the PDF format allows and reported, never written as given. CNV-08's,
+CNV-09's and CNV-11's existing engine tests are the regression cover and pass
+unchanged.
+
+#### The geometry, and the test that would catch it being wrong
+
+OOXML measures in EMU (914400/inch) from the slide's **top-left, y down**. A PDF
+page is points from its **bottom-left, y up**. A converter that forgets the flip
+produces a file where every assertion made against its own model still passes and
+every page is upside down — which is precisely the class of bug CNV-12's audit
+found in the opposite direction (a cropped page displaced every line and picture
+by the crop's origin).
+
+So the flip, the fit-to-page scale and the centring happen in exactly one
+function, `drawCanvas` in `pdf-block-layout.ts`, and `pptx-slides.ts` does no
+page geometry at all beyond dividing by 12700. The fixture deck puts a title
+0.4in from the slide's top edge and a footer 6.9in down, and the test reads where
+they landed **out of the produced PDF** with pdf.js — CNV-12's own
+`extractPageSlide`. The title's baseline must be ~468pt on a 540pt page and the
+footer's ~27pt; drop the flip and the first is ~29. The picture's placement is
+read the same way, out of the page's own content stream `cm` operands.
+
+#### What CNV-13 added to `pptx-reader.ts`, and why it belongs there
+
+CNV-12 shipped that reader with three gaps written down as obligations on its
+successor. All three are closed, because each is a fact about the *file format*
+rather than about either conversion:
+
+1. **Group shapes.** `<p:grpSp>` writes its children in its own child coordinate
+   space (`<a:chOff>`/`<a:chExt>`), which its `<a:off>`/`<a:ext>` map onto the
+   slide. Reporting a child's raw geometry — what the file used to do — is
+   *wrong*, not approximate, and PowerPoint groups shapes routinely. The
+   transform now composes down the tree, nested groups included.
+2. **Tables.** `<a:tbl>` lives inside a `<p:graphicFrame>`, which the old scan
+   did not look at at all, and which states its transform in the `p:` namespace
+   rather than the `a:` one. Cell text reached `runs`/`text` (they scan for
+   `<a:t>` anywhere) but no *shape* carried it — so a positioned layout would
+   have drawn nothing while the slide's own `text` claimed the words were there.
+   That is a silent loss, so the grid is now read: column widths, row heights,
+   per-cell paragraphs, and merge-continuation cells.
+3. **Run and paragraph properties** — `sz`, `b`, `i`, `algn`, `lvl`, and a
+   literal `<a:buChar>`. A converter that draws this text needs a size; guessing
+   one is how a deck comes out at the wrong scale.
+
+The element scan is no longer one non-greedy regex per name, because a
+`<p:grpSp>` can contain a `<p:grpSp>` and `[\s\S]*?` closes the outer group at
+the inner one's end tag — truncating the outer group's remaining shapes.
+`childElements` counts depth instead, and a test asserts a sibling written *after*
+a nested group survives.
+
+#### Sharing an image across slides: encode once
+
+A logo on forty slides is one `ppt/media/` part. The reader hands the same
+`Uint8Array` instance to every slide that references it, the canvas image item
+carries the part name as an `id`, and the layout engine caches embedded XObjects
+by that id — so the PDF holds one image object however many slides show it. The
+fixture proves this end to end: two slides draw one part, and the produced file
+has **one** image XObject for two placements. `operations.ts`'s `imageBuffersOf`
+had to be taught to descend into `canvas.items` for the second worker hop, which
+is a real hazard with no other symptom (a silent structured clone of a deck's
+worth of photographs); `ppt-to-pdf-transfer.test.ts` pins it, and reverting that
+branch fails two of its three tests.
+
+#### The honest fidelity statement
+
+The fixture is a `pptxgenjs`-written deck — the same writer CNV-12 ships — driven
+directly rather than through `buildPptx`, because `SlidePlan` cannot express a
+table. That gets it closer to an authored deck than a Stapler round trip would
+(bulleted paragraphs with `<a:buChar>`, a centred paragraph with `algn="ctr"`,
+per-run `b`/`i`/`sz`, a real `<a:tbl>`, one media part referenced twice). It is
+still **not** an arbitrary real-world PowerPoint file, and two differences matter:
+
+- **Layout and master inheritance is not read at all.** Text typed into a
+  placeholder is in the slide part and converts; a title, footer, slide number or
+  background that only the *layout* supplies is not read and does not appear. A
+  deck whose slides are made entirely of inherited placeholders comes out blank —
+  which is refused with a message naming that exact cause rather than written as
+  blank pages.
+- **No theme, no colour, no fills.** All text is black, no shape fill, outline,
+  shadow or slide background is drawn, and every glyph is Helvetica at the deck's
+  stated size. A slide that is a coloured banner with white type on it arrives as
+  black type on white. Nothing here reads a `.thmx` or a `<a:solidFill>`.
+
+One consequence of that second point is worth naming on its own, because it is
+the difference between "lower fidelity" and "unreadable". A placeholder that
+inherits its *geometry* from the layout carries no `<a:xfrm>` at all — ordinary
+in an authored deck, and most likely on the shape holding the title. Read as a
+box of zero width it would wrap to one character per line: a page missing no text
+and impossible to read. So an unstated extent becomes "the rest of the slide from
+this corner", every shape it happens to is counted, and the note says the text is
+all present but its wrapping and position are approximate.
+
+Also not carried across, each stated in the panel and counted at runtime where a
+count is meaningful: **transitions, animations and speaker notes** (the ticket's
+own out-of-scope list — a PDF page has no notion of any of them); rotated and
+flipped shapes (drawn upright at the same position and size, counted); charts,
+SmartArt and embedded objects (their text only); numbered bullets (PowerPoint
+stores the scheme, not the numbers — counted); video, audio, hyperlinks and
+comments. A run stating no `sz` is drawn at 18pt and counted. `•` reaches the
+page as `-`, because `markdown-to-pdf.ts`'s shared WinAnsi sanitiser rewrites it
+for every tool in this codebase (CNV-09's own list markers included) — the
+marker survives as a marker, and the substitution is the app's existing one
+rather than a loss introduced here.
+
+**Refusals, all before any PDF exists**, each with its own message and each with
+a test asserting the layout engine was never reached: an empty file; an OLE2
+container (a legacy `.ppt`, or a password-protected `.pptx` — the same
+container); a file that is not a ZIP; a ZIP with no `ppt/presentation.xml`; a
+deck listing no slides; a package listing a slide it does not contain; and a deck
+that would produce nothing but blank pages. Slide order comes from
+`<p:sldIdLst>` through `presentation.xml.rels`, never from sorting part names —
+`slide10` sorts before `slide2`, and a per-slide assertion would then be
+comparing the wrong page.
+
+**Verification.** `pnpm check` green (`tsc --noEmit`, `eslint .`,
+`prettier --check .`, 102 tokens, 30 contrast pairs × 2 themes, invariants).
+`pnpm test`: **92 files · 1193 tests · 0 failures**, up from 1141 — 52 new,
+across `ppt-to-pdf.test.ts` (43), `ppt-to-pdf-commit.test.ts` (6) and
+`ppt-to-pdf-transfer.test.ts` (3). No existing test's assertions changed; CNV-12's
+66 reader tests pass unchanged against the extended reader. `pnpm test:e2e`:
+**127 tests** (123 + 3 for the gate + 1 zero-network conversion run). Reported
+exactly as measured, because the two full runs disagreed and neither was clean:
+the first was **126 passed / 1 failed** (`compress-preview.spec.ts`'s CMP-05
+canvas-pixel comparison) and the second **124 passed / 3 failed** — that same
+CMP-05 comparison, `a11y-and-perf.spec.ts`'s route scan failing on the *home*
+route with "document must have `<title>`" and "html must have a lang attribute"
+(i.e. axe ran against a page that had not finished loading, before the tool loop
+it would have swept a new route in), and `import.spec.ts`'s clipboard-paste test.
+All three pass on a targeted rerun (**38/38**), none is in a file this ticket
+touches, and all four of this ticket's own e2e tests passed in both runs. These
+are the load-sensitive flakes CNV-08..11 each had to note; CNV-12's entry
+recorded the series' one clean full run, and this is not a second one.
+`pnpm check:bundle`: **362.04 KB gzipped**, +0.20 KB on CNV-12's 361.84 KB — the
+tool adds no dependency, and its reader is already-bundled `fflate`.
+
+Both mutation claims were **measured, not asserted**: weakening `commit.ts`'s
+guard to `!preview` fails the two revision cases and removing it fails all five
+refusal cases; removing the `canvas` branch from `imageBuffersOf` fails two of
+the three transfer tests.
+
+**Not verifiable here.** Nothing in this repo opens PowerPoint, Acrobat, Preview
+or Keynote, and no real-world deck (with a theme, a master, and fonts) was
+converted — the fixture is machine-written. Both belong on the `QA-05` manual
+checklist: convert a deck someone actually authored and compare it page by page.
+
+#### Closing the series: is CNV-08..13 actually six tools?
+
+CNV-13 is the last of the six, so the claim PLAN §1.1's revision note made at the
+start of the series — that PDF ↔ Office is "in scope as **CNV-08..13**" — is now
+checkable rather than a plan. Swept against the code, all six are complete and
+symmetric: each has a `ToolDefinition` in `tools.ts`, a body in `OptionsPanel`'s
+`BODIES`, a handler in `commit.ts`'s `HANDLERS`, an entry in
+`zero-network.spec.ts`'s tool sweep **and** its own conversion run under the
+network watch, a gate spec in `tests/e2e/`, and a beta badge plus a
+preview-gated save in its panel. Nothing in the series was left half-done. Two
+notes on the revision note's own wording, neither a defect:
+
+- Its "(paragraphs, headings, tables, basic runs, **images**)" is the class of
+  capability across the six, not a per-tool promise. The Excel pair carries no
+  images in either direction by design, and CNV-11's panel says so
+  (`EXCEL_LIMITATIONS`: "Charts, images, pivot tables, shapes, comments…").
+- §2.4's stack table has one stale cell, unrelated to this ticket: "DOCX write —
+  **docx** (lazy) … only loaded by CNV-08/12". `docx` is loaded from exactly one
+  place in the tree (`convert/docx-writer.ts`, dynamically) and only CNV-08
+  reaches it; CNV-12 writes PowerPoint with `pptxgenjs`. Reads like a renumbering
+  leftover. Flagged rather than edited — PLAN.md is out of scope for this ticket.
+
+**Second review pass** (an independent audit of this ticket, the same convention
+CNV-08 through CNV-12 followed — and the last one in the series). The headline is
+good news on the parts this entry spent the most words defending: **both
+acceptance criteria are genuinely met against real output bytes**, the
+group-transform composition is **correct**, verified against eight adversarial
+cases including nested groups with asymmetric scale (the exact class of bug that
+bit CNV-12 in the opposite direction), and the `canvas`/`pageBox` extension to
+the layout engine is **genuinely additive** — no existing tool's path changed.
+
+The audit then found **four real defects, three of them silent loss** — content
+left out with nothing said, which is the one failure class this whole series
+exists to police. All four are fixed, plus two minor findings it flagged as
+lower priority. Every behavioural fix was **falsified before being believed**:
+the change was reverted, the file was run, the expected tests failed, and the fix
+was restored. The counts are stated per finding.
+
+1. **A rotated or flipped group was silently discarded, uncounted, and the
+   panel's own promise was false for it. Fixed, both halves.** `pptx-reader.ts`
+   read `<a:off>`/`<a:ext>`/`<a:chOff>`/`<a:chExt>` off a `<p:grpSp>`'s
+   `<a:xfrm>` and **never read `rot`, `flipH` or `flipV` at all** — so a group's
+   orientation did not even reach `pptx-slides.ts`'s tally, which stayed at 0 and
+   produced `notes: []` for a deck of flipped groups. Limitation 7's panel copy
+   says such shapes are drawn "at their stated position and size" and that "the
+   count is reported with the conversion"; **both halves were false for a group**,
+   because PowerPoint's group flip mirrors the *child coordinate space* — the
+   children's own positions move, not just their orientation.
+   - **The positional half is fixed properly, not disclosed away.** A mirror is a
+     sign change on one axis, so `composeGroup` now carries a negative
+     `scaleX`/`scaleY` and adds the group's extent to the constant term
+     (`off + ext − chOff·scale`, which reduces to the old expression when there
+     is no flip), and `place` normalises the negative-width interval that
+     produces back into a left edge and a width. Composition therefore stays one
+     affine map: a flip inside a flip **cancels**, and the child comes back
+     exactly where it was written.
+   - **A group's rotation is *not* applied**, and that is now a named limitation
+     rather than a silence: applying it needs the group's centre and a rotated
+     draw, which nothing in this converter does. Every affected shape carries
+     `PptxShape.groupRotated`, `rotatedGroupNote` states the count, and
+     limitation 7's copy now says outright that a rotated group's children are
+     drawn where its *unrotated* rectangle puts them and that this can be well
+     away from where PowerPoint shows them.
+   - `PptxShape.rot`/`flipH`/`flipV` are now *effective* values — the shape's own
+     composed with every enclosing group's (sum, and XOR) — so a child of a 45°
+     group reports 45° and reaches the existing count. The doc comment says
+     plainly that the sum is an orientation **report**, never used to place
+     anything, and that it does not model a mirror reversing a rotation's sense.
+   - **Evidence.** Four tests around the audit's own repro — a group with
+     `rot="2700000" flipH="1"` mapping its child space 1:1 (so the mirror is the
+     only thing that can move the child). The child used to come back at
+     `x = 1000000` with `{rot: 0}`, no flip flags and `notes: []`; it now comes
+     back at `1800000` with `rot: 2700000`, `flipH`, `groupRotated`, and both
+     `rotatedNote(1)` and `rotatedGroupNote(1)` in the notes. A second test reads
+     the mirrored position **out of the produced PDF** with pdf.js (141.7pt, not
+     the 78.7pt the old reading wrote). A third asserts flip-inside-flip cancels
+     and reports *nothing* — so the disclosure is not a blanket. A fourth covers
+     `flipV` and a group stating an orientation but no child rectangle.
+     Falsified: dropping the sign change fails 3, dropping the orientation
+     propagation fails 2.
+2. **Charts and SmartArt contributed nothing, silently, and limitation 8 was
+   false for the realistic case. Fixed by actually reading their text.** A
+   `<p:graphicFrame>` holding a chart is a *reference*: `textRuns(frame.body)`
+   finds nothing, and the old code `continue`d on that — so no shape, nothing on
+   the slide's comparison surface, and `notes: []`. A chart's title, series names
+   and category labels live in `ppt/charts/chart1.xml` and SmartArt's node text
+   in `ppt/diagrams/data1.xml`, and `readPptx` opened neither. Limitation 8 said
+   these frames "contribute their text only", which was true only for the
+   unrealistic case of text inline in the frame.
+   - `graphicPartText` reads the two places that text actually lives: rich text
+     (`<a:t>` — chart and axis titles, every SmartArt node) and the **string**
+     caches (`<c:strCache>`'s `<c:v>` — series names, category labels),
+     deduplicated because every series repeats the same categories. **Numeric
+     caches are deliberately not read**: a bar's height is not a label, and
+     listing the numbers would read as a data table this converter did not draw.
+     Resolution happens in `readPptx`, where the package is, off the frame's own
+     `r:id`/`r:dm`; `shapesOf` stays a pure walk over the slide XML.
+   - Kept honest at the edges: the text is capped at `MAX_GRAPHIC_TEXT_RUNS`
+     (60) and **the remainder is counted**, not truncated in silence; and a frame
+     is now emitted as a `graphic` shape **even when nothing could be read from
+     it** (a missing part, or an OLE object whose part is binary), because the
+     note is then the only thing standing for it. `graphicFrameNote` fires **per
+     frame, naming the slide** — an aggregate would not tell the user which page
+     to look at.
+   - **Limitation 8 is rewritten** to what is now true: charts and SmartArt are
+     *not drawn*; their own text is read and drawn as plain text where the frame
+     sits, with no axes, bars, connectors or layout; an embedded object
+     contributes nothing at all; each frame is named per slide. The phrase
+     "contribute their text only" is gone from the list, and a test asserts it
+     stays gone.
+   - **Evidence.** Five tests. A hand-built package whose chart part holds
+     "Revenue by region" (plus a series name and two categories): the frame is
+     read as a `chart` at its own `p:xfrm`, the four strings reach the slide's
+     text, the numeric `41` does **not**, `graphicFrameNote` names slide 1, and
+     "Revenue by region" comes back out of the **produced PDF**. Then SmartArt
+     out of a `dgm:dataModel`, a chart whose reference does not resolve (noted as
+     "nothing on the page stands for it", alongside real content so the deck
+     still converts), the 60-label cap reporting 7 dropped, and the panel-copy
+     assertion. Falsified: restoring the `continue` fails 3, stubbing the part
+     read fails 2.
+3. **The mandatory preview stayed silent about blank pages it already knew
+   about. Fixed in the panel, which is where the finding was.** `SlideSummary.
+   empty` was computed per slide and read by **nothing** except the all-or-nothing
+   refusal, so a deck with one real slide and three placeholder-only ones — more
+   common in an authored deck than the fully-empty case — previewed as if every
+   page had content. `PptToPdfPanel` now marks the row itself with
+   `BLANK_SLIDE_LABEL` (a `core/` constant, so the panel and the converter cannot
+   describe the same page differently), and `blankSlidesNote` lists the numbers in
+   the "left out" list.
+   - **Evidence.** A unit test on a partially blank deck asserts
+     `[false, true, true, true]` per slide and the note naming "Slides 2, 3 and
+     4" — and an **e2e test** drives the real panel with a new fixture
+     (`pptToPdfPartiallyBlankPptx`, three of four slides with no shape at all):
+     row 1 is unmarked, rows 2–4 each read "appears blank", the note is visible,
+     and the save still unlocks — disclosed, not refused. Falsified by removing
+     the panel's marker: the e2e test fails with the row reading
+     `"p2 · Slide 2Slide 2"`, which is exactly what the audit described.
+4. **The all-blank refusal misattributed its cause and threw away a better
+   message it had already built. Fixed.** A deck whose only content is a picture
+   missing from the package, or an EMF, was already diagnosed exactly —
+   `missingImageNote` / `unsupportedImageNote` were computed and in hand — and
+   then, because the slide had no *text*, it fell into the generic
+   `PPTX_EMPTY_DECK_MESSAGE` and told the user their text "probably" lives in a
+   slide layout. A wrong diagnosis for a problem the code had solved.
+   `blankDeckMessage` now prefers the specific reasons (missing media,
+   unsupported format, a chart with no readable text, an all-empty table) and
+   falls back to the layout guess only when there genuinely is none.
+   - **Evidence.** Three tests through the production entry point with
+     `layoutCalls` asserted at 0: a picture whose relationship resolves to a part
+     that is not in the package, an EMF picture, and a chart-only deck. Each
+     asserts its own specific sentence **and** that "slide layout or master" is
+     *not* in the message; a fourth pins the fallback for a deck that really is
+     nothing but empty placeholders. Falsified by restoring the unconditional
+     throw: all three fail.
+
+**Both minor findings are fixed too, because both were cheap:**
+
+5. **CDATA desynchronised the element scan** — `childElements` stripped nothing,
+   so `<a><![CDATA[</a>]]>real</a><a>second</a>` closed the first element inside
+   the CDATA section and lost the middle text. That contradicted this file's own
+   claim that a regex walker's risk is "a missed element, never a wrong one". Both
+   comments and CDATA sections are now located up front and any "tag" inside one
+   is ignored, so the claim is true rather than merely likely — and because a
+   body is a slice of the original XML, the text inside a section is still kept.
+   One more thing fell out of it: a run written as `<a:t><![CDATA[…]]></a:t>` used
+   to reach the page **with the `<![CDATA[` markers in it** (wrong text, not
+   missing text), so `textContent` now decodes the two kinds of segment
+   differently — entities outside, verbatim inside. Three tests, including the
+   audit's exact repro; falsified by removing the skip (2 fail). Unreachable for
+   PowerPoint's own output, as the audit said; fixed because "wrong, not missing"
+   is the one thing this reader promised it could not be.
+6. **An all-empty table evaded blank detection** — it was drawn as an empty grid
+   and counted as content, so it benefited from neither the refusal nor the new
+   per-slide marker. `SlideSummary.empty` now means "carries nothing a reader can
+   read", which is items-drawn *and* the one case where something is drawn and
+   says nothing; `emptyTableNote` names the slide, and a deck that is nothing but
+   empty grids is refused with that note rather than with the layout guess. Two
+   tests.
+
+**What is still disclosed-but-unfixed, stated plainly because this is the last
+ticket in the series.** With the four fixes in, the series' safety claim — *every
+limitation is stated up front and counted at runtime* — now **holds for CNV-13
+in both halves**: every limitation is in `PPT_LIMITATIONS`, which the panel
+renders before the conversion runs, and the counted disclosures went from six to
+ten (`blankSlidesNote`, `rotatedGroupNote`, `graphicFrameNote`, `emptyTableNote`
+are the four new ones). Three residuals are consciously left, and each is now
+*stated* rather than silent:
+
+- **A rotated group's children are drawn at unrotated positions.** Not
+  approximate — potentially far from where PowerPoint shows them. Counted
+  (`rotatedGroupNote`) and named in limitation 7. Fixing it properly means
+  rotating a whole canvas item, which the layout engine does not do for any tool.
+- **A child of a flipped group that states no extent of its own** is mirrored
+  about its left edge rather than its box, because there is no width to mirror.
+  It is already inside the `unpositionedNote` count ("position and wrapping
+  approximate"), and the interaction is not called out separately in the panel.
+- **Chart and SmartArt text arrives in the part's order, not the picture's.** A
+  chart's labels are drawn as a plain list where the frame sat; nothing pretends
+  it is a chart, and limitation 8 says so, but "the text is present" is a weaker
+  promise than "the slide reads the same". Numeric caches are not read at all,
+  and past 60 strings the remainder is counted rather than drawn.
+
+Unchanged from the original entry, and still the biggest gaps in this direction:
+layout and master inheritance is not read (blank pages are now flagged per slide,
+which is disclosure, not content), and no theme, colour or fill is drawn. Neither
+is a counting problem, and neither is closed. **Still not verifiable here:**
+nothing in this repo opens PowerPoint, Acrobat or Keynote, and no real-world
+authored deck (theme, master, embedded fonts) was converted — both remain on the
+`QA-05` manual checklist.
+
+**Verification after all six fixes.** Run step by step for the reason this entry
+already gives. `tsc --noEmit` clean; `eslint .` clean; `prettier --check .`
+clean; 102 tokens; 30 contrast pairs × 2 themes; invariants clean (the panel's
+one new colour is `var(--warning)`, already an audited pair and already used as
+text elsewhere in `OptionsPanel`). `pnpm test`: **92 files · 1211 tests · 0
+failures**, up from 1193 — 18 new, all in `ppt-to-pdf.test.ts` (43 → 61). **No
+existing test's assertions changed**, and CNV-12's 66 reader tests pass unchanged
+against the further-extended reader, which is what makes the reader changes
+additive rather than a re-interpretation. `pnpm test:e2e`: **128 tests, 128
+passed / 0 failed** in one full run (8.4 min) — 127 + the new blank-preview test,
+and a clean run: none of the load-sensitive flakes this entry recorded
+(`compress-preview`'s CMP-05 pixel comparison, `a11y-and-perf`'s route scan,
+`import`'s clipboard paste) reproduced this time. `pnpm check:bundle`: **362.04 KB
+gzipped**, byte-identical to the pre-audit figure — every change is inside the
+reader, the converter and the panel, none in the initial bundle, and no
+dependency was added.
 
 - **Requirements:** Read `.pptx` via the hand-rolled `pptx-reader.ts` (a zip-of-XML
   walker over the existing `fflate` dependency — no new library for this narrow read
