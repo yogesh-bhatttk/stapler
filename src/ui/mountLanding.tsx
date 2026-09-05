@@ -1,6 +1,8 @@
 /**
- * Shared bootstrap for the five per-tool landing pages (DIST-03: `/merge-pdf`,
- * `/compress-pdf`, `/sign-pdf`, `/scan-cleanup`, `/redact-pdf`).
+ * Shared bootstrap for the per-tool landing pages (DIST-03: `/merge-pdf`,
+ * `/compress-pdf`, `/sign-pdf`, `/scan-cleanup`, `/redact-pdf`, and the six
+ * CNV-08..13 converters: `/pdf-to-word`, `/word-to-pdf`, `/pdf-to-excel`,
+ * `/excel-to-pdf`, `/pdf-to-ppt`, `/ppt-to-pdf`).
  *
  * Each landing page is a real static HTML file (see the `*.entry.ts` files in
  * `src/ui/landing/` and the matching `.html` files at the repo root, wired into

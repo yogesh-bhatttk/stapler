@@ -1,4 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>https://stapler.app/</loc></url>
+  <url><loc>https://stapler.app/merge-pdf</loc></url>
+  <url><loc>https://stapler.app/compress-pdf</loc></url>
+  <url><loc>https://stapler.app/sign-pdf</loc></url>
+  <url><loc>https://stapler.app/scan-cleanup</loc></url>
+  <url><loc>https://stapler.app/redact-pdf</loc></url>
+  <url><loc>https://stapler.app/pdf-to-word</loc></url>
+  <url><loc>https://stapler.app/word-to-pdf</loc></url>
+  <url><loc>https://stapler.app/pdf-to-excel</loc></url>
+  <url><loc>https://stapler.app/excel-to-pdf</loc></url>
+  <url><loc>https://stapler.app/pdf-to-ppt</loc></url>
+  <url><loc>https://stapler.app/ppt-to-pdf</loc></url>
 </urlset>

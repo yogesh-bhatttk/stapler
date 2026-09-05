@@ -171,17 +171,24 @@ function emitWebIndex(): Plugin {
 }
 
 /**
- * DIST-03 — the five per-tool landing pages (`/merge-pdf`, `/compress-pdf`,
- * `/sign-pdf`, `/scan-cleanup`, `/redact-pdf`). Web-only: they are static marketing
- * entry points for the deployed site, not something the extension ever opens, so
- * they are excluded from `BUILD_TARGET=ext` the same way `emitWebIndex` is.
+ * DIST-03 — the per-tool landing pages (`/merge-pdf`, `/compress-pdf`, `/sign-pdf`,
+ * `/scan-cleanup`, `/redact-pdf`, plus the six CNV-08..13 converters). Web-only:
+ * they are static marketing entry points for the deployed site, not something the
+ * extension ever opens, so they are excluded from `BUILD_TARGET=ext` the same way
+ * `emitWebIndex` is.
  */
 const LANDING_PAGES: Record<string, string> = {
   'merge-pdf': 'merge-pdf.html',
   'compress-pdf': 'compress-pdf.html',
   'sign-pdf': 'sign-pdf.html',
   'scan-cleanup': 'scan-cleanup.html',
-  'redact-pdf': 'redact-pdf.html'
+  'redact-pdf': 'redact-pdf.html',
+  'pdf-to-word': 'pdf-to-word.html',
+  'word-to-pdf': 'word-to-pdf.html',
+  'pdf-to-excel': 'pdf-to-excel.html',
+  'excel-to-pdf': 'excel-to-pdf.html',
+  'pdf-to-ppt': 'pdf-to-ppt.html',
+  'ppt-to-pdf': 'ppt-to-pdf.html'
 };
 
 export default defineConfig(() => {

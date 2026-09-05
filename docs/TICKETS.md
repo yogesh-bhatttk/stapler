@@ -935,6 +935,7 @@ current test actually asserts `< 500`.
   - *Context*: Some users speak Spanish. The team wants to expand globally, so we need RTL support.
   - *AC*: No hard-coded user-facing strings remain in English; Arabic shifts the UI layout seamlessly without breaking the unified canvas tools.
   - **Correction found in a later audit:** `initLocale()` was dead code — nothing called it, so no dictionary ever loaded on boot and the only way one loaded at all was the user manually touching the language `<select>`. Strings keyed by their own English text (most of them) rendered correctly by accident; strings keyed symbolically (`header.title`, `tool.batch`, `tool.compare`, and the `tool.annotate.*`/`tool.sign.*` keys added in this pass) rendered their literal dotted key. Fixed by calling `initLocale()` at bootstrap in `src/ui/app.tsx`, alongside a related signal-reactivity fix (`dictionaryVersion`) needed for translated strings to actually re-render on language change.
+  - **Second correction, 2026-09-05:** the six CNV-08..13 converter panels all correctly call `t()`/`translate()` on their strings, but none of those ~139 keys (an AST scan of every literal argument to `t`/`translate` across the six panels plus the `EXCEL_LIMITATIONS`/`PPTX_LIMITATIONS`/`PPT_LIMITATIONS`/`BLANK_SLIDE_LABEL` constants they render confirms the exact count) existed in `en.json` or any other locale dictionary. English rendered correctly only by the same key-equals-text coincidence noted above; every other locale would have shown English regardless of the selected language, silently. Registered all 139 keys in `en.json` (key = English text, matching `scripts/i18n-extract.ts`'s own convention) so the dictionary is now a complete source of truth for a future translation pass — `i18n-extract.ts` only harvests literal JSX text and specific attributes, so it would never have picked these up on its own, since the CNV series wrote `t('...')` calls directly instead of relying on the codemod. Translation into the other 9 locales was deliberately deferred (not done here): several of these keys are full disclaimer paragraphs about exactly what each beta converter preserves — the PLAN §5.5 claims-discipline copy — and shipping unreviewed AI translations of that into 10 languages, several non-Latin scripts, was judged a real quality/risk tradeoff rather than a mechanical fix. Until a reviewed pass exists, all 9 non-English locales fall back to English for these strings — the same documented behavior RED-07 already accepts for new UI strings pending the next `i18n-extract` pass.
 
 ---
 
@@ -1032,9 +1033,10 @@ this ticket's AC.
 
 ### DIST-03 · Website twin with per-tool landing pages — `L` `P1`
 
-**Status: Done** — `pnpm build:web` now emits five real static HTML entry points,
-and all six landing pages (index + 5 tool pages) serve HTTP 200 from `vite preview`.
-Lighthouse scores measured locally against `http://localhost:4173` (2026-08-16):
+**Status: Done** — `pnpm build:web` now emits eleven real static HTML entry points,
+and all twelve landing pages (index + 11 tool pages) serve HTTP 200 from `vite preview`.
+Lighthouse scores measured locally against `http://localhost:4173` (2026-08-16), for the
+original five tool pages:
 
 | Page | Perf | A11y | Best Practices | SEO |
 |---|---|---|---|---|
@@ -1050,11 +1052,26 @@ shares the editor's `<title>` rather than having its own landing title). SEO fix
 applied: absolute `rel=canonical` URLs and `public/robots.txt` added.
 Cloudflare Pages / real-domain Lighthouse is a deploy-time step for the submitter.
 
+Extended 2026-09-05 to cover the six CNV-08..13 converters — `/pdf-to-word`,
+`/word-to-pdf`, `/pdf-to-excel`, `/excel-to-pdf`, `/pdf-to-ppt`, `/ppt-to-pdf` — the
+same shape as the original five (search volume for "pdf to word" etc. is exactly the
+kind of front-loaded SEO door PLAN §1 argues for, and it was the one gap left after
+CNV-08..13 shipped without matching landing pages). Copy for each states the beta
+status and the specific fidelity limit from that tool's `summary` in
+`src/core/tools.ts` (PLAN §5.5's claims-discipline rule), plus a card calling out the
+mandatory preview PLAN §5.5 requires before every conversion. `public/sitemap.xml`
+was also filled in — previously it listed only `/`, missing all eleven tool routes.
+New pages were not re-measured with real Lighthouse (same "unverified here" caveat as
+the original five, below); they reuse the identical static-hero/`marketing.css`
+pattern that scored ≥90 on all categories, so no new failure mode is expected, but
+that is an inference, not a measurement.
+
 - **Requirements:** `pnpm build:web` deployed to Cloudflare Pages; routes `/merge-pdf`,
-  `/compress-pdf`, `/sign-pdf`, `/scan-cleanup`, `/redact-pdf`, each server-rendered static
-  with the tool preloaded, plus an install CTA. Upstream's marketing components
-  (hero/display type, feature cards) are appropriate here.
-  - Implementation: `vite.config.ts` adds these five `.html` files to
+  `/compress-pdf`, `/sign-pdf`, `/scan-cleanup`, `/redact-pdf`, `/pdf-to-word`,
+  `/word-to-pdf`, `/pdf-to-excel`, `/excel-to-pdf`, `/pdf-to-ppt`, `/ppt-to-pdf`, each
+  server-rendered static with the tool preloaded, plus an install CTA. Upstream's
+  marketing components (hero/display type, feature cards) are appropriate here.
+  - Implementation: `vite.config.ts` adds these eleven `.html` files to
     `rollupOptions.input` only when `BUILD_TARGET` is not `ext` (same gating as the
     existing `emitWebIndex` plugin), so `build:ext` is untouched — confirmed: `dist/ext`
     contains only `editor.html`/`privacy.html`, no landing pages.
@@ -1086,14 +1103,16 @@ Cloudflare Pages / real-domain Lighthouse is a deploy-time step for the submitte
   - Works fully without the extension installed: **met**. Each page mounts the real
     `App`/tool code client-side; nothing in the landing bundle references the extension
     or `chrome.*` (layer boundary unchanged — landing files import only `core/`/`ui/`).
-  - Evidence: `BUILD_TARGET=web vite build` emits all 6 pages
-    (`dist/web/{index,editor,merge-pdf,compress-pdf,sign-pdf,scan-cleanup,redact-pdf}.html`)
+  - Evidence: `BUILD_TARGET=web vite build` emits all 12 pages
+    (`dist/web/{index,editor,merge-pdf,compress-pdf,sign-pdf,scan-cleanup,redact-pdf,
+    pdf-to-word,word-to-pdf,pdf-to-excel,excel-to-pdf,pdf-to-ppt,ppt-to-pdf}.html`)
     with real content, injected per-page CSS/JS by Vite (confirmed by inspecting
-    `dist/web/merge-pdf.html`). `BUILD_TARGET=ext vite build` output is unchanged (only
-    `editor.html`/`privacy.html`). `pnpm check` (type/lint/format/tokens) and
-    `pnpm test` (266 unit tests) pass. The two `tests/e2e/zero-network.spec.ts` cases pass
-    against the built web preview. Full `pnpm test:e2e` and a real Lighthouse/Cloudflare
-    run remain manual follow-ups — add to the `QA-05`/`DIST-05` manual checklist.
+    `dist/web/merge-pdf.html` and `dist/web/pdf-to-word.html`). `BUILD_TARGET=ext vite
+    build` output is unchanged (only `editor.html`/`privacy.html`). `pnpm check`
+    (type/lint/format/tokens/invariants) passes. The two `tests/e2e/zero-network.spec.ts`
+    cases pass against the built web preview. Full `pnpm test:e2e` and a real
+    Lighthouse/Cloudflare run remain manual follow-ups — add to the `QA-05`/`DIST-05`
+    manual checklist.
 
 ### DIST-04 · Edge and Firefox submissions — `M` `P1`
 

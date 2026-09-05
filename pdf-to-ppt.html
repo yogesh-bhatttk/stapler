@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDF to PowerPoint — Stapler</title>
+    <meta
+      name="description"
+      content="Place each PDF page's text and images onto a slide, entirely in your browser. Beta: positioned boxes, not an editable deck. No upload, no account."
+    />
+    <link rel="canonical" href="https://stapler.app/pdf-to-ppt" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="PDF to PowerPoint — Stapler" />
+    <meta
+      property="og:description"
+      content="Turn a PDF into a slide deck. Nothing is uploaded — try it right on this page."
+    />
+    <link rel="icon" href="/icons/icon-32.png" />
+  </head>
+  <body>
+    <a class="landingSkipLink" href="#tool">Skip to the PDF to PowerPoint tool</a>
+
+    <header class="landingHero">
+      <div class="landingHeroInner">
+        <p class="landingEyebrow">Stapler · Offline PDF tools</p>
+        <h1 class="landingTitle">Convert PDF to PowerPoint, entirely on your device</h1>
+        <p class="landingSubtitle">
+          Stapler places each page's text and images onto its own slide, with a full preview before
+          you save. This is a beta converter: it produces positioned boxes where the page drew them,
+          not an editable deck with real text placeholders. Every byte stays on this device.
+        </p>
+        <div class="landingCtaRow">
+          <button type="button" class="landingCtaPrimary" disabled>
+            Install from the Chrome Web Store — coming soon
+          </button>
+          <a class="landingCtaSecondary" href="#tool">Use it now, no install needed</a>
+        </div>
+        <p class="landingCtaNote">
+          Works fully on this page. No upload, no account, no daily limit.
+        </p>
+      </div>
+    </header>
+
+    <ul class="landingFeatures">
+      <li class="landingFeatureCard">
+        <h2 class="landingFeatureTitle">Nothing leaves your device</h2>
+        <p class="landingFeatureBody">
+          No uploads, no account, no telemetry. Open DevTools' Network tab and watch it stay empty
+          while you convert.
+        </p>
+      </li>
+      <li class="landingFeatureCard">
+        <h2 class="landingFeatureTitle">Positioned boxes, not an editable deck</h2>
+        <p class="landingFeatureBody">
+          This is the widest gap of Stapler's six converters: each page's text and images land on a
+          slide at the position the page drew them, not inside editable placeholders.
+        </p>
+      </li>
+      <li class="landingFeatureCard">
+        <h2 class="landingFeatureTitle">See it before you save</h2>
+        <p class="landingFeatureBody">
+          Every conversion opens in a full preview before you commit to the .pptx, so you can check
+          what carried over and what didn't.
+        </p>
+      </li>
+    </ul>
+
+    <section class="landingAppSection">
+      <h2 class="landingAppHeading" id="tool">Try PDF to PowerPoint right here</h2>
+      <div id="app"></div>
+    </section>
+
+    <noscript>
+      Stapler's tools run in your browser and need JavaScript enabled to work. Everything still runs
+      locally — nothing is ever sent to a server.
+    </noscript>
+
+    <script type="module" src="/src/ui/landing/pdf-to-ppt.entry.ts"></script>
+  </body>
+</html>
