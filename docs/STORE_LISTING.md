@@ -6,39 +6,36 @@
 Stapler — Offline PDF Tools
 
 ### Short Description (max 132 chars)
-20+ PDF tools, entirely offline in your browser: merge, compress, sign, redact. No uploads, ever.
+30+ PDF tools, entirely offline in your browser: merge, convert, compress, sign, redact. No uploads, ever.
 
 ### Detailed Description (max 16,000 chars)
-**Stapler** is a complete PDF toolkit that never leaves your browser — no uploads, no accounts, no server, ever.
+Note: written as plain text on purpose — the Chrome Web Store's description field does not
+render Markdown, so this is the exact text to paste into the dashboard, not a source draft.
+
+Stapler is a complete PDF toolkit that never leaves your browser — no uploads, no accounts, no server, ever.
 
 Most "free PDF tools" online quietly send your file to a server you'll never see, then ask you to sign up to get it back. Stapler works differently: every merge, every redaction, every signature is computed on your own machine, inside a sandboxed offline-only extension page. Your documents never touch a network — not ours, not anyone's.
 
-**Organize & edit**
-Merge, split, and extract pages. Rotate, delete, duplicate, and reorder. Crop, insert, and remove blank pages. Normalize mixed page sizes. Build N-up layouts and booklets. Add bookmarks, page numbers, watermarks, Bates stamps, and QR/barcode stamps.
+Organize & edit — Merge, split, and extract pages. Rotate, delete, duplicate, and reorder. Crop, insert, and remove blank pages. Normalize mixed page sizes. Build N-up layouts and booklets. Add bookmarks, page numbers, watermarks, Bates stamps, and QR/barcode stamps.
 
-**Convert**
-Images (PNG/JPEG/HEIC) to PDF and back. PDF to plain text or Markdown. Markdown to PDF. Extract embedded images and tables.
+Convert — Images (PNG/JPEG/HEIC) to PDF and back. PDF to plain text or Markdown. Markdown to PDF. Extract embedded images and tables.
 
-**Sign & fill**
-Draw, type, or import a signature. Fill and flatten interactive form (AcroForm) fields.
+Sign & fill — Draw, type, or import a signature. Fill and flatten interactive form (AcroForm) fields.
 
-**Protect & clean up**
-Real redaction — the underlying content is structurally removed from the file, not just painted over, with a verification pass before you save. Scrub metadata. Straighten, deskew, and clean up phone-camera scans of paper documents.
+Protect & clean up — Real redaction: the underlying content is structurally removed from the file, not just painted over, with a verification pass before you save. Scrub metadata. Straighten, deskew, and clean up phone-camera scans of paper documents.
 
-**Compress**
-Shrink file size with a raster pass or a surgical re-encode that keeps text sharp — and never inflates a file that's already optimized.
+Compress — Shrink file size with a raster pass or a surgical re-encode that keeps text sharp — and never inflates a file that's already optimized.
 
-**Review & manage**
-Annotate with highlights, freehand marks, sticky notes, and whiteout. Compare two documents side by side. Batch-process a whole folder with a saved recipe.
+Review & manage — Annotate with highlights, freehand marks, sticky notes, and whiteout. Compare two documents side by side. Batch-process a whole folder with a saved recipe.
 
 Built for real accessibility, too: every tool is fully operable from the keyboard alone, in ten languages including right-to-left scripts, in light or dark mode.
 
-**Privacy, proven — not promised**
-- Zero network requests at runtime. Verify it yourself: open DevTools' Network tab and use any tool — nothing appears.
-- Zero permissions in the install prompt. Chrome won't even show you a warning, because there's nothing to warn about.
-- No accounts, no tracking, no analytics, no watermarks, no file-size limits, no daily quota.
-- Open source under the MIT licence — read every line of the code that touches your files.
+Privacy, proven — not promised
 
+Zero network requests at runtime. Verify it yourself: open DevTools' Network tab and use any tool — nothing appears.
+Zero permissions in the install prompt. Chrome won't even show you a warning, because there's nothing to warn about.
+No accounts, no tracking, no analytics, no watermarks, no file-size limits, no daily quota.
+Open source under the MIT licence — read every line of the code that touches your files.
 We built the tool we wanted for our own sensitive documents: something that just works, and never has to ask where your files are going — because they aren't going anywhere.
 
 ### Search Terms / Keywords (max 5)
@@ -46,7 +43,7 @@ We built the tool we wanted for our own sensitive documents: something that just
 2. Merge PDF
 3. Compress PDF
 4. Offline PDF
-5. Split PDF
+5. PDF to Word
 
 ## 2. Image Assets Checklist
 
