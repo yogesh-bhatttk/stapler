@@ -19,7 +19,14 @@ mkdirSync(outDir, { recursive: true });
 
 const BASE_URL = process.env.STAPLER_PREVIEW_URL ?? 'http://localhost:4173';
 
-/** Opens the app fresh and clears the first-run welcome dialog, if shown. */
+/**
+ * Opens the app fresh and clears whichever startup dialog appears: the
+ * first-run welcome dialog, or (on every call after the first fixture
+ * import in the same browser context) the "Restore your previous session?"
+ * prompt — each screenshot step imports its own fixture explicitly, so
+ * restoring the previous step's document would leave the wrong one on
+ * screen instead of blocking the click that follows.
+ */
 async function openApp(page) {
   await page.addInitScript(() => {
     delete window.showOpenFilePicker;
@@ -27,11 +34,18 @@ async function openApp(page) {
     delete window.showDirectoryPicker;
   });
   await page.goto(`${BASE_URL}/editor.html`);
-  const dialog = page.getByRole('dialog', { name: 'Welcome to Stapler' });
-  await dialog.waitFor({ state: 'visible', timeout: 10_000 }).catch(() => {});
-  if (await dialog.isVisible().catch(() => false)) {
+  const welcome = page.getByRole('dialog', { name: 'Welcome to Stapler' });
+  const restore = page.getByRole('dialog', { name: 'Restore your previous session?' });
+  await Promise.race([
+    welcome.waitFor({ state: 'visible', timeout: 10_000 }),
+    restore.waitFor({ state: 'visible', timeout: 10_000 })
+  ]).catch(() => {});
+  if (await welcome.isVisible().catch(() => false)) {
     await page.getByRole('button', { name: 'Get started' }).click();
-    await dialog.waitFor({ state: 'hidden' });
+    await welcome.waitFor({ state: 'hidden' });
+  } else if (await restore.isVisible().catch(() => false)) {
+    await page.getByRole('button', { name: 'Start fresh' }).click();
+    await restore.waitFor({ state: 'hidden' });
   }
 }
 
@@ -59,7 +73,14 @@ async function gotoTool(page, tool) {
 
 async function main() {
   const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  // Store listing screenshots are captured in dark mode: `initTheme()` resolves
+  // an unset preference from `prefers-color-scheme` (theme.ts), and each fixture
+  // import below starts from a fresh IndexedDB with no stored theme setting, so
+  // emulating a dark color scheme is enough — no UI toggle needed.
+  const page = await browser.newPage({
+    viewport: { width: 1280, height: 800 },
+    colorScheme: 'dark'
+  });
   await page.setViewportSize({ width: 1280, height: 800 });
 
   // 1. Scan cleanup before/after — the store listing's lead screenshot.
@@ -102,7 +123,12 @@ async function main() {
   await page.getByRole('button', { name: 'Add PDFs or images' }).click();
   const chooser = await addFilesPromise;
   await chooser.setFiles(cmykFixture);
-  await page.getByText('cmyk-text.pdf').waitFor({ timeout: 15_000 });
+  // Waits for the finished "Source files" row, not the "Parsing cmyk-text.pdf"
+  // progress toast — both contain the filename, but only the former means the
+  // import actually landed. `2. cmyk-text.pdf` matches MergePanel's own
+  // `{index + 1}. {source.name}` row text once cmyk-text.pdf becomes the
+  // second source.
+  await page.getByText('2. cmyk-text.pdf').waitFor({ timeout: 15_000 });
   await page.screenshot({ path: path.join(outDir, '3-merge.png') });
 
   // 4. Redact, with a marked region.
@@ -110,7 +136,12 @@ async function main() {
   await gotoTool(page, 'redact');
   await page.getByLabel('Find and mark text').fill('Letter');
   await page.getByRole('button', { name: 'Mark every occurrence' }).click();
-  await page.getByText('Marks (1)').waitFor({ timeout: 15_000 });
+  const marksHeading = page.getByText('Marks (1)');
+  await marksHeading.waitFor({ timeout: 15_000 });
+  // The panel is a scrollable sidebar, and the newer "Suggested marks" section
+  // above this one pushes it below the 1280x800 viewport fold — scroll it into
+  // view so the screenshot still shows the actual mark, not just the toast.
+  await marksHeading.scrollIntoViewIfNeeded();
   await page.screenshot({ path: path.join(outDir, '4-redact.png') });
 
   // 5. The offline trust panel — the product's central claim, in the UI itself.
