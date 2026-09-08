@@ -24,7 +24,7 @@ For more details, please see our [Privacy Policy](public/privacy.html).
 ## Installation
 
 ### From the Chrome Web Store
-*(Coming Soon)*
+[Install Stapler from the Chrome Web Store](https://chromewebstore.google.com/detail/stapler-%E2%80%94-offline-pdf-too/jeligfmdmcmjpfgcmkjepbmkpgejgpll)
 
 ### Build from Source
 
