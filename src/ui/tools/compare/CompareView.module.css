@@ -1,0 +1,43 @@
+/**
+ * This component used to import `SinglePageView.module.css` and reference
+ * `.workspace`/`.scrollArea`/`.canvasContainer` — none of which exist in that
+ * file (it only defines `.wrapper`/`.stage`/`.page`/`.canvas`). Because
+ * CSS-module types are a generic string-keyed record, that compiled cleanly;
+ * at runtime the three wrapper divs got no class at all, so the
+ * `CompareSlider` inside them (width/height: 100%, same as CompareSlider.module.css
+ * everywhere else) had no definite ancestor size to resolve against and
+ * silently collapsed to nothing visible — the visual-diff mode has likely
+ * never rendered anything. This is CompareView's own, correctly-named module.
+ */
+.workspace {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--doc-bg);
+}
+
+.scrollArea {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: var(--space-lg);
+}
+
+/* Height comes from the flex chain above; width is derived from the inline
+   `aspect-ratio` (the page's own proportions), capped so it never overflows. */
+.canvasContainer {
+  position: relative;
+  height: 100%;
+  width: auto;
+  max-width: 100%;
+}
+
+.canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}

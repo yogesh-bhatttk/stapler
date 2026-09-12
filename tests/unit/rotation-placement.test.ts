@@ -13,7 +13,7 @@
  * worker computed".
  */
 import { describe, expect, it } from 'vitest';
-import { PDFDocument, PDFArray, PDFDict, PDFName, degrees } from 'pdf-lib';
+import { PDFDocument, PDFArray, PDFDict, PDFName, StandardFonts, degrees } from 'pdf-lib';
 import { processWorkerImpl } from '../../src/core/workers/process.worker';
 import type {
   ComposeExtras,
@@ -618,5 +618,78 @@ describe('contact sheet paginates instead of shrinking cells (§5)', () => {
     for (const scale of scales) {
       expect(Math.abs(scale.a)).toBeGreaterThan(60);
     }
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Text watermark rotation pivot
+ * ------------------------------------------------------------------ */
+
+describe('a rotated text watermark stays centered on the same point as an unrotated one', () => {
+  it('does not drift when a large font size and a real rotation are combined', async () => {
+    // A blank page, not a fixture with its own visible text: `textPdf` draws
+    // its own `Tm` before the watermark's, and `drawAnchors` would pick that
+    // one up as `[0]` instead of the watermark's — exactly the mistake that
+    // let this test pass against the pre-fix code the first time around.
+    const source = await rotatedSource(RAW_W, RAW_H, 0);
+    const page = { key: 'p0', sourceDocId: 'source', sourceIndex: 0, rotation: 0 };
+    const fontSize = 96;
+    const text = 'CENTERED';
+
+    const composeWith = (rotation: number) =>
+      processWorkerImpl.compose(
+        [page],
+        { source },
+        [],
+        {
+          kind: 'text',
+          text,
+          imageScale: 0.35,
+          position: 'center',
+          opacity: 1,
+          rotation,
+          fontSize,
+          color: '#111111',
+          startAt: 1,
+          pageRange: ''
+        },
+        undefined,
+        null,
+        null,
+        undefined,
+        silentJob
+      );
+
+    const font = await (await PDFDocument.create()).embedFont(StandardFonts.HelveticaBold);
+    const textWidth = font.widthOfTextAtSize(text, fontSize);
+    const textHeight = font.heightAtSize(fontSize);
+
+    /**
+     * `drawText` rotates about its `Tm` anchor (the baseline start), not the
+     * text's own visual center — this reconstructs that center from the
+     * anchor and the draw's own rotation angle, the same relationship
+     * `centerPreservingOrigin` solves in reverse when placing it.
+     */
+    const visualCenter = (anchor: { x: number; y: number; a: number; b: number }) => {
+      const theta = Math.atan2(anchor.b, anchor.a);
+      const dx = (textWidth / 2) * Math.cos(theta) - (textHeight / 2) * Math.sin(theta);
+      const dy = (textWidth / 2) * Math.sin(theta) + (textHeight / 2) * Math.cos(theta);
+      return { x: anchor.x + dx, y: anchor.y + dy };
+    };
+
+    const unrotated = await PDFDocument.load(await composeWith(0));
+    const rotated = await PDFDocument.load(await composeWith(30));
+
+    const centerAt0 = visualCenter(drawAnchors(await pageStream(unrotated, 0))[0]);
+    const centerAt30 = visualCenter(drawAnchors(await pageStream(rotated, 0))[0]);
+
+    // `position: 'center'` has to mean the same point on the page whether or
+    // not the watermark is also rotated. Before this fix, a rotated
+    // watermark's `Tm` anchor was left at its un-rotated corner instead of
+    // being solved for the center, so the *visual* center drifted by roughly
+    // half the text's diagonal — worse the larger the font size, exactly what
+    // made a large rotated watermark look visibly off-center.
+    expect(centerAt30.x).toBeCloseTo(centerAt0.x, 0);
+    expect(centerAt30.y).toBeCloseTo(centerAt0.y, 0);
   });
 });

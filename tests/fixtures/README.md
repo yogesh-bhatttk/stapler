@@ -8,8 +8,9 @@ a hand-built byte structure no encoder produces) are committed here.
 
 `npm test` and `npm run test:e2e` regenerate any missing static fixture automatically via
 their `pretest`/`pretest:e2e` hooks (`npm run fixtures:static`). Regeneration only runs
-`convert`/`gs` for `scanned_skewed.pdf`, `cmyk.pdf`, and `encrypted.pdf` if those files are
-absent — on a normal checkout they are already committed, so no external tool is required.
+`convert`/`gs` for `scanned_skewed.pdf`, `cmyk.pdf`, `encrypted.pdf`,
+`permission-restricted.pdf` and `permission-no-print.pdf` if those files are absent — on a normal checkout they are
+already committed, so no external tool is required.
 
 ## Static Fixtures (Committed)
 
@@ -23,6 +24,20 @@ the application. `.gitignore` allow-lists exactly these files inside `tests/fixt
   properly during surgical re-encode (`CMP-03`). Built with ImageMagick.
 - `encrypted.pdf` — a real password-protected PDF (owner/user password). Validates that the
   app detects and explains encryption rather than failing obscurely (`DOC-02`). Built with
+  Ghostscript.
+- `permission-restricted.pdf` — an `/Encrypt` dictionary with an owner password but **no**
+  user password: the common "printing/copying restricted, opens with no prompt" PDF that
+  Chrome, Acrobat and Preview all open transparently. Regression fixture for a bug where
+  Stapler refused every `/Encrypt`-bearing PDF outright, this one included, instead of
+  trying the empty user password pdf-lib itself is able to decrypt with. Built with
+  Ghostscript.
+- `permission-no-print.pdf` — the same shape as `permission-restricted.pdf` (owner password,
+  no user password, opens with no prompt) but with permissions that actually deny something:
+  `/P -3904` — no printing, copying, modifying, annotating, form filling or assembly.
+  `permission-restricted.pdf` carries Ghostscript's default `/P -4`, which restricts
+  *nothing*, so it can prove that such a file opens but not that an export of it still
+  refuses what the input refused. This one can, and is the regression fixture for exports
+  silently dropping the restrictions a decrypted document no longer carries. Built with
   Ghostscript.
 - `jbig2.pdf` / `jpx.pdf` — a minimal hand-built PDF whose only image XObject declares
   `/Filter /JBIG2Decode` or `/JPXDecode` with a zero-length stream. This is **not** real

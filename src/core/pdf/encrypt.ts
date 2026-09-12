@@ -54,6 +54,24 @@ export const DEFAULT_PROTECTION: ProtectionSettings = {
 };
 
 /**
+ * What the handler is actually given: two passwords and the exact `/P` integer
+ * to write.
+ *
+ * {@link ProtectionSettings} is the *user's* vocabulary — three checkboxes —
+ * and it cannot express a `/P` that, say, forbids only form filling. The
+ * import-restriction path has to write back the precise flags the input
+ * carried, bit for bit, so it hands a plan straight down instead of round-
+ * tripping through three booleans and losing whatever they do not cover.
+ */
+export interface EncryptionPlan {
+  /** May be empty here — see {@link permissionOnlyPlan}. */
+  userPassword: string;
+  ownerPassword: string;
+  /** Written to `/Encrypt`'s `/P` verbatim. */
+  permissions: number;
+}
+
+/**
  * The /P permission flags (Table 22). Bit 1 is the low bit of the integer.
  *
  * Bits 1–2 are reserved and must be 0; bits 7–8 and 13–32 are reserved and must
@@ -62,15 +80,68 @@ export const DEFAULT_PROTECTION: ProtectionSettings = {
  */
 export function permissionFlags(settings: ProtectionSettings): number {
   let p = -4;
-  if (!settings.allowPrinting) p &= ~(1 << 2) & ~(1 << 11); // print, high-quality print
-  if (!settings.allowCopying) p &= ~(1 << 4); // copy / extract
+  if (!settings.allowPrinting) p &= ~PERMISSION_PRINT & ~(1 << 11); // print, high-quality print
+  if (!settings.allowCopying) p &= ~PERMISSION_COPY; // copy / extract
   if (!settings.allowModifying) {
-    p &= ~(1 << 3); // modify contents
+    p &= ~PERMISSION_MODIFY; // modify contents
     p &= ~(1 << 5); // add or modify annotations
     p &= ~(1 << 8); // fill in form fields
     p &= ~(1 << 10); // assemble document
   }
   return p | 0;
+}
+
+/** Bit 3 — print. */
+const PERMISSION_PRINT = 1 << 2;
+/** Bit 4 — modify contents. */
+const PERMISSION_MODIFY = 1 << 3;
+/** Bit 5 — copy or extract. */
+const PERMISSION_COPY = 1 << 4;
+
+/**
+ * The user's Protect settings, narrowed by restrictions the document arrived
+ * with.
+ *
+ * Turning Protect on must never be a way to *lift* a restriction: Stapler
+ * opened a permission-restricted file with the empty user password, which
+ * grants no owner rights, so it is in no position to hand printing back to
+ * anyone. Where the user's own choice is already the stricter of the two, the
+ * user's choice wins; this only ever removes permissions.
+ *
+ * `inherited` is a `/P` integer, so this is a lossy narrowing on purpose: a
+ * `/P` that forbids only form filling has no checkbox to turn off, and the
+ * three booleans are all this path can carry. The permission-only export path
+ * (`permissionOnlyPlan`) writes `/P` verbatim and loses nothing.
+ */
+export function withInheritedRestrictions(
+  settings: ProtectionSettings,
+  inherited: number | null
+): ProtectionSettings {
+  if (inherited === null) return settings;
+  return {
+    ...settings,
+    allowPrinting: settings.allowPrinting && (inherited & PERMISSION_PRINT) !== 0,
+    allowCopying: settings.allowCopying && (inherited & PERMISSION_COPY) !== 0,
+    allowModifying: settings.allowModifying && (inherited & PERMISSION_MODIFY) !== 0
+  };
+}
+
+/**
+ * The plan for re-applying restrictions a document was *imported* with.
+ *
+ * No user password, so the export opens with no prompt in any viewer — exactly
+ * as the input did — while a compliant reader still refuses whatever `/P`
+ * refuses. The owner password is random and thrown away: nobody ever held the
+ * original (Stapler opened the file with the empty *user* password), so there
+ * is no secret to preserve, and an empty owner password would make the
+ * restrictions liftable by anyone who pressed OK on a blank prompt.
+ */
+export function permissionOnlyPlan(permissions: number): EncryptionPlan {
+  return {
+    userPassword: '',
+    ownerPassword: randomPassword(),
+    permissions: permissions | 0
+  };
 }
 
 /* ------------------------------------------------------------------ *
@@ -95,6 +166,13 @@ function concat(...parts: Uint8Array[]): Uint8Array {
 
 function randomBytes(length: number): Uint8Array {
   return globalThis.crypto.getRandomValues(new Uint8Array(length));
+}
+
+/** A 256-bit owner password nobody keeps — see {@link permissionOnlyPlan}. */
+function randomPassword(): string {
+  let out = '';
+  for (const byte of randomBytes(32)) out += byte.toString(16).padStart(2, '0');
+  return out;
 }
 
 async function digest(algorithm: 'SHA-256' | 'SHA-384' | 'SHA-512', data: Uint8Array) {
@@ -179,10 +257,10 @@ interface EncryptionKeys {
   p: number;
 }
 
-async function deriveKeys(settings: ProtectionSettings): Promise<EncryptionKeys> {
+async function deriveKeys(plan: EncryptionPlan): Promise<EncryptionKeys> {
   const fileKey = randomBytes(32);
-  const user = passwordBytes(settings.userPassword);
-  const owner = passwordBytes(settings.ownerPassword || settings.userPassword);
+  const user = passwordBytes(plan.userPassword);
+  const owner = passwordBytes(plan.ownerPassword || plan.userPassword);
   const empty = new Uint8Array(0);
   const zeroIv = new Uint8Array(16);
 
@@ -198,7 +276,7 @@ async function deriveKeys(settings: ProtectionSettings): Promise<EncryptionKeys>
 
   // Algorithm 10: the permissions, repeated inside the encrypted payload so a
   // viewer can tell that /P was not tampered with in transit.
-  const p = permissionFlags(settings);
+  const p = plan.permissions | 0;
   const permsBlock = new Uint8Array(16);
   new DataView(permsBlock.buffer).setInt32(0, p, true);
   permsBlock.set([0xff, 0xff, 0xff, 0xff], 4);
@@ -300,7 +378,34 @@ export async function encryptPdf(
   if (!settings.userPassword) {
     throw internal('A password is required before a document can be protected.');
   }
+  return encryptWithPlan(
+    bytes,
+    {
+      userPassword: settings.userPassword,
+      ownerPassword: settings.ownerPassword,
+      permissions: permissionFlags(settings)
+    },
+    job
+  );
+}
 
+/**
+ * The handler itself, given an exact `/P` and passwords that may be empty.
+ *
+ * Split out of {@link encryptPdf} so the import-restriction path
+ * ({@link permissionOnlyPlan}) can write an owner-password-only document —
+ * empty user password, opens with no prompt — without `encryptPdf`'s guard
+ * being weakened for the Protect feature, where an empty user password means
+ * the user meant to type one and didn't.
+ *
+ * Nothing outside this module should call this with an empty *owner* password
+ * as well: a file with neither password restricts nobody.
+ */
+export async function encryptWithPlan(
+  bytes: Uint8Array,
+  plan: EncryptionPlan,
+  job?: JobHandle
+): Promise<Uint8Array> {
   let doc: PDFDocument;
   try {
     doc = await PDFDocument.load(bytes, { ignoreEncryption: false, updateMetadata: false });
@@ -314,7 +419,7 @@ export async function encryptPdf(
     throw err;
   }
 
-  const keys = await deriveKeys(settings);
+  const keys = await deriveKeys(plan);
   const context = doc.context;
   const seen = new Set<PDFObject>();
 

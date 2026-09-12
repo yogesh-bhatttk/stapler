@@ -51,15 +51,29 @@ const readMetadata = vi.fn(async (bytes: Uint8Array) => ({
 }));
 const scrubMetadata = vi.fn(async (bytes: Uint8Array) => new Uint8Array([...bytes, 0xff]));
 
+/**
+ * The second byte stands in for "this file arrived permission-restricted": a
+ * 9 means an `/Encrypt` dictionary with `/P -3904` (Acrobat's view-only), the
+ * way `permission-no-print.pdf` is built. `permission-restrictions.test.ts`
+ * proves the real flags survive a real export; what is in question here is
+ * only whether the batch runner asks for them at all, and for which files.
+ */
+const restrictDocument = vi.fn(async (bytes: Uint8Array) => new Uint8Array([...bytes, 0xee]));
+
 vi.mock('../../src/core/workers', () => ({
   processWorker: {
     lease: <T>(fn: (api: unknown) => Promise<T>) =>
       fn({
-        inspect: async () => ({ pageCount: 1 }),
+        inspect: async (bytes: Uint8Array) => ({
+          pageCount: 1,
+          permissionRestrictions: bytes[1] === 9 ? -3904 : null
+        }),
         compose: async (_pages: unknown, sources: Record<string, Uint8Array>) =>
           Object.values(sources)[0],
         readMetadata: (...args: unknown[]) => readMetadata(...(args as [Uint8Array])),
-        scrubMetadata: (...args: unknown[]) => scrubMetadata(...(args as [Uint8Array]))
+        scrubMetadata: (...args: unknown[]) => scrubMetadata(...(args as [Uint8Array])),
+        restrictDocument: (...args: unknown[]) =>
+          restrictDocument(...(args as unknown as [Uint8Array]))
       })
   }
 }));
@@ -73,15 +87,22 @@ interface Written {
   bytes: Uint8Array;
 }
 
-function fileHandle(name: string, options: { fails?: boolean; marker?: number } = {}) {
+function fileHandle(
+  name: string,
+  options: { fails?: boolean; marker?: number; restricted?: boolean } = {}
+) {
   return {
     kind: 'file' as const,
     name,
     getFile: async () => {
       if (options.fails) throw new Error(`cannot read ${name}`);
-      return new File([new Uint8Array([options.marker ?? 0, 2, 3])], name, {
-        type: 'application/pdf'
-      });
+      return new File(
+        [new Uint8Array([options.marker ?? 0, options.restricted ? 9 : 2, 3])],
+        name,
+        {
+          type: 'application/pdf'
+        }
+      );
     }
   };
 }
@@ -113,6 +134,7 @@ beforeEach(() => {
   compressDocument.mockClear();
   readMetadata.mockClear();
   scrubMetadata.mockClear();
+  restrictDocument.mockClear();
   state.activeRecipeId.value = null;
   state.savedRecipes.value = [];
   state.outputPattern.value = '{basename}';
@@ -241,5 +263,57 @@ describe('RED-09: batch metadata scrub', () => {
       new Uint8Array([1, 2, 3, 0xff])
     );
     expect(written.find(w => w.name === 'clean.pdf')!.bytes).toEqual(new Uint8Array([0, 2, 3]));
+  });
+});
+
+/**
+ * The batch runner writes its own output rather than going through
+ * `commit.ts`'s `save()`, so the rule that an import-restricted document may
+ * not leave unrestricted has to hold here on its own.
+ */
+describe('permission restrictions survive a batch run', () => {
+  it('re-applies the input\u2019s own /P to a file a tool rewrote', async () => {
+    const { inDir, outDir, written } = dirs([
+      fileHandle('locked.pdf', { marker: 1, restricted: true })
+    ]);
+    state.inputDirHandle.value = inDir as never;
+    state.outputDirHandle.value = outDir as never;
+    // Any tool that actually rewrites the bytes will do; the metadata scrub is
+    // the one already wired up in this file.
+    state.scrubMetadataInBatch.value = true;
+
+    await runBatch();
+
+    expect(restrictDocument).toHaveBeenCalledTimes(1);
+    expect(restrictDocument.mock.calls[0][1]).toBe(-3904);
+    // The scrubbed bytes, then the restriction pass over them \u2014 in that
+    // order, so the flags are applied to what is actually written.
+    expect(written[0].bytes).toEqual(new Uint8Array([1, 9, 3, 0xff, 0xee]));
+  });
+
+  it('leaves an unrestricted file alone', async () => {
+    const { inDir, outDir } = dirs([fileHandle('plain.pdf', { marker: 1 })]);
+    state.inputDirHandle.value = inDir as never;
+    state.outputDirHandle.value = outDir as never;
+    state.scrubMetadataInBatch.value = true;
+
+    await runBatch();
+
+    expect(restrictDocument).not.toHaveBeenCalled();
+  });
+
+  it('does not re-encrypt a file no tool touched', async () => {
+    // Nothing rewrote it, so the bytes written *are* the input bytes \u2014
+    // `/Encrypt` dictionary included. Re-encrypting would be a second parse
+    // and a second AES pass for no change at all.
+    const { inDir, outDir, written } = dirs([fileHandle('locked.pdf', { restricted: true })]);
+    state.inputDirHandle.value = inDir as never;
+    state.outputDirHandle.value = outDir as never;
+    state.scrubMetadataInBatch.value = false;
+
+    await runBatch();
+
+    expect(restrictDocument).not.toHaveBeenCalled();
+    expect(written[0].bytes).toEqual(new Uint8Array([0, 9, 3]));
   });
 });

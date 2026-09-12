@@ -259,6 +259,46 @@ function generateEncodedFixtures() {
     );
     run(`rm ${tempIn}`, 'rm');
   }
+
+  // permission-restricted.pdf: an /Encrypt dictionary with an owner password but
+  // NO user password — the extremely common "printing/copying restricted, opens
+  // with no prompt" PDF that Chrome, Acrobat and Preview all open transparently.
+  // Regression fixture for the bug where Stapler refused every /Encrypt-bearing
+  // PDF outright instead of trying the empty user password first.
+  const permissionOnly = path.join(FIXTURES_DIR, 'permission-restricted.pdf');
+  if (!existsSync(permissionOnly)) {
+    const tempIn = path.join(FIXTURES_DIR, 'temp_perm.pdf');
+    run(
+      `convert -size 200x200 xc:white -fill black -annotate 0 "Not actually secret" ${tempIn}`,
+      'ImageMagick (convert)'
+    );
+    run(
+      `gs -q -dNOPAUSE -dBATCH -sDEVICE=pdfwrite -sOwnerPassword=owner -sOutputFile=${permissionOnly} ${tempIn}`,
+      'Ghostscript (gs)'
+    );
+    run(`rm ${tempIn}`, 'rm');
+  }
+
+  // permission-no-print.pdf: the same shape, but with permissions that actually
+  // deny something — /P -3904, i.e. no printing, copying, modifying, annotating,
+  // form filling or assembly (Acrobat's "view only"). `permission-restricted.pdf`
+  // above carries Ghostscript's default /P -4, which restricts *nothing*, so it
+  // cannot show whether an export still denies what the input denied. This one
+  // can: re-parse the exported bytes and the same /P must still be there.
+  const noPrint = path.join(FIXTURES_DIR, 'permission-no-print.pdf');
+  if (!existsSync(noPrint)) {
+    const tempIn = path.join(FIXTURES_DIR, 'temp_noprint.pdf');
+    run(
+      `convert -size 200x200 xc:white -fill black -annotate 0 "Do not print" ${tempIn}`,
+      'ImageMagick (convert)'
+    );
+    run(
+      `gs -q -dNOPAUSE -dBATCH -sDEVICE=pdfwrite -dEncryptionR=3 -dKeyLength=128 ` +
+        `-dPermissions=-3904 -sOwnerPassword=owner -sOutputFile=${noPrint} ${tempIn}`,
+      'Ghostscript (gs)'
+    );
+    run(`rm ${tempIn}`, 'rm');
+  }
 }
 
 generateRawStubs();

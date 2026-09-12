@@ -55,6 +55,32 @@ describe('fromUnknown', () => {
     expect(restored.message).toBe('needs a password');
   });
 
+  // Comlink's actual `throwTransferHandler` (unlike the idealised round-trip
+  // above) copies only `message`, `name`, and `stack` off a thrown Error —
+  // `isStaplerError`/`kind`/`context` never make it across in practice, which
+  // is exactly what let a worker-thrown `encrypted(...)` surface as a generic
+  // "Something went wrong inside Stapler" instead of "This PDF is
+  // password-protected." `StaplerError`'s constructor sets `name` to
+  // `StaplerError(<kind>)`, and that string *does* survive — this is the only
+  // thing `fromUnknown` can actually recover a worker-thrown kind from.
+  it('rehydrates a kind from just the name/message Comlink actually preserves', () => {
+    const original = encrypted('needs a password');
+    const comlinkSurvivors = {
+      message: original.message,
+      name: original.name,
+      stack: original.stack
+    };
+    const restored = fromUnknown(comlinkSurvivors);
+    expect(restored.kind).toBe('Encrypted');
+    expect(restored.message).toBe('needs a password');
+  });
+
+  it('ignores a name that only looks like the StaplerError pattern', () => {
+    expect(fromUnknown({ name: 'StaplerError(NotARealKind)', message: 'x' }).kind).toBe(
+      'InternalError'
+    );
+  });
+
   it('passes a real StaplerError through unchanged', () => {
     const error = corrupt('truncated');
     expect(fromUnknown(error)).toBe(error);

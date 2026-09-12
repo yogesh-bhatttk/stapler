@@ -7,12 +7,9 @@ import { forwardRef } from 'preact/compat';
 import { UploadCloud } from 'lucide-preact';
 import { platform } from '../../platform/current';
 import { PDF_AND_IMAGES, acceptToInputAccept, type OpenedFile } from '../../platform/index';
-import { importFiles, isPdfFile, SUPPORTED_FORMATS } from '../../core/import';
-import { addDocument, makePageRefs } from '../../core/store';
-import { resetHistory } from '../../core/history';
-import { notify, notifyError } from '../../core/notify';
+import { SUPPORTED_FORMATS } from '../../core/import';
+import { importFilesAsDocuments, pickAndImportFiles } from '../../core/open-document';
 import { ProgressBar } from './Feedback';
-import { isSupportedImage } from '../../core/image';
 import { useImageImportOptions } from '../useImageImportOptions';
 import styles from './DropZone.module.css';
 
@@ -39,78 +36,35 @@ export const DropZone = forwardRef<HTMLLabelElement, DropZoneProps>(function Dro
   const process = async (files: File[], handles?: OpenedFile[]) => {
     if (files.length === 0) return;
 
-    let imageOptions = undefined;
-    const hasImages = files.some(f => !isPdfFile(f) && isSupportedImage(f));
-    if (hasImages) {
-      const options = await requestOptions(files);
-      if (!options) {
-        setState('idle');
-        return; // user cancelled
-      }
-      imageOptions = options;
-    }
+    const result = await importFilesAsDocuments(files, {
+      handles,
+      requestImageOptions: requestOptions,
+      onImportStart: () => {
+        setState('busy');
+        setProgress({ label: 'Reading files', value: null });
+      },
+      onProgress: (value, label) => setProgress({ label, value })
+    });
 
-    setState('busy');
-    setProgress({ label: 'Reading files', value: null });
-    try {
-      const outcome = await importFiles(
-        files,
-        {
-          onProgress: (value, label) => setProgress({ label, value })
-        },
-        imageOptions
-      );
-
-      for (const imported of outcome.imported) {
-        let handle: OpenedFile | undefined = undefined;
-        if (handles) {
-          const index = files.indexOf(imported.originalFile);
-          if (index !== -1) {
-            handle = handles[index];
-          }
-        }
-        addDocument({
-          id: crypto.randomUUID(),
-          name: imported.source.name,
-          pages: makePageRefs(imported.source.id, imported.source.pageCount),
-          annotations: [],
-          dirty: false,
-          sourceHandle: handle?.writable ? { fileId: handle.id, writable: true } : undefined
-        });
-        for (const warning of imported.warnings) {
-          notify('warning', imported.source.name, { detail: warning });
-        }
-      }
-      for (const failure of outcome.failures) {
-        notify('danger', translate('Could not open {name}', { name: failure.name }), {
-          detail: failure.message
-        });
-      }
-
-      if (outcome.imported.length > 0) {
-        resetHistory();
-        onImported();
-      }
-    } catch (err) {
-      notifyError('import', err);
-    } finally {
-      setState('idle');
-      setProgress(null);
-      depth.current = 0;
-    }
+    setState('idle');
+    setProgress(null);
+    depth.current = 0;
+    if (result.imported > 0) onImported();
   };
 
   const browse = async () => {
-    try {
-      const opened = await platform.openFiles({ multiple: true, accept: PDF_AND_IMAGES });
-      if (opened.length === 0) return;
-      for (const handle of opened) {
-        if (handle.persistable) await platform.persistHandle(handle);
-      }
-      await process(await Promise.all(opened.map(handle => handle.getFile())), opened);
-    } catch (err) {
-      notifyError('import.browse', err);
-    }
+    const result = await pickAndImportFiles({
+      requestImageOptions: requestOptions,
+      onImportStart: () => {
+        setState('busy');
+        setProgress({ label: 'Reading files', value: null });
+      },
+      onProgress: (value, label) => setProgress({ label, value })
+    });
+    setState('idle');
+    setProgress(null);
+    depth.current = 0;
+    if (result.imported > 0) onImported();
   };
 
   return (

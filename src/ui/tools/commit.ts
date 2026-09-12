@@ -8,9 +8,9 @@ import { translate } from '../../core/i18n';
  * tool adds an entry here instead of another branch.
  */
 import { platform } from '../../platform/current';
-import { confirmAction, notify } from '../../core/notify';
+import { confirmAction, notify, requestExportReview } from '../../core/notify';
 import { internal } from '../../core/errors';
-import { unzipSync } from 'fflate';
+import { unzipSync, zipSync } from 'fflate';
 import {
   applyRedactions,
   compressDocument,
@@ -23,6 +23,7 @@ import {
   flattenDocument,
   pagesToImageArchive,
   protectDocument,
+  restrictDocument,
   scrubDocumentMetadata,
   planCompression,
   planSizeSplitBoundaries,
@@ -35,6 +36,7 @@ import { imagesToPdfBytes } from '../../core/import';
 import {
   activeDoc,
   deletePages,
+  documentRestrictions,
   registerSource,
   replaceWithSource,
   selectedPageKeys,
@@ -71,7 +73,7 @@ import { XFA_MESSAGE } from '../../core/pdf/xfa';
 import { pendingRedactions, redactionReport } from './redact/state';
 import { faceBlurModelDeclined } from './redact/faceblur-state';
 import { protection, protectionActive, protectionIssue } from './protect/state';
-import type { ProtectionSettings } from '../../core/pdf/encrypt';
+import { withInheritedRestrictions, type ProtectionSettings } from '../../core/pdf/encrypt';
 import { scrubSettings } from './metadata/state';
 import { ocrReport, ocrSettings } from './ocr/state';
 import {
@@ -116,20 +118,38 @@ function stem(name: string): string {
   return name.replace(/\.[^.]+$/, '') || 'document';
 }
 
+/** What `applyProtection` decided, so `save` can describe the file honestly. */
+interface ProtectedExport {
+  bytes: Uint8Array;
+  /** True only when a password is now needed to *open* the file. */
+  passwordApplied: boolean;
+}
+
 /**
- * RED-06 — encrypts what is about to be written, if the user asked for it.
+ * RED-06 — encrypts what is about to be written, if the user asked for it, and
+ * re-applies whatever restrictions the document arrived with either way.
  *
- * Returns the bytes to write, or `null` when the export must not happen: an
- * encryption failure has to stop the save outright, because writing the
- * unencrypted bytes instead would hand the user a file they believe is protected.
- * Applied here rather than in each handler so every tool's export is covered by
- * one rule, and so nothing forks a second save path.
+ * The second half is not a feature, it is a leak being closed. Opening a
+ * permission-restricted PDF (no user password, printing/copying forbidden by
+ * its owner — the common kind) means decrypting it, and pdf-lib drops
+ * `/Encrypt` the moment it does; every export built from that document was
+ * therefore written back with the restrictions silently gone. `restrictions`
+ * is the `/P` the input carried, recovered at import time
+ * (`core/pdf/load.ts`), and it is written back verbatim: same flags, still no
+ * password to open, exactly as the file behaved before Stapler touched it.
+ *
+ * Returns `null` when the export must not happen: an encryption failure has to
+ * stop the save outright, because writing the unencrypted bytes instead would
+ * hand the user a file they believe is protected. Applied here rather than in
+ * each handler so every tool's export is covered by one rule, and so nothing
+ * forks a second save path.
  */
 async function applyProtection(
   bytes: Uint8Array,
   name: string,
-  job?: JobOptions
-): Promise<Uint8Array | null> {
+  job?: JobOptions,
+  restrictions: number | null = null
+): Promise<ProtectedExport | null> {
   const issue = protectionIssue();
   if (issue) {
     notify('danger', translate('Nothing was saved.'), {
@@ -138,40 +158,85 @@ async function applyProtection(
     });
     return null;
   }
-  if (!protectionActive()) return bytes;
+  const wantsPassword = protectionActive();
+  if (!wantsPassword && restrictions === null) return { bytes, passwordApplied: false };
 
   if (!name.toLowerCase().endsWith('.pdf')) {
     // A ZIP has no PDF security handler to carry the password, and encrypting the
     // members individually is a different feature than the one that was asked for.
-    notify('warning', translate('This export is a ZIP, so no password was applied.'), {
-      detail: 'Export a single PDF to password-protect it.',
-      timeout: 0
-    });
-    return bytes;
+    // The same is true of the imported restrictions: there is no `/Encrypt` on a
+    // ZIP, and a rasterised page could not carry one anyway.
+    if (wantsPassword) {
+      notify('warning', translate('This export is a ZIP, so no password was applied.'), {
+        detail: 'Export a single PDF to password-protect it.',
+        timeout: 0
+      });
+    }
+    return { bytes, passwordApplied: false };
   }
 
-  const state = protection.value;
-  // The confirmation field and the on/off flag are UI state; only the handler's
-  // own settings cross into the worker.
-  const settings: ProtectionSettings = {
-    userPassword: state.userPassword,
-    ownerPassword: state.ownerPassword,
-    allowPrinting: state.allowPrinting,
-    allowCopying: state.allowCopying,
-    allowModifying: state.allowModifying
-  };
   try {
+    if (!wantsPassword) {
+      // Restrictions only: the file still opens with no prompt, so nothing is
+      // asked of the user and nothing is announced — this is the document
+      // behaving as it did on the way in.
+      if (restrictions === null) return { bytes, passwordApplied: false };
+      return {
+        bytes: await restrictDocument(bytes, restrictions, job ?? {}),
+        passwordApplied: false
+      };
+    }
+
+    const state = protection.value;
+    // The confirmation field and the on/off flag are UI state; only the handler's
+    // own settings cross into the worker. Restrictions the document arrived with
+    // narrow the user's choices but never widen them: Stapler opened that file
+    // with the empty user password, which grants no owner rights, so turning
+    // Protect on is not a way to hand printing back.
+    const settings: ProtectionSettings = withInheritedRestrictions(
+      {
+        userPassword: state.userPassword,
+        ownerPassword: state.ownerPassword,
+        allowPrinting: state.allowPrinting,
+        allowCopying: state.allowCopying,
+        allowModifying: state.allowModifying
+      },
+      restrictions
+    );
     // RED-06 encryption re-writes every object in the file. Passing the job
     // through is what gives it a progress bar and a working Cancel; without it
     // the UI sat at 100% through the slowest part of the export.
-    return await protectDocument(bytes, settings, job ?? {});
+    return { bytes: await protectDocument(bytes, settings, job ?? {}), passwordApplied: true };
   } catch (err) {
-    notify('danger', translate('Could not password-protect the file — nothing was saved.'), {
-      detail: `${err instanceof Error ? err.message : String(err)} Your document is unchanged.`,
-      timeout: 0
-    });
+    notify(
+      'danger',
+      wantsPassword
+        ? translate('Could not password-protect the file — nothing was saved.')
+        : translate('Could not reapply this document’s restrictions — nothing was saved.'),
+      {
+        detail: `${err instanceof Error ? err.message : String(err)} Your document is unchanged.`,
+        timeout: 0
+      }
+    );
     return null;
   }
+}
+
+/**
+ * `compress`'s never-grow guarantee (CLAUDE.md), enforced against the bytes
+ * actually about to be written rather than the pre-restriction ones: applying
+ * a document's imported restrictions (or the user's own Protect settings) adds
+ * a handful of bytes for the AES pass, and on a file compressed right down to
+ * the wire that can be the difference between under and over the original.
+ * `save` checks this immediately after `applyProtection`, before anything
+ * reaches disk, and refuses the write rather than silently breaking the
+ * guarantee.
+ */
+export interface GrowthGuard {
+  /** The original, pre-compression byte length — never the pre-restriction one. */
+  maxBytes: number;
+  title: string;
+  detail: string;
 }
 
 /**
@@ -189,16 +254,26 @@ async function save(
   bytes: Uint8Array,
   name: string,
   job?: JobOptions,
-  onFinalBytes?: (bytes: Uint8Array) => void
+  onFinalBytes?: (bytes: Uint8Array) => void,
+  growthGuard?: GrowthGuard
 ): Promise<boolean> {
-  const protectedBytes = await applyProtection(bytes, name, job);
-  if (!protectedBytes) return false;
-  const wasProtected = protectedBytes !== bytes;
-  bytes = protectedBytes;
+  // `documentRestrictions` is read here, at the one place every tool's bytes
+  // pass through on their way to disk, rather than threaded through each
+  // handler: a tool that forgot to pass it would quietly export an
+  // unrestricted copy, which is the failure this whole path exists to prevent.
+  const result = await applyProtection(bytes, name, job, documentRestrictions(doc));
+  if (!result) return false;
+  bytes = result.bytes;
+  if (growthGuard && bytes.byteLength > growthGuard.maxBytes) {
+    notify('warning', translate(growthGuard.title), { detail: growthGuard.detail, timeout: 0 });
+    return false;
+  }
   onFinalBytes?.(bytes);
-  const note = (size: string) => (wasProtected ? `${size} · password required to open` : size);
+  const note = (size: string) =>
+    result.passwordApplied ? `${size} · password required to open` : size;
 
   if (doc.sourceHandle?.writable) {
+    announceWaiting(job, translate('Waiting for confirmation…'));
     const overwrite = await confirmAction({
       title: `Save changes to ${doc.name}?`,
       body: 'Save over the original file, or keep it and save a new file instead.',
@@ -226,6 +301,122 @@ async function save(
       detail: note(formatBytes(bytes.byteLength))
     });
   return saved;
+}
+
+/**
+ * The last `onProgress` report from whatever ran just before (composing the
+ * review's bytes, a compression search, a re-encode plan — "Writing file ·
+ * 95%") otherwise sits frozen on the action bar for as long as the ensuing
+ * modal/dialog is open — a job that's actually paused, waiting on the user,
+ * looking exactly like one still grinding away. There's nothing left to
+ * report a real fraction of, so this clears it to an indeterminate,
+ * honestly-labelled wait instead of leaving stale progress up. Used both
+ * before the review modal and before every plain confirm dialog a commit
+ * handler shows mid-job (save-over-original, compression trade-offs).
+ */
+function announceWaiting(job: JobOptions | undefined, label = translate('Reviewing…')): void {
+  job?.onProgress?.(null, label);
+}
+
+/**
+ * UX-04 — shows `ExportReviewModal` before anything is written, then defers
+ * to `save()` unchanged. `originalBytes: null` skips the diff and shows the
+ * result alone — for a tool with no single "before" PDF to compare against
+ * (images-to-pdf, contact-sheet) or where the output is a page *subset*, so a
+ * page-index diff against the original would silently compare unrelated pages
+ * (split's single-file branch).
+ */
+async function reviewAndSave(
+  doc: StaplerDoc,
+  originalBytes: Uint8Array | null,
+  bytes: Uint8Array,
+  name: string,
+  job?: JobOptions,
+  onFinalBytes?: (bytes: Uint8Array) => void
+): Promise<boolean> {
+  announceWaiting(job);
+  const proceed = await requestExportReview({
+    kind: 'single',
+    originalBytes,
+    resultBytes: bytes,
+    fileName: name
+  });
+  if (!proceed) return false;
+  return save(doc, bytes, name, job, onFinalBytes);
+}
+
+/**
+ * `applyProtection`'s restriction pass only ever sees one `.pdf` at a time —
+ * `save()` bails out on a `.zip` name because a ZIP itself has no security
+ * handler to carry anything. Split is the one tool that turns a single
+ * restricted document into several real PDFs, each of which can and should
+ * carry the input's `/P` on its own, so that path re-zips through here instead
+ * of going straight from `splitDocument`'s output to `save()`/a directory
+ * write. Not called for `pdf-to-img`/`extract-img`: their archive members are
+ * rasters, which have no PDF permissions to lose in the first place.
+ */
+async function restrictZipMembers(
+  bytes: Uint8Array,
+  restrictions: number,
+  job?: JobOptions
+): Promise<Uint8Array> {
+  const files = unzipSync(bytes);
+  const restricted: Record<string, Uint8Array> = {};
+  for (const [name, member] of Object.entries(files)) {
+    restricted[name] = name.toLowerCase().endsWith('.pdf')
+      ? await restrictDocument(member, restrictions, job ?? {})
+      : member;
+  }
+  return zipSync(restricted);
+}
+
+/**
+ * The zip equivalent — each archive member previewed on its own rather than
+ * diffed against the original, since a split chunk or an extracted image
+ * never lines up 1:1 with a single original page.
+ */
+async function reviewAndSaveZip(
+  doc: StaplerDoc,
+  bytes: Uint8Array,
+  name: string,
+  job?: JobOptions
+): Promise<boolean> {
+  announceWaiting(job);
+  const proceed = await requestExportReview({
+    kind: 'zip',
+    originalBytes: null,
+    resultBytes: bytes,
+    fileName: name
+  });
+  if (!proceed) return false;
+  return save(doc, bytes, name, job);
+}
+
+/** Same zip review, for the two directory-write branches that never call `save()`. */
+async function reviewZipOnly(bytes: Uint8Array, name: string, job?: JobOptions): Promise<boolean> {
+  announceWaiting(job);
+  return requestExportReview({
+    kind: 'zip',
+    originalBytes: null,
+    resultBytes: bytes,
+    fileName: name
+  });
+}
+
+/**
+ * The single-file review for tools that call `platform.saveFileAs` directly
+ * rather than the doc-based `save()` — `worksWithoutDocument` tools building a
+ * PDF from scratch (images-to-pdf, md-to-pdf) have no `StaplerDoc`/original
+ * file to offer a save-over-original prompt for.
+ */
+async function reviewOnly(bytes: Uint8Array, name: string, job?: JobOptions): Promise<boolean> {
+  announceWaiting(job);
+  return requestExportReview({
+    kind: 'single',
+    originalBytes: null,
+    resultBytes: bytes,
+    fileName: name
+  });
 }
 
 export interface CommitContext {
@@ -322,6 +513,12 @@ function topLevelBookmarkSlices(doc: StaplerDoc) {
 // resized pages on merge/organize/crop/watermark/etc. once the Normalize panel
 // had ever been opened, since the signal defaults to non-null on first mount.
 const exportComposed: CommitHandler = async ({ doc, job }) => {
+  // UX-04's "before" is a bare compose — page content only, no crop/watermark/
+  // header-footer/n-up/outline/bates/barcode — so the review diff isolates
+  // exactly what this export step adds on top of what the grid already shows
+  // live. Reordering, rotation, deletion and duplication are already baked
+  // into `doc.pages` either way, so both sides reflect them equally.
+  const original = await composeDocument({ pages: doc.pages, annotations: doc.annotations }, job);
   const bytes = await composeDocument(
     {
       pages: doc.pages,
@@ -337,7 +534,7 @@ const exportComposed: CommitHandler = async ({ doc, job }) => {
     },
     job
   );
-  await save(doc, bytes, `${stem(doc.name)}-stapler.pdf`);
+  await reviewAndSave(doc, original, bytes, `${stem(doc.name)}-stapler.pdf`);
 };
 
 /**
@@ -423,9 +620,13 @@ async function commitConvertedPreview<P extends { bytes: Uint8Array }>(input: {
   const name = input.name(preview);
   let bytes = preview.bytes;
   if (input.protectAsPdf) {
-    const protectedBytes = await applyProtection(bytes, name, input.protectAsPdf);
-    if (!protectedBytes) return;
-    bytes = protectedBytes;
+    // No `restrictions` argument: these three convert *into* PDF from a Word,
+    // Excel or PowerPoint file, so there is no imported `/Encrypt` to carry —
+    // and the other three write `.docx`/`.xlsx`/`.pptx`, which take no PDF
+    // security handler at all.
+    const result = await applyProtection(bytes, name, input.protectAsPdf);
+    if (!result) return;
+    bytes = result.bytes;
   }
 
   const saved = await platform.saveFileAs(bytes, name);
@@ -477,7 +678,10 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       api.applyAltText(bytes, altTexts, createJobHandle(job))
     );
 
-    await save(doc, finalBytes, `${stem(doc.name)}-acc.pdf`);
+    // Alt text carries no visible mark on the page, so the review's diff will
+    // read as unchanged — expected, and still useful as confirmation that
+    // nothing else in the document moved.
+    await reviewAndSave(doc, bytes, finalBytes, `${stem(doc.name)}-acc.pdf`);
   },
 
   annotate: async ({ doc, job }) => {
@@ -485,6 +689,25 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // `compose`, so this composes exactly as every other tool does; the
     // finalize step is here for the fields and annotations the *source*
     // document brought with it.
+    // UX-04's "before" omits only `layerAnnotations` — everything else here
+    // (crop/watermark/etc.) is already reflected on the canvas the same way
+    // as any other tool, so the review's diff isolates the marks this tool
+    // itself adds.
+    const original = await composeDocument(
+      {
+        pages: doc.pages,
+        annotations: doc.annotations,
+        cropBoxes: cropBoxes.value,
+        watermark: watermarkSettings.value,
+        headerFooter: headerFooterSettings.value,
+        nup: nupSettings.value,
+        outline: getOutline(doc),
+        bates: getBates(),
+        barcodeStamp: getBarcodeStamp(),
+        allowXfaLoss: true
+      },
+      job
+    );
     const bytes = await composeDocument(
       {
         pages: doc.pages,
@@ -502,8 +725,9 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       },
       job
     );
-    await save(
+    await reviewAndSave(
       doc,
+      original,
       await finalize(bytes, annotateFlattenOnExport.value, job),
       `${stem(doc.name)}-stapler.pdf`,
       job
@@ -616,19 +840,31 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       job
     );
 
+    const restrictions = documentRestrictions(doc);
+
     if (!result.isZip) {
       // A single bookmark means a single file, which is still a valid answer — it
       // just keeps the bookmark's name rather than arriving in a one-entry ZIP.
+      // UX-04: no diff against the original — this file is a page *subset*, so a
+      // page-index comparison would silently line up unrelated pages.
+      // `.pdf` name, so `save()`'s own `applyProtection` re-applies `restrictions` —
+      // no need to do it here too.
       const single = fileNames?.[0] ?? `${stem(doc.name)}-part-01`;
-      await save(doc, result.bytes, `${single}.pdf`);
+      await reviewAndSave(doc, null, result.bytes, `${single}.pdf`);
       return;
     }
 
+    const zipBytes =
+      restrictions === null
+        ? result.bytes
+        : await restrictZipMembers(result.bytes, restrictions, job);
+
     if (settings.outputFormat === 'directory') {
+      if (!(await reviewZipOnly(zipBytes, translate('the split files'), job))) return;
       const dir = await platform.openDirectory();
       if (!dir) return; // User cancelled or unsupported
 
-      const files = unzipSync(result.bytes);
+      const files = unzipSync(zipBytes);
       for (const [fileName, bytes] of Object.entries(files)) {
         await dir.write(fileName, bytes);
       }
@@ -637,7 +873,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         translate('Saved {count} files to directory', { count: Object.keys(files).length })
       );
     } else {
-      await save(doc, result.bytes, `${stem(doc.name)}-split.zip`);
+      await reviewAndSaveZip(doc, zipBytes, `${stem(doc.name)}-split.zip`);
     }
   },
 
@@ -669,7 +905,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       .map(({ index }) => index);
 
     const archive = await pagesToImageArchive(bytes, indices, settings.format, settings.dpi, job);
-    await save(doc, archive, `${stem(doc.name)}-${settings.dpi}dpi.zip`);
+    await reviewAndSaveZip(doc, archive, `${stem(doc.name)}-${settings.dpi}dpi.zip`);
   },
 
   'images-to-pdf': async ({ job }) => {
@@ -689,6 +925,9 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     });
 
     const name = settings.files.length === 1 ? `${stem(settings.files[0].name)}.pdf` : 'Images.pdf';
+    // UX-04: no "before" PDF exists yet — this builds one from scratch — so
+    // it's an after-only review, purely to confirm the layout came out right.
+    if (!(await reviewOnly(bytes, name, job))) return;
     const saved = await platform.saveFileAs(bytes, name);
     if (!saved) return;
 
@@ -728,6 +967,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     }
 
     if (extractImagesSettings.value.outputFormat === 'directory') {
+      if (!(await reviewZipOnly(result.bytes, translate('the extracted images'), job))) return;
       const dir = await platform.openDirectory();
       if (dir) {
         const files = unzipSync(result.bytes);
@@ -740,7 +980,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         );
       }
     } else {
-      const saved = await save(doc, result.bytes, `${stem(doc.name)}-images.zip`);
+      const saved = await reviewAndSaveZip(doc, result.bytes, `${stem(doc.name)}-images.zip`);
       if (saved && summary.skippedCount > 0) {
         notify(
           'warning',
@@ -810,6 +1050,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
           outcome.plan && outcome.plan.skipped.length > 0
             ? ` Some content cannot be re-encoded safely and stays at full size: ${outcome.plan.skipped.join('; ')}.`
             : '';
+        announceWaiting(job, translate('Waiting for confirmation…'));
         const proceed = await confirmAction({
           title: `Could not reach ${formatBytes(targetBytes)}`,
           body:
@@ -822,28 +1063,42 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         if (!proceed) return;
       }
 
+      // The size actually written, once restrictions/protection are re-applied —
+      // not `outcome.achievedBytes`, which is measured before that pass and can
+      // undercount it by the handful of bytes the AES pass adds.
+      let finalSize = outcome.achievedBytes;
       const savedTarget = await save(
         doc,
         outcome.bytes,
         `${stem(doc.name)}-compressed.pdf`,
         undefined,
         finalBytes => {
+          finalSize = finalBytes.byteLength;
           if (lastCompressionResult.value?.documentId === doc.id) {
             lastCompressionResult.value = {
               ...lastCompressionResult.value,
               finalBytes: finalBytes.byteLength
             };
           }
-        }
+        },
+        // Not applied when the user turned Protect on: they asked for encryption
+        // on top of compression, which adds bytes by design, and blocking their
+        // own explicit choice under the never-grow guarantee would be a worse
+        // surprise than the size it exists to prevent. This guard is for the
+        // *silent* case — a restriction the document merely arrived with.
+        protectionActive()
+          ? undefined
+          : {
+              maxBytes: outcome.originalBytes,
+              title: 'Kept the original file.',
+              detail:
+                'Re-applying this document’s restrictions after compression would have produced a file no smaller than the original, so nothing was written. This document is already as small as it usefully gets.'
+            }
       );
       if (savedTarget && outcome.reachedTarget) {
-        notify(
-          'success',
-          translate('Reached {size}', { size: formatBytes(outcome.achievedBytes) }),
-          {
-            detail: `Target was ${formatBytes(targetBytes)}. ${formatBytes(outcome.originalBytes)} → ${formatBytes(outcome.achievedBytes)} at ${outcome.settings?.dpi} DPI, ${Math.round((outcome.settings?.quality ?? 0) * 100)}% quality.`
-          }
-        );
+        notify('success', translate('Reached {size}', { size: formatBytes(finalSize) }), {
+          detail: `Target was ${formatBytes(targetBytes)}. ${formatBytes(outcome.originalBytes)} → ${formatBytes(finalSize)} at ${outcome.settings?.dpi} DPI, ${Math.round((outcome.settings?.quality ?? 0) * 100)}% quality.`
+        });
       }
       return;
     }
@@ -851,6 +1106,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // CMP-04: tell the truth *before* spending the user's time, not after.
     const report = await planCompression(original, settings, job);
     if (report.alreadyOptimized) {
+      announceWaiting(job, translate('Waiting for confirmation…'));
       const proceed = await confirmAction({
         title: 'Already optimized',
         body:
@@ -882,24 +1138,40 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       return;
     }
 
+    // Same reasoning as the target-size branch above: the percentage and the
+    // detail string have to reflect the bytes actually written, not the
+    // pre-restriction ones `compressDocument` measured.
+    let finalSize = result.bytes.byteLength;
     const saved = await save(
       doc,
       result.bytes,
       `${stem(doc.name)}-compressed.pdf`,
       undefined,
       finalBytes => {
+        finalSize = finalBytes.byteLength;
         if (lastCompressionResult.value?.documentId === doc.id) {
           lastCompressionResult.value = {
             ...lastCompressionResult.value,
             finalBytes: finalBytes.byteLength
           };
         }
-      }
+      },
+      // See the target-size branch above: not applied when Protect is on, since
+      // that growth is the user's own explicit choice, not the silent kind this
+      // guard exists to catch.
+      protectionActive()
+        ? undefined
+        : {
+            maxBytes: result.originalBytes,
+            title: 'Kept the original file.',
+            detail:
+              'Re-applying this document’s restrictions after compression would have produced a file no smaller than the original, so nothing was written. This document is already as small as it usefully gets.'
+          }
     );
     if (saved) {
-      const percent = Math.round((1 - result.bytes.byteLength / result.originalBytes) * 100);
+      const percent = Math.round((1 - finalSize / result.originalBytes) * 100);
       notify('success', translate('Reduced by {percent}%', { percent }), {
-        detail: `${formatBytes(result.originalBytes)} → ${formatBytes(result.bytes.byteLength)}`
+        detail: `${formatBytes(result.originalBytes)} → ${formatBytes(finalSize)}`
       });
     }
   },
@@ -933,6 +1205,13 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       });
       return;
     }
+
+    // UX-04's "before": the same compose, minus the signature/stamp layer and
+    // form fill, so the review's diff is exactly the marks this tool adds.
+    const original = await composeDocument(
+      { pages: doc.pages, annotations: doc.annotations, allowXfaLoss: true },
+      job
+    );
 
     // Order matters, and it is the reason SGN-03 lost data. `composeDocument`
     // rebuilds the document with `copyPages`, which does not carry the catalog's
@@ -981,8 +1260,9 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       // are one decision. With the toggle off the values stay interactive.
       bytes = await fillFormFields(bytes, values, false, job);
     }
-    await save(
+    await reviewAndSave(
       doc,
+      original,
       await finalize(bytes, signFlattenOnExport.value, job),
       `${stem(doc.name)}-signed.pdf`,
       job
@@ -990,8 +1270,14 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   },
 
   normalize: async ({ doc, job }) => {
+    // UX-04: normalize is exactly the one operation that legitimately resizes
+    // pages, so "before" is deliberately the un-normalized bytes rather than
+    // `currentDocumentBytes`'s usual export-time compose — the review is meant
+    // to show the resize itself, and its `comparable: false` fallback is the
+    // expected outcome here, not an edge case.
+    const original = await currentDocumentBytes(job);
     const bytes = await currentDocumentBytes(job, true);
-    await save(doc, bytes, `${stem(doc.name)}-normalized.pdf`);
+    await reviewAndSave(doc, original, bytes, `${stem(doc.name)}-normalized.pdf`);
   },
 
   redact: async ({ doc, job }) => {
@@ -1067,7 +1353,9 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   metadata: async ({ doc, job }) => {
     const original = await currentDocumentBytes(job);
     const scrubbed = await scrubDocumentMetadata(original, scrubSettings.value, job);
-    await save(doc, scrubbed, `${stem(doc.name)}-scrubbed.pdf`, job);
+    // Scrubbing touches document properties, not page content — the review's
+    // diff is expected to read as unchanged; that's the point of it here.
+    await reviewAndSave(doc, original, scrubbed, `${stem(doc.name)}-scrubbed.pdf`, job);
   },
   ocr: async ({ doc, job }) => {
     const settings = ocrSettings.value;
@@ -1119,8 +1407,9 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // Annotate, whose panels show the control; OCR has no such setting, so
     // routing its export through that path would silently flatten this document
     // if we threaded the panel choice through from somewhere else.
-    // OCR adds an invisible text layer and changes nothing else.
-    await save(doc, result.bytes, `${stem(doc.name)}-ocr.pdf`);
+    // OCR adds an invisible text layer and changes nothing else, so the
+    // review's diff is expected to read as unchanged.
+    await reviewAndSave(doc, original, result.bytes, `${stem(doc.name)}-ocr.pdf`);
   },
 
   // OCR-03. The action bar's primary CTA and the panel's per-format buttons are
@@ -1192,7 +1481,11 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // The panel's column setting, not a hardcoded 4: the action bar's primary CTA
     // and the panel's own button are two routes to one export and must agree.
     const sheet = await exportContactSheet(doc.id, bytes, contactSheetColumns.value, job);
-    await save(doc, sheet, `${stem(doc.name)}-contact-sheet.pdf`);
+    // UX-04: a contact sheet is a different page layout entirely (a grid of
+    // thumbnails per sheet page, not one page per original page), so a
+    // page-index diff against the original would compare unrelated pages —
+    // after-only review instead.
+    await reviewAndSave(doc, null, sheet, `${stem(doc.name)}-contact-sheet.pdf`);
   },
   compare: async () => {},
   batch: async () => {},
@@ -1207,7 +1500,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   // bar's single primary CTA (DESIGN-ADAPTATION §4.2). `worksWithoutDocument` on
   // the tool definition means `context.doc` may not correspond to a real open
   // document here — the handler never reads it.
-  'md-to-pdf': async () => {
+  'md-to-pdf': async ({ job }) => {
     const markdown = markdownToPdfSource.value;
     if (!markdown.trim()) {
       notify('warning', translate('Nothing to export.'), {
@@ -1218,6 +1511,8 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     const { bytes, hadUnsupportedCharacters } = await processWorker.lease(api =>
       api.markdownToPdf(markdown)
     );
+    // UX-04: built from scratch, no "before" PDF to compare against.
+    if (!(await reviewOnly(bytes, 'document.pdf', job))) return;
     const saved = await platform.saveFileAs(bytes, 'document.pdf');
     if (!saved) return;
     if (hadUnsupportedCharacters) {
@@ -1357,6 +1652,43 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   },
   shortcuts: async () => {}
 };
+
+/**
+ * UX-04 — every tool whose handler above routes its output through
+ * `reviewAndSave`/`reviewAndSaveZip`/`reviewOnly` before anything is written.
+ * The single source of truth for that set is the handlers themselves; this
+ * list just names them so the action bar can tell the user, up front, that
+ * its commit button shows a preview first rather than saving immediately —
+ * without duplicating each handler's logic to find out.
+ *
+ * Deliberately excludes: compress/cleanup (already have a live before/after
+ * in-panel), the six CNV-08..13 converters (already gate on a mandatory
+ * preview of their own), and anything that never writes a file at all
+ * (compare, batch, read-aloud, reflow, history, side-by-side, shortcuts,
+ * remove-blanks, redact, table-extract).
+ */
+export const TOOLS_WITH_EXPORT_REVIEW: ReadonlySet<ToolId> = new Set([
+  'merge',
+  'organize',
+  'insert',
+  'extract',
+  'nup',
+  'crop',
+  'watermark',
+  'outline',
+  'acc',
+  'annotate',
+  'sign',
+  'normalize',
+  'metadata',
+  'ocr',
+  'split',
+  'pdf-to-img',
+  'extract-img',
+  'images-to-pdf',
+  'md-to-pdf',
+  'contact-sheet'
+]);
 
 export async function commitTool(toolId: ToolId, job: JobOptions): Promise<void> {
   const doc = activeDoc.value;

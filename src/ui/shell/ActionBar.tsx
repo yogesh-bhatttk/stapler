@@ -13,7 +13,7 @@ import { activeJob } from '../../core/notify';
 
 import { Button } from '../components/Button';
 import { ProgressBar } from '../components/Feedback';
-import { commitTool } from '../tools/commit';
+import { commitTool, TOOLS_WITH_EXPORT_REVIEW } from '../tools/commit';
 import { commitGate } from '../tools/commit-gate';
 import { useJob } from '../useJob';
 import styles from './ActionBar.module.css';
@@ -37,6 +37,11 @@ export function ActionBar() {
    * is not an accessible one; the panel states it at length too.
    */
   const gate = commitGate(tool.id);
+  // A tool whose commit routes through a review step first — the button still
+  // says "Export PDF" (or whatever its own copy is), but nothing is actually
+  // written until the preview it opens is confirmed. Said here rather than
+  // relabelling ~20 tool-specific button strings.
+  const previewsFirst = !gate && TOOLS_WITH_EXPORT_REVIEW.has(tool.id);
 
   return (
     <div className={styles.actionBar}>
@@ -52,6 +57,10 @@ export function ActionBar() {
       ) : gate ? (
         <span className={styles.gate} id={`commit-gate-${tool.id}`}>
           {gate}
+        </span>
+      ) : previewsFirst ? (
+        <span className={styles.gate}>
+          {t('Shows a preview first — nothing is saved until you confirm it.')}
         </span>
       ) : (
         <span className={styles.spacer} />

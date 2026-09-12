@@ -17,6 +17,8 @@
  * actually exercise them.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { PDFDocument } from 'pdf-lib';
 import { unzipSync } from 'fflate';
 
@@ -105,6 +107,12 @@ function seedDoc(sourceId: string, pageCount: number, bytes: Uint8Array): Staple
   };
   addDocument(doc);
   return doc;
+}
+
+function fixtureBytes(name: string): Uint8Array {
+  return new Uint8Array(
+    readFileSync(fileURLToPath(new URL(`../fixtures/${name}`, import.meta.url)))
+  );
 }
 
 function currentDoc(docId: string): StaplerDoc {
@@ -641,5 +649,23 @@ describe('golden: OPS-09 normalize', () => {
     // a page that displays landscape. The old code picked portrait Letter outright.
     expect(page.getWidth()).toBeCloseTo(612, 0);
     expect(page.getHeight()).toBeCloseTo(792, 0);
+  });
+});
+
+describe('golden: permission-only encryption is not refused', () => {
+  it('composes a PDF whose /Encrypt dictionary has no user password, same as Chrome or Acrobat would open it', async () => {
+    // Regression test: `process.worker.ts`'s shared `load()` used to refuse
+    // every `/Encrypt`-bearing PDF outright. Most "encrypted" PDFs found in the
+    // wild — this fixture included — only restrict printing/copying and were
+    // never actually locked from opening: their user password is the empty
+    // string, which pdf-lib (like every mainstream viewer) can decrypt with
+    // when asked to. `bytesForPages`/`compose` must succeed here, not throw.
+    const bytes = fixtureBytes('permission-restricted.pdf');
+    const doc = seedDoc('perm', 1, bytes);
+
+    const output = await composeCurrent(currentDoc(doc.id));
+
+    const reloaded = await PDFDocument.load(output);
+    expect(reloaded.getPageCount()).toBe(1);
   });
 });

@@ -1,0 +1,287 @@
+/**
+ * UX-03 — the pre-export review step. Reads `exportReviewRequest` (set by
+ * `commit.ts`'s `reviewAndSave`/`reviewOnly`) the same way `ConfirmDialog` and
+ * `OcrConsentDialog` read their own request signals, and resolves it when the
+ * user picks Save or Cancel.
+ *
+ * 'single' shows a page-by-page before/after `CompareSlider`, with a toggle to
+ * paint the pixel-diff mask over the "after" half. 'zip' shows a file list —
+ * each member previewed on its own (no before/after: a split's output PDF
+ * covers a page range, and extract-img's output is an individual image, so
+ * neither pairs 1:1 with an original page the way a whole-document export does).
+ */
+import { useEffect, useRef, useState } from 'preact/hooks';
+import { forwardRef } from 'preact/compat';
+import { unzipSync } from 'fflate';
+import { ChevronLeft, ChevronRight } from 'lucide-preact';
+import { exportReviewRequest } from '../../core/notify';
+import { diffPage, documentPageCount, renderPage, type PageDiff } from '../../core/diff-preview';
+import { Modal } from './Modal';
+import { Button } from './Button';
+import { IconButton } from './IconButton';
+import { CompareSlider } from './CompareSlider';
+import { formatBytes } from './Feedback';
+import { useTranslation } from '../../core/i18n';
+import styles from './ExportReviewModal.module.css';
+
+const IMAGE_EXT = /\.(png|jpe?g|webp|gif|tiff?|heic|bmp)$/i;
+
+function DiffCanvas({
+  image,
+  highlight
+}: {
+  image: ImageData | null;
+  highlight: ImageData | null;
+}) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas || !image) return;
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.putImageData(image, 0, 0);
+    if (highlight) {
+      // `pixelDiff` returns red-opaque changed pixels and fully transparent
+      // everywhere else, so drawing it straight on top leaves the rest showing.
+      const bitmap = document.createElement('canvas');
+      bitmap.width = highlight.width;
+      bitmap.height = highlight.height;
+      const bctx = bitmap.getContext('2d');
+      if (bctx) {
+        bctx.putImageData(highlight, 0, 0);
+        ctx.drawImage(bitmap, 0, 0);
+      }
+    }
+  }, [image, highlight]);
+  if (!image) return null;
+  return <canvas ref={ref} className={styles.canvas} />;
+}
+
+function SinglePageReview({
+  originalBytes,
+  resultBytes
+}: {
+  originalBytes: Uint8Array | null;
+  resultBytes: Uint8Array;
+}) {
+  const t = useTranslation();
+  const [pageIndex, setPageIndex] = useState(0);
+  const [pageCount, setPageCount] = useState<number | null>(null);
+  const [diff, setDiff] = useState<PageDiff | null>(null);
+  const [afterOnly, setAfterOnly] = useState<ImageData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [highlight, setHighlight] = useState(false);
+  const requestId = useRef(0);
+
+  useEffect(() => {
+    documentPageCount(resultBytes)
+      .then(count => setPageCount(count))
+      .catch(() => setPageCount(null));
+  }, [resultBytes]);
+
+  useEffect(() => {
+    const id = ++requestId.current;
+    setLoading(true);
+    (async () => {
+      if (originalBytes) {
+        const result = await diffPage(originalBytes, resultBytes, pageIndex);
+        if (requestId.current !== id) return;
+        setDiff(result);
+        setAfterOnly(null);
+      } else {
+        const result = await renderPage(resultBytes, pageIndex);
+        if (requestId.current !== id) return;
+        setDiff(null);
+        setAfterOnly(result);
+      }
+    })().finally(() => {
+      if (requestId.current === id) setLoading(false);
+    });
+  }, [originalBytes, resultBytes, pageIndex]);
+
+  const canPrev = pageIndex > 0;
+  const canNext = pageCount === null || pageIndex < pageCount - 1;
+
+  return (
+    <div className={styles.body}>
+      <div className={styles.toolbar}>
+        <div className={styles.nav}>
+          <IconButton
+            icon={ChevronLeft}
+            title={t('Previous page')}
+            disabled={!canPrev}
+            onClick={() => setPageIndex(i => Math.max(0, i - 1))}
+          />
+          <span className={styles.pageLabel}>
+            {pageCount
+              ? `${t('Page')} ${pageIndex + 1} / ${pageCount}`
+              : `${t('Page')} ${pageIndex + 1}`}
+          </span>
+          <IconButton
+            icon={ChevronRight}
+            title={t('Next page')}
+            disabled={!canNext}
+            onClick={() => setPageIndex(i => i + 1)}
+          />
+        </div>
+        {diff?.comparable && (
+          <Button
+            variant={highlight ? 'primary' : 'secondary'}
+            onClick={() => setHighlight(h => !h)}
+          >
+            {t('Highlight changes')}
+          </Button>
+        )}
+      </div>
+
+      {diff && !diff.comparable && (
+        <p className={styles.note}>
+          {t('This page changed size, so before and after cannot be lined up pixel for pixel.')}
+        </p>
+      )}
+
+      {(() => {
+        // The slider's two layers are CSS `position: absolute; width/height:
+        // 100%` (CompareSlider.module.css) — that only ever resolves to
+        // something visible if *this* box has a real size to be 100% of, which
+        // a plain `width/height: auto` div never gives it (a page whose crop
+        // changed its size hit exactly this: both sides rendered fine, but the
+        // slider was 0×0 and invisible). An aspect-ratio computed from
+        // whichever image is on screen is the same fix `Thumbnail.tsx` already
+        // uses for the page grid.
+        const shown = afterOnly ?? diff?.after ?? diff?.before ?? null;
+        const aspect = shown ? shown.width / shown.height : undefined;
+        return (
+          <div className={styles.stage} aria-busy={loading}>
+            <div className={styles.page} style={aspect ? { aspectRatio: `${aspect}` } : undefined}>
+              {diff?.comparable && diff.before && diff.after ? (
+                <CompareSlider
+                  label={t('Compare original and result')}
+                  before={<DiffCanvas image={diff.before} highlight={null} />}
+                  after={<DiffCanvas image={diff.after} highlight={highlight ? diff.diff : null} />}
+                />
+              ) : (
+                <DiffCanvas image={shown} highlight={null} />
+              )}
+            </div>
+          </div>
+        );
+      })()}
+    </div>
+  );
+}
+
+interface ZipEntry {
+  name: string;
+  bytes: Uint8Array;
+}
+
+function ZipReview({ resultBytes }: { resultBytes: Uint8Array }) {
+  const t = useTranslation();
+  const [entries] = useState<ZipEntry[]>(() =>
+    Object.entries(unzipSync(resultBytes)).map(([name, bytes]) => ({ name, bytes }))
+  );
+  const [selected, setSelected] = useState(0);
+  const [preview, setPreview] = useState<
+    { kind: 'image'; url: string } | { kind: 'pdf'; image: ImageData | null } | null
+  >(null);
+
+  useEffect(() => {
+    const entry = entries[selected];
+    if (!entry) return;
+    if (IMAGE_EXT.test(entry.name)) {
+      const url = URL.createObjectURL(new Blob([entry.bytes]));
+      setPreview({ kind: 'image', url });
+      return () => URL.revokeObjectURL(url);
+    }
+    if (entry.name.toLowerCase().endsWith('.pdf')) {
+      let cancelled = false;
+      renderPage(entry.bytes, 0).then(image => {
+        if (!cancelled) setPreview({ kind: 'pdf', image });
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+    setPreview(null);
+    return undefined;
+  }, [entries, selected]);
+
+  return (
+    <div className={styles.zipLayout}>
+      <ul className={styles.fileList}>
+        {entries.map((entry, index) => (
+          <li key={entry.name}>
+            <button
+              type="button"
+              className={`${styles.fileRow} ${index === selected ? styles.fileRowActive : ''}`}
+              onClick={() => setSelected(index)}
+              aria-current={index === selected}
+            >
+              <span className={styles.fileRowName} title={entry.name}>
+                {entry.name}
+              </span>
+              <span className={styles.fileRowSize}>{formatBytes(entry.bytes.byteLength)}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      <div className={styles.filePreview}>
+        {preview?.kind === 'image' && (
+          <img className={styles.previewImg} src={preview.url} alt="" />
+        )}
+        {preview?.kind === 'pdf' && (
+          <div
+            className={styles.page}
+            style={
+              preview.image
+                ? { aspectRatio: `${preview.image.width / preview.image.height}` }
+                : undefined
+            }
+          >
+            <DiffCanvas image={preview.image} highlight={null} />
+          </div>
+        )}
+        {!preview && <p className={styles.note}>{t('No preview available for this file type.')}</p>}
+      </div>
+    </div>
+  );
+}
+
+export const ExportReviewModal = forwardRef<HTMLDivElement, Record<string, never>>(
+  function ExportReviewModal(_props, ref) {
+    const t = useTranslation();
+    const request = exportReviewRequest.value;
+    if (!request) return null;
+
+    return (
+      <Modal
+        ref={ref}
+        title={t('Review before saving')}
+        size="lg"
+        onClose={() => request.resolve(false)}
+        footer={
+          <>
+            <Button variant="tertiary" onClick={() => request.resolve(false)}>
+              {t('Cancel')}
+            </Button>
+            <Button variant="primary" onClick={() => request.resolve(true)}>
+              {t('Save {name}', { name: request.fileName })}
+            </Button>
+          </>
+        }
+      >
+        {request.kind === 'zip' ? (
+          <ZipReview resultBytes={request.resultBytes} />
+        ) : (
+          <SinglePageReview
+            originalBytes={request.originalBytes}
+            resultBytes={request.resultBytes}
+          />
+        )}
+      </Modal>
+    );
+  }
+);

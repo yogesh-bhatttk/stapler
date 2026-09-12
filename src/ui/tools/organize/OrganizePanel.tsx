@@ -2,9 +2,11 @@
  * Organize options (OPS-02). Bulk actions over the current selection, each with a
  * keyboard equivalent documented in the shortcut sheet.
  */
-import { Copy, RotateCcw, RotateCw, Trash2 } from 'lucide-preact';
+import { useLocation } from 'wouter-preact';
+import { Copy, Crop as CropIcon, RotateCcw, RotateCw, Trash2 } from 'lucide-preact';
 import {
   activeDoc,
+  activePageIndex,
   deletePages,
   duplicatePages,
   rotatePages,
@@ -12,6 +14,8 @@ import {
   clearPageSelection,
   selectedPageKeys
 } from '../../../core/store';
+import { toolRoute } from '../../../core/tools';
+import { cropSettings } from '../crop/state';
 import { Button } from '../../components/Button';
 import { panelStyles } from '../../shell/panelStyles';
 import { useTranslation } from '../../../core/i18n';
@@ -20,12 +24,28 @@ export function OrganizePanel() {
   const t = useTranslation();
   const doc = activeDoc.value;
   const selection = selectedPageKeys.value;
+  const [, setLocation] = useLocation();
   if (!doc) return null;
 
   // With nothing ticked, a bulk action applies to the whole document — which is what
   // "rotate all" means, and it saves selecting 300 pages first.
   const targets = selection.size > 0 ? [...selection] : doc.pages.map(p => p.key);
   const scope = selection.size > 0 ? `${selection.size} selected` : `all ${doc.pages.length}`;
+
+  // UX-06: a shortcut into the Crop tool, honestly scoped — Crop's scope model
+  // (current/all/odd/even) has no notion of an arbitrary multi-page selection, so
+  // rather than inventing one, an in-between selection just disables the button.
+  const openCrop = () => {
+    if (selection.size === 0) {
+      cropSettings.value = { ...cropSettings.value, scope: 'all' };
+    } else {
+      const [key] = selection;
+      const index = doc.pages.findIndex(p => p.key === key);
+      if (index !== -1) activePageIndex.value = index;
+      cropSettings.value = { ...cropSettings.value, scope: 'current' };
+    }
+    setLocation(toolRoute('crop'));
+  };
 
   return (
     <>
@@ -58,6 +78,14 @@ export function OrganizePanel() {
           onClick={() => deletePages(doc.id, targets)}
         >
           {t('Delete')}
+        </Button>
+        <Button
+          variant="secondary"
+          icon={CropIcon}
+          disabled={selection.size > 1}
+          onClick={openCrop}
+        >
+          {t('Crop…')}
         </Button>
       </div>
 

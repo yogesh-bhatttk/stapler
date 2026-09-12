@@ -7,7 +7,7 @@ import { EmptyState } from '../../components/Feedback';
 import { isCancellation, logEvent, fromUnknown } from '../../../core/errors';
 import { pixelDiff } from '../../../core/pixel-diff';
 import { diffText, DiffChunk } from '../../../core/diff';
-import styles from '../../shell/SinglePageView.module.css';
+import styles from './CompareView.module.css';
 import { useTranslation } from '../../../core/i18n';
 import { readSourceBytes } from '../../../core/opfs';
 
@@ -196,32 +196,24 @@ export function CompareView({ pages, pageIndex }: CompareViewProps) {
       <div className={styles.scrollArea}>
         <div
           className={styles.canvasContainer}
-          style={{
-            opacity: isProcessing ? 0.7 : 1,
-            transition: 'opacity 0.2s',
-            width: '100%',
-            height: '100%',
-            display: 'flex',
-            justifyContent: 'center',
-            alignItems: 'center'
-          }}
+          style={
+            settings.diffMode === 'visual'
+              ? {
+                  opacity: isProcessing ? 0.7 : 1,
+                  transition: 'opacity 0.2s',
+                  // Derives width from the page's own proportions, same
+                  // technique as `SinglePageView`/`ExportReviewModal` — text
+                  // mode below is a plain reading column, not page-shaped, so
+                  // it keeps the CSS default (`width: auto`) instead.
+                  aspectRatio: pageSize ? `${pageSize.width / pageSize.height}` : undefined
+                }
+              : { width: '100%' }
+          }
         >
           {settings.diffMode === 'visual' ? (
             <CompareSlider
-              before={
-                <canvas
-                  ref={baseCanvasRef}
-                  className={styles.canvas}
-                  style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
-                />
-              }
-              after={
-                <canvas
-                  ref={diffCanvasRef}
-                  className={styles.canvas}
-                  style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
-                />
-              }
+              before={<canvas ref={baseCanvasRef} className={styles.canvas} />}
+              after={<canvas ref={diffCanvasRef} className={styles.canvas} />}
             />
           ) : (
             <div

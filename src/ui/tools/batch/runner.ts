@@ -260,6 +260,25 @@ export async function runBatch(signal?: AbortSignal) {
           }
         }
 
+        // A file that arrived permission-restricted must not leave
+        // unrestricted. Opening one means decrypting it (`core/pdf/load.ts`),
+        // and a decrypted document has no `/Encrypt` left to carry its `/P`
+        // forward — so the flags are read back off the input's own bytes and
+        // re-applied here, exactly as `ui/tools/commit.ts` does for every
+        // single-document export.
+        //
+        // Only when something actually rewrote the file: an untouched
+        // `currentBytes` *is* the input, `/Encrypt` and all, and re-encrypting
+        // it would be both pointless and a second parse per batch item.
+        if (currentBytes !== bytes) {
+          const { permissionRestrictions } = await processWorker.lease(api => api.inspect(bytes));
+          if (typeof permissionRestrictions === 'number') {
+            currentBytes = await processWorker.lease(api =>
+              api.restrictDocument(currentBytes, permissionRestrictions)
+            );
+          }
+        }
+
         // Save output
         // BAT-03: use the pre-resolved output name for this file.
         const outName = `${stripPdfExtension(resolvedNames[fileIndex])}.pdf`;

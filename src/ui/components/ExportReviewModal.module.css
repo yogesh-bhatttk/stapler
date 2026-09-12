@@ -1,0 +1,146 @@
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  min-width: 0;
+}
+
+/*
+ * A fixed (not max-) height is what makes `.page`'s `height: 100%` below a
+ * real, definite size to letterbox into — a `max-height` here left the
+ * percentage unresolved, so `.page` fell back to its aspect-ratio computed
+ * from *width* alone and overflowed vertically, forcing the inner scrollbar
+ * this replaces (the "why do I have to scroll to see the whole page" bug).
+ */
+.stage {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 60vh;
+  min-height: 320px;
+  overflow: hidden;
+  background: var(--doc-bg);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+}
+
+/*
+ * `aspect-ratio` (set inline, from the rendered page's own pixels) plus a
+ * definite `height` and an auto, capped `width` is the same "fit inside the
+ * box, preserve shape, never crop" sizing a plain `<img>` gets for free —
+ * `.page` is a div, so it has to be told explicitly.
+ */
+.page {
+  position: relative;
+  height: 100%;
+  width: auto;
+  max-width: 100%;
+  background: var(--doc-page);
+  box-shadow: var(--doc-shadow);
+  border: 1px solid var(--hairline-strong);
+}
+
+.canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.pageLabel {
+  font: var(--text-small);
+  color: var(--ink-muted);
+  min-width: 6em;
+  text-align: center;
+}
+
+.note {
+  font: var(--text-small);
+  color: var(--ink-subtle);
+  margin: 0;
+}
+
+.zipLayout {
+  display: flex;
+  gap: var(--space-md);
+  height: 60vh;
+  min-height: 320px;
+}
+
+.fileList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  width: 220px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+}
+
+.fileRow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: var(--space-xs) var(--space-sm);
+  border: 0;
+  background: none;
+  color: var(--ink);
+  cursor: pointer;
+  font: var(--text-small);
+}
+
+.fileRow:hover {
+  background: var(--surface-2);
+}
+
+.fileRowActive {
+  background: var(--surface-2);
+  color: var(--primary-text);
+}
+
+.fileRowName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileRowSize {
+  color: var(--ink-subtle);
+}
+
+.filePreview {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  overflow: auto;
+  background: var(--doc-bg);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+}
+
+.previewImg {
+  max-width: 100%;
+  max-height: 100%;
+  display: block;
+}

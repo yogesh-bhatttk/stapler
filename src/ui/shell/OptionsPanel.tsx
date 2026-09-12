@@ -8,6 +8,7 @@
 
 import { useActiveTool } from '../useActiveTool';
 import { activeDoc } from '../../core/store';
+import { OpenDocumentPrompt } from '../components/OpenDocumentPrompt';
 import { MergePanel } from '../tools/organize/MergePanel';
 import { OrganizePanel } from '../tools/organize/OrganizePanel';
 import { InsertPanel } from '../tools/organize/InsertPanel';
@@ -47,7 +48,6 @@ import { ReflowPanel } from '../tools/reflow/ReflowPanel';
 import { HistoryPanel } from '../tools/history/HistoryPanel';
 import { SideBySidePanel } from '../tools/side-by-side/SideBySidePanel';
 import styles from './OptionsPanel.module.css';
-import { useTranslation } from '../../core/i18n';
 
 const BODIES: Record<string, () => preact.JSX.Element | null> = {
   merge: MergePanel,
@@ -91,7 +91,6 @@ const BODIES: Record<string, () => preact.JSX.Element | null> = {
 };
 
 export function OptionsPanel() {
-  const t = useTranslation();
   const tool = useActiveTool();
   if (!tool || !tool.needsOptionsPanel) return null;
 
@@ -104,13 +103,7 @@ export function OptionsPanel() {
         <h1 className={styles.title}>{tool.title}</h1>
         <p className={styles.description}>{tool.summary}</p>
       </div>
-      {hasDocument || tool.worksWithoutDocument ? (
-        Body && <Body />
-      ) : (
-        <p className={`${styles.note} ${styles.noteInfo}`}>
-          {t('Open a document to use this tool.')}
-        </p>
-      )}
+      {hasDocument || tool.worksWithoutDocument ? Body && <Body /> : <OpenDocumentPrompt />}
     </aside>
   );
 }

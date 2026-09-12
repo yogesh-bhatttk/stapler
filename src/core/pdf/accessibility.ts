@@ -18,6 +18,7 @@ import {
   Statement,
   Token
 } from './interpreter';
+import { loadPdfDocument } from './load';
 import { decodeStream } from './interpreter';
 
 function utf16BeHex(text: string): string {
@@ -499,8 +500,15 @@ export async function readAltTextFromDoc(doc: PDFDocument): Promise<Record<strin
   return result;
 }
 
-/** Convenience: read alt-text straight from bytes. */
+/**
+ * Convenience: read alt-text straight from bytes.
+ *
+ * Goes through the shared loader (not a bare `PDFDocument.load`) so a
+ * permission-only-encrypted PDF — one AccPanel's sibling `findImagesForAltText`
+ * call already handles correctly via the process worker's own loader — doesn't
+ * fail this half of the same `Promise.all` and abort both results.
+ */
 export async function readAltText(bytes: Uint8Array): Promise<Record<string, string>> {
-  const doc = await PDFDocument.load(bytes, { updateMetadata: false });
+  const doc = await loadPdfDocument(bytes);
   return readAltTextFromDoc(doc);
 }

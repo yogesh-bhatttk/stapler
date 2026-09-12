@@ -13,6 +13,8 @@ tests/fixtures/*
 !tests/fixtures/jbig2.pdf
 !tests/fixtures/jpx.pdf
 !tests/fixtures/encrypted.pdf
+!tests/fixtures/permission-restricted.pdf
+!tests/fixtures/permission-no-print.pdf
 !tests/fixtures/cjk.pdf
 !tests/fixtures/rtl.pdf
 !tests/fixtures/xfa.pdf

@@ -58,6 +58,16 @@ export interface SourceDocument {
   pageCount: number;
   /** Unrotated page sizes in points, for correct thumbnail aspect ratios. */
   pageSizes: { width: number; height: number }[];
+  /**
+   * The `/P` permission flags this file was imported with, when it restricted
+   * printing/copying/modifying but opened with no password (`DocumentFacts`).
+   *
+   * Recorded per *source*, not per document, because a merge can mix a
+   * restricted file with an unrestricted one and the result has to keep the
+   * restriction — see {@link documentRestrictions}. Absent means "nothing to
+   * preserve", which is the overwhelmingly common case.
+   */
+  restrictions?: number;
 }
 
 export interface StaplerDoc {
@@ -127,6 +137,35 @@ export const activeSources = computed<SourceDocument[]>(() => {
   }
   return order.map(id => sources.value[id]).filter((s): s is SourceDocument => Boolean(s));
 });
+
+/**
+ * The `/P` flags an export of this document still has to carry, or `null`.
+ *
+ * Every source the document's pages come from contributes: a source with no
+ * restrictions denies nothing (`-4`, all permission bits set), so ANDing the
+ * lot yields the union of every restriction in the file. Merging a restricted
+ * document into an unrestricted one therefore keeps the restriction rather
+ * than laundering it away, which is the conservative reading and the only one
+ * that cannot lose a protection the user never asked to drop.
+ *
+ * `null` when no contributing source was restricted — the common case, and the
+ * one where the export must come out byte-identical to what it was before any
+ * of this existed. Note that this deliberately answers for the *document*, not
+ * for a page range: an extract of pages that all came from the unrestricted
+ * half of a merge still carries the restriction.
+ */
+export function documentRestrictions(doc: StaplerDoc): number | null {
+  let combined: number | null = null;
+  const seen = new Set<string>();
+  for (const page of doc.pages) {
+    if (seen.has(page.sourceDocId)) continue;
+    seen.add(page.sourceDocId);
+    const restrictions = sources.value[page.sourceDocId]?.restrictions;
+    if (restrictions === undefined) continue;
+    combined = combined === null ? restrictions : combined & restrictions;
+  }
+  return combined;
+}
 
 export function registerSource(source: SourceDocument, originalFiles?: File[]): void {
   sources.value = { ...sources.value, [source.id]: source };
@@ -389,12 +428,29 @@ export function appendPages(docId: string, pages: PageRef[]): void {
 }
 
 /**
+ * Carries a document's import-time permission flags onto a source built by
+ * rewriting its bytes.
+ *
+ * Redaction and scan cleanup hand back a brand-new source whose bytes came out
+ * of Stapler in the clear, so it carries no `/Encrypt` of its own. Without
+ * this, redacting a print-restricted document would be the one way to strip
+ * its restrictions: the source that knew about them is dropped in the same
+ * call that registers the replacement.
+ */
+function carryRestrictions(docId: string, source: SourceDocument): SourceDocument {
+  if (source.restrictions !== undefined) return source;
+  const doc = documents.value.find(d => d.id === docId);
+  const inherited = doc ? documentRestrictions(doc) : null;
+  return inherited === null ? source : { ...source, restrictions: inherited };
+}
+
+/**
  * Replaces a document's pages with a single new source — used when an operation
  * rewrites the bytes (redaction, scan cleanup) rather than rearranging pages.
  */
 export function replaceWithSource(docId: string, source: SourceDocument): void {
   commit();
-  registerSource(source);
+  registerSource(carryRestrictions(docId, source));
   mutateDoc(docId, doc => ({
     ...doc,
     pages: makePageRefs(source.id, source.pageCount),
@@ -422,6 +478,11 @@ export function repointPage(
   sourceIndex = 0
 ): void {
   commit();
+  // Same reasoning as `replaceWithSource`: the rewritten page's new source was
+  // written in the clear, and on a single-page document it is the *only*
+  // source left once this repoint lands.
+  const rewritten = sources.value[sourceId];
+  if (rewritten) registerSource(carryRestrictions(docId, rewritten));
   mutateDoc(docId, doc => ({
     ...doc,
     pages: doc.pages.map(p =>

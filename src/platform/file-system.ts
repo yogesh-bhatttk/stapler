@@ -106,14 +106,40 @@ export async function openDirectoryViaPicker(): Promise<OutputDirectory | null> 
   }
 }
 
+/**
+ * Every extension Stapler actually writes, mapped to its real MIME type.
+ * Everything else previously fell back to `text/plain` — a mismatch the File
+ * System Access API doesn't validate (`writable.write` isn't affected either
+ * way), but an OS/desktop file picker that *does* use the declared type to
+ * decide what extension belongs on the saved file has no reason to trust
+ * ".docx is a text/plain file" and is exactly the kind of malformed input
+ * that invites it to fall back to its own default naming instead.
+ */
+const EXTENSION_MIME: Record<string, string> = {
+  '.pdf': 'application/pdf',
+  '.zip': 'application/zip',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.csv': 'text/csv',
+  '.tsv': 'text/tab-separated-values',
+  '.md': 'text/markdown',
+  '.txt': 'text/plain'
+};
+
+/** `EXTENSION_MIME[ext]`, or the generic fallback for anything not in that table. */
+function mimeForName(name: string): string {
+  const extension = name.match(/\.[^.]+$/)?.[0] ?? '';
+  return EXTENSION_MIME[extension.toLowerCase()] ?? 'application/octet-stream';
+}
+
 export async function saveViaPicker(bytes: Uint8Array, suggestedName: string): Promise<boolean> {
   const extension = suggestedName.match(/\.[^.]+$/)?.[0] ?? '.pdf';
-  const mime =
-    extension === '.zip'
-      ? 'application/zip'
-      : extension === '.pdf'
-        ? 'application/pdf'
-        : 'text/plain';
+  const mime = mimeForName(suggestedName);
   try {
     const handle = await showSaveFilePicker({
       suggestedName,
@@ -236,7 +262,7 @@ export function openFilesViaInput(options?: OpenOptions): Promise<OpenedFile[]> 
 export function saveViaDownload(bytes: Uint8Array, suggestedName: string): boolean {
   // Copy into a fresh buffer: a transferred Uint8Array may be a view on a larger
   // ArrayBuffer, and Blob would then write the whole thing.
-  const blob = new Blob([bytes.slice()], { type: 'application/octet-stream' });
+  const blob = new Blob([bytes.slice()], { type: mimeForName(suggestedName) });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;

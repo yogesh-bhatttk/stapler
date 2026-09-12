@@ -159,6 +159,50 @@ export function requestOcrConsent(
 }
 
 /* ------------------------------------------------------------------ *
+ * UX-02/03 — pre-export review
+ * ------------------------------------------------------------------ */
+
+export interface ExportReviewRequest {
+  /** 'zip' unzips `resultBytes` into a file list; 'single' reviews it as one PDF. */
+  kind: 'single' | 'zip';
+  /**
+   * The document as it stood before this operation, for a before/after diff.
+   * `null` skips diffing outright — a non-PDF output (CNV conversions,
+   * table-extract's CSV/XLSX) or a tool with no single "before" PDF to speak of
+   * (images-to-pdf, md-to-pdf) has nothing meaningful to diff against.
+   */
+  originalBytes: Uint8Array | null;
+  resultBytes: Uint8Array;
+  fileName: string;
+  resolve: (proceed: boolean) => void;
+}
+
+export const exportReviewRequest = signal<ExportReviewRequest | null>(null);
+
+/**
+ * Promise-based "review this before it's written" gate, resolved by
+ * `<ExportReviewModal>` in the app shell — same shape as `confirmAction` and
+ * `requestOcrConsent`, but for a rich before/after preview instead of a
+ * yes/no question.
+ */
+export function requestExportReview(input: {
+  kind: 'single' | 'zip';
+  originalBytes: Uint8Array | null;
+  resultBytes: Uint8Array;
+  fileName: string;
+}): Promise<boolean> {
+  return new Promise(resolve => {
+    exportReviewRequest.value = {
+      ...input,
+      resolve: proceed => {
+        exportReviewRequest.value = null;
+        resolve(proceed);
+      }
+    };
+  });
+}
+
+/* ------------------------------------------------------------------ *
  * Long-running job status — one at a time, matching the single action bar.
  * ------------------------------------------------------------------ */
 

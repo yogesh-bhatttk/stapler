@@ -127,7 +127,15 @@ async function importPdf(file: File, options: JobOptions): Promise<ImportedFile>
         id,
         name: file.name,
         pageCount: info.pageCount,
-        pageSizes: info.pageSizes
+        pageSizes: info.pageSizes,
+        // Import is the only moment these are readable: opening a
+        // permission-restricted PDF decrypts it, and a decrypted document has
+        // no `/Encrypt` dictionary left to read them back from. Every export
+        // of this document re-applies them (see `ui/tools/commit.ts`), so a
+        // file that arrived unprintable does not leave printable.
+        ...(facts.permissionRestrictions !== null
+          ? { restrictions: facts.permissionRestrictions }
+          : {})
       };
       await writeSourceBytes(id, bytes);
       registerSource(source);

@@ -101,7 +101,8 @@ import type { IFontNames } from '@pdf-lib/standard-fonts';
 import { zipSync } from 'fflate';
 import type { JobHandle } from './protocol';
 import { checkpoint, subJob } from './protocol';
-import { corrupt, encrypted, fromUnknown, internal, unsupported } from '../errors';
+import { corrupt, fromUnknown, internal, unsupported } from '../errors';
+import { loadPdfDocument, loadPdfDocumentWithRestrictions } from '../pdf/load';
 import type { ImagesToPdfOptions } from '../operations';
 import type { ImageResultStat } from '../compress-report';
 import { DOC_HAIRLINE_RGB, DOC_INK_RGB, DOC_REDACT_RGB } from '../doc-colors';
@@ -141,7 +142,12 @@ import {
   type PlacementXObject
 } from '../pdf/image-placements';
 import { hasXfaMarker, XFA_COMPOSE_MESSAGE, XFA_MESSAGE } from '../pdf/xfa';
-import { encryptPdf, type ProtectionSettings } from '../pdf/encrypt';
+import {
+  encryptPdf,
+  encryptWithPlan,
+  permissionOnlyPlan,
+  type ProtectionSettings
+} from '../pdf/encrypt';
 import { applyAltTextToDoc } from '../pdf/accessibility';
 
 /** A page in the output, pointing back at the bytes it came from. */
@@ -187,6 +193,17 @@ export interface DocumentFacts {
   isEncrypted: boolean;
   hasAcroForm: boolean;
   fieldCount: number;
+  /**
+   * The `/P` flags of a document that restricts printing/copying/modifying but
+   * opens with no password — `null` when there is nothing to preserve.
+   *
+   * Captured at import because it is the only moment it can be: pdf-lib drops
+   * `/Encrypt` the instant it decrypts a file, so by the time any export runs,
+   * the flags are gone. See `core/pdf/load.ts`. Every export of this document
+   * has to write them back, or Stapler silently hands the user an unrestricted
+   * copy of a file somebody restricted on purpose.
+   */
+  permissionRestrictions: number | null;
 }
 
 export interface ImageFacts {
@@ -686,6 +703,16 @@ export interface ProcessJob {
     job?: JobHandle
   ): Promise<Uint8Array>;
   /**
+   * Re-applies the permission flags a document was *imported* with.
+   *
+   * Not a second Protect feature and not a way to lift anything: the output
+   * still opens with no password, exactly as the input did, and carries the
+   * same `/P`. It exists because opening a permission-restricted PDF requires
+   * decrypting it, and a decrypted document saved as-is comes out with the
+   * restrictions silently gone — see `DocumentFacts.permissionRestrictions`.
+   */
+  restrictDocument(bytes: Uint8Array, permissions: number, job?: JobHandle): Promise<Uint8Array>;
+  /**
    * Applies redactions through operator-level content removal, removing intersecting text
    * and image objects from the content stream while keeping the rest of the page selectable.
    */
@@ -775,30 +802,8 @@ export interface ProcessJob {
  * Loading
  * ------------------------------------------------------------------ */
 
-/**
- * `ignoreEncryption: true` was used throughout the previous implementation, which
- * meant encrypted documents were half-processed into garbage instead of refused.
- * Encryption is a hard stop with an explanation (PLAN §1.1, §5.2).
- */
-async function load(bytes: Uint8Array, allowEncrypted = false): Promise<PDFDocument> {
-  let doc: PDFDocument;
-  try {
-    doc = await PDFDocument.load(bytes, {
-      ignoreEncryption: allowEncrypted,
-      updateMetadata: false
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (/encrypt/i.test(message)) {
-      throw encrypted('The document is encrypted, so its contents cannot be rewritten.');
-    }
-    throw corrupt(`The PDF could not be parsed: ${message}`);
-  }
-  if (doc.isEncrypted && !allowEncrypted) {
-    throw encrypted('The document is encrypted, so its contents cannot be rewritten.');
-  }
-  return doc;
-}
+/** Thin local name for the shared loader — see `core/pdf/load.ts` for the encryption-retry logic. */
+const load = loadPdfDocument;
 
 /** pdf-lib Colors built from the document-colour tuples, made once. */
 const DOC_INK = rgb(...DOC_INK_RGB);
@@ -2430,9 +2435,23 @@ async function composePages(
         const g = parseInt(hex.substring(2, 4), 16) / 255;
         const b = parseInt(hex.substring(4, 6), 16) / 255;
 
-        // `drawText` rotates about its own anchor, so only the baseline start
-        // point needs mapping — hence the 0x0 box.
-        const placed = placeDisplayBox(marginFrame, x, y, 0, 0, watermark.rotation);
+        // `drawText` rotates about its `x`/`y` anchor (the baseline start), not
+        // around the text's own visual center — passing the real box here (the
+        // same `textWidth`/`textHeight` already used to *position* it) is what
+        // makes `centerPreservingOrigin` solve for the anchor that keeps the
+        // rotated text centered on the same point an unrotated one would be,
+        // exactly like the image watermark branch above already does. The
+        // previous 0x0 box put the pivot at the un-rotated corner instead of
+        // the center, so a large watermark swung visibly off-center as soon as
+        // any rotation was set — worse the larger the font size.
+        const placed = placeDisplayBox(
+          marginFrame,
+          x,
+          y,
+          textWidth,
+          textHeight,
+          watermark.rotation
+        );
 
         copied.drawText(displayText, {
           x: placed.x,
@@ -3840,7 +3859,12 @@ const api: ProcessJob = {
   async inspect(bytes) {
     // Inspection must be able to report on a file it cannot rewrite, so this is
     // the one place encryption is tolerated — read-only, and reported.
-    const doc = await load(bytes, true);
+    //
+    // This is also the one load that asks for the original permission flags.
+    // It costs an extra parse, and only for a file that carries `/Encrypt` at
+    // all; import runs it once per file, where compose runs its loads once per
+    // source per export and must not pay for it.
+    const { doc, restrictions } = await loadPdfDocumentWithRestrictions(bytes, true);
     const form = doc.getForm();
     // Raw-byte evidence first: see `core/pdf/xfa.ts` for why the parsed answer
     // alone lets hybrid XFA forms through as ordinary AcroForms.
@@ -3850,7 +3874,8 @@ const api: ProcessJob = {
       isXfa,
       isEncrypted: doc.isEncrypted,
       hasAcroForm: !isXfa && form.getFields().length > 0,
-      fieldCount: isXfa ? 0 : form.getFields().length
+      fieldCount: isXfa ? 0 : form.getFields().length,
+      permissionRestrictions: restrictions
     };
   },
 
@@ -5366,6 +5391,20 @@ Q
     await checkpoint(job, 0.1, 'Encrypting');
     const out = await encryptPdf(bytes, settings, subJob(job, 0.1, 0.95));
     await checkpoint(job, 1, 'Encrypted');
+    return out;
+  },
+
+  async restrictDocument(bytes, permissions, job) {
+    // Same AES pass, same progress span as `protectDocument` — the only
+    // difference is where the /P came from and that there is no user password.
+    await checkpoint(job, 0, 'Reading the document');
+    await checkpoint(job, 0.1, 'Restoring the document restrictions');
+    const out = await encryptWithPlan(
+      bytes,
+      permissionOnlyPlan(permissions),
+      subJob(job, 0.1, 0.95)
+    );
+    await checkpoint(job, 1, 'Restrictions restored');
     return out;
   },
 

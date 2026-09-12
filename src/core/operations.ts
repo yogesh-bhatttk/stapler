@@ -560,6 +560,24 @@ export async function protectDocument(
   return processWorker.lease(api => api.protectDocument(bytes, settings, job));
 }
 
+/**
+ * Re-applies the `/P` flags a document was imported with, on the way out.
+ *
+ * The counterpart to `protectDocument`: no password is added, nothing is
+ * asked of the user, and the file still opens with no prompt — it just stops
+ * being a printable copy of a document whose owner forbade printing. See
+ * `core/pdf/load.ts` for why the flags have to be re-applied rather than
+ * simply left alone.
+ */
+export async function restrictDocument(
+  bytes: Uint8Array,
+  permissions: number,
+  options: JobOptions = {}
+) {
+  const job = createJobHandle(options);
+  return processWorker.lease(api => api.restrictDocument(bytes, permissions, job));
+}
+
 /** RED-04 — metadata scrub, with progress and cancellation like every other op. */
 export async function scrubDocumentMetadata(
   bytes: Uint8Array,

@@ -119,8 +119,21 @@ export function fromUnknown(value: unknown): StaplerError {
       context?: Record<string, string | number | boolean>;
       name?: string;
     };
-    if (v.isStaplerError && v.kind && v.kind in COPY) {
+    if (v.isStaplerError && v.kind && Object.hasOwn(COPY, v.kind)) {
       return new StaplerError(v.kind, v.message ?? '', v.context ?? {});
+    }
+    // Comlink's default error transfer handler only copies `message`, `name` and
+    // `stack` across a worker boundary (it structured-clones nothing else off an
+    // Error instance) — `isStaplerError`/`kind`/`context` never survive the trip,
+    // so the check above only ever matches a same-thread throw. `name` does
+    // survive, and the constructor sets it to `StaplerError(<kind>)`, so a
+    // worker-thrown StaplerError is still recoverable from that string instead of
+    // falling through to a generic "Something went wrong" below.
+    const nameMatch = /^StaplerError\((\w+)\)$/.exec(v.name ?? '');
+    // `hasOwn`, not `in`: `in` also matches inherited Object.prototype keys
+    // (`constructor`, `toString`, …), which `\w+` can match literally.
+    if (nameMatch && Object.hasOwn(COPY, nameMatch[1])) {
+      return new StaplerError(nameMatch[1] as ErrorKind, v.message ?? '', v.context ?? {});
     }
     if (v.name === 'AbortError') return cancelled();
     // Chrome surfaces allocation failures as a RangeError or a bare "out of memory".

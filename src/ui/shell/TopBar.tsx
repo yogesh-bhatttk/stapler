@@ -1,8 +1,9 @@
 import { translate } from '../../core/i18n';
-import { Moon, Search, Sun } from 'lucide-preact';
+import { House, Moon, Search, Sun } from 'lucide-preact';
 import { useState } from 'preact/hooks';
 import { Badge } from '../components/Badge';
 import { Button } from '../components/Button';
+import { Icon } from '../components/Icon';
 import { IconButton } from '../components/IconButton';
 import { TrustModal } from '../components/TrustModal';
 import { FileTabs } from './FileTabs';
@@ -24,22 +25,15 @@ export function TopBar() {
 
   return (
     <header className={styles.topBar}>
-      <a href="#/" className={styles.logo}>
-        <svg
-          width="20"
-          height="20"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <path d="M5 8h14" />
-          <path d="M5 12h14" />
-          <path d="M5 16h14" />
-        </svg>
+      {/*
+       * This link always went to Home (`href="#/"`) — the bug was that the icon
+       * next to the wordmark was three horizontal bars, i.e. drawn as a menu
+       * toggle, not as a home affordance. A `title` tooltip and a real House
+       * icon make the same existing link legible as "click to go home" instead
+       * of looking like static branding.
+       */}
+      <a href="#/" className={styles.logo} title={t('Home')}>
+        <Icon icon={House} size={20} />
         {t('header.title')}
       </a>
 
