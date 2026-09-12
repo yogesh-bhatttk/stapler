@@ -20,11 +20,13 @@ These are the product, not preferences. A `PostToolUse` hook
    the OCR language model in `src/core/ocr/` (OCR-01), and the face-detector weights in
    `src/core/faceblur/` (RED-08). The inference *engines* for both are bundled, never
    fetched — remote code is forbidden outright, whatever the user consents to.
-2. **Zero permissions in the Chrome/Edge manifest.** `manifest.json` ships with empty
-   `permissions` and no `host_permissions` or content scripts, so Chrome's install dialog
-   shows no warning. The Firefox build is the explicit exception: it adds `tabs` so the
-   extension can query tabs there. Use the File System Access API instead of the
-   `downloads` permission.
+2. **Zero permissions, on every build.** `manifest.json` ships with empty `permissions`
+   and no `host_permissions` or content scripts, so Chrome's install dialog shows no
+   warning — and this is not relaxed for Firefox either: `service-worker.ts` finds its
+   own editor tab via `chrome.runtime.getContexts` (falling back to just opening a new
+   tab on a Firefox old enough to lack it) specifically to avoid needing the `tabs`
+   permission there. Use the File System Access API instead of the `downloads`
+   permission.
 3. **No raw colours.** Every colour comes from `var(--token)` defined in
    `src/ui/styles/tokens.css`. No hex, `rgb()`, or `hsl()` literals anywhere else.
 4. **Layer boundary.** Only `src/platform/` and `src/background/service-worker.ts` may reference `chrome.*`. 

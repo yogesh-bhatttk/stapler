@@ -111,7 +111,7 @@ about matching their architecture.
 | PDF → Word/PowerPoint | — | **Deliberate non-goal** (`PLAN.md` §1.1: "PDF → Word/DOCX — layout reconstruction is its own product") |
 | PDF → Excel | — | Partially covered by OCR-03 (table extraction → CSV/XLSX, beta) for tabular content; not a general PDF→Excel |
 | PDF → Text | CNV-04 | Have |
-| Unlock PDF (remove password) | — | **Deliberate non-goal** (`PLAN.md` §1.1: "pdf-lib cannot decrypt; attracts requests we won't serve") |
+| Unlock PDF (remove password) | — | **Deliberate non-goal, narrower than it sounds** (`PLAN.md` §1.1, 2026-09-12 revision: Stapler will not recover or bypass a *real* password, but it does open a permission-only file — no password to open, print/copy owner-restricted — the same way every mainstream viewer does, and preserves rather than strips those restrictions on export) |
 | **Protect PDF (add password)** | — | **Gap, not currently a stated non-goal** — see below |
 
 ## Real gaps worth a ticket

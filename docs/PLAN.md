@@ -38,7 +38,7 @@ Explicitly out of scope. Each has a reason; do not relitigate without one.
 | Not building                          | Reason                                                                               |
 | ------------------------------------- | ------------------------------------------------------------------------------------ |
 | Pixel-perfect PDF ↔ Office fidelity   | Exact font/pagination/column reconstruction needs a full rendering engine (WASM or server-side LibreOffice) that either blows the 900KB bundle budget or breaks the zero-network invariant. We don't promise this and won't fake it. |
-| Password / permission removal         | pdf-lib cannot decrypt; attracts requests we won't serve                             |
+| Removing a document's real password   | No password recovery/cracking is offered. Stapler only ever opens what a blank password already unlocks (see 2026-09-12 revision note) — a document that actually needs a password to open stays refused. |
 | Certificate-based signatures (PAdES)  | Incremental-update signing is a deep rabbit hole. Revisit post-v2                    |
 | Editing existing text in place        | Font matching and reflow make this a trap                                            |
 | Accounts, sync, cloud storage         | Breaks the cost model and the privacy claim                                          |
@@ -54,6 +54,23 @@ labeled beta with a mandatory preview rather than not shipping it at all (see
 narrowed to the fidelity claim it actually applies to. This is a deliberate
 carve-out, not a silent reversal — same pattern as RED-06 carving password
 *addition* out of the still-standing password *removal* non-goal.
+
+**Revision note, 2026-09-12:** the row above used to read "Password / permission
+removal — pdf-lib cannot decrypt; attracts requests we won't serve". That
+premise turned out to be false: pdf-lib genuinely decrypts a document when
+handed its real password, and the overwhelming majority of "encrypted" PDFs in
+the wild have an *empty* user password — only print/copy/edit is owner-
+restricted, exactly what Chrome's own viewer, Acrobat and Preview all open with
+no prompt. `core/pdf/load.ts` now tries the empty password before refusing, and
+every export re-applies the input's original `/P` restrictions on save
+(`core/pdf/encrypt.ts`'s `permissionOnlyPlan`, wired through `ui/tools/commit.ts`
+— a security-audit fix for a silent-stripping bug, not a planned feature). This
+is the same carve-out shape as the CNV-08..13 note above: the non-goal is
+narrowed to what it actually protects — Stapler still will not attempt to
+recover or bypass a *real* password (`encrypted.pdf`'s fixture, and the whole
+class it represents, stays refused) — rather than silently reversed. Restrictions
+are only ever *preserved*, never removed: there is still no "strip protection"
+feature and none is planned.
 
 ---
 

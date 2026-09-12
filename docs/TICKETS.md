@@ -1284,8 +1284,10 @@ support for V5/R6 AES-256, so this is expected to hold, but it is inference, not
 - **Requirements:** Optional owner/user password and a permission set (print, copy,
   modify) applied to the exported PDF only, entirely client-side. Clearly label this as
   encryption *added* at export, distinct from RED-04's metadata scrubbing and from the
-  password-*removal* non-goal — Stapler still never opens or decrypts a document it
-  doesn't already hold the password for.
+  password-*removal* non-goal — Stapler still never opens or decrypts a document that
+  needs a *real* password it wasn't given (it does try the empty one automatically, the
+  same way Chrome/Acrobat/Preview do — see PLAN §1.1's 2026-09-12 revision note — but a
+  document that actually requires a password stays refused).
 - **AC:** Exported file requires the set password to open in an external viewer (Chrome's
   own PDF viewer, at minimum) and the unprotected original in the editor is unaffected.
 
@@ -1406,9 +1408,13 @@ opposite of CMP-03: it hands over the image object's *own* encoded bytes.
 - One file per distinct image *object*, named `page-NNN-image-NN.ext` for the page and
   position it first appears at; later pages report the reuse. So a logo on 300 pages is
   decoded once and written once.
-- Encrypted input is refused with the standard message — its streams are ciphertext, so
-  "extracting" them would write files full of noise. Nothing is written when nothing could
-  be extracted: an empty ZIP would read as a successful export of nothing.
+- Encrypted input that actually needs a password to open is refused with the standard
+  message — its streams are ciphertext, so "extracting" them would write files full of
+  noise. A permission-only file (empty user password, print/copy restricted by its owner)
+  is not refused: `load` opens it the same way every other tool does (see PLAN §1.1's
+  2026-09-12 revision note) and its images extract normally — there is no PDF permission
+  concept on the raw JPEG/PNG bytes this ticket writes out. Nothing is written when nothing
+  could be extracted: an empty ZIP would read as a successful export of nothing.
 
 Evidence: `tests/unit/extract-images.test.ts` (16 tests) — the AC's two halves are
 "writes a DCTDecode image out byte-for-byte, with no decode step at all",
