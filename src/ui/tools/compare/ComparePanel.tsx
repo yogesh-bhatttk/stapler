@@ -58,12 +58,14 @@ export function ComparePanel() {
         const compareSource = sources.value[settings.compareSourceId];
         if (!compareSource) return;
 
+        const comparePages = makePageRefs(compareSource.id, compareSource.pageCount);
         const docB: StaplerDoc = {
           id: compareSource.id,
           name: compareSource.name,
-          pages: makePageRefs(compareSource.id, compareSource.pageCount),
+          pages: comparePages,
           annotations: [],
-          dirty: false
+          dirty: false,
+          baseline: comparePages
         };
 
         const outBytes = await exportComparePdf(docA, docB, {

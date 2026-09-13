@@ -40,36 +40,43 @@ export interface PageDiff {
 }
 
 /**
- * Renders `pageIndex` from both `beforeBytes` and `afterBytes` and diffs them.
- * Either side may be shorter than `pageIndex` (a page was added or removed) —
- * that side simply comes back `null`, and the caller falls back to whichever
- * side rendered.
+ * Renders `beforeIndex` from `beforeBytes` and `afterIndex` from `afterBytes`
+ * and diffs them. The two indices are independent — a reordered page is at a
+ * different position on each side — rather than one shared `pageIndex`, so a
+ * caller with page-alignment info (`page-alignment.ts`) can pass each page's
+ * true counterpart instead of assuming position N on one side is position N
+ * on the other. `beforeIndex: null` means this page has no baseline
+ * counterpart (new/duplicated) — the before side is skipped entirely, not
+ * just rendered blank, so a new page costs one document load, not two.
  */
 export async function diffPage(
   beforeBytes: Uint8Array,
   afterBytes: Uint8Array,
-  pageIndex: number
+  beforeIndex: number | null,
+  afterIndex: number
 ): Promise<PageDiff> {
   const { before, after } = await renderWorker.lease(async api => {
     let beforeHandle: string | undefined;
     let afterHandle: string | undefined;
     try {
-      const [infoBefore, infoAfter] = await Promise.all([
-        api.loadDocument(beforeBytes),
-        api.loadDocument(afterBytes)
-      ]);
-      beforeHandle = infoBefore.handle;
-      afterHandle = infoAfter.handle;
-
-      const renderOne = async (handle: string, pageCount: number) => {
-        if (pageIndex < 0 || pageIndex >= pageCount) return null;
-        const bitmap = await api.renderPage(handle, pageIndex, SCALE);
+      const renderOne = async (handle: string, pageCount: number, index: number) => {
+        if (index < 0 || index >= pageCount) return null;
+        const bitmap = await api.renderPage(handle, index, SCALE);
         return toImageData(bitmap);
       };
 
+      const [infoBefore, infoAfter] = await Promise.all([
+        beforeIndex === null ? null : api.loadDocument(beforeBytes),
+        api.loadDocument(afterBytes)
+      ]);
+      beforeHandle = infoBefore?.handle;
+      afterHandle = infoAfter.handle;
+
       const [before, after] = await Promise.all([
-        renderOne(beforeHandle, infoBefore.pageCount),
-        renderOne(afterHandle, infoAfter.pageCount)
+        infoBefore && beforeIndex !== null
+          ? renderOne(infoBefore.handle, infoBefore.pageCount, beforeIndex)
+          : Promise.resolve(null),
+        renderOne(afterHandle, infoAfter.pageCount, afterIndex)
       ]);
       return { before, after };
     } finally {

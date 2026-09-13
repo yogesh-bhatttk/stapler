@@ -10,12 +10,13 @@
  * covers a page range, and extract-img's output is an individual image, so
  * neither pairs 1:1 with an original page the way a whole-document export does).
  */
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { forwardRef } from 'preact/compat';
 import { unzipSync } from 'fflate';
 import { ChevronLeft, ChevronRight } from 'lucide-preact';
 import { exportReviewRequest } from '../../core/notify';
 import { diffPage, documentPageCount, renderPage, type PageDiff } from '../../core/diff-preview';
+import type { PageAlignment } from '../../core/page-alignment';
 import { Modal } from './Modal';
 import { Button } from './Button';
 import { IconButton } from './IconButton';
@@ -59,12 +60,123 @@ function DiffCanvas({
   return <canvas ref={ref} className={styles.canvas} />;
 }
 
+/** A single removed page, rendered alone — reuses the existing after-only render path. */
+function RemovedPagePreview({
+  bytes,
+  beforeIndex,
+  onBack
+}: {
+  bytes: Uint8Array;
+  beforeIndex: number;
+  onBack: () => void;
+}) {
+  const t = useTranslation();
+  const [image, setImage] = useState<ImageData | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    renderPage(bytes, beforeIndex)
+      .then(result => {
+        if (!cancelled) setImage(result);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [bytes, beforeIndex]);
+
+  return (
+    <div className={styles.body}>
+      <div className={styles.toolbar}>
+        <span className={styles.pageLabel}>
+          {t('Page')} {beforeIndex + 1}
+        </span>
+        <Button variant="secondary" size="compact" onClick={onBack}>
+          {t('Back to review')}
+        </Button>
+      </div>
+      <p className={styles.note}>{t('Removed — will not be in the saved file.')}</p>
+      <div className={styles.stage} aria-busy={loading}>
+        <div
+          className={styles.page}
+          style={image ? { aspectRatio: `${image.width / image.height}` } : undefined}
+        >
+          <DiffCanvas image={image} highlight={null} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The summary line and named removed-page chips above the page navigator —
+ * hidden entirely when `alignment` shows no structural difference, so a plain
+ * crop/watermark-only export looks exactly as it did before this existed.
+ */
+function AlignmentSummary({
+  alignment,
+  onViewRemoved
+}: {
+  alignment: PageAlignment;
+  onViewRemoved: (beforeIndex: number) => void;
+}) {
+  const t = useTranslation();
+  const { rotatedCount, movedCount, addedCount } = useMemo(() => {
+    let rotated = 0;
+    let moved = 0;
+    let added = 0;
+    for (const entry of alignment.entries) {
+      if (entry.beforeIndex === null) added++;
+      else {
+        if (entry.rotated) rotated++;
+        if (entry.moved) moved++;
+      }
+    }
+    return { rotatedCount: rotated, movedCount: moved, addedCount: added };
+  }, [alignment]);
+  const removedCount = alignment.removedBeforeIndices.length;
+
+  const parts: string[] = [];
+  if (rotatedCount > 0) parts.push(t('{count} rotated', { count: rotatedCount }));
+  if (movedCount > 0) parts.push(t('{count} reordered', { count: movedCount }));
+  if (removedCount > 0) parts.push(t('{count} removed', { count: removedCount }));
+  if (addedCount > 0) parts.push(t('{count} added', { count: addedCount }));
+  if (parts.length === 0) return null;
+
+  return (
+    <div className={styles.summary}>
+      <span>{parts.join(' · ')}</span>
+      {removedCount > 0 && (
+        <div className={styles.removedList}>
+          <span>{t('Removed:')}</span>
+          {alignment.removedBeforeIndices.map(beforeIndex => (
+            <button
+              key={beforeIndex}
+              type="button"
+              className={styles.removedChip}
+              onClick={() => onViewRemoved(beforeIndex)}
+            >
+              {t('page {number}', { number: beforeIndex + 1 })}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SinglePageReview({
   originalBytes,
-  resultBytes
+  resultBytes,
+  alignment
 }: {
   originalBytes: Uint8Array | null;
   resultBytes: Uint8Array;
+  alignment?: PageAlignment;
 }) {
   const t = useTranslation();
   const [pageIndex, setPageIndex] = useState(0);
@@ -73,6 +185,7 @@ function SinglePageReview({
   const [afterOnly, setAfterOnly] = useState<ImageData | null>(null);
   const [loading, setLoading] = useState(true);
   const [highlight, setHighlight] = useState(false);
+  const [viewingRemoved, setViewingRemoved] = useState<number | null>(null);
   const requestId = useRef(0);
 
   useEffect(() => {
@@ -81,12 +194,17 @@ function SinglePageReview({
       .catch(() => setPageCount(null));
   }, [resultBytes]);
 
+  const align = alignment?.entries[pageIndex];
+  // Falls back to the shared `pageIndex` when there's no alignment — the same
+  // positional assumption this always made, for a caller with nothing to align.
+  const beforeIndex = align ? align.beforeIndex : pageIndex;
+
   useEffect(() => {
     const id = ++requestId.current;
     setLoading(true);
     (async () => {
       if (originalBytes) {
-        const result = await diffPage(originalBytes, resultBytes, pageIndex);
+        const result = await diffPage(originalBytes, resultBytes, beforeIndex, pageIndex);
         if (requestId.current !== id) return;
         setDiff(result);
         setAfterOnly(null);
@@ -99,13 +217,24 @@ function SinglePageReview({
     })().finally(() => {
       if (requestId.current === id) setLoading(false);
     });
-  }, [originalBytes, resultBytes, pageIndex]);
+  }, [originalBytes, resultBytes, beforeIndex, pageIndex]);
+
+  if (viewingRemoved !== null && originalBytes) {
+    return (
+      <RemovedPagePreview
+        bytes={originalBytes}
+        beforeIndex={viewingRemoved}
+        onBack={() => setViewingRemoved(null)}
+      />
+    );
+  }
 
   const canPrev = pageIndex > 0;
   const canNext = pageCount === null || pageIndex < pageCount - 1;
 
   return (
     <div className={styles.body}>
+      {alignment && <AlignmentSummary alignment={alignment} onViewRemoved={setViewingRemoved} />}
       <div className={styles.toolbar}>
         <div className={styles.nav}>
           <IconButton
@@ -125,6 +254,12 @@ function SinglePageReview({
             disabled={!canNext}
             onClick={() => setPageIndex(i => i + 1)}
           />
+          {align?.rotated && <span className={styles.badge}>{t('Rotated')}</span>}
+          {align?.moved && (
+            <span className={styles.badge}>
+              {t('Was page {number}', { number: (align.beforeIndex ?? 0) + 1 })}
+            </span>
+          )}
         </div>
         {diff?.comparable && (
           <Button
@@ -279,6 +414,7 @@ export const ExportReviewModal = forwardRef<HTMLDivElement, Record<string, never
           <SinglePageReview
             originalBytes={request.originalBytes}
             resultBytes={request.resultBytes}
+            alignment={request.alignment}
           />
         )}
       </Modal>

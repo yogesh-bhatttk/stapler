@@ -7,6 +7,7 @@
  * layer (core or UI) can raise one without importing a component.
  */
 import { signal } from '@preact/signals';
+import type { PageAlignment } from './page-alignment';
 import {
   buildDiagnostic,
   fromUnknown,
@@ -174,6 +175,14 @@ export interface ExportReviewRequest {
   originalBytes: Uint8Array | null;
   resultBytes: Uint8Array;
   fileName: string;
+  /**
+   * Which page in `originalBytes` corresponds to which page in `resultBytes`,
+   * from `alignPages` (`core/page-alignment.ts`) — lets the modal show a
+   * correct diff (and a rotated/moved badge) per page even after reordering,
+   * and name pages removed since the baseline. Absent for tools with no page
+   * list to align (a non-PDF output, or one built from scratch).
+   */
+  alignment?: PageAlignment;
   resolve: (proceed: boolean) => void;
 }
 
@@ -190,6 +199,7 @@ export function requestExportReview(input: {
   originalBytes: Uint8Array | null;
   resultBytes: Uint8Array;
   fileName: string;
+  alignment?: PageAlignment;
 }): Promise<boolean> {
   return new Promise(resolve => {
     exportReviewRequest.value = {

@@ -37,11 +37,14 @@ import {
   activeDoc,
   deletePages,
   documentRestrictions,
+  refreshBaseline,
   registerSource,
   replaceWithSource,
   selectedPageKeys,
+  type PageRef,
   type StaplerDoc
 } from '../../core/store';
+import { alignPages, type PageAlignment } from '../../core/page-alignment';
 import { formatBytes } from '../components/Feedback';
 import type { JobOptions } from '../../core/workers/protocol';
 import { createJobHandle } from '../../core/workers/protocol';
@@ -283,6 +286,7 @@ async function save(
     if (overwrite) {
       const saved = await platform.saveOver(doc.sourceHandle.fileId, bytes);
       if (saved) {
+        refreshBaseline(doc.id, doc.pages);
         notify('success', translate('Saved {name}', { name: doc.name }), {
           detail: note(formatBytes(bytes.byteLength))
         });
@@ -296,10 +300,12 @@ async function save(
   }
 
   const saved = await platform.saveFileAs(bytes, name);
-  if (saved)
+  if (saved) {
+    refreshBaseline(doc.id, doc.pages);
     notify('success', translate('Saved {name}', { name }), {
       detail: note(formatBytes(bytes.byteLength))
     });
+  }
   return saved;
 }
 
@@ -332,14 +338,16 @@ async function reviewAndSave(
   bytes: Uint8Array,
   name: string,
   job?: JobOptions,
-  onFinalBytes?: (bytes: Uint8Array) => void
+  onFinalBytes?: (bytes: Uint8Array) => void,
+  alignment?: PageAlignment
 ): Promise<boolean> {
   announceWaiting(job);
   const proceed = await requestExportReview({
     kind: 'single',
     originalBytes,
     resultBytes: bytes,
-    fileName: name
+    fileName: name,
+    alignment
   });
   if (!proceed) return false;
   return save(doc, bytes, name, job, onFinalBytes);
@@ -490,20 +498,20 @@ function getBarcodeStamp() {
  * and would silently drop the outlines a second, merged-in document contributed
  * through OPS-01.
  */
-function getOutline(doc: StaplerDoc) {
+function getOutline(doc: StaplerDoc, pages: PageRef[]) {
   if (outlineDocId.value !== doc.id || !outlineEdited.value) return undefined;
   return entriesToNodes(
     outlineTree.value,
-    doc.pages.map(page => page.key)
+    pages.map(page => page.key)
   );
 }
 
 /** OPS-12 — the loaded outline's top-level entries, as split boundaries and names. */
-function topLevelBookmarkSlices(doc: StaplerDoc) {
+function topLevelBookmarkSlices(doc: StaplerDoc, pages: PageRef[]) {
   const tree = outlineDocId.value === doc.id ? outlineTree.value : [];
   return topLevelSlices(
     tree,
-    doc.pages.map(page => page.key)
+    pages.map(page => page.key)
   );
 }
 
@@ -513,12 +521,15 @@ function topLevelBookmarkSlices(doc: StaplerDoc) {
 // resized pages on merge/organize/crop/watermark/etc. once the Normalize panel
 // had ever been opened, since the signal defaults to non-null on first mount.
 const exportComposed: CommitHandler = async ({ doc, job }) => {
-  // UX-04's "before" is a bare compose — page content only, no crop/watermark/
-  // header-footer/n-up/outline/bates/barcode — so the review diff isolates
-  // exactly what this export step adds on top of what the grid already shows
-  // live. Reordering, rotation, deletion and duplication are already baked
-  // into `doc.pages` either way, so both sides reflect them equally.
-  const original = await composeDocument({ pages: doc.pages, annotations: doc.annotations }, job);
+  // The "before" is a bare compose of `doc.baseline` — page content only, no
+  // crop/watermark/header-footer/n-up/outline/bates/barcode, so the review
+  // diff isolates what this export step adds on top *and* shows whatever
+  // Organize itself did (rotate/reorder/delete/duplicate) since the baseline
+  // was last anchored, via `alignment` below.
+  const original = await composeDocument(
+    { pages: doc.baseline, annotations: doc.annotations },
+    job
+  );
   const bytes = await composeDocument(
     {
       pages: doc.pages,
@@ -528,13 +539,22 @@ const exportComposed: CommitHandler = async ({ doc, job }) => {
       headerFooter: headerFooterSettings.value,
       nup: nupSettings.value,
       layerAnnotations: getLayerAnnotations(),
-      outline: getOutline(doc),
+      outline: getOutline(doc, doc.pages),
       bates: getBates(),
       barcodeStamp: getBarcodeStamp()
     },
     job
   );
-  await reviewAndSave(doc, original, bytes, `${stem(doc.name)}-stapler.pdf`);
+  const alignment = alignPages(doc.baseline, doc.pages);
+  await reviewAndSave(
+    doc,
+    original,
+    bytes,
+    `${stem(doc.name)}-stapler.pdf`,
+    undefined,
+    undefined,
+    alignment
+  );
 };
 
 /**
@@ -665,6 +685,10 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     const altTexts = Object.fromEntries(altTextMap.value);
     if (Object.keys(altTexts).length === 0) return;
 
+    const original = await composeDocument(
+      { pages: doc.baseline, annotations: doc.annotations },
+      job
+    );
     const bytes = await composeDocument(
       {
         pages: doc.pages,
@@ -678,10 +702,20 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       api.applyAltText(bytes, altTexts, createJobHandle(job))
     );
 
-    // Alt text carries no visible mark on the page, so the review's diff will
-    // read as unchanged — expected, and still useful as confirmation that
-    // nothing else in the document moved.
-    await reviewAndSave(doc, bytes, finalBytes, `${stem(doc.name)}-acc.pdf`);
+    // Alt text itself carries no visible mark — the review's diff isolates to
+    // whatever Organize/Annotate did since the baseline (via `alignment`),
+    // which is worth seeing here too rather than only in those tools' own
+    // reviews.
+    const alignment = alignPages(doc.baseline, doc.pages);
+    await reviewAndSave(
+      doc,
+      original,
+      finalBytes,
+      `${stem(doc.name)}-acc.pdf`,
+      undefined,
+      undefined,
+      alignment
+    );
   },
 
   annotate: async ({ doc, job }) => {
@@ -689,19 +723,19 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // `compose`, so this composes exactly as every other tool does; the
     // finalize step is here for the fields and annotations the *source*
     // document brought with it.
-    // UX-04's "before" omits only `layerAnnotations` — everything else here
+    // "Before" omits only `layerAnnotations` — everything else here
     // (crop/watermark/etc.) is already reflected on the canvas the same way
     // as any other tool, so the review's diff isolates the marks this tool
-    // itself adds.
+    // itself adds, plus whatever Organize did since the baseline (`alignment`).
     const original = await composeDocument(
       {
-        pages: doc.pages,
+        pages: doc.baseline,
         annotations: doc.annotations,
         cropBoxes: cropBoxes.value,
         watermark: watermarkSettings.value,
         headerFooter: headerFooterSettings.value,
         nup: nupSettings.value,
-        outline: getOutline(doc),
+        outline: getOutline(doc, doc.baseline),
         bates: getBates(),
         barcodeStamp: getBarcodeStamp(),
         allowXfaLoss: true
@@ -717,7 +751,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         headerFooter: headerFooterSettings.value,
         nup: nupSettings.value,
         layerAnnotations: getLayerAnnotations(),
-        outline: getOutline(doc),
+        outline: getOutline(doc, doc.pages),
         bates: getBates(),
         barcodeStamp: getBarcodeStamp(),
         // Same as Sign: Annotate deliberately produces a static page.
@@ -725,12 +759,15 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       },
       job
     );
+    const alignment = alignPages(doc.baseline, doc.pages);
     await reviewAndSave(
       doc,
       original,
       await finalize(bytes, annotateFlattenOnExport.value, job),
       `${stem(doc.name)}-stapler.pdf`,
-      job
+      job,
+      undefined,
+      alignment
     );
   },
 
@@ -754,7 +791,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     }
 
     // OPS-12 — the boundaries and the filenames both come from the outline.
-    const bookmarks = settings.mode === 'bookmarks' ? topLevelBookmarkSlices(doc) : null;
+    const bookmarks = settings.mode === 'bookmarks' ? topLevelBookmarkSlices(doc, doc.pages) : null;
     if (settings.mode === 'bookmarks' && (!bookmarks || bookmarks.length === 0)) {
       notify('warning', translate('This document has no top-level bookmarks.'), {
         detail: 'Add them in the Bookmarks tool, or choose another split mode.'
@@ -1206,10 +1243,12 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       return;
     }
 
-    // UX-04's "before": the same compose, minus the signature/stamp layer and
-    // form fill, so the review's diff is exactly the marks this tool adds.
+    // "Before": the same compose, minus the signature/stamp layer and form
+    // fill, built from `doc.baseline` so the review's diff also shows
+    // whatever Organize did since the baseline, not just the marks this tool
+    // itself adds.
     const original = await composeDocument(
-      { pages: doc.pages, annotations: doc.annotations, allowXfaLoss: true },
+      { pages: doc.baseline, annotations: doc.annotations, allowXfaLoss: true },
       job
     );
 
@@ -1260,24 +1299,36 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       // are one decision. With the toggle off the values stay interactive.
       bytes = await fillFormFields(bytes, values, false, job);
     }
+    const alignment = alignPages(doc.baseline, doc.pages);
     await reviewAndSave(
       doc,
       original,
       await finalize(bytes, signFlattenOnExport.value, job),
       `${stem(doc.name)}-signed.pdf`,
-      job
+      job,
+      undefined,
+      alignment
     );
   },
 
   normalize: async ({ doc, job }) => {
-    // UX-04: normalize is exactly the one operation that legitimately resizes
-    // pages, so "before" is deliberately the un-normalized bytes rather than
-    // `currentDocumentBytes`'s usual export-time compose — the review is meant
-    // to show the resize itself, and its `comparable: false` fallback is the
-    // expected outcome here, not an edge case.
-    const original = await currentDocumentBytes(job);
+    // Normalize is the one operation that legitimately resizes pages, so
+    // "before" is deliberately un-normalized — built from `doc.baseline` so
+    // the review is meant to show the resize itself *and* whatever Organize
+    // did since the baseline; its `comparable: false` fallback already
+    // handles a resulting size mismatch gracefully, not an edge case.
+    const original = await currentDocumentBytes(job, false, doc.baseline);
     const bytes = await currentDocumentBytes(job, true);
-    await reviewAndSave(doc, original, bytes, `${stem(doc.name)}-normalized.pdf`);
+    const alignment = alignPages(doc.baseline, doc.pages);
+    await reviewAndSave(
+      doc,
+      original,
+      bytes,
+      `${stem(doc.name)}-normalized.pdf`,
+      undefined,
+      undefined,
+      alignment
+    );
   },
 
   redact: async ({ doc, job }) => {
@@ -1351,11 +1402,24 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   },
 
   metadata: async ({ doc, job }) => {
-    const original = await currentDocumentBytes(job);
-    const scrubbed = await scrubDocumentMetadata(original, scrubSettings.value, job);
-    // Scrubbing touches document properties, not page content — the review's
-    // diff is expected to read as unchanged; that's the point of it here.
-    await reviewAndSave(doc, original, scrubbed, `${stem(doc.name)}-scrubbed.pdf`, job);
+    // Scrubbing must run on the *current* pages — the file actually being
+    // saved — so this stays separate from `original`, which is only for the
+    // diff and is built from `doc.baseline` instead: scrubbing itself touches
+    // document properties, not page content, so the review's diff isolates to
+    // whatever Organize did since the baseline (via `alignment`).
+    const current = await currentDocumentBytes(job);
+    const scrubbed = await scrubDocumentMetadata(current, scrubSettings.value, job);
+    const original = await currentDocumentBytes(job, false, doc.baseline);
+    const alignment = alignPages(doc.baseline, doc.pages);
+    await reviewAndSave(
+      doc,
+      original,
+      scrubbed,
+      `${stem(doc.name)}-scrubbed.pdf`,
+      job,
+      undefined,
+      alignment
+    );
   },
   ocr: async ({ doc, job }) => {
     const settings = ocrSettings.value;
@@ -1376,8 +1440,11 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       }
     }
 
-    const original = await currentDocumentBytes(job);
-    const result = await runOcr(original, doc.pages.length, {
+    // OCR must run on the *current* pages — the file actually being saved —
+    // so this stays separate from `original` below, which is only for the
+    // diff and is built from `doc.baseline` instead.
+    const current = await currentDocumentBytes(job);
+    const result = await runOcr(current, doc.pages.length, {
       ...job,
       lang: settings.lang,
       pageIndices
@@ -1407,9 +1474,19 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // Annotate, whose panels show the control; OCR has no such setting, so
     // routing its export through that path would silently flatten this document
     // if we threaded the panel choice through from somewhere else.
-    // OCR adds an invisible text layer and changes nothing else, so the
-    // review's diff is expected to read as unchanged.
-    await reviewAndSave(doc, original, result.bytes, `${stem(doc.name)}-ocr.pdf`);
+    // OCR itself adds only an invisible text layer, so the review's diff
+    // isolates to whatever Organize did since the baseline (via `alignment`).
+    const original = await currentDocumentBytes(job, false, doc.baseline);
+    const alignment = alignPages(doc.baseline, doc.pages);
+    await reviewAndSave(
+      doc,
+      original,
+      result.bytes,
+      `${stem(doc.name)}-ocr.pdf`,
+      undefined,
+      undefined,
+      alignment
+    );
   },
 
   // OCR-03. The action bar's primary CTA and the panel's per-format buttons are

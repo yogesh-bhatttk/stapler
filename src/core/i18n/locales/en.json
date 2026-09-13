@@ -442,5 +442,15 @@
   "tool.sign.stampDate": "Date",
   "tool.sign.stampText": "Text",
   "tool.sign.useThisPrefix": "Use this",
-  "· page": "· page"
+  "· page": "· page",
+  "Back to review": "Back to review",
+  "Removed — will not be in the saved file.": "Removed — will not be in the saved file.",
+  "Removed:": "Removed:",
+  "Rotated": "Rotated",
+  "Was page {number}": "Was page {number}",
+  "page {number}": "page {number}",
+  "{count} added": "{count} added",
+  "{count} removed": "{count} removed",
+  "{count} reordered": "{count} reordered",
+  "{count} rotated": "{count} rotated"
 }

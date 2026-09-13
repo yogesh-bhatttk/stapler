@@ -84,6 +84,15 @@ export interface StaplerDoc {
    * by those operations.
    */
   sourceHandle?: { fileId: string; writable: boolean };
+  /**
+   * `pages` as of the last import or successful save — what a "before" export
+   * review diffs against, so rotate/reorder/delete/duplicate (which mutate
+   * `pages` immediately, long before Export is clicked) show up as real changes
+   * instead of being baked equally into both sides of the diff. Refreshed only
+   * by `refreshBaseline`, never by `mutateDoc` — it is not a user edit and must
+   * not push undo history or flip `dirty`.
+   */
+  baseline: PageRef[];
 }
 
 /** Workspace documents — what the file tabs show. */
@@ -289,9 +298,19 @@ export function makePageRefs(sourceDocId: string, pageCount: number): PageRef[] 
   }));
 }
 
-export function addDocument(doc: StaplerDoc): void {
-  documents.value = [...documents.value, doc];
+export function addDocument(doc: Omit<StaplerDoc, 'baseline'>): void {
+  documents.value = [...documents.value, { ...doc, baseline: doc.pages }];
   activeDocId.value = doc.id;
+}
+
+/**
+ * Re-anchors the "before" an export review diffs against to the page list just
+ * written to disk. Called only from `save()`'s two success paths (commit.ts) —
+ * not a user edit, so it bypasses `mutateDoc`/`commit()` on purpose: it must not
+ * flip `dirty` or push an undo entry.
+ */
+export function refreshBaseline(docId: string, pages: PageRef[]): void {
+  documents.value = documents.value.map(d => (d.id === docId ? { ...d, baseline: pages } : d));
 }
 
 export function closeDocument(id: string): void {
@@ -305,7 +324,9 @@ export function closeDocument(id: string): void {
   // it has to be named explicitly here or closing any unrelated tab deletes
   // its OPFS bytes and closes its render handle out from under an open
   // side-by-side view.
-  const stillUsed = new Set(documents.value.flatMap(d => d.pages.map(p => p.sourceDocId)));
+  const stillUsed = new Set(
+    documents.value.flatMap(d => [...d.pages, ...d.baseline].map(p => p.sourceDocId))
+  );
   if (sideBySideSourceId.value) stillUsed.add(sideBySideSourceId.value);
   const kept: Record<string, SourceDocument> = {};
   for (const [key, value] of Object.entries(sources.value)) {
@@ -451,12 +472,21 @@ function carryRestrictions(docId: string, source: SourceDocument): SourceDocumen
 export function replaceWithSource(docId: string, source: SourceDocument): void {
   commit();
   registerSource(carryRestrictions(docId, source));
-  mutateDoc(docId, doc => ({
-    ...doc,
-    pages: makePageRefs(source.id, source.pageCount),
-    // Stamps were baked into the new bytes, so keeping them would draw them twice.
-    annotations: []
-  }));
+  mutateDoc(docId, doc => {
+    const pages = makePageRefs(source.id, source.pageCount);
+    return {
+      ...doc,
+      pages,
+      // Stamps were baked into the new bytes, so keeping them would draw them twice.
+      annotations: [],
+      // This document was just wholly rebuilt (redact/face-blur) with brand new
+      // page keys — already confirmed by the caller's own "verified and applied"
+      // notice. Re-anchoring here means the next export review diffs against
+      // *this*, not against a baseline whose keys no longer exist anywhere,
+      // which would otherwise show every page as removed-and-re-added.
+      baseline: pages
+    };
+  });
   clearPageSelection();
 }
 

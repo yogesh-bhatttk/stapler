@@ -2555,14 +2555,25 @@ import { nupSettings } from '../ui/tools/nup/state';
  */
 export async function currentDocumentBytes(
   options: JobOptions = {},
-  applyNormalize = false
+  applyNormalize = false,
+  /**
+   * Overrides which page list is composed — `doc.baseline` for a review's
+   * "before", so it reflects the page list as of the last save/import rather
+   * than whatever Organize has done to `doc.pages` since. Forces the
+   * `untouched` fast path off: that shortcut answers "has anything changed
+   * since import", which isn't the question being asked when a specific page
+   * list is requested.
+   */
+  pagesOverride?: PageRef[]
 ): Promise<Uint8Array> {
   const doc = activeDoc.value;
   if (!doc) throw internal('No document is open.');
+  const pages = pagesOverride ?? doc.pages;
 
   const normalize = applyNormalize ? normalizeSettings.value : null;
 
   const untouched =
+    !pagesOverride &&
     doc.annotations.length === 0 &&
     doc.pages.length > 0 &&
     doc.pages.every((p, _i, a) => p.sourceDocId === a[0].sourceDocId) &&
@@ -2582,7 +2593,7 @@ export async function currentDocumentBytes(
 
   return composeDocument(
     {
-      pages: doc.pages,
+      pages,
       annotations: doc.annotations,
       cropBoxes: cropBoxes.value,
       watermark: watermarkSettings.value,
