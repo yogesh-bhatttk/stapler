@@ -48,35 +48,62 @@ export interface PageDiff {
  * on the other. `beforeIndex: null` means this page has no baseline
  * counterpart (new/duplicated) — the before side is skipped entirely, not
  * just rendered blank, so a new page costs one document load, not two.
+ *
+ * `beforeRotationOverride`, when given, is the rotation the *before* page is
+ * rendered at instead of its own — pass the current page's own rotation
+ * (`PageAlignEntry.afterRotation`) so a page that was only rotated renders
+ * both sides at the same orientation and compares as identical, rather than
+ * "changed size" (a 90/270° rotation swaps rendered width and height) purely
+ * from the rotation itself, which would otherwise also mask any real edit
+ * (crop, watermark) made on top of it — non-comparable suppresses the
+ * pixel-diff mask entirely.
  */
 export async function diffPage(
   beforeBytes: Uint8Array,
   afterBytes: Uint8Array,
   beforeIndex: number | null,
-  afterIndex: number
+  afterIndex: number,
+  beforeRotationOverride?: number
 ): Promise<PageDiff> {
   const { before, after } = await renderWorker.lease(async api => {
     let beforeHandle: string | undefined;
     let afterHandle: string | undefined;
     try {
-      const renderOne = async (handle: string, pageCount: number, index: number) => {
+      const renderOne = async (
+        handle: string,
+        pageCount: number,
+        index: number,
+        rotationOverride?: number
+      ) => {
         if (index < 0 || index >= pageCount) return null;
-        const bitmap = await api.renderPage(handle, index, SCALE);
+        const bitmap = await api.renderPage(handle, index, SCALE, rotationOverride);
         return toImageData(bitmap);
       };
 
-      const [infoBefore, infoAfter] = await Promise.all([
-        beforeIndex === null ? null : api.loadDocument(beforeBytes),
-        api.loadDocument(afterBytes)
-      ]);
-      beforeHandle = infoBefore?.handle;
-      afterHandle = infoAfter.handle;
+      // Each load's handle is captured off its own `.then`, not off the
+      // combined `Promise.all` result — if the *before* load rejects,
+      // `Promise.all` rejects before ever reaching a destructuring
+      // assignment made from its resolved value, which would otherwise skip
+      // recording a handle for an *after* load that succeeded just fine,
+      // leaking it (the `finally` below only closes handles it knows about).
+      const beforePromise =
+        beforeIndex === null
+          ? Promise.resolve(null)
+          : api.loadDocument(beforeBytes).then(info => {
+              beforeHandle = info.handle;
+              return info;
+            });
+      const afterPromise = api.loadDocument(afterBytes).then(info => {
+        afterHandle = info.handle;
+        return info;
+      });
+      const [infoBefore, infoAfter] = await Promise.all([beforePromise, afterPromise]);
 
       const [before, after] = await Promise.all([
         infoBefore && beforeIndex !== null
-          ? renderOne(infoBefore.handle, infoBefore.pageCount, beforeIndex)
+          ? renderOne(infoBefore.handle, infoBefore.pageCount, beforeIndex, beforeRotationOverride)
           : Promise.resolve(null),
-        renderOne(afterHandle, infoAfter.pageCount, afterIndex)
+        renderOne(infoAfter.handle, infoAfter.pageCount, afterIndex)
       ]);
       return { before, after };
     } finally {

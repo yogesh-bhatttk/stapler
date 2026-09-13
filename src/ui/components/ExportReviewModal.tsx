@@ -73,13 +73,21 @@ function RemovedPagePreview({
   const t = useTranslation();
   const [image, setImage] = useState<ImageData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [renderError, setRenderError] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setRenderError(false);
     renderPage(bytes, beforeIndex)
       .then(result => {
         if (!cancelled) setImage(result);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setImage(null);
+          setRenderError(true);
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -100,14 +108,18 @@ function RemovedPagePreview({
         </Button>
       </div>
       <p className={styles.note}>{t('Removed — will not be in the saved file.')}</p>
-      <div className={styles.stage} aria-busy={loading}>
-        <div
-          className={styles.page}
-          style={image ? { aspectRatio: `${image.width / image.height}` } : undefined}
-        >
-          <DiffCanvas image={image} highlight={null} />
+      {renderError ? (
+        <p className={styles.note}>{t("Couldn't render this page for preview.")}</p>
+      ) : (
+        <div className={styles.stage} aria-busy={loading}>
+          <div
+            className={styles.page}
+            style={image ? { aspectRatio: `${image.width / image.height}` } : undefined}
+          >
+            <DiffCanvas image={image} highlight={null} />
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -186,6 +198,7 @@ function SinglePageReview({
   const [loading, setLoading] = useState(true);
   const [highlight, setHighlight] = useState(false);
   const [viewingRemoved, setViewingRemoved] = useState<number | null>(null);
+  const [renderError, setRenderError] = useState(false);
   const requestId = useRef(0);
 
   useEffect(() => {
@@ -202,9 +215,16 @@ function SinglePageReview({
   useEffect(() => {
     const id = ++requestId.current;
     setLoading(true);
+    setRenderError(false);
     (async () => {
       if (originalBytes) {
-        const result = await diffPage(originalBytes, resultBytes, beforeIndex, pageIndex);
+        const result = await diffPage(
+          originalBytes,
+          resultBytes,
+          beforeIndex,
+          pageIndex,
+          align?.afterRotation
+        );
         if (requestId.current !== id) return;
         setDiff(result);
         setAfterOnly(null);
@@ -214,10 +234,21 @@ function SinglePageReview({
         setDiff(null);
         setAfterOnly(result);
       }
-    })().finally(() => {
-      if (requestId.current === id) setLoading(false);
-    });
-  }, [originalBytes, resultBytes, beforeIndex, pageIndex]);
+    })()
+      .catch(() => {
+        // A render failure must not leave a blank stage with no explanation
+        // and Save still enabled as if the preview succeeded — surface it,
+        // rather than silently falling through to whichever half of the pair
+        // did resolve.
+        if (requestId.current !== id) return;
+        setDiff(null);
+        setAfterOnly(null);
+        setRenderError(true);
+      })
+      .finally(() => {
+        if (requestId.current === id) setLoading(false);
+      });
+  }, [originalBytes, resultBytes, beforeIndex, pageIndex, align?.afterRotation]);
 
   if (viewingRemoved !== null && originalBytes) {
     return (
@@ -230,7 +261,13 @@ function SinglePageReview({
   }
 
   const canPrev = pageIndex > 0;
-  const canNext = pageCount === null || pageIndex < pageCount - 1;
+  // Disabled, not optimistically enabled, while the count is still unknown:
+  // letting Next run ahead of it used to push `pageIndex` past the real last
+  // page, which made the "after" render come back out of range (`null`) while
+  // "before" still resolved fine — and the display fallback then showed that
+  // stale "before" image labelled as the review's current page, with nothing
+  // saying it wasn't really there.
+  const canNext = pageCount !== null && pageIndex < pageCount - 1;
 
   return (
     <div className={styles.body}>
@@ -285,65 +322,79 @@ function SinglePageReview({
         </p>
       )}
 
-      {(() => {
-        // A page whose size changed (crop, N-up, Normalize) can't share the
-        // slider's single overlaid box — the two images are genuinely
-        // different shapes, not two versions of one shape. Rendering both,
-        // side by side at their own real proportions, is what actually shows
-        // a crop or resize happened; discarding "before" and showing only
-        // "after" (the previous fallback) left the note as the *only* signal
-        // anything changed, easy to miss and impossible to compare against.
-        if (diff && !diff.comparable && diff.before && diff.after) {
-          return (
-            <div className={styles.stage} aria-busy={loading}>
-              <div className={styles.sideBySide}>
-                <div className={styles.sidePane}>
-                  <span className={styles.sideLabel}>{t('Before')}</span>
-                  <div
-                    className={styles.sidePage}
-                    style={{ aspectRatio: `${diff.before.width / diff.before.height}` }}
-                  >
-                    <DiffCanvas image={diff.before} highlight={null} />
+      {renderError && (
+        <p className={styles.note}>
+          {t(
+            "Couldn't render this page for preview. This does not necessarily mean the export itself would fail — try another page, or Save to find out."
+          )}
+        </p>
+      )}
+
+      {!renderError &&
+        (() => {
+          // A page whose size changed (crop, N-up, Normalize) can't share the
+          // slider's single overlaid box — the two images are genuinely
+          // different shapes, not two versions of one shape. Rendering both,
+          // side by side at their own real proportions, is what actually shows
+          // a crop or resize happened; discarding "before" and showing only
+          // "after" (the previous fallback) left the note as the *only* signal
+          // anything changed, easy to miss and impossible to compare against.
+          if (diff && !diff.comparable && diff.before && diff.after) {
+            return (
+              <div className={styles.stage} aria-busy={loading}>
+                <div className={styles.sideBySide}>
+                  <div className={styles.sidePane}>
+                    <span className={styles.sideLabel}>{t('Before')}</span>
+                    <div
+                      className={styles.sidePage}
+                      style={{ aspectRatio: `${diff.before.width / diff.before.height}` }}
+                    >
+                      <DiffCanvas image={diff.before} highlight={null} />
+                    </div>
                   </div>
-                </div>
-                <div className={styles.sidePane}>
-                  <span className={styles.sideLabel}>{t('After')}</span>
-                  <div
-                    className={styles.sidePage}
-                    style={{ aspectRatio: `${diff.after.width / diff.after.height}` }}
-                  >
-                    <DiffCanvas image={diff.after} highlight={null} />
+                  <div className={styles.sidePane}>
+                    <span className={styles.sideLabel}>{t('After')}</span>
+                    <div
+                      className={styles.sidePage}
+                      style={{ aspectRatio: `${diff.after.width / diff.after.height}` }}
+                    >
+                      <DiffCanvas image={diff.after} highlight={null} />
+                    </div>
                   </div>
                 </div>
               </div>
+            );
+          }
+
+          // The slider's two layers are CSS `position: absolute; width/height:
+          // 100%` (CompareSlider.module.css) — that only ever resolves to
+          // something visible if *this* box has a real size to be 100% of, which
+          // a plain `width/height: auto` div never gives it. An aspect-ratio
+          // computed from whichever image is on screen is the same fix
+          // `Thumbnail.tsx` already uses for the page grid.
+          const shown = afterOnly ?? diff?.after ?? diff?.before ?? null;
+          const aspect = shown ? shown.width / shown.height : undefined;
+          return (
+            <div className={styles.stage} aria-busy={loading}>
+              <div
+                className={styles.page}
+                style={aspect ? { aspectRatio: `${aspect}` } : undefined}
+              >
+                {diff?.comparable && diff.before && diff.after ? (
+                  <CompareSlider
+                    label={t('Compare original and result')}
+                    before={<DiffCanvas image={diff.before} highlight={null} />}
+                    after={
+                      <DiffCanvas image={diff.after} highlight={highlight ? diff.diff : null} />
+                    }
+                  />
+                ) : (
+                  <DiffCanvas image={shown} highlight={null} />
+                )}
+              </div>
             </div>
           );
-        }
-
-        // The slider's two layers are CSS `position: absolute; width/height:
-        // 100%` (CompareSlider.module.css) — that only ever resolves to
-        // something visible if *this* box has a real size to be 100% of, which
-        // a plain `width/height: auto` div never gives it. An aspect-ratio
-        // computed from whichever image is on screen is the same fix
-        // `Thumbnail.tsx` already uses for the page grid.
-        const shown = afterOnly ?? diff?.after ?? diff?.before ?? null;
-        const aspect = shown ? shown.width / shown.height : undefined;
-        return (
-          <div className={styles.stage} aria-busy={loading}>
-            <div className={styles.page} style={aspect ? { aspectRatio: `${aspect}` } : undefined}>
-              {diff?.comparable && diff.before && diff.after ? (
-                <CompareSlider
-                  label={t('Compare original and result')}
-                  before={<DiffCanvas image={diff.before} highlight={null} />}
-                  after={<DiffCanvas image={diff.after} highlight={highlight ? diff.diff : null} />}
-                />
-              ) : (
-                <DiffCanvas image={shown} highlight={null} />
-              )}
-            </div>
-          </div>
-        );
-      })()}
+        })()}
     </div>
   );
 }
@@ -360,7 +411,10 @@ function ZipReview({ resultBytes }: { resultBytes: Uint8Array }) {
   );
   const [selected, setSelected] = useState(0);
   const [preview, setPreview] = useState<
-    { kind: 'image'; url: string } | { kind: 'pdf'; image: ImageData | null } | null
+    | { kind: 'image'; url: string }
+    | { kind: 'pdf'; image: ImageData | null }
+    | { kind: 'error' }
+    | null
   >(null);
 
   useEffect(() => {
@@ -373,9 +427,13 @@ function ZipReview({ resultBytes }: { resultBytes: Uint8Array }) {
     }
     if (entry.name.toLowerCase().endsWith('.pdf')) {
       let cancelled = false;
-      renderPage(entry.bytes, 0).then(image => {
-        if (!cancelled) setPreview({ kind: 'pdf', image });
-      });
+      renderPage(entry.bytes, 0)
+        .then(image => {
+          if (!cancelled) setPreview({ kind: 'pdf', image });
+        })
+        .catch(() => {
+          if (!cancelled) setPreview({ kind: 'error' });
+        });
       return () => {
         cancelled = true;
       };
@@ -418,6 +476,9 @@ function ZipReview({ resultBytes }: { resultBytes: Uint8Array }) {
           >
             <DiffCanvas image={preview.image} highlight={null} />
           </div>
+        )}
+        {preview?.kind === 'error' && (
+          <p className={styles.note}>{t("Couldn't render a preview for this file.")}</p>
         )}
         {!preview && <p className={styles.note}>{t('No preview available for this file type.')}</p>}
       </div>

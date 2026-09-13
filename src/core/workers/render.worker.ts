@@ -189,7 +189,19 @@ export interface RedactedImageInspection {
 export interface RenderJob {
   loadDocument(bytes: Uint8Array, password?: string): Promise<DocumentInfo>;
   closeDocument(handle: string): Promise<void>;
-  renderPage(handle: string, pageIndex: number, scale: number): Promise<ImageBitmap>;
+  /**
+   * `rotationOverride`, when given, replaces the page's own `/Rotate` for this
+   * render only — used by the export-review diff to render a baseline page
+   * at the *current* page's rotation, so a page that was only rotated (no
+   * other edit) compares as identical instead of "changed size" just because
+   * a 90/270° rotation swaps width and height.
+   */
+  renderPage(
+    handle: string,
+    pageIndex: number,
+    scale: number,
+    rotationOverride?: number
+  ): Promise<ImageBitmap>;
   pageToImageBytes(
     handle: string,
     pageIndex: number,
@@ -1135,10 +1147,12 @@ const api: RenderJob = {
     await found.task.destroy();
   },
 
-  async renderPage(handle, pageIndex, scale) {
+  async renderPage(handle, pageIndex, scale, rotationOverride) {
     const page = await entry(handle).doc.getPage(pageIndex + 1);
     try {
-      const viewport = page.getViewport({ scale });
+      const viewport = page.getViewport(
+        rotationOverride === undefined ? { scale } : { scale, rotation: rotationOverride }
+      );
       const { canvas, ctx } = offscreen(viewport.width, viewport.height);
       await page.render(renderParams(ctx, viewport)).promise;
       const bitmap = canvas.transferToImageBitmap();

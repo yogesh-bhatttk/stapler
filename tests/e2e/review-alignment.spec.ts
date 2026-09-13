@@ -96,6 +96,56 @@ test.describe('review diff reflects organize edits', () => {
     await expect(dialog.locator('canvas')).toHaveCount(2);
   });
 
+  test('a rotated page compares cleanly, not as a false "changed size"', async ({ page }) => {
+    await openApp(page);
+    await importFile(page, path.join(FIXTURES_DIR, 'bookmarked-9.pdf'));
+    await gotoTool(page, 'organize');
+
+    const grid = page.getByRole('listbox', { name: /Pages of/ });
+    await grid.getByRole('option', { name: /^Page 1 of/ }).focus();
+    await page.keyboard.press('r');
+
+    await page.getByRole('button', { name: 'View changes' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Review before saving' });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText('Rotated', { exact: true })).toBeVisible();
+    // A 90° rotation swaps rendered width/height; the diff renders "before" at
+    // the page's own new rotation so the two still line up pixel for pixel —
+    // proven by the highlight toggle being offered at all (only shown for a
+    // comparable pair) and the size-change note being absent.
+    await expect(dialog.getByRole('button', { name: 'Highlight changes' })).toBeVisible();
+    await expect(
+      dialog.getByText(
+        'This page changed size, so before and after cannot be lined up pixel for pixel.'
+      )
+    ).not.toBeVisible();
+  });
+
+  test('an N-up export does not misapply per-page alignment badges to sheets', async ({ page }) => {
+    await openApp(page);
+    await importFile(page, path.join(FIXTURES_DIR, 'bookmarked-9.pdf'));
+    await gotoTool(page, 'organize');
+
+    const grid = page.getByRole('listbox', { name: /Pages of/ });
+    await grid.getByRole('option', { name: /^Page 1 of/ }).focus();
+    await page.keyboard.press('r');
+
+    await gotoTool(page, 'nup');
+    await page.getByLabel('Layout', { exact: true }).selectOption('2-up');
+    await page.getByRole('button', { name: 'Export layout' }).click();
+
+    const dialog = page.getByRole('dialog', { name: 'Review before saving' });
+    await expect(dialog).toBeVisible();
+    // Each output sheet combines two original pages — a page-level alignment
+    // entry (rotated/moved/new, keyed by *original* page position) read at a
+    // *sheet* index would name the wrong baseline page, so none of that
+    // metadata is shown at all once N-up is active; the review still opens
+    // and Save still works, just without a misleading badge.
+    await expect(dialog.getByText('Rotated', { exact: true })).not.toBeVisible();
+    await expect(dialog.getByText(/Was page/)).not.toBeVisible();
+    await expect(dialog.getByRole('button', { name: /^Save /, exact: false })).toBeEnabled();
+  });
+
   test('a duplicated page is badged "New page", not the misleading size-change note', async ({
     page
   }) => {

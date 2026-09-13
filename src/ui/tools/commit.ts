@@ -126,6 +126,17 @@ interface ProtectedExport {
   bytes: Uint8Array;
   /** True only when a password is now needed to *open* the file. */
   passwordApplied: boolean;
+  /**
+   * True when this document's imported restrictions were silently reapplied
+   * with no password change requested — the file still opens with no prompt,
+   * but it was re-encrypted from whatever security handler it originally
+   * carried (RC4/40-128-bit revisions included) into this handler's one fixed
+   * algorithm, AES-256/R6 (ISO 32000-2). That is a real, permanent narrowing
+   * of which readers can open the file — an old/embedded PDF viewer without
+   * R6 support could open the input and can no longer open the output — so
+   * `save` discloses it rather than repeating the input's own silence.
+   */
+  restrictionsPreserved: boolean;
 }
 
 /**
@@ -162,7 +173,9 @@ async function applyProtection(
     return null;
   }
   const wantsPassword = protectionActive();
-  if (!wantsPassword && restrictions === null) return { bytes, passwordApplied: false };
+  if (!wantsPassword && restrictions === null) {
+    return { bytes, passwordApplied: false, restrictionsPreserved: false };
+  }
 
   if (!name.toLowerCase().endsWith('.pdf')) {
     // A ZIP has no PDF security handler to carry the password, and encrypting the
@@ -175,18 +188,23 @@ async function applyProtection(
         timeout: 0
       });
     }
-    return { bytes, passwordApplied: false };
+    return { bytes, passwordApplied: false, restrictionsPreserved: false };
   }
 
   try {
     if (!wantsPassword) {
       // Restrictions only: the file still opens with no prompt, so nothing is
-      // asked of the user and nothing is announced — this is the document
-      // behaving as it did on the way in.
-      if (restrictions === null) return { bytes, passwordApplied: false };
+      // asked of the user up front — but `restrictionsPreserved` still tells
+      // `save` to disclose the algorithm change in its success message,
+      // rather than staying as silent about it as the input's own restriction
+      // was about opening.
+      if (restrictions === null) {
+        return { bytes, passwordApplied: false, restrictionsPreserved: false };
+      }
       return {
         bytes: await restrictDocument(bytes, restrictions, job ?? {}),
-        passwordApplied: false
+        passwordApplied: false,
+        restrictionsPreserved: true
       };
     }
 
@@ -209,7 +227,14 @@ async function applyProtection(
     // RED-06 encryption re-writes every object in the file. Passing the job
     // through is what gives it a progress bar and a working Cancel; without it
     // the UI sat at 100% through the slowest part of the export.
-    return { bytes: await protectDocument(bytes, settings, job ?? {}), passwordApplied: true };
+    return {
+      bytes: await protectDocument(bytes, settings, job ?? {}),
+      passwordApplied: true,
+      // Not disclosed separately here: a password requirement is already the
+      // headline of `passwordApplied`'s own note, and this is the user's own
+      // explicit Protect choice, not a silent narrowing of an already-open file.
+      restrictionsPreserved: false
+    };
   } catch (err) {
     notify(
       'danger',
@@ -258,7 +283,15 @@ async function save(
   name: string,
   job?: JobOptions,
   onFinalBytes?: (bytes: Uint8Array) => void,
-  growthGuard?: GrowthGuard
+  growthGuard?: GrowthGuard,
+  // False for any export whose bytes are not a faithful rendering of
+  // `doc.pages` as the document itself — a page subset (split), a derived
+  // layout (contact sheet), or a non-PDF archive (the `*.zip` tools). Only a
+  // "yes, this is what the document now looks like, unchanged in structure"
+  // export may advance the review baseline; otherwise the next real export's
+  // diff would compare `doc.pages` against itself and report no changes for
+  // edits that were never actually written anywhere.
+  refreshesBaseline = true
 ): Promise<boolean> {
   // `documentRestrictions` is read here, at the one place every tool's bytes
   // pass through on their way to disk, rather than threaded through each
@@ -272,10 +305,26 @@ async function save(
     return false;
   }
   onFinalBytes?.(bytes);
-  const note = (size: string) =>
-    result.passwordApplied ? `${size} · password required to open` : size;
+  const note = (size: string) => {
+    if (result.passwordApplied) return `${size} · password required to open`;
+    // No password either before or after, but the restrictions this document
+    // arrived with were carried through by re-encrypting under this handler's
+    // one fixed algorithm (AES-256/R6) — worth a word, since a reader that
+    // opened the input under an older/weaker handler is not guaranteed to
+    // open this output.
+    if (result.restrictionsPreserved) {
+      return `${size} · this document's restrictions were preserved (now AES-256-encrypted; needs a reader from the last decade or so)`;
+    }
+    return size;
+  };
 
-  if (doc.sourceHandle?.writable) {
+  // Same test as the baseline refresh below, and for the same reason: "save
+  // over original" replaces the file the user opened with exactly these
+  // bytes. Offering that for a page subset, a contact sheet, or a ZIP would
+  // let "Save over original" silently overwrite the user's real document with
+  // something that is not it — the file-destruction case the never-corrupt
+  // invariant exists to prevent, not merely a stale review.
+  if (refreshesBaseline && doc.sourceHandle?.writable) {
     announceWaiting(job, translate('Waiting for confirmation…'));
     const overwrite = await confirmAction({
       title: `Save changes to ${doc.name}?`,
@@ -301,7 +350,7 @@ async function save(
 
   const saved = await platform.saveFileAs(bytes, name);
   if (saved) {
-    refreshBaseline(doc.id, doc.pages);
+    if (refreshesBaseline) refreshBaseline(doc.id, doc.pages);
     notify('success', translate('Saved {name}', { name }), {
       detail: note(formatBytes(bytes.byteLength))
     });
@@ -339,7 +388,11 @@ async function reviewAndSave(
   name: string,
   job?: JobOptions,
   onFinalBytes?: (bytes: Uint8Array) => void,
-  alignment?: PageAlignment
+  alignment?: PageAlignment,
+  // See `save()` — false when `bytes` is a page subset or a different layout
+  // entirely (split's single-file branch, the contact sheet), so it must not
+  // be mistaken for "the document, saved" once it reaches disk.
+  refreshesBaseline = true
 ): Promise<boolean> {
   announceWaiting(job);
   const proceed = await requestExportReview({
@@ -350,7 +403,7 @@ async function reviewAndSave(
     alignment
   });
   if (!proceed) return false;
-  return save(doc, bytes, name, job, onFinalBytes);
+  return save(doc, bytes, name, job, onFinalBytes, undefined, refreshesBaseline);
 }
 
 /**
@@ -397,7 +450,10 @@ async function reviewAndSaveZip(
     fileName: name
   });
   if (!proceed) return false;
-  return save(doc, bytes, name, job);
+  // A ZIP is never `doc.pages` written out as the document — it's rasters or
+  // split members — so it must not advance the review baseline or trigger
+  // "save over original" (see `save()`).
+  return save(doc, bytes, name, job, undefined, undefined, false);
 }
 
 /** Same zip review, for the two directory-write branches that never call `save()`. */
@@ -515,21 +571,28 @@ function topLevelBookmarkSlices(doc: StaplerDoc, pages: PageRef[]) {
   );
 }
 
+/**
+ * `alignPages`'s per-page rotated/moved/new/removed metadata is built one
+ * entry per *original* page — meaningless once N-up has collapsed 2 or 4
+ * original pages onto one output sheet, since the review then reads that
+ * metadata at a *sheet* index and hands the wrong baseline page to it. Only
+ * relevant to a handler whose own compose actually passes `nup` through
+ * (annotate, normalize, metadata, ocr — via `currentDocumentBytes`, which
+ * always does); a handler that never composes with N-up has nothing to guard
+ * against. `undefined` here is exactly what the contact sheet and N-up's own
+ * export already pass for the same "different page layout entirely" reason —
+ * no alignment, rather than a wrong one.
+ */
+function alignmentUnlessComposed(doc: StaplerDoc): PageAlignment | undefined {
+  return nupSettings.value ? undefined : alignPages(doc.baseline, doc.pages);
+}
+
 // Normalize is deliberately not read here: it is its own tool, applied only via
 // `currentDocumentBytes(job, true)` in its own handler below. Reading the global
 // `normalizeSettings` signal in every tool's export was OPS-09 — it silently
 // resized pages on merge/organize/crop/watermark/etc. once the Normalize panel
 // had ever been opened, since the signal defaults to non-null on first mount.
 const exportComposed: CommitHandler = async ({ doc, job }) => {
-  // The "before" is a bare compose of `doc.baseline` — page content only, no
-  // crop/watermark/header-footer/n-up/outline/bates/barcode, so the review
-  // diff isolates what this export step adds on top *and* shows whatever
-  // Organize itself did (rotate/reorder/delete/duplicate) since the baseline
-  // was last anchored, via `alignment` below.
-  const original = await composeDocument(
-    { pages: doc.baseline, annotations: doc.annotations },
-    job
-  );
   const bytes = await composeDocument(
     {
       pages: doc.pages,
@@ -543,6 +606,27 @@ const exportComposed: CommitHandler = async ({ doc, job }) => {
       bates: getBates(),
       barcodeStamp: getBarcodeStamp()
     },
+    job
+  );
+
+  // N-up collapses 2 or 4 *original* pages onto each output sheet — the same
+  // "a different page layout entirely" case the contact sheet is (UX-04): a
+  // page-index diff, and `alignment` (one entry per *original* page, not per
+  // sheet), would either compare unrelated pages or — reading
+  // `alignment.entries[sheetIndex]` — hand the wrong baseline page to a sheet
+  // that never corresponded to it 1:1. After-only review instead.
+  if (nupSettings.value) {
+    await reviewAndSave(doc, null, bytes, `${stem(doc.name)}-stapler.pdf`);
+    return;
+  }
+
+  // The "before" is a bare compose of `doc.baseline` — page content only, no
+  // crop/watermark/header-footer/outline/bates/barcode, so the review diff
+  // isolates what this export step adds on top *and* shows whatever Organize
+  // itself did (rotate/reorder/delete/duplicate) since the baseline was last
+  // anchored, via `alignment` below.
+  const original = await composeDocument(
+    { pages: doc.baseline, annotations: doc.annotations },
     job
   );
   const alignment = alignPages(doc.baseline, doc.pages);
@@ -759,7 +843,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       },
       job
     );
-    const alignment = alignPages(doc.baseline, doc.pages);
+    const alignment = alignmentUnlessComposed(doc);
     await reviewAndSave(
       doc,
       original,
@@ -786,7 +870,23 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         { pages: selected, annotations: doc.annotations, layerAnnotations: getLayerAnnotations() },
         job
       );
-      await save(doc, bytes, `${stem(doc.name)}-extract.pdf`);
+      // UX-04: no diff against the original — a page subset, the same reason
+      // the non-extract single-file branch below skips one too — but still a
+      // real review, not a silent write straight to disk: `split` is in
+      // `TOOLS_WITH_EXPORT_REVIEW`, and extract mode is the one branch of it
+      // that used to bypass the dialog the action bar had already promised.
+      // Not `doc.pages` — must not be mistaken for "the document, saved" (see
+      // `save()`), hence `refreshesBaseline: false`.
+      await reviewAndSave(
+        doc,
+        null,
+        bytes,
+        `${stem(doc.name)}-extract.pdf`,
+        undefined,
+        undefined,
+        undefined,
+        false
+      );
       return;
     }
 
@@ -887,7 +987,18 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       // `.pdf` name, so `save()`'s own `applyProtection` re-applies `restrictions` —
       // no need to do it here too.
       const single = fileNames?.[0] ?? `${stem(doc.name)}-part-01`;
-      await reviewAndSave(doc, null, result.bytes, `${single}.pdf`);
+      // A page subset, not `doc.pages` — must not be mistaken for "the
+      // document, saved" (see `save()`).
+      await reviewAndSave(
+        doc,
+        null,
+        result.bytes,
+        `${single}.pdf`,
+        undefined,
+        undefined,
+        undefined,
+        false
+      );
       return;
     }
 
@@ -1319,7 +1430,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // handles a resulting size mismatch gracefully, not an edge case.
     const original = await currentDocumentBytes(job, false, doc.baseline);
     const bytes = await currentDocumentBytes(job, true);
-    const alignment = alignPages(doc.baseline, doc.pages);
+    const alignment = alignmentUnlessComposed(doc);
     await reviewAndSave(
       doc,
       original,
@@ -1410,7 +1521,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     const current = await currentDocumentBytes(job);
     const scrubbed = await scrubDocumentMetadata(current, scrubSettings.value, job);
     const original = await currentDocumentBytes(job, false, doc.baseline);
-    const alignment = alignPages(doc.baseline, doc.pages);
+    const alignment = alignmentUnlessComposed(doc);
     await reviewAndSave(
       doc,
       original,
@@ -1477,7 +1588,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // OCR itself adds only an invisible text layer, so the review's diff
     // isolates to whatever Organize did since the baseline (via `alignment`).
     const original = await currentDocumentBytes(job, false, doc.baseline);
-    const alignment = alignPages(doc.baseline, doc.pages);
+    const alignment = alignmentUnlessComposed(doc);
     await reviewAndSave(
       doc,
       original,
@@ -1562,7 +1673,18 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // thumbnails per sheet page, not one page per original page), so a
     // page-index diff against the original would compare unrelated pages —
     // after-only review instead.
-    await reviewAndSave(doc, null, sheet, `${stem(doc.name)}-contact-sheet.pdf`);
+    // A different page layout entirely, not `doc.pages` — must not be
+    // mistaken for "the document, saved" (see `save()`).
+    await reviewAndSave(
+      doc,
+      null,
+      sheet,
+      `${stem(doc.name)}-contact-sheet.pdf`,
+      undefined,
+      undefined,
+      undefined,
+      false
+    );
   },
   compare: async () => {},
   batch: async () => {},
@@ -1771,6 +1893,20 @@ export async function commitTool(toolId: ToolId, job: JobOptions): Promise<void>
   const doc = activeDoc.value;
   const tool = findTool(toolId);
   if (!doc && !tool?.worksWithoutDocument) throw internal('No document is open.');
+  // A document can reach zero pages (`deletePages` has no last-page guard —
+  // select-all-and-delete is a legitimate way to clear a document before
+  // starting over). Left uncaught, this reached `composeDocument`'s own
+  // `internal('There are no pages to export.')` deep inside whichever
+  // handler ran, which reads to the user as "Stapler crashed" (`InternalError`'s
+  // copy literally says "file an issue") for an entirely ordinary state. Caught
+  // once, here, for every tool, rather than duplicated in each handler that
+  // would otherwise hit it a different way.
+  if (doc && doc.pages.length === 0) {
+    notify('warning', translate('Nothing to export.'), {
+      detail: 'This document has no pages. Undo the deletion, or open a different file.'
+    });
+    return;
+  }
   const handler = HANDLERS[toolId];
   if (!handler) throw internal(`No commit action is defined for the ${toolId} tool.`);
   // `worksWithoutDocument` tools (md-to-pdf, batch) never read `context.doc`; the

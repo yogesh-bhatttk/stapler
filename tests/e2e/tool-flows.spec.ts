@@ -443,6 +443,26 @@ test.describe('tool flows', () => {
     expect(output.getPage(0).getRotation().angle).toBe(90);
   });
 
+  test('deleting every page shows a clear message, not a crash dialog', async ({ page }) => {
+    const file = await ensureFixture('text-4.pdf', () => textPdf(4));
+    await importFixture(page, file);
+    await gotoTool(page, 'organize');
+
+    const grid = page.getByRole('listbox', { name: /Pages of/ });
+    await grid.getByRole('option', { name: /^Page 1 of/ }).click();
+    await grid.getByRole('option', { name: /^Page 4 of/ }).click({ modifiers: ['Shift'] });
+    await page.getByRole('button', { name: 'Delete' }).click();
+    await expect(page.getByText('0 pages', { exact: false }).first()).toBeVisible();
+
+    await page.getByRole('button', { name: 'View changes' }).click();
+    await expect(page.getByText('Nothing to export.')).toBeVisible();
+    await expect(page.getByRole('dialog', { name: 'Review before saving' })).not.toBeVisible();
+    // Never the generic "something went wrong inside Stapler" copy that
+    // `composeDocument`'s own internal error for an empty page list produces
+    // when nothing catches it first.
+    await expect(page.getByText(/file an issue/i)).not.toBeVisible();
+  });
+
   test('split: extracting a selection produces exactly those pages', async ({ page }) => {
     const file = await ensureFixture('text-10.pdf', () => textPdf(10));
     await importFixture(page, file);
@@ -455,6 +475,25 @@ test.describe('tool flows', () => {
 
     const bytes = await commitAndRead(page, 'Split / extract');
     expect((await PDFDocument.load(bytes)).getPageCount()).toBe(2);
+  });
+
+  test('split: extracting a selection shows a review before saving', async ({ page }) => {
+    const file = await ensureFixture('text-10.pdf', () => textPdf(10));
+    await importFixture(page, file);
+    await gotoTool(page, 'split');
+
+    const grid = page.getByRole('listbox', { name: /Pages of/ });
+    await grid.getByRole('option', { name: /^Page 2 of/ }).click();
+    await grid.getByRole('option', { name: /^Page 3 of/ }).click({ modifiers: ['Shift'] });
+
+    // `split` is in `TOOLS_WITH_EXPORT_REVIEW` — extract mode used to be the
+    // one branch of it that wrote straight to disk without ever opening the
+    // dialog the action bar's own copy promised.
+    await page.getByRole('button', { name: 'Split / extract' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Review before saving' });
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole('button', { name: /^Save /, exact: false }).click();
+    await expect(dialog).not.toBeVisible();
   });
 
   test('split: every-N mode covers the whole document', async ({ page }) => {
@@ -678,6 +717,63 @@ test.describe('tool flows', () => {
     const extracted = page.getByRole('textbox', { name: 'Extracted text' });
     await expect(extracted).toBeVisible({ timeout: 30_000 });
     expect(await extracted.inputValue()).toContain('the quick brown fox jumps over the lazy dog');
+  });
+
+  test('switching tabs is blocked while a job runs on the active document', async ({ page }) => {
+    // Real, multi-second work, same as the CMP-03 tests below — the window
+    // this race needs actually has to be open long enough to click into.
+    test.setTimeout(180_000);
+    const jpeg = await makePhotoJpeg(page, 1600, 1200, 0.85);
+    const heavyFile = await ensureFixture('mixed-text-image-tabs.pdf', () =>
+      mixedTextImagePdf(jpeg)
+    );
+    const otherFile = await ensureFixture('text-2.pdf', () => textPdf(2));
+
+    await importFixture(page, heavyFile);
+
+    // A second tab: the drop zone only exists on the home route (`/`), not
+    // on a tool route with a document already open, so this goes home first
+    // — home renders regardless of whether documents are already open —
+    // imports there (adding a document rather than replacing the one open),
+    // then heads back to Compress.
+    await page.evaluate(() => {
+      window.location.hash = '#/';
+    });
+    await page.locator('input[type="file"]').setInputFiles(otherFile);
+    const otherTab = page.getByRole('button', { name: 'text-2.pdf', exact: true });
+    await expect(otherTab).toBeVisible();
+
+    // Back on the heavy document before starting the slow job on it.
+    const heavyTab = page.getByRole('button', {
+      name: 'mixed-text-image-tabs.pdf',
+      exact: true
+    });
+    await heavyTab.click();
+    await gotoTool(page, 'compress');
+    await expect(heavyTab).toHaveAttribute('aria-current', 'true');
+
+    // `useJob`'s shared `activeJob` signal — the same one the action bar's
+    // own busy-gate reads — is what a tab switch used to be able to run
+    // straight past, letting a handler that reads `activeDoc`/`currentDocumentBytes`
+    // more than once across its own `await`s (e.g. building a "before" and an
+    // "after" separately) silently pick up whichever document was active by
+    // the time its *second* read happened.
+    await page.getByRole('button', { name: /Analyse without changing/ }).click();
+    await expect(otherTab).toBeDisabled();
+
+    // Blocked, not silently ignored — still on the document the job is
+    // running for. A disabled native <button> does not fire a click even
+    // when forced, which is exactly the point of this assertion.
+    await otherTab.click({ force: true });
+    await expect(heavyTab).toHaveAttribute('aria-current', 'true');
+    await expect(otherTab).not.toHaveAttribute('aria-current', 'true');
+
+    await expect(page.getByText(/Images re-encoded, text kept/i)).toBeVisible({ timeout: 60_000 });
+
+    // The job is done — switching works again.
+    await expect(otherTab).toBeEnabled();
+    await otherTab.click();
+    await expect(otherTab).toHaveAttribute('aria-current', 'true');
   });
 
   test('compress: CMP-03 keeps a transparent image transparent, with no black box', async ({
