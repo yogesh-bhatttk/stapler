@@ -72,20 +72,20 @@ export function OrganizePanel() {
           {t('Duplicate')}
         </Button>
         <Button
-          variant="danger"
-          icon={Trash2}
-          disabled={targets.length >= doc.pages.length && selection.size === 0}
-          onClick={() => deletePages(doc.id, targets)}
-        >
-          {t('Delete')}
-        </Button>
-        <Button
           variant="secondary"
           icon={CropIcon}
           disabled={selection.size > 1}
           onClick={openCrop}
         >
           {t('Crop…')}
+        </Button>
+        <Button
+          variant="danger"
+          icon={Trash2}
+          disabled={targets.length >= doc.pages.length && selection.size === 0}
+          onClick={() => deletePages(doc.id, targets)}
+        >
+          {t('Delete')}
         </Button>
       </div>
 
