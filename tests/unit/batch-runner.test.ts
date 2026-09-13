@@ -317,3 +317,71 @@ describe('permission restrictions survive a batch run', () => {
     expect(written[0].bytes).toEqual(new Uint8Array([0, 9, 3]));
   });
 });
+
+/**
+ * CLAUDE.md: "Never emit output larger than the input on a 'compress'
+ * operation \u2014 fall back and say so." `compressDocument`'s own `keptOriginal`
+ * check only sees the bytes it was handed; it cannot see that restriction
+ * reapplication (a fresh `/Encrypt` dictionary, hex-string ciphertext, and
+ * `useObjectStreams: false`) is about to add bytes back afterwards. Batch
+ * writes its own output rather than going through `commit.ts`'s `save()`
+ * (whose own `growthGuard` only covers that path), so this guarantee has to
+ * hold here on its own too.
+ */
+describe("compress's never-grow guarantee survives restriction reapplication", () => {
+  it('discards a compressed result once reapplying restrictions regrows it past the original', async () => {
+    const { inDir, outDir, written } = dirs([
+      // bytes: [1, 9, 3] \u2014 marker 1, restricted (byte[1] === 9), length 3.
+      fileHandle('locked.pdf', { marker: 1, restricted: true })
+    ]);
+    state.inputDirHandle.value = inDir as never;
+    state.outputDirHandle.value = outDir as never;
+
+    planCompression.mockResolvedValueOnce({ alreadyOptimized: false });
+    // A "compression" that does not actually shrink anything (a real codec can
+    // legitimately land here on already-incompressible content) \u2014 on its own
+    // this looks harmless (same size, not larger), but restrictDocument's
+    // mock adds one byte back, which would land the final file one byte
+    // *larger* than the original.
+    compressDocument.mockImplementationOnce(async (bytes: Uint8Array) => ({
+      bytes: new Uint8Array(bytes),
+      keptOriginal: false
+    }));
+
+    await runBatch();
+
+    // Reverted to the untouched original \u2014 already correctly restricted, so
+    // no second restriction pass was needed once compression was discarded.
+    expect(written[0].bytes).toEqual(new Uint8Array([1, 9, 3]));
+    expect(
+      state.batchProgress.value.notes.some(
+        n => n.file === 'locked.pdf' && n.kind === 'kept-original'
+      )
+    ).toBe(true);
+  });
+
+  it('keeps a compressed result that is still smaller once restrictions are reapplied', async () => {
+    const { inDir, outDir, written } = dirs([
+      fileHandle('locked.pdf', { marker: 1, restricted: true })
+    ]);
+    state.inputDirHandle.value = inDir as never;
+    state.outputDirHandle.value = outDir as never;
+
+    planCompression.mockResolvedValueOnce({ alreadyOptimized: false });
+    // Shrinks by two bytes \u2014 still smaller than the original even after
+    // restrictDocument's mock adds one byte back.
+    compressDocument.mockImplementationOnce(async (bytes: Uint8Array) => ({
+      bytes: bytes.slice(0, bytes.length - 2),
+      keptOriginal: false
+    }));
+
+    await runBatch();
+
+    expect(written[0].bytes).toEqual(new Uint8Array([1, 0xee]));
+    expect(
+      state.batchProgress.value.notes.some(
+        n => n.file === 'locked.pdf' && n.kind === 'kept-original'
+      )
+    ).toBe(false);
+  });
+});

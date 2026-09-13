@@ -153,6 +153,10 @@ export async function runBatch(signal?: AbortSignal) {
         const { hasWatermarkContent, hasHeaderFooterContent } = await import('../watermark/state');
 
         let currentBytes = bytes;
+        // Set only when a 'compress' step actually ran (not when it was
+        // skipped as already-optimized) — the bytes fed into it, so the
+        // never-grow guard below has something to fall back to.
+        let preCompressBytes: Uint8Array | null = null;
 
         // Apply tools in the order declared by recipe.tools (or defaults).
         for (const toolId of activeTools) {
@@ -227,6 +231,7 @@ export async function runBatch(signal?: AbortSignal) {
                 detail: 'Already optimised — there was nothing left to compress.'
               });
             } else {
+              preCompressBytes = currentBytes;
               const res = await compressDocument(currentBytes, compress, report);
               if (res.keptOriginal) {
                 addNote({
@@ -270,12 +275,48 @@ export async function runBatch(signal?: AbortSignal) {
         // Only when something actually rewrote the file: an untouched
         // `currentBytes` *is* the input, `/Encrypt` and all, and re-encrypting
         // it would be both pointless and a second parse per batch item.
+        let permissionRestrictions: number | null = null;
         if (currentBytes !== bytes) {
-          const { permissionRestrictions } = await processWorker.lease(api => api.inspect(bytes));
-          if (typeof permissionRestrictions === 'number') {
+          const inspected = await processWorker.lease(api => api.inspect(bytes));
+          if (typeof inspected.permissionRestrictions === 'number') {
+            permissionRestrictions = inspected.permissionRestrictions;
             currentBytes = await processWorker.lease(api =>
-              api.restrictDocument(currentBytes, permissionRestrictions)
+              api.restrictDocument(currentBytes, permissionRestrictions as number)
             );
+          }
+        }
+
+        // CLAUDE.md's never-grow guarantee for "compress" applies here too,
+        // and restriction reapplication is exactly where it can be broken:
+        // re-encrypting adds a fresh `/Encrypt` dictionary, hex-string
+        // ciphertext, and forces `useObjectStreams: false` (no xref stream),
+        // which together can outweigh what compression saved — silently
+        // handing back a batch file larger than skipping compression would
+        // have, on a document merely restricted enough that compressing it
+        // was never worth it. Compared against skipping compression
+        // altogether — restricted the same way this file's actual output
+        // was, so a real restriction cost isn't mistaken for one compression
+        // caused — not the bare pre-compress bytes.
+        if (preCompressBytes) {
+          const withoutCompress =
+            preCompressBytes === bytes
+              ? bytes
+              : permissionRestrictions !== null
+                ? await processWorker.lease(api =>
+                    api.restrictDocument(
+                      preCompressBytes as Uint8Array,
+                      permissionRestrictions as number
+                    )
+                  )
+                : preCompressBytes;
+          if (currentBytes.byteLength > withoutCompress.byteLength) {
+            currentBytes = withoutCompress;
+            addNote({
+              file: fileHandle.name,
+              kind: 'kept-original',
+              detail:
+                'Reapplying this document’s restrictions after compression would have produced a file no smaller than skipping compression, so the compressed version was discarded.'
+            });
           }
         }
 
