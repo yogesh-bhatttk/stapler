@@ -26,6 +26,12 @@ import { normalizeRotation } from './rotation';
 import { pruneRenderHandles } from './render-cache';
 import { deleteSourceBytes, readSourceBytes } from './opfs';
 import { sideBySideSourceId } from '../ui/tools/side-by-side/state';
+import { cropBoxes, type CropBox } from '../ui/tools/crop/state';
+// Aliased: this module already declares its own, unrelated `Annotation`
+// (form/signature marks on `doc.annotations`) — `annotate/state.ts`'s is the
+// Annotate tool's freehand/highlight/etc. marks, keyed by page in
+// `pageAnnotations`, a different concept that happens to share a name.
+import { pageAnnotations, type Annotation as PageAnnotation } from '../ui/tools/annotate/state';
 export interface PageRef {
   /** Stable across reorders, so thumbnails and selection survive a move. */
   key: string;
@@ -407,16 +413,50 @@ export function duplicatePages(docId: string, pageKeys: Iterable<string>): void 
   const keys = new Set(pageKeys);
   if (keys.size === 0) return;
   commit();
+  // Collected while walking `doc.pages` below and applied to `cropBoxes`/
+  // `pageAnnotations` afterwards — those are separate signals keyed by page
+  // key, not part of `PageRef` itself, so spreading `page` into the duplicate
+  // (which is what already carries rotation forward, since that *is* a
+  // `PageRef` field) does nothing for them on its own. Left uncopied, a
+  // duplicate of a cropped or annotated page would silently start out
+  // uncropped and unannotated — every other page property survives
+  // duplication, so this one not surviving reads as data loss, not a
+  // deliberate "duplicates start clean" design.
+  const newCropBoxes: Record<string, CropBox> = {};
+  const newAnnotations: Record<string, PageAnnotation[]> = {};
   mutateDoc(docId, doc => {
     const pages: PageRef[] = [];
     for (const page of doc.pages) {
       pages.push(page);
       // A duplicate is a new ref to the same source page, with its own key so
       // selection and thumbnails treat the two independently.
-      if (keys.has(page.key)) pages.push({ ...page, key: crypto.randomUUID() });
+      if (keys.has(page.key)) {
+        const newKey = crypto.randomUUID();
+        pages.push({ ...page, key: newKey });
+        const crop = cropBoxes.value[page.key];
+        if (crop) newCropBoxes[newKey] = crop;
+        const annotations = pageAnnotations.value[page.key];
+        if (annotations?.length) {
+          // Fresh ids too, not just a new map key — these are meant to be
+          // independent marks on independent pages from here on, and a
+          // shared id could confuse any lookup that expects ids to be unique
+          // across the document.
+          newAnnotations[newKey] = annotations.map(a => ({
+            ...a,
+            id: crypto.randomUUID(),
+            pageKey: newKey
+          }));
+        }
+      }
     }
     return { ...doc, pages };
   });
+  if (Object.keys(newCropBoxes).length > 0) {
+    cropBoxes.value = { ...cropBoxes.value, ...newCropBoxes };
+  }
+  if (Object.keys(newAnnotations).length > 0) {
+    pageAnnotations.value = { ...pageAnnotations.value, ...newAnnotations };
+  }
 }
 
 /**

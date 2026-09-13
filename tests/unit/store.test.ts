@@ -27,6 +27,8 @@ import {
 } from '../../src/core/store';
 import { canUndo, resetHistory, undo } from '../../src/core/history';
 import { __memoryFallback } from '../../src/core/opfs';
+import { cropBoxes } from '../../src/ui/tools/crop/state';
+import { pageAnnotations } from '../../src/ui/tools/annotate/state';
 
 function seed(pageCount = 5, sourceId = 'src-a'): StaplerDoc {
   const id = sourceId ?? crypto.randomUUID();
@@ -55,6 +57,8 @@ beforeEach(() => {
   sources.value = {};
   activeDocId.value = null;
   selectedPageKeys.value = new Set();
+  cropBoxes.value = {};
+  pageAnnotations.value = {};
   resetHistory();
 });
 
@@ -230,6 +234,52 @@ describe('duplicatePages', () => {
     const pages = documents.value[0].pages;
     expect(pages.map(p => p.sourceIndex)).toEqual([0, 0, 1]);
     expect(new Set(pages.map(p => p.key)).size).toBe(3);
+  });
+
+  it('carries the crop box and page annotations forward to the duplicate', () => {
+    const doc = seed(2);
+    const originalKey = doc.pages[0].key;
+    cropBoxes.value = { [originalKey]: { x: 0.1, y: 0.1, width: 0.8, height: 0.8 } };
+    pageAnnotations.value = {
+      [originalKey]: [
+        {
+          id: 'ann-1',
+          pageKey: originalKey,
+          type: 'highlight',
+          color: '#ffeb3b',
+          strokeWidth: 2,
+          rect: { x: 0, y: 0, width: 10, height: 10 }
+        }
+      ]
+    };
+
+    duplicatePages(doc.id, [originalKey]);
+
+    const pages = documents.value[0].pages;
+    expect(pages.map(p => p.sourceIndex)).toEqual([0, 0, 1]);
+    const duplicateKey = pages[1].key;
+    expect(duplicateKey).not.toBe(originalKey);
+
+    // The original's own crop box and annotation are untouched...
+    expect(cropBoxes.value[originalKey]).toEqual({ x: 0.1, y: 0.1, width: 0.8, height: 0.8 });
+    expect(pageAnnotations.value[originalKey]).toHaveLength(1);
+    // ...and the duplicate got its own independent copies, not a shared
+    // reference: every other page property (e.g. rotation) already survives
+    // duplication, so crop/annotations silently not surviving would read as
+    // data loss, not a deliberate "duplicates start clean" design.
+    expect(cropBoxes.value[duplicateKey]).toEqual({ x: 0.1, y: 0.1, width: 0.8, height: 0.8 });
+    expect(pageAnnotations.value[duplicateKey]).toHaveLength(1);
+    expect(pageAnnotations.value[duplicateKey][0].pageKey).toBe(duplicateKey);
+    // A fresh id, not a twin of the original's, so a per-id lookup can never
+    // find one page's mark on the other.
+    expect(pageAnnotations.value[duplicateKey][0].id).not.toBe('ann-1');
+  });
+
+  it('does not touch crop boxes or annotations when the source page has none', () => {
+    const doc = seed(2);
+    duplicatePages(doc.id, [doc.pages[0].key]);
+    expect(cropBoxes.value).toEqual({});
+    expect(pageAnnotations.value).toEqual({});
   });
 });
 
