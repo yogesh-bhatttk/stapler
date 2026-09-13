@@ -15,6 +15,22 @@ import { FIXTURES_DIR } from './fixtures';
 import { openApp, gotoTool, importFile } from './helpers';
 
 test.describe('discard all changes', () => {
+  test('is not offered on a freshly opened document with nothing to discard', async ({ page }) => {
+    await openApp(page);
+    await importFile(page, path.join(FIXTURES_DIR, 'bookmarked-9.pdf'));
+    await gotoTool(page, 'organize');
+
+    // Nothing has been touched yet — the button must not sit there enabled,
+    // ready to pop a "danger" confirmation for a click that would discard
+    // nothing at all.
+    await expect(page.getByRole('button', { name: 'Discard all changes…' })).toHaveCount(0);
+
+    const grid = page.getByRole('listbox', { name: /Pages of/ });
+    await grid.getByRole('option', { name: /^Page 1 of/ }).focus();
+    await page.keyboard.press('r');
+    await expect(page.getByRole('button', { name: 'Discard all changes…' })).toBeVisible();
+  });
+
   test('reverts rotation, crop, and a watermark in one action', async ({ page }) => {
     await openApp(page);
     await importFile(page, path.join(FIXTURES_DIR, 'bookmarked-9.pdf'));

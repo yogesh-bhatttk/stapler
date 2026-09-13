@@ -15,16 +15,75 @@ import { translate } from '../core/i18n';
 import { clearPageSelection, discardPageChanges, type StaplerDoc } from '../core/store';
 import { cropBoxes } from './tools/crop/state';
 import { pageAnnotations } from './tools/annotate/state';
-import { resetStampSettings } from './tools/watermark/state';
+import {
+  batesSettings,
+  barcodeStampSettings,
+  hasHeaderFooterContent,
+  hasWatermarkContent,
+  headerFooterSettings,
+  resetStampSettings,
+  watermarkSettings
+} from './tools/watermark/state';
 import { nupSettings } from './tools/nup/state';
-import { resetOutlineIfLoaded } from './tools/outline/state';
-import { resetRedactionState } from './tools/redact/state';
+import { outlineDocId, outlineEdited, resetOutlineIfLoaded } from './tools/outline/state';
+import { pendingRedactions, resetRedactionState } from './tools/redact/state';
+
+/**
+ * Whether there is actually anything `confirmAndDiscardAllChanges` would
+ * revert or clear — every source it touches, checked read-only. The action
+ * bar uses this to decide whether to offer the action at all: without it, the
+ * button sat there fully enabled on a document nobody had touched yet,
+ * popping a "danger" confirmation for a click that would have discarded
+ * nothing.
+ */
+export function hasAnythingToDiscard(doc: StaplerDoc): boolean {
+  // Mirrors `refreshBaseline`/`addDocument`: baseline is only ever a *new*
+  // array once a mutation (rotate/reorder/delete/duplicate) has actually
+  // happened, so reference inequality is exactly "the page list changed",
+  // not merely "an array was recreated".
+  if (doc.pages !== doc.baseline) return true;
+
+  const keys = [...doc.pages, ...doc.baseline].map(p => p.key);
+  if (keys.some(key => cropBoxes.value[key])) return true;
+  if (keys.some(key => pageAnnotations.value[key]?.length)) return true;
+
+  if (hasWatermarkContent(watermarkSettings.value)) return true;
+  if (hasHeaderFooterContent(headerFooterSettings.value)) return true;
+  if (batesSettings.value.enabled) return true;
+  if (barcodeStampSettings.value.enabled) return true;
+  if (nupSettings.value !== null) return true;
+  if (outlineDocId.value === doc.id && outlineEdited.value) return true;
+  if (pendingRedactions.value.length > 0) return true;
+
+  return false;
+}
 
 /**
  * Prompts for confirmation, then applies the reset if the user agrees.
  * Returns whether it actually happened, in case a caller wants to react.
  */
+// `confirmAction`'s `confirmRequest` is a single global signal (`core/notify.ts`)
+// — a second call before the first resolves replaces it outright, silently
+// orphaning the first `await` forever (nothing ever calls its `resolve`,
+// since the dialog now shows the *second* request). A fast double-click,
+// before the modal has actually mounted to swallow the second click, is
+// exactly that: two overlapping calls into the same confirm. Guarded at
+// module scope, not component state, so it holds regardless of which button
+// (Organize's, or another tool's — this is rendered on every tool's action
+// bar) fired it.
+let discardInFlight = false;
+
 export async function confirmAndDiscardAllChanges(doc: StaplerDoc): Promise<boolean> {
+  if (discardInFlight) return false;
+  discardInFlight = true;
+  try {
+    return await discardAllChangesFlow(doc);
+  } finally {
+    discardInFlight = false;
+  }
+}
+
+async function discardAllChangesFlow(doc: StaplerDoc): Promise<boolean> {
   const confirmed = await confirmAction({
     title: translate('Discard all changes to this document?'),
     body: translate(

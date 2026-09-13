@@ -15,7 +15,7 @@ import { Button } from '../components/Button';
 import { ProgressBar } from '../components/Feedback';
 import { commitTool, TOOLS_WITH_EXPORT_REVIEW } from '../tools/commit';
 import { commitGate } from '../tools/commit-gate';
-import { confirmAndDiscardAllChanges } from '../discardAllChanges';
+import { confirmAndDiscardAllChanges, hasAnythingToDiscard } from '../discardAllChanges';
 import { useJob } from '../useJob';
 import styles from './ActionBar.module.css';
 import { useTranslation } from '../../core/i18n';
@@ -74,7 +74,7 @@ export function ActionBar() {
             regardless of which panel happens to be open, so this lives on
             the action bar (present on every tool) rather than duplicated
             into each panel that can make a change. */}
-        {doc && !busy && (
+        {doc && !busy && hasAnythingToDiscard(doc) && (
           <Button variant="tertiary" onClick={() => void confirmAndDiscardAllChanges(doc)}>
             {t('Discard all changes…')}
           </Button>
