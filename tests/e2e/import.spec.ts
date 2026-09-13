@@ -11,7 +11,7 @@
 import { expect, test } from '@playwright/test';
 import { PDFDocument } from 'pdf-lib';
 import { corruptPdf, ensureFixture, FIXTURES_DIR, textPdf } from './fixtures';
-import { openApp } from './helpers';
+import { confirmExportReviewIfShown, openApp } from './helpers';
 
 /** Imports through the real file input; images pause on the options dialog first. */
 async function importThrough(page: import('@playwright/test').Page, file: string) {
@@ -156,7 +156,11 @@ test.describe('DOC-02 import and validation', () => {
     await expect(grid.getByRole('option')).toHaveCount(3);
 
     const download = page.waitForEvent('download', { timeout: 60_000 });
-    await page.getByRole('button', { name: /Export PDF/i }).click();
+    // Importing images generically (rather than through the dedicated Images
+    // to PDF panel) lands on Organize once the conversion resolves, so this
+    // is Organize's button, not Images to PDF's — hence "View changes…".
+    await page.getByRole('button', { name: /View changes/i }).click();
+    await confirmExportReviewIfShown(page, download);
     const saved = await download;
     const location = await saved.path();
     expect(location).toBeTruthy();

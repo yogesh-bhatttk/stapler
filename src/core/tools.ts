@@ -86,7 +86,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     icon: 'Layers',
     canvasMode: 'grid',
     needsOptionsPanel: true,
-    commitLabel: 'Export PDF',
+    commitLabel: 'View changes…',
     selectable: false,
     // Merge builds a document from scratch, same as images-to-pdf — it should
     // never require opening one first just to have something to add files to.
@@ -100,7 +100,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     icon: 'LayoutGrid',
     canvasMode: 'grid',
     needsOptionsPanel: true,
-    commitLabel: 'Export PDF',
+    commitLabel: 'View changes…',
     selectable: true
   },
   {
@@ -166,7 +166,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     icon: 'Crop',
     canvasMode: 'single',
     needsOptionsPanel: true,
-    commitLabel: 'Export PDF',
+    commitLabel: 'View changes…',
     selectable: false
   },
   {
@@ -177,7 +177,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     icon: 'Stamp',
     canvasMode: 'single',
     needsOptionsPanel: true,
-    commitLabel: 'Export PDF',
+    commitLabel: 'View changes…',
     selectable: false
   },
   {
@@ -188,7 +188,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     icon: 'ListTree',
     canvasMode: 'single',
     needsOptionsPanel: true,
-    commitLabel: 'Export PDF',
+    commitLabel: 'View changes…',
     selectable: false
   },
   {
@@ -244,7 +244,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     icon: 'FileText',
     canvasMode: 'grid',
     needsOptionsPanel: true,
-    commitLabel: 'Export PDF',
+    commitLabel: 'View changes…',
     selectable: true
   },
   {
@@ -369,7 +369,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     icon: 'FilePlus',
     canvasMode: 'grid',
     needsOptionsPanel: true,
-    commitLabel: 'Export PDF',
+    commitLabel: 'View changes…',
     // Selecting a page in the grid sets the insertion anchor — the panel inserts
     // right after the last selected page.
     selectable: true

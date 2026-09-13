@@ -36,7 +36,7 @@ import {
   contractV1Pdf,
   contractV2Pdf
 } from './fixtures';
-import { gotoTool, openApp } from './helpers';
+import { commitAndRead, gotoTool, openApp } from './helpers';
 
 /**
  * QA-04 — one import → operate → export flow per P0 tool, asserting the real output
@@ -51,16 +51,6 @@ async function importFixture(page: import('@playwright/test').Page, file: string
   await openApp(page);
   await page.locator('input[type="file"]').setInputFiles(file);
   await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
-}
-
-/** Clicks the action bar's primary button and returns the downloaded bytes. */
-async function commitAndRead(page: import('@playwright/test').Page, label: string | RegExp) {
-  const download = page.waitForEvent('download', { timeout: 60_000 });
-  await page.getByRole('button', { name: label }).click();
-  const saved = await download;
-  const location = await saved.path();
-  expect(location).toBeTruthy();
-  return new Uint8Array(readFileSync(location!));
 }
 
 /* ------------------------------------------------------------------ *
@@ -447,7 +437,7 @@ test.describe('tool flows', () => {
       .catch(() => {});
     await expect(page.getByText('5 pages').first()).toBeVisible();
 
-    const bytes = await commitAndRead(page, 'Export PDF');
+    const bytes = await commitAndRead(page, 'View changes');
     const output = await PDFDocument.load(bytes);
     expect(output.getPageCount()).toBe(5);
     expect(output.getPage(0).getRotation().angle).toBe(90);
@@ -487,7 +477,7 @@ test.describe('tool flows', () => {
     await importFixture(page, file);
     await gotoTool(page, 'merge');
 
-    const bytes = await commitAndRead(page, 'Export PDF');
+    const bytes = await commitAndRead(page, 'View changes');
     const output = await PDFDocument.load(bytes);
     expect(output.getPageCount()).toBe(3);
     const heights = output.getPages().map(p => Math.round(p.getSize().height));
@@ -526,7 +516,7 @@ test.describe('tool flows', () => {
       timeout: 30_000
     });
 
-    const bytes = await commitAndRead(page, 'Export PDF');
+    const bytes = await commitAndRead(page, 'View changes');
     const output = await PDFDocument.load(bytes);
     expect(output.getPageCount()).toBe(3);
   });
@@ -534,7 +524,7 @@ test.describe('tool flows', () => {
   test('merge: exporting with nothing added yet warns instead of crashing', async ({ page }) => {
     await openApp(page);
     await gotoTool(page, 'merge');
-    await page.getByRole('button', { name: 'Export PDF' }).click();
+    await page.getByRole('button', { name: 'View changes' }).click();
     await expect(page.getByText('Nothing to export.')).toBeVisible();
   });
 
@@ -1229,7 +1219,7 @@ test.describe('tool flows', () => {
     await page.getByRole('button', { name: 'Dismiss notification' }).click();
 
     await gotoTool(page, 'organize');
-    const bytes = await commitAndRead(page, 'Export PDF');
+    const bytes = await commitAndRead(page, 'View changes');
     const output = await PDFDocument.load(bytes);
     expect(await drawnText(bytes)).not.toContain('Line 1 of body text on page 1.');
     expect(await drawnText(bytes)).toContain('Line 2 of body text on page 1.');
@@ -1268,7 +1258,7 @@ test.describe('tool flows', () => {
     await page.getByRole('button', { name: 'Dismiss notification' }).click();
 
     await gotoTool(page, 'organize');
-    const bytes = await commitAndRead(page, 'Export PDF');
+    const bytes = await commitAndRead(page, 'View changes');
 
     // The page still draws an image — the uncovered part of it is content the
     // user kept — but it is not the same image any more, and the original
@@ -1359,7 +1349,7 @@ test.describe('tool flows', () => {
     await page.getByRole('button', { name: 'Dismiss notification' }).click();
 
     await gotoTool(page, 'organize');
-    const bytes = await commitAndRead(page, 'Export PDF');
+    const bytes = await commitAndRead(page, 'View changes');
     const text = await drawnText(bytes);
     expect(text).not.toContain('INSIDESHAPE');
     expect(text).toContain('CORNERKEEP');
@@ -1595,7 +1585,7 @@ test.describe('tool flows', () => {
     await page.mouse.move(box.x + 200, box.y + 200, { steps: 5 });
     await page.mouse.up();
 
-    const result = await commitAndRead(page, /Export PDF/i);
+    const result = await commitAndRead(page, /View changes/i);
     const output = await PDFDocument.load(result);
     const cropBox = output.getPage(0).getCropBox();
     expect(cropBox.width).toBeLessThan(output.getPage(0).getWidth());
@@ -1658,7 +1648,7 @@ test.describe('tool flows', () => {
     await page.keyboard.press('Control+z');
     await expect(page.getByRole('group', { name: /Crop box/i })).toBeVisible();
 
-    const result = await commitAndRead(page, /Export PDF/i);
+    const result = await commitAndRead(page, /View changes/i);
     const output = await PDFDocument.load(result);
     const page1Crop = output.getPage(0).getCropBox();
     const page2Crop = output.getPage(1).getCropBox();
@@ -1680,7 +1670,7 @@ test.describe('tool flows', () => {
     // Choose bottom-center position
     await page.getByLabel('Position').selectOption('bottom-center');
 
-    const bytes = await commitAndRead(page, /Export PDF/i);
+    const bytes = await commitAndRead(page, /View changes/i);
     const output = await PDFDocument.load(bytes);
 
     // The former assertion only proved that the export still had six pages. This
@@ -1700,7 +1690,7 @@ test.describe('tool flows', () => {
     await page.getByLabel('Header text').fill('ACME Corp');
     await page.getByLabel('Footer text').fill('Page {n} of {total}');
 
-    const bytes = await commitAndRead(page, /Export PDF/i);
+    const bytes = await commitAndRead(page, /View changes/i);
     const output = await PDFDocument.load(bytes);
 
     expect(await drawnText(bytes)).toContain('ACME Corp');
@@ -1725,7 +1715,7 @@ test.describe('tool flows', () => {
     await page.getByRole('button', { name: /Add bookmark for page 1/ }).click();
     await expect(titles).toHaveCount(BOOKMARK_CHAPTERS.length + 1);
 
-    const bytes = await commitAndRead(page, /Export PDF/i);
+    const bytes = await commitAndRead(page, /View changes/i);
     expect(await outlineTitles(bytes)).toEqual([
       'Front matter',
       'Appendix',
@@ -1745,7 +1735,7 @@ test.describe('tool flows', () => {
     await page.getByLabel('Digits').fill('6');
     await page.getByLabel('Start at').fill('1');
 
-    const bytes = await commitAndRead(page, /Export PDF/i);
+    const bytes = await commitAndRead(page, /View changes/i);
     // `drawnText` reads page 1; the whole-document sequence is asserted on output
     // bytes in tests/unit/outline.test.ts.
     expect(await drawnText(bytes)).toContain('ACME-000001');

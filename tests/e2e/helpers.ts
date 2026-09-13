@@ -1,4 +1,5 @@
 import { expect, type Page } from '@playwright/test';
+import { readFileSync } from 'node:fs';
 
 /**
  * Forces the `<input type=file>` + anchor-download fallback.
@@ -70,4 +71,40 @@ export async function gotoTool(page: Page, tool: string) {
 export async function importFile(page: Page, file: string) {
   await page.locator('input[type="file"]').setInputFiles(file);
   await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
+}
+
+/**
+ * Clicks through the "Review before saving" dialog if one opens, otherwise
+ * does nothing.
+ *
+ * UX-01/02/03 put every `TOOLS_WITH_EXPORT_REVIEW` tool's save behind that
+ * dialog — the action bar's button no longer writes a file by itself, it
+ * opens the review, and only the dialog's own "Save …" button does. A tool
+ * outside that set (Compress, Cleanup) still saves straight from the one
+ * click, so this races the given `settled` promise (typically a pending
+ * `download` event) against the dialog appearing, rather than waiting on the
+ * dialog first — a direct-save tool isn't stuck paying for a dialog that was
+ * never going to open.
+ */
+export async function confirmExportReviewIfShown(page: Page, settled: Promise<unknown>) {
+  const review = page.getByRole('dialog', { name: 'Review before saving' });
+  await Promise.race([
+    settled.catch(() => {}),
+    review
+      .waitFor({ state: 'visible', timeout: 60_000 })
+      .then(() => review.getByRole('button', { name: /^Save / }).click())
+      .catch(() => {})
+  ]);
+}
+
+/** Clicks the action bar's primary button and returns the downloaded bytes. */
+export async function commitAndRead(page: Page, label: string | RegExp) {
+  const download = page.waitForEvent('download', { timeout: 60_000 });
+  await page.getByRole('button', { name: label }).click();
+  await confirmExportReviewIfShown(page, download);
+
+  const saved = await download;
+  const location = await saved.path();
+  expect(location).toBeTruthy();
+  return new Uint8Array(readFileSync(location!));
 }

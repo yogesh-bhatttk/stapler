@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { ensureFixture, textPdf } from './fixtures';
-import { gotoTool, openApp } from './helpers';
+import { confirmExportReviewIfShown, gotoTool, openApp } from './helpers';
 import AxeBuilder from '@axe-core/playwright';
 import { TOOLS as TOOL_REGISTRY } from '../../src/core/tools';
 
@@ -379,7 +379,8 @@ test.describe('performance budgets (PLAN §5.1)', () => {
       requestAnimationFrame(measure);
     });
 
-    await page.getByRole('button', { name: 'Export PDF' }).click();
+    await page.getByRole('button', { name: 'View changes' }).click();
+    await confirmExportReviewIfShown(page, downloadPromise);
     await downloadPromise;
     const elapsed = Date.now() - started;
 

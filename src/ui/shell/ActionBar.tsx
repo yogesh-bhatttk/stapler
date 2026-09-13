@@ -37,10 +37,11 @@ export function ActionBar() {
    * is not an accessible one; the panel states it at length too.
    */
   const gate = commitGate(tool.id);
-  // A tool whose commit routes through a review step first — the button still
-  // says "Export PDF" (or whatever its own copy is), but nothing is actually
-  // written until the preview it opens is confirmed. Said here rather than
-  // relabelling ~20 tool-specific button strings.
+  // A tool whose commit routes through a review step first. The compose-only
+  // tools say so on the button itself ("View changes…" — see `core/tools.ts`);
+  // the rest still do real work first (Compress, OCR, Sign…) and keep a
+  // verb-led label, so this line is what tells *those* the click won't just
+  // save immediately either.
   const previewsFirst = !gate && TOOLS_WITH_EXPORT_REVIEW.has(tool.id);
 
   return (
