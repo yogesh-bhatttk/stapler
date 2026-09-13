@@ -386,6 +386,19 @@ export function rotatePages(docId: string, pageKeys: Iterable<string>, delta: nu
   }));
 }
 
+/**
+ * Reverts this document's page list to its baseline — rotate/reorder/delete/
+ * duplicate made since the last import or save are discarded. Routed through
+ * `mutateDoc` like any other page mutation, so it pushes a normal undo entry;
+ * the tool-level settings (crop/watermark/outline/redaction/annotations) a
+ * "discard all changes" action also clears are not page-scoped and are reset
+ * separately, by the caller.
+ */
+export function discardPageChanges(docId: string): void {
+  commit();
+  mutateDoc(docId, doc => ({ ...doc, pages: doc.baseline }));
+}
+
 export function rotatePage(docId: string, pageKey: string, delta: number): void {
   rotatePages(docId, [pageKey], delta);
 }

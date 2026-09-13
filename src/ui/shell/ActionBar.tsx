@@ -15,6 +15,7 @@ import { Button } from '../components/Button';
 import { ProgressBar } from '../components/Feedback';
 import { commitTool, TOOLS_WITH_EXPORT_REVIEW } from '../tools/commit';
 import { commitGate } from '../tools/commit-gate';
+import { confirmAndDiscardAllChanges } from '../discardAllChanges';
 import { useJob } from '../useJob';
 import styles from './ActionBar.module.css';
 import { useTranslation } from '../../core/i18n';
@@ -68,6 +69,16 @@ export function ActionBar() {
       )}
 
       <div className={styles.actions}>
+        {/* Document-level, not tool-specific — a rotation done in Organize, a
+            crop box, and a watermark are all "changes to this document"
+            regardless of which panel happens to be open, so this lives on
+            the action bar (present on every tool) rather than duplicated
+            into each panel that can make a change. */}
+        {doc && !busy && (
+          <Button variant="tertiary" onClick={() => void confirmAndDiscardAllChanges(doc)}>
+            {t('Discard all changes…')}
+          </Button>
+        )}
         {/* Only shown while there is something to cancel, rather than being a
             permanently dead control. */}
         {job && (

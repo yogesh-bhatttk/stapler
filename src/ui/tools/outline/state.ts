@@ -40,6 +40,19 @@ export const outlineLoadedSignature = signal<string | null>(null);
  */
 export const outlineEdited = signal(false);
 
+/**
+ * Clears the loaded/edited outline for `docId`, if it's the one currently
+ * loaded — leaves another document's loaded outline untouched. Used by
+ * Organize's "discard all changes." Leaves `outlineLoading`/the signature
+ * signals alone; the panel re-derives them the next time it mounts.
+ */
+export function resetOutlineIfLoaded(docId: string): void {
+  if (outlineDocId.value !== docId) return;
+  outlineTree.value = [];
+  outlineEdited.value = false;
+  outlineDocId.value = null;
+}
+
 /** Applies a tree edit and records that the outline is now the user's, not the file's. */
 export function editTree(edit: (tree: OutlineEntry[]) => OutlineEntry[]): void {
   const next = edit(outlineTree.value);

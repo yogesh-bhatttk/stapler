@@ -27,14 +27,19 @@ export const patternScanRan = signal(false);
 /** Verification result, held so RED-03's report survives closing the dialog. */
 export const redactionReport = signal<RedactionOutcome | null>(null);
 
+/** Clears every redaction-in-progress signal — shared by the doc-switch effect below and Organize's "discard all changes." */
+export function resetRedactionState(): void {
+  pendingRedactions.value = [];
+  redactionReport.value = null;
+  patternSuggestions.value = [];
+  patternScanRan.value = false;
+}
+
 // `RedactionRegion.pageIndex` is a raw index into whichever document applyRedactions
 // runs against — it means nothing once the active document changes. Left in place,
 // marks drawn on document A's page 3 would silently target document B's page 3 on
 // Verify & Apply after switching documents without applying or clearing them first.
 effect(() => {
   void activeDocId.value;
-  pendingRedactions.value = [];
-  redactionReport.value = null;
-  patternSuggestions.value = [];
-  patternScanRan.value = false;
+  resetRedactionState();
 });

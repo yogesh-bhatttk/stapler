@@ -137,6 +137,50 @@ export function hasHeaderFooterContent(settings: HeaderFooterSettings): boolean 
   return !!settings.headerText.trim() || !!settings.footerText.trim();
 }
 
+/**
+ * Resets every stamp — watermark, header/footer, Bates, barcode — to its
+ * default. These are workspace-wide, not scoped to one document, so this
+ * clears them for every open tab; used by Organize's "discard all changes."
+ */
+export function resetStampSettings(): void {
+  watermarkSettings.value = {
+    kind: 'text',
+    text: '',
+    image: null,
+    imageScale: 0.35,
+    position: 'center',
+    opacity: 0.5,
+    rotation: 45,
+    fontSize: 72,
+    color: DOC_SIGNATURE_STROKE,
+    startAt: 1,
+    pageRange: 'all'
+  };
+  headerFooterSettings.value = {
+    headerText: '',
+    headerAlign: 'center',
+    footerText: '',
+    footerAlign: 'center',
+    fontSize: 10,
+    pageRange: 'all'
+  };
+  batesSettings.value = {
+    enabled: false,
+    prefix: '',
+    digits: 6,
+    start: 1,
+    position: 'bottom-right',
+    fontSize: 10
+  };
+  barcodeStampSettings.value = {
+    enabled: false,
+    kind: 'qr',
+    text: '',
+    position: 'bottom-left',
+    scale: 0.12
+  };
+}
+
 /** Whether a 1-based `pageRange` string ("all" or "1-3, 6") covers `pageIndex` (0-based). */
 export function pageInRange(pageRange: string, pageIndex: number): boolean {
   const value = pageRange.trim().toLowerCase();
