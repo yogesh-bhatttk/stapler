@@ -1821,6 +1821,26 @@ test.describe('tool flows', () => {
     expect((await PDFDocument.load(bytes)).getPageCount()).toBe(9);
   });
 
+  test('bookmarks: "Add" targets the page the pager is actually showing', async ({ page }) => {
+    // `activePageIndex` (core/store.ts) is the one signal OutlinePanel's "Add"
+    // button, CropPanel/CropOverlay's "current" scope, and OCR's folder-search
+    // jump-to all read as "the page in view" — but `Canvas.tsx` used to track
+    // the single-page pager's position in its own local state instead of that
+    // signal, so none of those readers ever saw where the pager had moved to.
+    const file = await ensureFixture('bookmarked-9.pdf', bookmarkedPdf);
+    await importFixture(page, file);
+    await gotoTool(page, 'outline');
+
+    await expect(page.getByRole('button', { name: /Add bookmark for page 1/ })).toBeVisible();
+    await page.getByRole('button', { name: 'Next' }).click();
+    await page.getByRole('button', { name: 'Next' }).click();
+    await expect(page.getByRole('button', { name: /Add bookmark for page 3/ })).toBeVisible();
+
+    await page.getByRole('button', { name: /Add bookmark for page 3/ }).click();
+    const titles = page.getByRole('textbox', { name: /^Bookmark title/ });
+    await expect(titles.last()).toHaveValue('Page 3');
+  });
+
   test('bates: a stamped run is sequential and zero-padded (OPS-11)', async ({ page }) => {
     const file = await ensureFixture('text-6.pdf', () => textPdf(6));
     await importFixture(page, file);

@@ -9,9 +9,15 @@
  * live in core/render-cache.ts, keyed by source, and outlive this component.
  */
 import { useActiveTool } from '../useActiveTool';
-import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useEffect, useMemo } from 'preact/hooks';
 
-import { activeDoc, makePageRefs, selectedPageKeys, sources } from '../../core/store';
+import {
+  activeDoc,
+  activePageIndex,
+  makePageRefs,
+  selectedPageKeys,
+  sources
+} from '../../core/store';
 import { pruneRenderHandles } from '../../core/render-cache';
 
 import { EmptyState } from '../components/Feedback';
@@ -37,7 +43,18 @@ export function Canvas() {
   const t = useTranslation();
   const tool = useActiveTool();
   const doc = activeDoc.value;
-  const [pageIndex, setPageIndex] = useState(0);
+  // The single, shared "current page" — CropPanel/CropOverlay's `current`
+  // scope, Outline's "add a bookmark here", and OCR's folder-search jump-to
+  // all read this same signal expecting it to track whichever page the
+  // single-page view is actually showing. It used to be a local `useState`
+  // here instead: those readers saw whatever the signal was last set to by
+  // one of the writers, not the page the pager had since moved to — CropPanel
+  // resetting a page you had long since paged away from, and Outline naming
+  // a new bookmark after the wrong page.
+  const pageIndex = activePageIndex.value;
+  const setPageIndex = (index: number) => {
+    activePageIndex.value = index;
+  };
 
   // Retire pdf.js documents for sources nothing references any more. Keyed on the
   // source *ids*, not the documents array, so a page reorder does not trigger it.
