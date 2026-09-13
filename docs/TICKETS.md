@@ -151,6 +151,35 @@ Build the primitives and app components listed in DESIGN-ADAPTATION §5.
 - **AC:** Back/forward navigate between tools correctly. Resizing across both breakpoints
   never clips a control or produces a horizontal scrollbar.
 
+**Amended (2026-09-14):** `FileTabs` did not gate switching or closing the active tab
+against a running job — `useJob`'s shared `activeJob` signal only ever disabled the action
+bar's own commit button. A handler that reads `activeDoc`/calls `currentDocumentBytes` more
+than once across its own `await`s (building a "before" and an "after" separately, for
+instance — several do) could silently pick up a different document mid-job if the user
+switched tabs in the gap between those reads. Switching to a *different* tab and closing
+the *active* one (which also moves `activeDocId`, the same risk) are both now blocked while
+a job runs; the active tab itself stays clickable (a harmless no-op) and a non-active tab
+can still be closed freely. `tests/e2e/tool-flows.spec.ts` › "switching tabs is blocked
+while a job runs on the active document" drives a real multi-second compression analysis
+and asserts the other tab is disabled for its duration, then enabled again once it finishes.
+
+**Amended (2026-09-14) — a second, unrelated bug found investigating UX-06 below:**
+`Canvas.tsx`'s single-page dispatcher tracked the pager's position in its own local
+`useState`, never reading or writing `core/store.ts`'s `activePageIndex` signal — the one
+signal `CropPanel`/`CropOverlay`'s `current` scope, `OutlinePanel`'s "Add bookmark for page
+N", and OCR's folder-search jump-to all read expecting it to mean "the page the single-page
+view is showing right now". In practice it meant "whichever page one of those two external
+writers last jumped to", stale the moment the user paged anywhere with the view's own
+Previous/Next buttons: page to page 5 in Crop and click "Reset crop on current page", and it
+reset page 1's crop, not the one on screen; page to page 3 in Outline and click "Add
+bookmark for page 3" (the button's own label, computed from the same stale signal, so even
+the *label* was wrong), and both the label and the bookmark it added named whatever page the
+signal last happened to hold. `Canvas.tsx` now reads and writes `activePageIndex` directly
+instead of a parallel local copy, so every reader sees the page actually on screen.
+`tests/e2e/tool-flows.spec.ts` › 'bookmarks: "Add" targets the page the pager is actually
+showing'; `tests/e2e/organize-crop-shortcut.spec.ts` (UX-06, below) exercises the same fix
+from the Crop side.
+
 ### DS-05 · Home launcher — `M` `P0`
 
 **Status: Done** — Drop zone states, fuzzy tool search, Recents from persisted handles.
@@ -200,6 +229,17 @@ dirty }`. `PageRef` carries source doc id, source index, rotation, crop box, and
 - **AC:** Reordering one page in a 300-page document re-renders only affected thumbnails
   (verified in a performance profile).
 
+**Amended (2026-09-14):** `duplicatePages` copied a page's rotation forward to its
+duplicate (a `PageRef` field, carried by spreading the page) but not its crop box or page
+annotations — separate signals keyed by page key, unaffected by minting the duplicate's new
+key. A duplicate of a cropped or annotated page silently started out uncropped and
+unannotated, while every other property of the page it was duplicated from survived —
+inconsistent in a way that reads as data loss, not a deliberate "duplicates start clean"
+design. Both now carry forward to the duplicate's own key (page annotations re-issued fresh
+ids, so a per-id lookup can never find one page's mark on the other).
+`tests/unit/store.test.ts` › "carries the crop box and page annotations forward to the
+duplicate".
+
 ### DOC-02 · Import and validation — `M` `P0`
 
 **Status: Done** — Re-verified against the real corpus, not against intent.
@@ -210,6 +250,26 @@ dirty }`. `PageRef` carries source doc id, source index, rotation, crop box, and
 - **Oversized:** `largeFileWarning()` is unit-tested at the boundary (100MB exactly → silent, +1 byte → warns), and an import of a >100MB PDF is proven to warn rather than refuse (`tests/unit/import.test.ts`). The warning now also covers oversized *images*, which it previously did not.
 - **Two full copies of the bytes — one real instance found and fixed:** `render.worker.ts` `loadDocument` did `new Uint8Array(bytes)` before handing the buffer to pdf.js, so a 100MB import held 200MB in the render worker. The copy protected nothing: the argument arrives by structured clone (no call site transfers it), so the array is already private to that worker. Removed; all 34 `tool-flows` E2E tests, which load a document on every path, still pass. The main-thread read (`new Uint8Array(await file.arrayBuffer())`) is a view, not a copy, and was already correct.
 - **Fixed along the way:** `tiny.jpg` and `cmyk-text.pdf` were used by unit tests but neither committed nor generated — a fresh clone failed six tests. Both are now built by `scripts/generate-static-fixtures.mjs` and allow-listed. The unsupported-file message and the drop-zone hint both omitted TIFF while the pipeline accepted it; both now read from one `SUPPORTED_FORMATS` constant.
+- **Fixed 2026-09-12 (56db43c):** opening a permission-restricted PDF (no user password,
+  printing/copying forbidden by its owner — the common kind) means decrypting it, and
+  pdf-lib drops `/Encrypt` the instant it does; every export built from one used to be
+  written back with the restrictions silently gone. `core/pdf/load.ts`'s
+  `loadPdfDocumentWithRestrictions` now recovers the original `/P` from a second,
+  non-decrypting parse at import time (the only moment it is still readable) and carries
+  it on `SourceDocument.restrictions`; every export re-applies it
+  (`RED-06`'s `permissionOnlyPlan`, wired through `ui/tools/commit.ts`'s `save()`).
+  `tests/unit/permission-restrictions.test.ts` (20 tests) proves this against real output
+  bytes with pdf.js and poppler, not against `documentRestrictions()`'s own opinion.
+- **Amended (2026-09-14):** that second parse can itself fail on a malformed `/Encrypt`
+  dictionary — genuinely rare, since the decrypting parse right before it already
+  succeeded on the same bytes — and was silently reporting "nothing to preserve," which
+  is indistinguishable from a file that really has nothing to preserve and reintroduces
+  the exact silent-stripping bug above for that one case. Both places this can fail now
+  report a distinguishable `restrictionsUnknown`, surfaced as an import-time warning
+  ("this document's original permission restrictions could not be read…") instead of a
+  silent, unrestricted export. `tests/unit/permission-restrictions.test.ts` › "when the raw
+  /Encrypt re-parse itself fails"; `tests/unit/import.test.ts` › "warns when the original
+  restrictions could not be read, rather than exporting unrestricted with no notice".
 
 - **Requirements:** Accept PDF, PNG, JPEG, WebP, TIFF, HEIC. Detect and classify:
   encrypted, XFA, corrupt/truncated, oversized (>100MB warning). Read via streaming where
@@ -745,6 +805,20 @@ Covered by `tests/unit/history.test.ts` (undo/redo reaching the overlay layer) a
   report, output to a chosen directory or ZIP.
 - **AC:** 200 files process with a live queue; a deliberately corrupt file is reported and
   skipped while the other 199 complete.
+
+**Amended (2026-09-14):** CMP-04's never-grow guarantee ("no fixture, under any setting,
+can produce a saved file larger than its input") did not actually hold for a batch recipe
+that both compresses and touches a permission-restricted file. `compressDocument`'s own
+`keptOriginal` check compares only against the bytes it was handed; it has no way to know
+that restriction reapplication (a fresh `/Encrypt` dictionary, hex-string ciphertext, and
+`useObjectStreams: false` giving up the xref stream) is about to add bytes back afterwards
+— on a file barely worth compressing, that overhead alone could erase the gain and leave
+the batch output larger than skipping compression would have, written silently. The batch
+runner now compares its final, fully-restricted output against what skipping compression
+(restricted the same way) would have produced, and discards the compressed version with a
+`kept-original` note if it did not actually help. `tests/unit/batch-runner.test.ts` ›
+"compress's never-grow guarantee survives restriction reapplication" (two tests: one
+proving the discard, one proving a genuine reduction is still kept).
 
 ### BAT-02 · Saved recipes — `M` `P1`
 
@@ -1290,6 +1364,20 @@ support for V5/R6 AES-256, so this is expected to hold, but it is inference, not
   document that actually requires a password stays refused).
 - **AC:** Exported file requires the set password to open in an external viewer (Chrome's
   own PDF viewer, at minimum) and the unprotected original in the editor is unaffected.
+
+**Amended (2026-09-14):** the silent-restriction-preservation path DOC-02 added
+(`permissionOnlyPlan`, no password change requested) re-encrypts under this handler's one
+fixed algorithm the same as the explicit-password path does — a real, permanent narrowing
+of which readers can open the file (an old/embedded PDF viewer without R6 support could
+open the input and can no longer open the output), previously undisclosed: the file still
+opens with no password either way, so nothing was ever said about it. `save()`'s success
+toast now names it explicitly ("this document's restrictions were preserved (now
+AES-256-encrypted; needs a reader from the last decade or so)") when it happens, the same
+way the explicit-password path already discloses "password required to open." Preserving
+the *original* algorithm instead is not attempted — this handler is deliberately the only
+one pdf-lib gets, so there is no RC4/older-revision writer to fall back to (see this
+ticket's own header comment on why AES-256/R6 was chosen), and implementing one is out of
+proportion to how rarely an old-revision-encrypted, permission-only file is re-exported.
 
 ### OPS-10 · Bookmark and outline editor — `M` `P1`
 
@@ -2690,6 +2778,25 @@ arrangement.
   further edits after export) instead of a claim recovery now makes false.
 - 5 new unit tests; full suite (817 tests) green, `tsc --noEmit`, `eslint`, `prettier` all
   clean.
+- **Fixed 2026-09-13 (1082992):** `baseline` (added to `StaplerDoc` after this record
+  format already existed) could be missing entirely from a record saved by an older build;
+  `restoreSession()` now backfills it from the document's own `pages` — the same
+  "baseline starts as whatever's there" rule a freshly opened document gets — rather than
+  handing back a document that crashes the moment anything reads `doc.baseline`.
+- **Amended (2026-09-14):** `checkRecovery`'s own validation against what OPFS still holds
+  only ever checked `doc.pages`, not `doc.baseline` — inconsistent with `closeDocument`'s
+  own source GC (`store.ts`), which deliberately unions both before deciding a source is
+  free, precisely because a baseline page can outlive the deletion of the page it came
+  from. A source freed in the narrow window between a crash and the next debounced
+  autosave could leave a *surviving* document's baseline pointing at bytes that no longer
+  exist, passing this check because its *current* pages happened not to reference that
+  source. Traced forward, that dangling reference breaks every export-review diff for the
+  document (baseline compose throws) and, worse, "Discard all changes" copies it straight
+  into the *live* page list with no validation at all, permanently blanking that page's
+  thumbnail — a genuine "silently corrupt a document" gap. `checkRecovery` now checks the
+  union of `pages` and `baseline`, the same as `closeDocument` already does.
+  `tests/unit/session-recovery.test.ts` › "checkRecovery drops a document whose BASELINE
+  (not current pages) points at gone bytes".
 
 - **Requirements:** Persist enough session state to F-06's IndexedDB layer to reopen the
   editor after a crash or accidental reload and resume the in-progress document and undo
@@ -5179,6 +5286,217 @@ dependency was added.
   produces a PDF with one page per slide, all slide text present, verified against
   the source deck's own text content. Beta label and mandatory preview appear before
   save.
+
+---
+
+## EPIC-17 · Workflow polish
+
+Six features shipped together over 2026-09-12/13, the first five sharing one thread: never
+let an export surprise the user — show them what is about to be written, never write
+something they did not ask for, and never make discarding a change riskier than making one.
+The sixth (UX-06) is a smaller, unrelated shortcut from the same commit. Same hard
+invariants and definition of done as every other epic in this file. Audited for edge cases
+on 2026-09-14 (this file's own tickets were never written for this work until this pass —
+the commits shipped it directly); every fix below has a regression test that fails on the
+pre-fix code, confirmed by reverting the fix and re-running it.
+
+### UX-01 · Unified open-document flow — `S` `P1`
+
+**Status: Done** — `core/open-document.ts` factors "pick or drop files → import → add as
+workspace document(s)" out of the home route's drop zone (DS-05) into one shared entry
+point (`pickAndImportFiles`/`importFilesAsDocuments`), so a tool opened with nothing loaded
+is not a dead end: `OpenDocumentPrompt` (previously inert text in `OptionsPanel`) calls the
+same pipeline and lands the user in the same tool once a file is chosen.
+
+**Audited and hardened (2026-09-14):** the button's own label picked up a wording change
+("Open a document…" → "Open a document or image…") whose translation never made it past
+`en.json` — every one of the other 10 locales silently fell back to English for the button
+specifically, while the caption above it was correctly translated (a *different* key,
+which did get updated everywhere). Fixed by adding the missing key to all 10 locale files.
+`tests/e2e/i18n.spec.ts` › "the open-document empty-state button is translated, not left
+in English".
+
+- **Requirements:** A single "open a document" pipeline, reachable both from the home
+  route's drop zone and from any tool's own empty state, importing PDFs and images through
+  the same validation/classification path.
+- **AC:** Opening a tool with nothing loaded shows a prompt that itself opens a file,
+  landing in the same tool. The prompt's copy and its button are both translated in every
+  supported locale, not just English.
+
+### UX-02 · Pre-export review: page rendering and diff — `M` `P1`
+
+**Status: Done** — `core/diff-preview.ts` renders a `beforeIndex`/`afterIndex` pair from
+two documents to `ImageData` via the render worker and pixel-diffs them (`pixelDiff`),
+reusing the exact render-worker call shape ANN-05's `visual-diff-export.ts` already
+established — load both documents in one lease, render the target page from each, close
+both handles. `core/page-alignment.ts`'s `alignPages` matches `current` against `baseline`
+by each page's stable key (survives rotation, reordering, and the deletion of *other*
+pages), so a reordered page is compared against its true counterpart rather than whatever
+sits at the same position on both sides.
+
+**Audited and hardened (2026-09-14) — five real bugs found and fixed:**
+1. `alignPages`'s `moved` flag compared `beforeIndex` to raw `currentIndex` — deleting or
+   duplicating *any* page shifted every later page's index, wrongly flagging it
+   "reordered" (delete page 3 of 9 → 6 pages wrongly badged "Was page N"). Replaced with a
+   longest-increasing-subsequence check over the `beforeIndex` sequence, so only pages
+   genuinely out of relative order are flagged — a deletion just removes an element from
+   an already-increasing sequence, it does not disturb it. `tests/unit/page-alignment.test.ts`
+   (new — this module had no unit coverage at all before this pass).
+2. A 90/270° rotation swaps the rendered page's width and height, which made the pair
+   `comparable: false` — masking any *other* edit (crop, watermark) made on the same page
+   behind a misleading "this page changed size" note that was simply the wrong
+   explanation. `diffPage` now takes a `rotationOverride` (a new parameter on the render
+   worker's `renderPage`) and renders the baseline page at the *current* page's rotation
+   instead of its own, so a rotation-only change compares as pixel-identical and a real
+   edit layered on top of one still surfaces. `tests/e2e/review-alignment.spec.ts` › "a
+   rotated page compares cleanly, not as a false 'changed size'".
+3. N-up collapses 2–4 original pages onto one output sheet; `alignPages`'s per-page
+   metadata (one entry per *original* page) was still being read at a *sheet* index by
+   every handler whose compose can include N-up (`annotate`, `normalize`, `metadata`,
+   `ocr`, and the generic organize-style exporter), handing the wrong baseline page to a
+   sheet and showing false Rotated/Was-page badges. Alignment is now skipped entirely
+   whenever N-up is active — after-only review, the same treatment the contact sheet
+   already gets for the identical "different page layout entirely" reason.
+   `tests/e2e/review-alignment.spec.ts` › "an N-up export does not misapply per-page
+   alignment badges to sheets".
+4. A leaked render-worker document handle when the *before* load rejected: `Promise.all`
+   rejects before a destructuring assignment from its resolved value ever runs, which was
+   skipping the handle-close for an *after* load that had actually succeeded just fine.
+   Each load's handle is now captured off its own `.then` as soon as it resolves, not off
+   the combined `Promise.all` result.
+5. Clicking Next before the real page count had resolved could push `pageIndex` past the
+   last real page; the "after" render then came back `null` and the display silently fell
+   back to showing the *before* image, unlabeled, as if it were the result. `canNext` now
+   requires a confirmed count rather than optimistically assuming one exists.
+
+- **Requirements:** Render and diff one page from each of two documents by true page
+  identity, not position; degrade gracefully (no diff mask, no crash) when the two pages
+  are not pixel-comparable.
+- **AC:** A rotated page with no other edit shows no differences and no "changed size"
+  note. A crop/N-up/Normalize-resized page shows both images side by side, not just the
+  after page. Reordering, deleting, or duplicating pages never mislabels an untouched page
+  as changed.
+
+### UX-03 · Pre-export review modal — `M` `P1`
+
+**Status: Done** — `ExportReviewModal.tsx` reads `exportReviewRequest` (set by
+`commit.ts`'s `reviewAndSave`/`reviewAndSaveZip`/`reviewOnly`) and resolves it when the
+user picks Save or Cancel. `'single'` shows a page-by-page before/after `CompareSlider`
+with a pixel-diff-highlight toggle; `'zip'` shows a file list, each member previewed on its
+own, since a split chunk or an extracted image never lines up 1:1 with an original page.
+
+**Audited and hardened (2026-09-14):** none of the modal's three render effects (the
+single-page diff, the removed-page preview, the zip member preview) caught a render
+failure — a rejected promise left a blank stage with Save still enabled and no
+explanation, indistinguishable on screen from "nothing changed here." All three now catch
+and show a plain-language note instead of failing silently.
+
+- **Requirements:** Show the result of a commit before it is written, with a real
+  before/after comparison where one is meaningful and an after-only preview where it is
+  not (a page subset, a different layout, a non-PDF archive member).
+- **AC:** Cancelling writes nothing. A render failure is disclosed to the user, not
+  silently blank with Save still available.
+
+### UX-04 · Route every export through a mandatory review — `M` `P1`
+
+**Status: Done** — `TOOLS_WITH_EXPORT_REVIEW` names every handler in `commit.ts` whose
+output routes through `reviewAndSave`/`reviewAndSaveZip`/`reviewOnly` before `save()` ever
+writes a byte, so the action bar can tell the user up front that its commit button shows a
+preview first rather than saving immediately, without duplicating each handler's own logic
+to find out.
+
+**Audited and hardened (2026-09-14) — four real bugs found and fixed:**
+1. `save()` unconditionally re-anchored the diff baseline (`refreshBaseline`) to the
+   current page list after *any* successful write — including a ZIP export
+   (pdf-to-images, extract-images, split-to-zip), a page-subset extract, or the contact
+   sheet, none of which write out `doc.pages` as a real document. Rotate or delete pages,
+   export to an image ZIP, then export the real PDF, and the review would have compared
+   `doc.pages` against itself and reported nothing changed for edits that were never
+   actually written anywhere. `save()` and `reviewAndSave()` now take a
+   `refreshesBaseline` flag, false for every one of those non-representative paths.
+2. The same non-representative paths could also trigger "Save over original" (offered
+   whenever the document has a writable file handle), letting the user silently overwrite
+   their real PDF with a ZIP or a page subset. Gated off by the same flag — when
+   `refreshesBaseline` is false, "save over original" is never offered, only "save as a
+   new file."
+3. `split` is in `TOOLS_WITH_EXPORT_REVIEW` — the action bar tells the user a preview
+   comes first — but extract mode wrote straight to disk, the one branch of it that
+   bypassed the dialog entirely. Now goes through `reviewAndSave` like the tool's other
+   branches (after-only, since a page subset has no 1:1 "before"). `tests/e2e/tool-flows.spec.ts`
+   › "split: extracting a selection shows a review before saving".
+4. Deleting every page (`deletePages` has no last-page guard — select-all-and-delete is a
+   legitimate way to clear a document before starting over) hit `composeDocument`'s own
+   internal "there are no pages to export" error, which surfaced as a generic "something
+   went wrong inside Stapler, file an issue" dialog for an entirely ordinary state. Caught
+   once, centrally, in `commitTool`, before any handler runs, with a plain "Nothing to
+   export" message. `tests/e2e/tool-flows.spec.ts` › "deleting every page shows a clear
+   message, not a crash dialog".
+
+- **Requirements:** Every tool that writes a file shows the user what it is about to
+  write first, unless the output can't meaningfully be diffed (in which case an
+  after-only preview still appears) — never a silent write.
+- **AC:** No handler named in `TOOLS_WITH_EXPORT_REVIEW` writes a file without the dialog
+  having appeared and been confirmed first, regardless of output shape (single PDF, ZIP,
+  page subset, or derived layout).
+
+### UX-05 · Discard all changes — `S` `P1`
+
+**Status: Done** — `ui/discardAllChanges.ts`'s `confirmAndDiscardAllChanges` reverts a
+document's page structure to its baseline (rotate/reorder/delete/duplicate since the last
+import or save) and clears crop, watermark/header-footer/Bates/barcode, N-up, this
+document's loaded outline, redaction marks, and page annotations — all in one confirmed
+action. Rendered on every tool's action bar, not folded into Organize's panel, since a
+rotation, a crop box, and a watermark are all "changes to this document" regardless of
+which panel happens to be open when the user wants out of all of them at once.
+
+**Audited and hardened (2026-09-14) — two real bugs found and fixed:**
+1. The button was unconditionally enabled whenever a document was open and not busy,
+   popping a "danger" confirmation dialog for a click that would have discarded nothing on
+   a freshly-opened, untouched document. `hasAnythingToDiscard()` now checks, read-only,
+   every source the action actually touches (page-structure change, crop boxes, page
+   annotations, watermark/header-footer/Bates/barcode content, N-up, this document's
+   loaded-and-edited outline, pending redaction marks), and the button only renders when
+   at least one of them has something to revert. `tests/e2e/discard-all-changes.spec.ts`
+   › "is not offered on a freshly opened document with nothing to discard".
+2. `confirmAction`'s `confirmRequest` is a single global signal (`core/notify.ts`); a
+   second call before the first resolves replaces it outright, silently orphaning the
+   first `await` forever — its `resolve` is never called once the dialog is showing the
+   *second* request instead. A fast double-click, before the modal had actually mounted to
+   swallow further clicks, was exactly that. Guarded with a module-level in-flight flag,
+   so a second call while one is pending is a no-op rather than a stuck promise.
+   `tests/unit/discardAllChanges.test.ts` › "a second call while the first is still
+   awaiting confirmation is a no-op, not an orphaned promise".
+
+- **Requirements:** One confirmed action that reverts page-structure edits and clears
+  every other pending, workspace-wide edit at once, reachable from any tool screen.
+- **AC:** Offered only when there is something to discard. A fast double-invocation
+  cannot orphan the confirmation or fire the reset twice.
+
+### UX-06 · Organize's shortcut into Crop — `XS` `P1`
+
+**Status: Done** — `OrganizePanel.tsx`'s "Crop…" button jumps to the Crop tool scoped from
+whatever is currently selected in the page grid: nothing selected sets Crop's scope to
+`all`; exactly one page selected sets it to `current` and moves the single-page view to
+that page. Crop's own scope model (`current`/`all`/odd/even) has no notion of an arbitrary
+multi-page selection, so rather than inventing one, an in-between selection (more than one
+page, fewer than all) just disables the button — an honest limit, stated in the code
+rather than silently guessed at. Shipped in the same commit as UX-01–04 (2026-09-12) but
+never named in its commit message and, like the rest of this epic, never ticketed until
+now; unlike the rest of this epic it also had no test coverage at all before this pass.
+
+**Audited and hardened (2026-09-14):** selecting one page and clicking "Crop…" correctly
+set `cropSettings.scope` to `current`, but landed on whatever page the single-page view's
+own local state last held — not the page that had actually been selected — because of the
+`activePageIndex` bug DS-04's amendment above describes in full (this shortcut is one of
+its two writers, and the one that surfaced it first). Fixed by that same change.
+`tests/e2e/organize-crop-shortcut.spec.ts` (new) covers all three cases: nothing selected,
+one page selected, and the disabled in-between state.
+
+- **Requirements:** A single click from Organize into Crop, scoped to the current
+  selection where Crop's scope model can express it, disabled where it cannot.
+- **AC:** Nothing selected scopes to all pages; exactly one page selected scopes to and
+  visibly lands on that page; any other selection size disables the shortcut rather than
+  guessing.
 
 ---
 
