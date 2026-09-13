@@ -130,9 +130,18 @@ export async function checkRecovery(record: SessionRecord): Promise<RecoveryChec
 
   // A document with even one page whose source is gone is dropped whole:
   // a document silently missing some of its pages is worse than one that
-  // is not offered back at all.
+  // is not offered back at all. Checked against `baseline` too, not just
+  // `pages` — the export-review diff and "Discard all changes" both read
+  // straight from `baseline` (`doc.baseline ?? doc.pages`, the same fallback
+  // `restoreSession` uses below, for a record old enough to predate the
+  // field) — the same reasoning `closeDocument`'s own source GC already
+  // applies (`store.ts`, unions `pages` and `baseline` before freeing a
+  // source). A page current pages no longer reference can still be sitting
+  // in baseline, so checking `pages` alone would restore a document that
+  // exports fine today but throws the moment its diff (or a discard) tries
+  // to read the baseline page whose bytes are already gone.
   const survivingDocs = record.documents.filter(doc =>
-    doc.pages.every(page => existing.has(page.sourceDocId))
+    [...doc.pages, ...(doc.baseline ?? doc.pages)].every(page => existing.has(page.sourceDocId))
   );
   const droppedDocuments = record.documents.length - survivingDocs.length;
   if (survivingDocs.length === 0) return null;

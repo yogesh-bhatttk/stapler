@@ -285,6 +285,57 @@ describe('session-recovery (DOC-11)', () => {
     expect(await checkRecovery(record!)).toBeNull();
   });
 
+  it('checkRecovery drops a document whose BASELINE (not current pages) points at gone bytes', async () => {
+    // The dangling reference `closeDocument`'s own source GC already guards
+    // against (`store.ts` unions `pages` and `baseline` before freeing a
+    // source): current pages all resolve, but a since-deleted page is still
+    // sitting in baseline pointing at a source whose bytes are gone. Built
+    // directly rather than through `addDocument` (which always sets
+    // `baseline: pages`) to get pages and baseline pointing at different
+    // sources, the way an edited-then-partially-reverted document can.
+    await writeSourceBytes('src-9-live', new Uint8Array([1, 2, 3]));
+    await writeSourceBytes('src-9-gone', new Uint8Array([4, 5, 6]));
+    registerSource({
+      id: 'src-9-live',
+      name: 'i.pdf',
+      pageCount: 1,
+      pageSizes: [{ width: 1, height: 1 }]
+    });
+    registerSource({
+      id: 'src-9-gone',
+      name: 'i-old.pdf',
+      pageCount: 1,
+      pageSizes: [{ width: 1, height: 1 }]
+    });
+    const currentPages = makePageRefs('src-9-live', 1);
+    const baselinePages = makePageRefs('src-9-gone', 1);
+    const doc = {
+      id: 'doc-9',
+      name: 'i.pdf',
+      pages: currentPages,
+      baseline: baselinePages,
+      annotations: [],
+      dirty: true
+    };
+    settings.set('session.recovery', {
+      documents: [doc],
+      sources: sources.value,
+      activeDocId: 'doc-9',
+      selection: [],
+      cropBoxes: {},
+      pageAnnotations: {},
+      history: { undoStack: [], redoStack: [], undoLog: [], redoLog: [] },
+      savedAt: Date.now()
+    });
+    const record = await loadPendingRecovery();
+
+    // The race: baseline's source is gone by the time recovery is checked,
+    // even though every *current* page still resolves fine.
+    await deleteSourceBytes('src-9-gone');
+
+    expect(await checkRecovery(record!)).toBeNull();
+  });
+
   it('leaves no record after an explicit decline, so it is not offered again', async () => {
     registerSource({
       id: 'src-4',
