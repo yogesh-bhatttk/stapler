@@ -164,7 +164,15 @@ export async function checkRecovery(record: SessionRecord): Promise<RecoveryChec
 
 /** Replaces the live workspace wholesale with a previously saved one. */
 export function restoreSession(record: SessionRecord): void {
-  documents.value = record.documents;
+  // `baseline` (added after this record format existed) can be missing from a
+  // record saved by an older build — IndexedDB has no schema to migrate that
+  // against, so it's backfilled here, the one place a saved record becomes
+  // live state. Falling back to the document's own `pages` is the same
+  // "baseline starts as whatever's there" rule a freshly opened document
+  // gets; it just means edits from the session that crashed aren't visible
+  // in the very next review, which is the honest answer when there is no
+  // real baseline to recover.
+  documents.value = record.documents.map(doc => ({ ...doc, baseline: doc.baseline ?? doc.pages }));
   sources.value = record.sources;
   activeDocId.value = record.activeDocId;
   selectedPageKeys.value = new Set(record.selection);

@@ -180,6 +180,40 @@ describe('session-recovery (DOC-11)', () => {
     expect(pageAnnotations.value[pageKey][0].type).toBe('highlight');
   });
 
+  it('backfills a missing baseline from a record saved before that field existed', async () => {
+    // `baseline` was added after this record format shipped — IndexedDB has no
+    // schema to migrate the JSON payload against, so a record written by an
+    // older build restores with no `baseline` on its documents at all. This
+    // writes exactly that shape directly (bypassing `saveSession`, which only
+    // ever captures *current*, already-baseline'd `documents.value`) to prove
+    // `restoreSession` backfills it rather than handing back a document that
+    // crashes the first time anything reads `doc.baseline`.
+    const pages = makePageRefs('src-8', 1);
+    const legacyDoc = { id: 'doc-8', name: 'h.pdf', pages, annotations: [], dirty: false };
+    await writeSourceBytes('src-8', new Uint8Array([1, 2, 3]));
+    registerSource({
+      id: 'src-8',
+      name: 'h.pdf',
+      pageCount: 1,
+      pageSizes: [{ width: 1, height: 1 }]
+    });
+    settings.set('session.recovery', {
+      documents: [legacyDoc],
+      sources: sources.value,
+      activeDocId: 'doc-8',
+      selection: [],
+      cropBoxes: {},
+      pageAnnotations: {},
+      history: { undoStack: [], redoStack: [], undoLog: [], redoLog: [] },
+      savedAt: Date.now()
+    });
+
+    const record = await loadPendingRecovery();
+    restoreSession(record!);
+
+    expect(documents.value[0].baseline).toEqual(pages);
+  });
+
   it('clears the record once every document is closed, rather than saving an empty one', async () => {
     registerSource({
       id: 'src-3',
