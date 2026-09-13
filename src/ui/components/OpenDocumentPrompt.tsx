@@ -30,10 +30,10 @@ export function OpenDocumentPrompt() {
   return (
     <div className={panelStyles.section}>
       <p className={`${panelStyles.note} ${panelStyles.noteInfo}`}>
-        {t('Open a document to use this tool.')}
+        {t('Open a document or image to use this tool.')}
       </p>
       <Button variant="primary" icon={UploadCloud} onClick={open} disabled={busy}>
-        {t('Open a document…')}
+        {t('Open a document or image…')}
       </Button>
       {node}
     </div>
