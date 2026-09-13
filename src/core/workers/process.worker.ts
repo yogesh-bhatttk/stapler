@@ -204,6 +204,14 @@ export interface DocumentFacts {
    * copy of a file somebody restricted on purpose.
    */
   permissionRestrictions: number | null;
+  /**
+   * True when this document is encrypted and opens with no password, but its
+   * `/P` could not be read — `permissionRestrictions` is `null` in this case
+   * too, indistinguishable from "genuinely nothing to preserve" on its own.
+   * The importer warns on this specifically (`core/import.ts`) rather than
+   * silently exporting the file unrestricted with no one the wiser.
+   */
+  permissionRestrictionsUnknown: boolean;
 }
 
 export interface ImageFacts {
@@ -3864,7 +3872,10 @@ const api: ProcessJob = {
     // It costs an extra parse, and only for a file that carries `/Encrypt` at
     // all; import runs it once per file, where compose runs its loads once per
     // source per export and must not pay for it.
-    const { doc, restrictions } = await loadPdfDocumentWithRestrictions(bytes, true);
+    const { doc, restrictions, restrictionsUnknown } = await loadPdfDocumentWithRestrictions(
+      bytes,
+      true
+    );
     const form = doc.getForm();
     // Raw-byte evidence first: see `core/pdf/xfa.ts` for why the parsed answer
     // alone lets hybrid XFA forms through as ordinary AcroForms.
@@ -3875,7 +3886,8 @@ const api: ProcessJob = {
       isEncrypted: doc.isEncrypted,
       hasAcroForm: !isXfa && form.getFields().length > 0,
       fieldCount: isXfa ? 0 : form.getFields().length,
-      permissionRestrictions: restrictions
+      permissionRestrictions: restrictions,
+      permissionRestrictionsUnknown: restrictionsUnknown
     };
   },
 

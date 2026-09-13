@@ -121,6 +121,16 @@ async function importPdf(file: File, options: JobOptions): Promise<ImportedFile>
       if (facts.hasAcroForm && !isXfa) {
         warnings.push(`Contains ${facts.fieldCount} fillable form field(s).`);
       }
+      // `facts.permissionRestrictions` is `null` here too — this is the one
+      // case that isn't "nothing to preserve" and must not read as one:
+      // this file may well have arrived with real restrictions this codebase
+      // failed to parse, and — unlike the ordinary case — an export of it
+      // will silently not carry them forward unless the user is told now.
+      if (facts.permissionRestrictionsUnknown) {
+        warnings.push(
+          "This document's original permission restrictions could not be read, so they will not be reapplied when you export it."
+        );
+      }
 
       const id = crypto.randomUUID();
       const source: SourceDocument = {

@@ -52,31 +52,68 @@ export interface LoadedDocument {
    * `null` when there is nothing to preserve: no `/Encrypt` at all, a `/P` that
    * denies nothing, a non-standard security handler, or a file that only opened
    * because the caller passed `allowEncrypted` (its real user password is
-   * unknown, so its content cannot be rewritten anyway).
+   * unknown, so its content cannot be rewritten anyway). Also `null` when
+   * {@link restrictionsUnknown} is true — the two are indistinguishable from
+   * this field alone, which is exactly why that one exists.
    */
   restrictions: number | null;
+  /**
+   * True when this document's `/Encrypt` dictionary could not be parsed at
+   * all, so whether it actually restricts anything is genuinely unknown —
+   * `restrictions` above is `null`, the same as "nothing to preserve", but
+   * that would be papering over a real gap: this file may well have arrived
+   * with real restrictions this codebase simply failed to read, and an export
+   * of it will not carry them forward. A caller that surfaces import-time
+   * facts to the user (`core/import.ts`) should warn on this specifically,
+   * rather than let it look identical to the ordinary, unrestricted case.
+   */
+  restrictionsUnknown: boolean;
+}
+
+interface RestrictionsProbe {
+  flags: number | null;
+  unknown: boolean;
 }
 
 /** Reads `/Encrypt`'s `/P` from a document parsed *without* decrypting it. */
-function permissionsOf(doc: PDFDocument): number | null {
-  const entry = doc.context.trailerInfo.Encrypt;
-  const dict =
-    entry instanceof PDFRef
-      ? doc.context.lookupMaybe(entry, PDFDict)
-      : entry instanceof PDFDict
-        ? entry
-        : undefined;
-  if (!dict) return null;
-  // Only the standard security handler has a `/P` this codebase can re-create.
-  // A custom handler's permissions live in its own private encoding, and
-  // guessing at one is how a document comes out of here more permissive than
-  // it went in without anyone noticing.
-  if (dict.lookup(PDFName.of('Filter')) !== PDFName.of('Standard')) return null;
-  const p = dict.lookup(PDFName.of('P'));
-  if (!(p instanceof PDFNumber)) return null;
-  // `/P` is a signed 32-bit integer; some producers write it unsigned.
-  const flags = p.asNumber() | 0;
-  return (flags & MEANINGFUL_PERMISSION_BITS) === MEANINGFUL_PERMISSION_BITS ? null : flags;
+function permissionsOf(doc: PDFDocument): RestrictionsProbe {
+  try {
+    const entry = doc.context.trailerInfo.Encrypt;
+    const dict =
+      entry instanceof PDFRef
+        ? doc.context.lookupMaybe(entry, PDFDict)
+        : entry instanceof PDFDict
+          ? entry
+          : undefined;
+    if (!dict) return { flags: null, unknown: false };
+    // Only the standard security handler has a `/P` this codebase can
+    // re-create. A custom handler's permissions live in its own private
+    // encoding, and guessing at one is how a document comes out of here more
+    // permissive than it went in without anyone noticing — a deliberate
+    // "nothing to preserve" answer, not the unreadable case below.
+    if (dict.lookup(PDFName.of('Filter')) !== PDFName.of('Standard')) {
+      return { flags: null, unknown: false };
+    }
+    const p = dict.lookup(PDFName.of('P'));
+    if (!(p instanceof PDFNumber)) return { flags: null, unknown: false };
+    // `/P` is a signed 32-bit integer; some producers write it unsigned.
+    const flags = p.asNumber() | 0;
+    return {
+      flags: (flags & MEANINGFUL_PERMISSION_BITS) === MEANINGFUL_PERMISSION_BITS ? null : flags,
+      unknown: false
+    };
+  } catch (err) {
+    // A malformed `/Encrypt` dict that a lookup chokes on — genuinely rare,
+    // since this is called only on a document pdf-lib already parsed
+    // successfully. Not the deliberate "nothing to preserve" answer above:
+    // this file may carry real restrictions this codebase failed to read.
+    console.warn(
+      "Stapler: this document's /Encrypt dictionary could not be read; its permission " +
+        'restrictions, if any, will not be reapplied on export.',
+      err
+    );
+    return { flags: null, unknown: true };
+  }
 }
 
 /**
@@ -88,15 +125,23 @@ function permissionsOf(doc: PDFDocument): number | null {
  * encryption dictionary", and reconstructing `/P` from the decrypted document
  * is impossible because the value is simply no longer there.
  */
-async function restrictionsInBytes(bytes: Uint8Array): Promise<number | null> {
+async function restrictionsInBytes(bytes: Uint8Array): Promise<RestrictionsProbe> {
   try {
     const raw = await PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false });
     return permissionsOf(raw);
-  } catch {
-    // Unreadable encryption dictionary. The document itself already loaded, so
-    // the export goes ahead; it simply carries no restrictions, exactly as it
-    // did before any of this existed.
-    return null;
+  } catch (err) {
+    // The whole re-parse failed, not just one dictionary lookup within it —
+    // genuinely rare, since the decrypting parse in `loadInternal` already
+    // succeeded on these same bytes. The document itself still loads, so the
+    // export goes ahead rather than being refused over a restriction this
+    // codebase cannot even name; it simply cannot re-apply a `/P` it was
+    // unable to read.
+    console.warn(
+      "Stapler: this document's original permission restrictions could not be read " +
+        '(the /Encrypt dictionary failed to re-parse) and will not be reapplied on export.',
+      err
+    );
+    return { flags: null, unknown: true };
   }
 }
 
@@ -128,10 +173,10 @@ async function loadInternal(
         const decrypted = await PDFDocument.load(bytes, { password: '', updateMetadata: false });
         // The empty password opened it, so this is a permission-only file and
         // its `/P` is exactly what an export of it must carry back.
-        return {
-          doc: decrypted,
-          restrictions: wantRestrictions ? await restrictionsInBytes(bytes) : null
-        };
+        const probe = wantRestrictions
+          ? await restrictionsInBytes(bytes)
+          : { flags: null, unknown: false };
+        return { doc: decrypted, restrictions: probe.flags, restrictionsUnknown: probe.unknown };
       } catch {
         // The empty password didn't open it either — a real password is required.
         throw encrypted('The document is encrypted, so its contents cannot be rewritten.');
@@ -142,15 +187,18 @@ async function loadInternal(
   if (doc.isEncrypted && !allowEncrypted) {
     throw encrypted('The document is encrypted, so its contents cannot be rewritten.');
   }
-  if (!wantRestrictions || !doc.isEncrypted) return { doc, restrictions: null };
+  if (!wantRestrictions || !doc.isEncrypted) {
+    return { doc, restrictions: null, restrictionsUnknown: false };
+  }
   // `allowEncrypted` read this file without decrypting it, so its strings and
   // streams are still ciphertext and its `/Encrypt` dictionary is still here to
   // read. Its permissions are only worth reporting if the file opens with no
   // password at all — otherwise nothing downstream can rewrite it regardless.
-  return {
-    doc,
-    restrictions: (await opensWithEmptyPassword(bytes)) ? permissionsOf(doc) : null
-  };
+  if (!(await opensWithEmptyPassword(bytes))) {
+    return { doc, restrictions: null, restrictionsUnknown: false };
+  }
+  const probe = permissionsOf(doc);
+  return { doc, restrictions: probe.flags, restrictionsUnknown: probe.unknown };
 }
 
 export async function loadPdfDocument(

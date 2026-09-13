@@ -256,6 +256,43 @@ describe('recovering the original permissions at import', () => {
   });
 });
 
+describe('when the raw /Encrypt re-parse itself fails', () => {
+  it('reports restrictionsUnknown rather than silently treating the file as unrestricted', async () => {
+    const bytes = fixtureBytes('permission-no-print.pdf');
+    const realLoad = PDFDocument.load.bind(PDFDocument);
+    // The one call this fix cares about: `restrictionsInBytes`'s raw,
+    // undecrypting re-parse (`ignoreEncryption: true`, no `password` key) —
+    // distinct from the main `ignoreEncryption: false` call (which is what
+    // actually throws first, routing here) and the empty-password decrypt
+    // retry (which has a `password` key). Only that one is made to fail.
+    const spy = vi
+      .spyOn(PDFDocument, 'load')
+      .mockImplementation(async (input: Uint8Array, options?: Record<string, unknown>) => {
+        if (options?.ignoreEncryption === true && !('password' in (options ?? {}))) {
+          throw new Error('simulated malformed /Encrypt dictionary');
+        }
+        return realLoad(input, options as never);
+      });
+    try {
+      const result = await loadPdfDocumentWithRestrictions(bytes);
+      // Still opens and decrypts normally — a probe failure must not block
+      // the document itself, only what can be said about its restrictions.
+      expect(result.doc.isEncrypted).toBe(false);
+      expect(result.doc.getPageCount()).toBe(1);
+      expect(result.restrictions).toBeNull();
+      expect(result.restrictionsUnknown).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('leaves restrictionsUnknown false on the ordinary success path', async () => {
+    const result = await loadPdfDocumentWithRestrictions(fixtureBytes('permission-no-print.pdf'));
+    expect(result.restrictions).toBe(NO_PRINT_P);
+    expect(result.restrictionsUnknown).toBe(false);
+  });
+});
+
 describe('exporting a permission-restricted document', () => {
   it('writes a file that still refuses printing, copying and modifying', async () => {
     const doc = await openDocument('restricted', fixtureBytes('permission-no-print.pdf'));

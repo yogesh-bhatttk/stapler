@@ -27,7 +27,12 @@ interface StubDocumentInfo {
 /** Swappable per test: what the stubbed pdf.js load does with the bytes it is given. */
 let loadDocument: (bytes: Uint8Array) => Promise<StubDocumentInfo>;
 /** Swappable per test: what the stubbed pdf-lib inspection reports. */
-let inspect: () => Promise<{ hasAcroForm: boolean; fieldCount: number }>;
+let inspect: () => Promise<{
+  hasAcroForm: boolean;
+  fieldCount: number;
+  permissionRestrictions?: number | null;
+  permissionRestrictionsUnknown?: boolean;
+}>;
 
 const closed: string[] = [];
 
@@ -178,6 +183,30 @@ describe('DOC-02: every fixture imports or gets its own accurate explanation', (
     // Per-file isolation: the good file after the bad one still imported.
     expect(outcome.imported).toHaveLength(1);
     expect(outcome.imported[0].source.name).toBe('cjk.pdf');
+  });
+
+  it('warns when the original restrictions could not be read, rather than exporting unrestricted with no notice', async () => {
+    inspect = async () => ({
+      hasAcroForm: false,
+      fieldCount: 0,
+      permissionRestrictions: null,
+      permissionRestrictionsUnknown: true
+    });
+    const outcome = await importFiles([pdfFile('cjk.pdf', fixtureBytes('cjk.pdf'))]);
+    expect(outcome.imported[0].warnings).toContain(
+      "This document's original permission restrictions could not be read, so they will not be reapplied when you export it."
+    );
+  });
+
+  it('does not warn about restrictions for an ordinary file with nothing to preserve', async () => {
+    inspect = async () => ({
+      hasAcroForm: false,
+      fieldCount: 0,
+      permissionRestrictions: null,
+      permissionRestrictionsUnknown: false
+    });
+    const outcome = await importFiles([pdfFile('cjk.pdf', fixtureBytes('cjk.pdf'))]);
+    expect(outcome.imported[0].warnings.some(w => /restrictions/.test(w))).toBe(false);
   });
 
   it('an unsupported file type names every format that is actually accepted', async () => {
