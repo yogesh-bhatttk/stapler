@@ -37,4 +37,23 @@ test.describe('watermark/crop preview on the page grid', () => {
     await expect(page.getByText('CONFIDENTIAL').first()).toBeVisible();
     await expect(page.getByTestId('crop-box-preview').first()).toBeVisible();
   });
+
+  test('the staged watermark preview is hidden from the accessibility tree', async ({ page }) => {
+    await openApp(page);
+    await importFile(page, path.join(FIXTURES_DIR, 'bookmarked-9.pdf'));
+
+    await gotoTool(page, 'watermark');
+    await page.getByRole('textbox', { name: 'Text', exact: true }).fill('CONFIDENTIAL');
+
+    await gotoTool(page, 'organize');
+    const watermarkText = page.getByText('CONFIDENTIAL').first();
+    await expect(watermarkText).toBeVisible();
+
+    // Purely visual, like the crop-box overlay it sits alongside in every
+    // thumbnail — composed into every visible page's `role="option"` cell, so
+    // without this a screen reader user reviewing the grid would hear the
+    // watermark text announced once per page.
+    const overlay = watermarkText.locator('xpath=ancestor-or-self::*[@aria-hidden="true"][1]');
+    await expect(overlay).toHaveCount(1);
+  });
 });

@@ -52,6 +52,15 @@ export function WatermarkOverlay({ pageIndex, width }: WatermarkOverlayProps) {
   return (
     <div
       className={styles.overlay}
+      // Purely visual — the watermark text/image is baked into the exported
+      // PDF's content, not the editor's accessible page name. Matches
+      // `CropBoxPreview`'s own overlay, which this component was rendered
+      // alongside from the start; the gap only became reachable once
+      // `PageGrid` began composing this same component into every visible
+      // thumbnail's `role="option"` cell (rather than the single active page
+      // in the Watermark tool alone), where it would otherwise be announced
+      // once per thumbnail as a screen reader user reviews the grid.
+      aria-hidden="true"
       style={{
         alignItems: hAlign,
         justifyContent: vAlign,
