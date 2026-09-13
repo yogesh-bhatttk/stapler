@@ -9,7 +9,7 @@
  * audit) and no test would have failed.
  */
 import { expect, test } from '@playwright/test';
-import { openApp } from './helpers';
+import { openApp, gotoTool } from './helpers';
 
 test.describe('i18n', () => {
   test('switching language renders real translated text, not English fallback', async ({
@@ -46,5 +46,23 @@ test.describe('i18n', () => {
     await page.getByLabel('Change Language').selectOption('ar');
     await expect(page.locator('html')).toHaveAttribute('dir', 'rtl');
     await expect(page.getByRole('heading', { name: 'أدوات PDF دون اتصال' })).toBeVisible();
+  });
+
+  test('the open-document empty-state button is translated, not left in English', async ({
+    page
+  }) => {
+    await openApp(page);
+    await page.getByLabel('Change Language').selectOption('fr');
+
+    // No document open — every tool falls back to `OpenDocumentPrompt`. Its
+    // caption and its button used to share one translation key; the button
+    // was later given its own ("… or image…") that only ever got added to
+    // en.json, so every other locale silently fell back to English for the
+    // button alone while the caption right above it was correctly translated.
+    await gotoTool(page, 'organize');
+    await expect(
+      page.getByRole('button', { name: 'Ouvrir un document ou une image…' })
+    ).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Open a document or image…' })).toHaveCount(0);
   });
 });
