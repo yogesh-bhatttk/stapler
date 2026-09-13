@@ -27,6 +27,10 @@ import { beginTransaction } from '../../core/history';
 import { displayedAspectRatio } from '../../core/rotation';
 import { Thumbnail } from '../components/Thumbnail';
 import { eventMatchesShortcut, getEffectiveBinding, customShortcuts } from '../../core/shortcuts';
+import { WatermarkOverlay } from '../tools/watermark/WatermarkOverlay';
+import { watermarkSettings, hasWatermarkContent } from '../tools/watermark/state';
+import { CropBoxPreview } from '../tools/crop/CropBoxPreview';
+import { cropBoxes } from '../tools/crop/state';
 import styles from './PageGrid.module.css';
 
 /** Matches the `minmax()` floor below; both must change together. */
@@ -115,6 +119,11 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
   );
   const firstIndex = firstRow * metrics.columns;
   const visible = doc.pages.slice(firstIndex, lastRow * metrics.columns);
+
+  // Watermark and crop are global signals another tool may have staged — not yet
+  // in `doc.pages`, so nothing here shows them without this. Gated on whether
+  // anything is actually configured so idle tiles mount no extra overlay at all.
+  const showWatermarkPreview = hasWatermarkContent(watermarkSettings.value);
 
   const onScroll = useCallback(() => {
     setScrollTop(scrollerRef.current?.scrollTop ?? 0);
@@ -309,6 +318,7 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
             const isSelected = selection.has(page.key);
             const dropBefore = dropIndex === index;
             const dropAfter = dropIndex === index + 1 && index === doc.pages.length - 1;
+            const cropBox = cropBoxes.value[page.key];
 
             return (
               <div
@@ -364,6 +374,20 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
                   aspect={gridAspect}
                   isSelected={isSelected}
                   selectable={selectable}
+                  overlay={
+                    (showWatermarkPreview || cropBox) && (
+                      <>
+                        {showWatermarkPreview && (
+                          <WatermarkOverlay
+                            pageIndex={index}
+                            width={metrics.width}
+                            height={metrics.height}
+                          />
+                        )}
+                        {cropBox && <CropBoxPreview box={cropBox} />}
+                      </>
+                    )
+                  }
                 />
                 <span className={isSelected ? styles.pageNumberSelected : styles.pageNumber}>
                   {index + 1}

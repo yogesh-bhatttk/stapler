@@ -1,0 +1,16 @@
+.layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.dim {
+  position: absolute;
+  background: var(--scrim);
+}
+
+.box {
+  position: absolute;
+  border: 1.5px dashed var(--primary);
+  box-sizing: border-box;
+}

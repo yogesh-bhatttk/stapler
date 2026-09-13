@@ -14,6 +14,7 @@
  */
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { forwardRef } from 'preact/compat';
+import type { ComponentChildren } from 'preact';
 import { Check, RotateCw, Trash2 } from 'lucide-preact';
 import { deletePage, rotatePage, sources, type PageRef } from '../../core/store';
 import { bitmapKey, renderHandleFor, thumbnailCache } from '../../core/render-cache';
@@ -32,6 +33,13 @@ export interface ThumbnailProps {
   aspect: number;
   isSelected?: boolean;
   selectable?: boolean;
+  /**
+   * Read-only preview of settings staged on another tool (Watermark, Crop) but
+   * not yet baked into `doc.pages` — otherwise invisible until Export composes
+   * them in. Drawn between the page image and the grid's own selection/rotation
+   * chrome, so it sits "on the page" without covering either.
+   */
+  overlay?: ComponentChildren;
 }
 
 type State = 'loading' | 'ready' | 'failed';
@@ -44,7 +52,7 @@ function renderScale(cssWidth: number, pageWidthPt: number): number {
 }
 
 export const Thumbnail = forwardRef<HTMLDivElement, ThumbnailProps>(function Thumbnail(
-  { page, docId, width, aspect, isSelected, selectable },
+  { page, docId, width, aspect, isSelected, selectable, overlay },
   ref
 ) {
   const frameRef = useRef<HTMLDivElement>(null);
@@ -150,6 +158,8 @@ export const Thumbnail = forwardRef<HTMLDivElement, ThumbnailProps>(function Thu
           {state === 'failed' ? 'Cannot render' : ''}
         </div>
       )}
+
+      {overlay}
 
       {rotation !== 0 && <span className={styles.rotationBadge}>{rotation}°</span>}
 
