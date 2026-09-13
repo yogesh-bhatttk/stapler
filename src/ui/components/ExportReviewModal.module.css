@@ -48,6 +48,42 @@
   height: 100%;
 }
 
+.sideBySide {
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  gap: var(--space-md);
+  height: 100%;
+  width: 100%;
+}
+
+.sidePane {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+  max-width: 48%;
+}
+
+.sideLabel {
+  font: var(--text-small);
+  color: var(--ink-muted);
+}
+
+/* Same fit as `.page`, but `flex: 1` instead of a hard `height: 100%` — it
+   shares its row with the label above it rather than owning the whole box. */
+.sidePage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  width: auto;
+  max-width: 100%;
+  background: var(--doc-page);
+  box-shadow: var(--doc-shadow);
+  border: 1px solid var(--hairline-strong);
+}
+
 .toolbar {
   display: flex;
   align-items: center;

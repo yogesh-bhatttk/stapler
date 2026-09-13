@@ -66,4 +66,59 @@ test.describe('review diff reflects organize edits', () => {
     await expect(page.getByRole('dialog', { name: 'Review before saving' })).toBeVisible();
     await expect(page.getByText(/rotated/i).first()).toBeVisible();
   });
+
+  test('a crop shows both pages side by side, not just the after page', async ({ page }) => {
+    await openApp(page);
+    await importFile(page, path.join(FIXTURES_DIR, 'bookmarked-9.pdf'));
+    await gotoTool(page, 'crop');
+
+    const cropCanvas = page.locator('[aria-label="Page preview, scrollable"] canvas').first();
+    await expect(cropCanvas).toBeVisible();
+    const box = await cropCanvas.boundingBox();
+    if (!box) throw new Error('crop canvas has no bounding box');
+    await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width * 0.8, box.y + box.height * 0.8, { steps: 5 });
+    await page.mouse.up();
+
+    await page.getByRole('button', { name: 'View changes' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Review before saving' });
+    await expect(dialog).toBeVisible();
+    await expect(
+      dialog.getByText(
+        'This page changed size, so before and after cannot be lined up pixel for pixel.'
+      )
+    ).toBeVisible();
+    await expect(dialog.getByText('Before', { exact: true })).toBeVisible();
+    await expect(dialog.getByText('After', { exact: true })).toBeVisible();
+    // Both a genuinely different-sized "before" and "after" render, not one
+    // discarded in favour of the other.
+    await expect(dialog.locator('canvas')).toHaveCount(2);
+  });
+
+  test('a duplicated page is badged "New page", not the misleading size-change note', async ({
+    page
+  }) => {
+    await openApp(page);
+    await importFile(page, path.join(FIXTURES_DIR, 'bookmarked-9.pdf'));
+    await gotoTool(page, 'organize');
+
+    const grid = page.getByRole('listbox', { name: /Pages of/ });
+    await grid.getByRole('option', { name: /^Page 1 of/ }).click();
+    await page.getByRole('button', { name: 'Duplicate' }).click();
+    await expect(page.getByText('10 pages', { exact: false }).first()).toBeVisible();
+
+    await page.getByRole('button', { name: 'View changes' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Review before saving' });
+    await expect(dialog).toBeVisible();
+
+    // The duplicate lands right after its source (page 2 of 10).
+    await dialog.getByRole('button', { name: 'Next page' }).click();
+    await expect(dialog.getByText('New page', { exact: true })).toBeVisible();
+    await expect(
+      dialog.getByText(
+        'This page changed size, so before and after cannot be lined up pixel for pixel.'
+      )
+    ).not.toBeVisible();
+  });
 });

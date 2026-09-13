@@ -254,6 +254,9 @@ function SinglePageReview({
             disabled={!canNext}
             onClick={() => setPageIndex(i => i + 1)}
           />
+          {align && align.beforeIndex === null && (
+            <span className={styles.badge}>{t('New page')}</span>
+          )}
           {align?.rotated && <span className={styles.badge}>{t('Rotated')}</span>}
           {align?.moved && (
             <span className={styles.badge}>
@@ -271,21 +274,58 @@ function SinglePageReview({
         )}
       </div>
 
-      {diff && !diff.comparable && (
+      {/* Only for a page that genuinely resized — an added/duplicated page
+          (no baseline counterpart at all) hits the same `!comparable` path
+          but "changed size" would be a wrong, confusing claim about a page
+          that never had a "before" to be a different size from; its "New
+          page" badge above is the correct signal instead. */}
+      {diff && !diff.comparable && align?.beforeIndex !== null && (
         <p className={styles.note}>
           {t('This page changed size, so before and after cannot be lined up pixel for pixel.')}
         </p>
       )}
 
       {(() => {
+        // A page whose size changed (crop, N-up, Normalize) can't share the
+        // slider's single overlaid box — the two images are genuinely
+        // different shapes, not two versions of one shape. Rendering both,
+        // side by side at their own real proportions, is what actually shows
+        // a crop or resize happened; discarding "before" and showing only
+        // "after" (the previous fallback) left the note as the *only* signal
+        // anything changed, easy to miss and impossible to compare against.
+        if (diff && !diff.comparable && diff.before && diff.after) {
+          return (
+            <div className={styles.stage} aria-busy={loading}>
+              <div className={styles.sideBySide}>
+                <div className={styles.sidePane}>
+                  <span className={styles.sideLabel}>{t('Before')}</span>
+                  <div
+                    className={styles.sidePage}
+                    style={{ aspectRatio: `${diff.before.width / diff.before.height}` }}
+                  >
+                    <DiffCanvas image={diff.before} highlight={null} />
+                  </div>
+                </div>
+                <div className={styles.sidePane}>
+                  <span className={styles.sideLabel}>{t('After')}</span>
+                  <div
+                    className={styles.sidePage}
+                    style={{ aspectRatio: `${diff.after.width / diff.after.height}` }}
+                  >
+                    <DiffCanvas image={diff.after} highlight={null} />
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        }
+
         // The slider's two layers are CSS `position: absolute; width/height:
         // 100%` (CompareSlider.module.css) — that only ever resolves to
         // something visible if *this* box has a real size to be 100% of, which
-        // a plain `width/height: auto` div never gives it (a page whose crop
-        // changed its size hit exactly this: both sides rendered fine, but the
-        // slider was 0×0 and invisible). An aspect-ratio computed from
-        // whichever image is on screen is the same fix `Thumbnail.tsx` already
-        // uses for the page grid.
+        // a plain `width/height: auto` div never gives it. An aspect-ratio
+        // computed from whichever image is on screen is the same fix
+        // `Thumbnail.tsx` already uses for the page grid.
         const shown = afterOnly ?? diff?.after ?? diff?.before ?? null;
         const aspect = shown ? shown.width / shown.height : undefined;
         return (
