@@ -26,6 +26,7 @@ import { normalizeRotation } from './rotation';
 import { pruneRenderHandles } from './render-cache';
 import { deleteSourceBytes, readSourceBytes } from './opfs';
 import { sideBySideSourceId } from '../ui/tools/side-by-side/state';
+import { compareSettings } from '../ui/tools/compare/state';
 import { cropBoxes, type CropBox } from '../ui/tools/crop/state';
 // Aliased: this module already declares its own, unrelated `Annotation`
 // (form/signature marks on `doc.annotations`) — `annotate/state.ts`'s is the
@@ -244,16 +245,21 @@ export function sourceDocRefCount(sourceId: string): number {
 
 /**
  * ANN-07 — frees a source's bytes and registry entry once nothing references
- * it: no workspace document page, and it is no longer the side-by-side
- * comparison source either. Meant to be called with the *previous*
- * `sideBySideSourceId` right before it is replaced — `closeDocument` already
- * does the equivalent check for a closed tab, but switching the side-by-side
- * comparison file never went through `closeDocument` at all, so its old
- * source was simply orphaned (never released) every time the user picked a
- * different file to compare against.
+ * it: no workspace document page, and it is no longer the side-by-side or
+ * Compare comparison source either. Meant to be called with the *previous*
+ * `sideBySideSourceId`/`compareSettings.compareSourceId` right before it is
+ * replaced — `closeDocument` already does the equivalent check for a closed
+ * tab, but switching the comparison file never went through `closeDocument`
+ * at all, so its old source was simply orphaned (never released) every time
+ * the user picked a different file to compare against.
  */
 export function releaseSourceIfUnused(sourceId: string): void {
-  if (sourceRefCount(sourceId) > 0 || sideBySideSourceId.value === sourceId) return;
+  if (
+    sourceRefCount(sourceId) > 0 ||
+    sideBySideSourceId.value === sourceId ||
+    compareSettings.value.compareSourceId === sourceId
+  )
+    return;
   if (!(sourceId in sources.value)) return;
   const rest = { ...sources.value };
   delete rest[sourceId];
@@ -325,15 +331,16 @@ export function closeDocument(id: string): void {
     activeDocId.value = documents.value[0]?.id ?? null;
   }
   // Drop sources nothing references any more, so closing a tab frees its bytes.
-  // ANN-07's side-by-side comparison document is the one source that lives
-  // outside every `StaplerDoc.pages` array — it is never a workspace tab — so
-  // it has to be named explicitly here or closing any unrelated tab deletes
-  // its OPFS bytes and closes its render handle out from under an open
-  // side-by-side view.
+  // ANN-07's side-by-side comparison document, and Compare's own comparison
+  // document, are sources that live outside every `StaplerDoc.pages` array —
+  // neither is ever a workspace tab — so they have to be named explicitly
+  // here or closing any unrelated tab deletes their OPFS bytes and closes
+  // their render handle out from under an open comparison view.
   const stillUsed = new Set(
     documents.value.flatMap(d => [...d.pages, ...d.baseline].map(p => p.sourceDocId))
   );
   if (sideBySideSourceId.value) stillUsed.add(sideBySideSourceId.value);
+  if (compareSettings.value.compareSourceId) stillUsed.add(compareSettings.value.compareSourceId);
   const kept: Record<string, SourceDocument> = {};
   for (const [key, value] of Object.entries(sources.value)) {
     if (stillUsed.has(key)) {

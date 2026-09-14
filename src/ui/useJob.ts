@@ -25,9 +25,16 @@ export function useJob() {
 
   useEffect(
     () => () => {
-      // Leaving the view must not leave a worker grinding on output nobody wants.
-      controllerRef.current?.abort();
-      activeJob.value = null;
+      // Leaving the view must not leave a worker grinding on output nobody wants —
+      // but only if THIS instance is the one that owns the running job. `activeJob`
+      // is a single shared signal read by every panel's own `useJob()`; clearing it
+      // unconditionally here would wipe out a job owned by a different instance
+      // (e.g. the action bar's commit) merely because some unrelated panel happened
+      // to unmount, such as when the user switches tools while an export is running.
+      if (controllerRef.current) {
+        controllerRef.current.abort();
+        activeJob.value = null;
+      }
     },
     []
   );
@@ -38,8 +45,12 @@ export function useJob() {
       task: (jobOptions: JobOptions) => Promise<T>
     ): Promise<T | undefined> => {
       // A second commit while one is running would interleave worker calls on the
-      // same document; the action bar disables its button, and this is the backstop.
-      if (controllerRef.current) return undefined;
+      // same document. `activeJob` is shared across every `useJob()` instance, so
+      // the guard has to check it, not just this instance's own controller — the
+      // action bar disables its button as the primary defence, and this is the
+      // backstop for every other panel's secondary actions (Analyse, Scan, Detect
+      // headings, …) that don't have their own busy-check against another job.
+      if (controllerRef.current || activeJob.value !== null) return undefined;
 
       const controller = new AbortController();
       controllerRef.current = controller;

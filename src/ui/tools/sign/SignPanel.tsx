@@ -80,12 +80,19 @@ export function SignPanel() {
       return;
     }
     // Only query fields if the document properties imply they exist
+    let cancelled = false;
     void currentDocumentBytes().then(bytes => {
       getFormFields(bytes)
         .then(fields => {
+          // Discard a response that resolves after `doc` has already moved on
+          // (switched tabs, or an edit landed) — otherwise a slow fetch for a
+          // document the user has left can clobber the fields shown/filled for
+          // whatever document is active now.
+          if (cancelled) return;
           formFields.value = fields;
         })
         .catch(() => {
+          if (cancelled) return;
           formFields.value = null;
         });
       // SGN-09 — a structural check only, independent of whether the document
@@ -93,12 +100,17 @@ export function SignPanel() {
       // form-fields fetch above.
       checkSignatureIntegrity(bytes)
         .then(report => {
+          if (cancelled) return;
           signatureIntegrity.value = report;
         })
         .catch(() => {
+          if (cancelled) return;
           signatureIntegrity.value = null;
         });
     });
+    return () => {
+      cancelled = true;
+    };
   }, [doc]);
 
   useEffect(() => {

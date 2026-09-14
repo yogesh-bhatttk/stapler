@@ -8,7 +8,13 @@ import { platform } from '../../../platform/current';
 import { importFiles } from '../../../core/import';
 import { logEvent, fromUnknown } from '../../../core/errors';
 import { useTranslation } from '../../../core/i18n';
-import { activeDoc, sources, makePageRefs, type StaplerDoc } from '../../../core/store';
+import {
+  activeDoc,
+  sources,
+  makePageRefs,
+  releaseSourceIfUnused,
+  type StaplerDoc
+} from '../../../core/store';
 import { exportComparePdf } from '../../../core/compare-export';
 import { useJob } from '../../useJob';
 
@@ -26,7 +32,9 @@ export function ComparePanel() {
       const fileObjects = await Promise.all(files.map(f => f.getFile()));
       const { imported, failures } = await importFiles(fileObjects);
       if (imported.length > 0) {
+        const previous = settings.compareSourceId;
         compareSettings.value = { ...settings, compareSourceId: imported[0].source.id };
+        if (previous) releaseSourceIfUnused(previous);
       }
       if (failures.length > 0) {
         logEvent('error', 'compare', failures[0].message);
