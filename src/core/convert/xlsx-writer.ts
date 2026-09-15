@@ -23,6 +23,7 @@
 
 import { strToU8, zipSync } from 'fflate';
 import { columnRef } from './column-ref';
+import { isRtlRunGroup } from './text-direction';
 import { internal } from '../errors';
 
 /** One worksheet: a name and a rectangular-ish grid of already-stringified cells. */
@@ -124,6 +125,11 @@ export function buildXlsx(sheets: readonly XlsxSheet[], options: XlsxOptions = {
 
   const names = uniqueSheetNames(sheets.map(sheet => sheet.name));
   const hasTitle = typeof options.title === 'string' && options.title.length > 0;
+  // Direction is decided once per sheet, over every cell it holds — see
+  // `sheetXml`. A workbook with any RTL sheet also needs the `<bookViews>` the
+  // `workbookViewId` on that sheet's view refers to.
+  const rightToLeft = sheets.map(sheet => isRtlRunGroup(sheet.rows.flat()));
+  const anyRightToLeft = rightToLeft.some(Boolean);
 
   const sheetOverrides = sheets
     .map(
@@ -169,9 +175,18 @@ export function buildXlsx(sheets: readonly XlsxSheet[], options: XlsxOptions = {
     .join('')}
 </Relationships>`;
 
+  // `<bookViews>` exists only to give the `workbookViewId="0"` on an RTL sheet's
+  // `<sheetView>` something real to point at: `workbookViewId` is a *required*
+  // attribute of `CT_SheetView`, and a reference to a view the workbook never
+  // declares is the kind of schema hole Excel answers with a repair prompt.
+  // Written only when some sheet is RTL, so an all-Latin workbook's
+  // `workbook.xml` is byte-for-byte what it was before this change. Sequence
+  // position matters in `CT_Workbook`: `bookViews` comes before `sheets`.
+  const bookViewsXml = anyRightToLeft ? '<bookViews><workbookView/></bookViews>' : '';
+
   const workbookXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <sheets>
+  ${bookViewsXml}<sheets>
     ${names
       .map((name, i) => `<sheet name="${xmlEscape(name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`)
       .join('')}
@@ -189,7 +204,9 @@ export function buildXlsx(sheets: readonly XlsxSheet[], options: XlsxOptions = {
   // shortened", not seventeen callbacks.
   const truncated = { cells: 0 };
   sheets.forEach((sheet, i) => {
-    files[`xl/worksheets/sheet${i + 1}.xml`] = strToU8(sheetXml(sheet.rows, truncated));
+    files[`xl/worksheets/sheet${i + 1}.xml`] = strToU8(
+      sheetXml(sheet.rows, truncated, rightToLeft[i])
+    );
   });
   if (truncated.cells > 0) options.onTruncatedCells?.(truncated.cells);
 
@@ -203,8 +220,25 @@ export function buildXlsx(sheets: readonly XlsxSheet[], options: XlsxOptions = {
   return zipSync(files);
 }
 
-/** One worksheet part. Empty cells are omitted, which is what a sparse grid is. */
-function sheetXml(rows: readonly (readonly string[])[], truncated: { cells: number }): string {
+/**
+ * One worksheet part. Empty cells are omitted, which is what a sparse grid is.
+ *
+ * `rightToLeft` writes `<sheetView rightToLeft="1"/>`, the SpreadsheetML flag
+ * (`CT_SheetView/@rightToLeft`) that makes Excel run the sheet right-to-left:
+ * column A on the right, and each cell's text laid out and aligned as RTL. This
+ * is the sheet-level answer, which is the granularity this writer's input has —
+ * a PDF page's extracted lines arrive as a grid of strings with no per-cell
+ * formatting, and the alternative, `<alignment readingOrder="2"/>` per cell,
+ * means a whole `xl/styles.xml` part and a style index on every cell for a
+ * finer distinction nothing upstream can currently make. A mixed-direction
+ * sheet therefore gets the direction of its majority; the text itself is
+ * correct Unicode either way.
+ */
+function sheetXml(
+  rows: readonly (readonly string[])[],
+  truncated: { cells: number },
+  rightToLeft: boolean
+): string {
   const sheetRowsXml = rows
     .map((row, rIdx) => {
       const rowNum = rIdx + 1;
@@ -227,9 +261,15 @@ function sheetXml(rows: readonly (readonly string[])[], truncated: { cells: numb
     })
     .join('');
 
+  // `CT_Worksheet`'s sequence puts `sheetViews` before `sheetData`; out of order
+  // it is a schema violation, which Excel reports as a file needing repair.
+  const sheetViewsXml = rightToLeft
+    ? '<sheetViews><sheetView rightToLeft="1" workbookViewId="0"/></sheetViews>'
+    : '';
+
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <sheetData>${sheetRowsXml}</sheetData>
+  ${sheetViewsXml}<sheetData>${sheetRowsXml}</sheetData>
 </worksheet>`;
 }
 

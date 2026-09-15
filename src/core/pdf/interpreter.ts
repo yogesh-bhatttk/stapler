@@ -398,6 +398,12 @@ export interface FilterContentStreamResult {
    * pixels in the image itself, or refuse the operation. Never neither.
    */
   partialImageCoverage: PartialImageCoverage[];
+  /**
+   * Form XObject placements whose content a mark reached into. See
+   * {@link FormRewrite} — the caller must create each replacement object and
+   * retire the original name.
+   */
+  formRewrites: FormRewrite[];
 }
 
 /**
@@ -483,6 +489,65 @@ export interface XObjectInfo {
   bbox?: [number, number, number, number];
   /** Form's own transform, applied before the page CTM. Unused for images. */
   matrix?: Matrix;
+  /**
+   * The Form's own content, so a mark that covers only part of it can be
+   * resolved by looking *inside* rather than refused. Absent when the caller
+   * could not decode the stream, or would not (a form that nests into itself,
+   * or deeper than {@link MAX_FORM_DEPTH}).
+   */
+  content?: FormContent;
+}
+
+/**
+ * One Form XObject's parsed content plus the resolvers its own `/Resources`
+ * imply — decoded by the caller, because decoding is asynchronous and this
+ * module is not.
+ */
+export interface FormContent {
+  statements: Statement[];
+  resolveXObject?: (name: string) => XObjectInfo | undefined;
+  resolveFont?: (name: string) => FontInfo | undefined;
+}
+
+/**
+ * A Form XObject placement whose content had to change, and the replacement
+ * that was emitted in its place.
+ *
+ * The filtered content is *not* written back over the original form: one form
+ * is routinely drawn at several places on a page, and only some of those
+ * placements fall under a mark. So each placement that changed gets its own
+ * object, and the caller defines {@link newName} in whichever resource
+ * dictionary the `Do` was resolved against — the page's for a top-level
+ * rewrite, the enclosing rewritten form's for a {@link nested} one.
+ *
+ * The caller must also drop the original name once no surviving `Do` still
+ * uses it: the unfiltered form still holds the text the mark covered, and
+ * leaving it named by the page leaves it in the saved bytes.
+ */
+export interface FormRewrite {
+  /** The `/XObject` resource name the original `Do` used, without the slash. */
+  originalName: string;
+  /** The name the emitted `Do` now uses. */
+  newName: string;
+  /** The form's content after filtering, to be written as the new stream. */
+  filtered: Statement[];
+  /** Rewrites made inside this form, scoped to *its* `/Resources/XObject`. */
+  nested: FormRewrite[];
+}
+
+/** How deep a chain of forms drawing forms is followed before giving up. */
+const MAX_FORM_DEPTH = 8;
+
+/** Extra wiring `filterContentStream` needs to rewrite forms rather than refuse. */
+export interface FormRecursionOptions {
+  /**
+   * Returns a resource name not used anywhere in the page's XObject
+   * dictionaries. Without one, a partial overlap with a form is refused
+   * exactly as it was before recursion existed.
+   */
+  allocateFormName: () => string;
+  /** Current nesting depth; callers leave this at its default. */
+  depth?: number;
 }
 
 /**
@@ -496,8 +561,10 @@ export interface XObjectInfo {
  * sits in a different part of the page from the glyphs it describes — and a
  * redaction that misses its box leaves the text in the file.
  *
- * `widths` is in glyph space (1/1000 em), keyed by character code — which is
- * exactly how both `/Widths` (simple fonts) and `/W` (CID fonts) are indexed.
+ * `widths` is in glyph space, keyed by character code — which is exactly how
+ * both `/Widths` (simple fonts) and `/W` (CID fonts) are indexed. Glyph space
+ * is 1/1000 em for every font type *except* `/Type3`, which declares its own
+ * `/FontMatrix`; see {@link FontInfo.glyphSpaceScale}.
  */
 export interface FontInfo {
   /**
@@ -506,12 +573,27 @@ export interface FontInfo {
    * singly or in pairs.
    */
   twoByte: boolean;
-  /** Character code → width in 1/1000 em. */
+  /** Character code → width in glyph space. */
   widths?: Map<number, number>;
-  /** Width for any code not in `widths`, in 1/1000 em. */
+  /** Width for any code not in `widths`, in glyph space. */
   defaultWidth?: number;
   /**
-   * An upper bound on the advance of *any* glyph in this font, in 1/1000 em —
+   * Glyph space → text space, as the horizontal scale factor every width here
+   * is multiplied by. `1/1000` (the default when this is absent) for every
+   * font whose glyph space the spec fixes at 1/1000 em.
+   *
+   * A `/Type3` font does not have one: it carries its own `/FontMatrix`, and
+   * its `/Widths` are in whatever units that matrix maps to text space — 1 unit
+   * per em for `[1 0 0 1 0 0]`, 2048 for a hinted outline conversion, anything
+   * at all for the `dvips`/LaTeX bitmap fonts that produce most Type 3 in the
+   * wild. Measuring those through the fixed 1/1000 made a 10-glyph, 24pt run
+   * spanning ~144pt of page measure ~0.14pt wide, so no mark could ever be
+   * found to overlap it; `checkRegionText` then caught the mismatch and refused
+   * every save, which is safe but makes redaction unusable on the document.
+   */
+  glyphSpaceScale?: number;
+  /**
+   * An upper bound on the advance of *any* glyph in this font, in glyph space —
    * the widest entry in `widths`, `/MissingWidth`, and the `/FontBBox` span,
    * whichever is largest. Used **only** to widen the hit-testing box of a code
    * whose width had to be guessed, never to position anything.
@@ -529,16 +611,24 @@ export interface FontInfo {
   maxGlyphWidth?: number;
 }
 
-/** Fallback advance when the font resource says nothing, in 1/1000 em. */
-const FALLBACK_SIMPLE_WIDTH = 600;
-const FALLBACK_CID_WIDTH = 1000;
+/**
+ * Fallback advance when the font resource says nothing, in **em** rather than
+ * glyph space: a guess about a typical glyph is a guess about a fraction of the
+ * type size, and it must not change meaning just because the font declared an
+ * unusual `/FontMatrix`.
+ */
+const FALLBACK_SIMPLE_EM = 0.6;
+const FALLBACK_CID_EM = 1;
 
 /**
  * Coverage bound for a guessed width when the font declares nothing to bound it
  * with (no `/Widths`, no `/MissingWidth`, no `/FontBBox`): one full em, which is
  * wider than all but a handful of glyphs in any text face.
  */
-const FALLBACK_MAX_GLYPH_WIDTH = 1000;
+const FALLBACK_MAX_GLYPH_EM = 1;
+
+/** Glyph space → text space for every font whose glyph space the spec fixes. */
+const DEFAULT_GLYPH_SPACE_SCALE = 1 / 1000;
 
 /**
  * The bytes a `(...)` or `<...>` operand actually denotes.
@@ -672,7 +762,11 @@ interface GlyphAdvance {
  */
 function glyphAdvances(bytes: Uint8Array, state: GraphicsState, font?: FontInfo): GlyphAdvance[] {
   const twoByte = font?.twoByte ?? false;
-  const fallback = twoByte ? FALLBACK_CID_WIDTH : FALLBACK_SIMPLE_WIDTH;
+  const fallbackEm = twoByte ? FALLBACK_CID_EM : FALLBACK_SIMPLE_EM;
+  // Every declared width below is in the font's own glyph space, so it only
+  // becomes a text-space advance through this. A Type 3 font sets it from its
+  // `/FontMatrix`; everyone else is the spec's fixed 1/1000 em.
+  const scale = font?.glyphSpaceScale ?? DEFAULT_GLYPH_SPACE_SCALE;
   const step = twoByte ? 2 : 1;
   const out: GlyphAdvance[] = [];
 
@@ -681,19 +775,22 @@ function glyphAdvances(bytes: Uint8Array, state: GraphicsState, font?: FontInfo)
     // (`/MissingWidth`, `/DW`) — both of which the spec makes authoritative.
     // A trailing half-code (`code === null`) is malformed input, never exact.
     const declared = code === null ? undefined : (font?.widths?.get(code) ?? font?.defaultWidth);
-    const width = declared ?? fallback;
+    const widthEm = declared !== undefined ? declared * scale : fallbackEm;
     // A width the font itself states is exact. A guessed one may be narrower
     // than the glyph a viewer actually draws, so its coverage bound must not be.
-    const bound =
+    const boundEm =
       declared !== undefined
-        ? width
-        : Math.max(width, font?.maxGlyphWidth ?? FALLBACK_MAX_GLYPH_WIDTH);
+        ? widthEm
+        : Math.max(
+            widthEm,
+            font?.maxGlyphWidth !== undefined ? font.maxGlyphWidth * scale : FALLBACK_MAX_GLYPH_EM
+          );
     const extra = state.charSpacing + (!twoByte && code === 32 ? state.wordSpacing : 0);
     out.push({
       start,
       end,
-      advance: ((width / 1000) * state.fontSize + extra) * state.horizontalScale,
-      coverAdvance: ((bound / 1000) * state.fontSize + extra) * state.horizontalScale,
+      advance: (widthEm * state.fontSize + extra) * state.horizontalScale,
+      coverAdvance: (boundEm * state.fontSize + extra) * state.horizontalScale,
       exact: declared !== undefined
     });
   };
@@ -755,16 +852,52 @@ function statementOf(operands: Token[], operator: string): Statement {
   return { operands, operator: asciiToken('operator', operator) };
 }
 
+/** A Form XObject's `/BBox`, in device space, under the matrix that places it. */
+function formBoxOf(formCtm: Matrix, bbox: [number, number, number, number]): Rect {
+  const [llx, lly, urx, ury] = bbox;
+  const corners = [
+    transformPoint(formCtm, llx, lly),
+    transformPoint(formCtm, urx, lly),
+    transformPoint(formCtm, urx, ury),
+    transformPoint(formCtm, llx, ury)
+  ];
+  const xs = corners.map(c => c.x);
+  const ys = corners.map(c => c.y);
+  return {
+    x: Math.min(...xs),
+    y: Math.min(...ys),
+    width: Math.max(...xs) - Math.min(...xs),
+    height: Math.max(...ys) - Math.min(...ys)
+  };
+}
+
+/**
+ * Did the filter leave this statement list exactly as it found it?
+ *
+ * Identity, not equality: every statement the filter keeps unchanged is pushed
+ * through by reference, and every statement it rewrites is a freshly built
+ * object. So this answers "was anything removed, replaced or reordered" without
+ * having to serialise and compare bytes.
+ */
+function sameStatements(filtered: Statement[], original: Statement[]): boolean {
+  if (filtered.length !== original.length) return false;
+  for (let i = 0; i < filtered.length; i++) if (filtered[i] !== original[i]) return false;
+  return true;
+}
+
 export function filterContentStream(
   statements: Statement[],
   redactionBoxes: RedactionArea[],
   initialState?: GraphicsState,
   resolveXObject?: (name: string) => XObjectInfo | undefined,
-  resolveFont?: (name: string) => FontInfo | undefined
+  resolveFont?: (name: string) => FontInfo | undefined,
+  formOptions?: FormRecursionOptions
 ): FilterContentStreamResult {
   const filtered: Statement[] = [];
   const strippedXObjectNames: string[] = [];
   const partialImageCoverage: PartialImageCoverage[] = [];
+  const formRewrites: FormRewrite[] = [];
+  const formDepth = formOptions?.depth ?? 0;
   const state = initialState ? initialState.clone() : new GraphicsState();
   const savedStates: SavedState[] = [];
 
@@ -1192,54 +1325,101 @@ export function filterContentStream(
 
       const info = xObjectName ? resolveXObject?.(xObjectName) : undefined;
 
-      let box: Rect;
-      if (info?.subtype === 'Form' && info.bbox) {
+      let shouldStrip = false;
+      if (info?.subtype === 'Form') {
         // The Form's own Matrix (if any) applies before the page's CTM.
         const formCtm = info.matrix ? multiplyMatrix(info.matrix, state.ctm) : state.ctm;
-        const [llx, lly, urx, ury] = info.bbox;
-        const corners = [
-          transformPoint(formCtm, llx, lly),
-          transformPoint(formCtm, urx, lly),
-          transformPoint(formCtm, urx, ury),
-          transformPoint(formCtm, llx, ury)
-        ];
-        const xs = corners.map(c => c.x);
-        const ys = corners.map(c => c.y);
-        box = {
-          x: Math.min(...xs),
-          y: Math.min(...ys),
-          width: Math.max(...xs) - Math.min(...xs),
-          height: Math.max(...ys) - Math.min(...ys)
-        };
+
+        // `/BBox` is required by the spec, but producers omit it. Without one
+        // there is no extent to test, so neither of the two shortcuts below is
+        // available and the content itself has to answer the question — which
+        // it can, now that the content is walked. Treating a missing box as
+        // "the unit square", which is what fell out of the old image branch,
+        // described a 1×1pt form at the origin and was wrong every time.
+        const box = info.bbox ? formBoxOf(formCtm, info.bbox) : null;
+
+        // Fully covered: the whole form goes, exactly as before. Nothing the
+        // user kept is inside it.
+        if (box && redactionBoxes.some(r => areaCovers(r, box))) shouldStrip = true;
+        else if (box && !redactionBoxes.some(r => areaTouches(r, box))) {
+          // Nowhere near a mark. Byte-untouched.
+        } else if (info.content && formOptions && formDepth < MAX_FORM_DEPTH) {
+          // A partial overlap, resolved by filtering the form's own content at
+          // the placement's own matrix. Refusing here instead — which is what
+          // this did before — makes redaction unusable on every producer that
+          // wraps a page, or a whole region of one, in a single form.
+          //
+          // The form's content runs with the graphics state as it stands at the
+          // `Do` (spec 8.10.1), so the state is cloned rather than reset; only
+          // the CTM changes. Its final state is discarded because `Do` brackets
+          // the form in an implicit save/restore.
+          const innerState = state.clone();
+          innerState.ctm = formCtm;
+          const inner = filterContentStream(
+            info.content.statements,
+            redactionBoxes,
+            innerState,
+            info.content.resolveXObject,
+            info.content.resolveFont,
+            { allocateFormName: formOptions.allocateFormName, depth: formDepth + 1 }
+          );
+
+          if (inner.strippedXObjectNames.length > 0 || inner.partialImageCoverage.length > 0) {
+            // An image or a nested form inside this one falls under the mark.
+            // Both are removals this module cannot complete from in here: the
+            // image's pixels are edited by the caller against *page*-level
+            // resource names, and dropping a nested form's `Do` would leave its
+            // stream named by resources the caller is not rewriting. Refusing
+            // is what the whole `Do` used to do for any overlap at all, so this
+            // is strictly narrower than before — and it never leaves marked
+            // content in the file.
+            throw unsupported(
+              'A redaction mark falls across an image (or a nested form) that is drawn from ' +
+                'inside a Form XObject. Stapler can filter text and vectors inside a form, but ' +
+                'not remove an image through one. Nothing was changed — your original document ' +
+                'is untouched. Cover the whole form with the mark, or rasterise the page first.'
+            );
+          }
+
+          if (sameStatements(inner.filtered, info.content.statements)) {
+            // The mark reached the form's box but nothing it draws — a margin,
+            // the gap around a table rule. Keep the `Do` exactly as it was.
+            filtered.push(stmt);
+            continue;
+          }
+
+          const newName = formOptions.allocateFormName();
+          formRewrites.push({
+            originalName: xObjectName,
+            newName,
+            filtered: inner.filtered,
+            nested: inner.formRewrites
+          });
+          filtered.push(statementOf([asciiToken('name', `/${newName}`)], 'Do'));
+          continue;
+        } else {
+          throw unsupported(
+            (box
+              ? 'A redaction mark only partly covers a Form XObject whose content Stapler ' +
+                'could not read'
+              : 'A redaction mark overlaps a Form XObject that declares no /BBox and whose ' +
+                'content Stapler could not read') +
+              ' — so what the mark covers inside it cannot be determined. Removing the whole ' +
+              'form would delete content outside the marked region. Nothing was changed — your ' +
+              'original document is untouched.'
+          );
+        }
       } else {
         // Images occupy the unit square in their own space.
         const p1 = transformPoint(state.ctm, 0, 0);
         const p2 = transformPoint(state.ctm, 1, 1);
-        box = {
+        const box: Rect = {
           x: Math.min(p1.x, p2.x),
           y: Math.min(p1.y, p2.y),
           width: Math.abs(p2.x - p1.x),
           height: Math.abs(p2.y - p1.y)
         };
-      }
 
-      let shouldStrip = false;
-      if (info?.subtype === 'Form') {
-        for (const r of redactionBoxes) {
-          if (areaCovers(r, box)) {
-            shouldStrip = true;
-            break;
-          }
-          if (areaTouches(r, box)) {
-            throw unsupported(
-              'A redaction mark only partly covers a Form XObject. Removing the entire form ' +
-                'would delete content outside the marked region, and Stapler does not yet ' +
-                'safely redact inside nested form content. Nothing was changed — your original ' +
-                'document is untouched.'
-            );
-          }
-        }
-      } else {
         // An Image XObject is only safe to drop wholesale when a single
         // redaction rectangle fully contains it — then nothing the user kept is
         // lost with it. A *partial* overlap cannot be resolved here at all: the
@@ -1286,7 +1466,7 @@ export function filterContentStream(
     flushPath(null, false);
   }
 
-  return { filtered, finalState: state, strippedXObjectNames, partialImageCoverage };
+  return { filtered, finalState: state, strippedXObjectNames, partialImageCoverage, formRewrites };
 }
 
 /** Text-showing and text-state operators — everything legal inside `BT`...`ET`. */

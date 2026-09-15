@@ -59,6 +59,7 @@ import { useLocation } from 'wouter-preact';
 import { toolRoute } from '../../core/tools';
 import { useImageImportOptions } from '../useImageImportOptions';
 import { importFiles } from '../../core/import';
+import { importFilesAsDocuments } from '../../core/open-document';
 import { platform } from '../../platform/current';
 import { notify, confirmAction } from '../../core/notify';
 import { readSetting, writeSetting } from '../../core/db';
@@ -253,6 +254,48 @@ export function AppShell({ children }: { children: ComponentChildren }) {
 
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
+  }, []);
+
+  useEffect(() => {
+    // PageGrid's own drag handlers only call preventDefault() for an internal
+    // page-reorder drag (when `dragKey` is set). A file dragged in from the OS
+    // and dropped anywhere else in the app — the tool rail, the top bar, empty
+    // canvas space — never had its default handled, so the browser's default
+    // action (navigating the tab to the dropped file) could fire and silently
+    // destroy the whole open workspace with no confirmation
+    // (AUDIT-EDGE-CASES-2026-09-15.md §1.1). Block that globally.
+    const isFileDrag = (transfer: DataTransfer | null) =>
+      Array.from(transfer?.types ?? []).includes('Files');
+
+    const onDragOver = (event: DragEvent) => {
+      event.preventDefault();
+    };
+
+    const onDrop = (event: DragEvent) => {
+      event.preventDefault();
+      if (!isFileDrag(event.dataTransfer)) return; // an internal reorder drag, already handled
+      const files = Array.from(event.dataTransfer?.files ?? []);
+      if (files.length === 0) return;
+
+      if (activeDoc.value) {
+        // Importing here would go through importFilesAsDocuments(), which calls
+        // resetHistory() — wiping the undo stack of the document already open
+        // and being edited. That trades one data-loss bug for a quieter one, so
+        // block the destructive default and point at the real affordance
+        // instead of guessing what a mid-edit drop was supposed to do.
+        notify('info', translate('Use "Add PDF" to insert pages into this document.'));
+        return;
+      }
+
+      void importFilesAsDocuments(files, { requestImageOptions: requestOptions });
+    };
+
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('drop', onDrop);
+    return () => {
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('drop', onDrop);
+    };
   }, []);
 
   return (

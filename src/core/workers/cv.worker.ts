@@ -7,6 +7,7 @@
 import * as Comlink from 'comlink';
 import {
   detectCorners,
+  isDegenerateQuad,
   warpPerspective,
   warpTargetSize,
   type CornerDetection,
@@ -113,7 +114,13 @@ const api: CVJob = {
   async processScan(imageData, settings, job) {
     let current = imageData;
 
-    if (settings.corners) {
+    // A degenerate quad (three corners on a line, or all four on a point) has no
+    // page shape to recover, and `warpTargetSize` reads a meaningless one off it —
+    // 1×1 for four coincident corners. `warpPerspective` refuses such a quad on its
+    // own, so this is belt and braces; skipping here keeps the *size* from being
+    // computed off it too. The UI decides what to tell the user (`CleanupEditor`'s
+    // `cornersFor`); the worker's job is to leave the page untouched.
+    if (settings.corners && !isDegenerateQuad(settings.corners, current)) {
       await checkpoint(job, 0.1, 'Correcting perspective');
       // `current` is still the frame the corners were detected in, which is what
       // fixes the principal point the aspect-ratio recovery needs. Sizing has to

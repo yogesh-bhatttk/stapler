@@ -23,7 +23,7 @@ import { renderHandleFor } from '../../../core/render-cache';
 import { readSourceBytes, writeSourceBytes } from '../../../core/opfs';
 import { cvWorker, processWorker, renderWorker } from '../../../core/workers';
 import { createJobHandle } from '../../../core/workers/protocol';
-import { frameQuad, isFrameQuad, type Quad } from '../../../core/cv/imageUtils';
+import { frameQuad, isDegenerateQuad, isFrameQuad, type Quad } from '../../../core/cv/imageUtils';
 import { normalizeRotation } from '../../../core/rotation';
 import { notify } from '../../../core/notify';
 import { cancelled, logEvent } from '../../../core/errors';
@@ -51,9 +51,17 @@ const CORNERS: (keyof Quad)[] = ['tl', 'tr', 'br', 'bl'];
  * "Use the whole page" button both produce. Warping through it is an identity
  * homography that still resamples every pixel, so it is skipped: a page we could
  * not read the edges of is left exactly as it came in.
+ *
+ * The handles below are deliberately unconstrained, so the other shape that is not
+ * a page is equally reachable: three corners dragged onto one line, or all four
+ * onto a point. That quad has no homography worth solving — it used to warp the
+ * page to solid black, or collapse it to a single pixel — so it gets the same
+ * answer, and the editor says so once each time the handles enter that state.
  */
 function cornersFor(quad: Quad, image: ImageData): Quad | null {
-  return isFrameQuad(quad, image.width, image.height) ? null : quad;
+  if (isFrameQuad(quad, image.width, image.height)) return null;
+  if (isDegenerateQuad(quad, image)) return null;
+  return quad;
 }
 
 /** One page's cleaned pixels, encoded as JPEG for `imagesToPdf`. */
@@ -77,6 +85,12 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
   // alone, so clicking right after a preset change, or before the first preview
   // round trip lands, silently applied nothing).
   const [previewReady, setPreviewReady] = useState(false);
+  // The handles have no minimum area, convexity, or ordering, so a drag can put
+  // them somewhere that is not a page outline at all. `cornersFor` turns that into
+  // "skip the de-warp", which is the safe result but an invisible one — the Cleaned
+  // pane simply stops changing. This says so, once per time the quad becomes
+  // degenerate rather than on every pointermove of the drag that got it there.
+  const warnedDegenerate = useRef(false);
   const { run } = useJob();
 
   const page = pages[pageIndex];
@@ -156,6 +170,19 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
     if (!ready || !beforeRef.current || !quad) return;
     let cancelled = false;
     setPreviewReady(false);
+
+    const before = beforeRef.current;
+    // The whole-frame quad is the other reason `cornersFor` returns null, and it is
+    // an intended no-op ("Use the whole page"), not a mistake to warn about.
+    const degenerate =
+      !isFrameQuad(quad, before.width, before.height) && isDegenerateQuad(quad, before);
+    if (degenerate && !warnedDegenerate.current) {
+      notify('warning', translate('Those corners do not outline a page.'), {
+        detail:
+          'Three of them are on one line, or they enclose almost nothing, so the page is shown uncorrected. Drag them back into a quadrilateral.'
+      });
+    }
+    warnedDegenerate.current = degenerate;
 
     void (async () => {
       const processed = await cvWorker.lease(api =>

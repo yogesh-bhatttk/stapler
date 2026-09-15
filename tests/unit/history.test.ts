@@ -132,6 +132,71 @@ describe('undo and redo', () => {
   });
 });
 
+/**
+ * §2.2 — `commit.ts`'s export handler captures `doc = activeDoc.value` once
+ * and holds that reference across several `await`s (compose, a confirm
+ * dialog, the save picker) before writing `doc.pages` back onto the
+ * document's `baseline` by id. An undo/redo landing in that window swaps
+ * `documents.value` for a snapshot with a different `pages` array for the
+ * same id, so the eventual `refreshBaseline` call stamps stale, pre-undo
+ * pages onto the document — corrupting the next export's diff. `activeJob`
+ * is the same signal `FileTabs.tsx` already gates tab-switch/close on for
+ * this exact class of problem.
+ */
+describe('undo/redo refuse to run while a job is active (§2.2)', () => {
+  it('canUndo/canRedo report false while activeJob is set, true once it clears', async () => {
+    const doc = seed(3);
+    deletePages(doc.id, [doc.pages[0].key]);
+    expect(canUndo()).toBe(true);
+
+    const { activeJob } = await import('../../src/core/notify');
+    activeJob.value = { label: 'Exporting…', progress: null, cancel: () => {} };
+    try {
+      expect(canUndo()).toBe(false);
+    } finally {
+      activeJob.value = null;
+    }
+    expect(canUndo()).toBe(true);
+  });
+
+  it('undo() is a no-op while a job is active, and works again once it clears', async () => {
+    const doc = seed(3);
+    deletePages(doc.id, [doc.pages[0].key]);
+    expect(documents.value[0].pages.length).toBe(2);
+
+    const { activeJob } = await import('../../src/core/notify');
+    activeJob.value = { label: 'Exporting…', progress: null, cancel: () => {} };
+    try {
+      undo();
+      // Nothing moved: the pending export still holds a `doc.pages` reference
+      // this must not invalidate.
+      expect(documents.value[0].pages.length).toBe(2);
+    } finally {
+      activeJob.value = null;
+    }
+    undo();
+    expect(documents.value[0].pages.length).toBe(3);
+  });
+
+  it('redo() is a no-op while a job is active', async () => {
+    const doc = seed(3);
+    deletePages(doc.id, [doc.pages[0].key]);
+    undo();
+    expect(documents.value[0].pages.length).toBe(3);
+
+    const { activeJob } = await import('../../src/core/notify');
+    activeJob.value = { label: 'Exporting…', progress: null, cancel: () => {} };
+    try {
+      redo();
+      expect(documents.value[0].pages.length).toBe(3);
+    } finally {
+      activeJob.value = null;
+    }
+    redo();
+    expect(documents.value[0].pages.length).toBe(2);
+  });
+});
+
 describe('transactions', () => {
   // The regression this exists for: dragging a stamp called updateAnnotation on every
   // pointer move, and each push filled a slot — so one drag consumed the whole stack

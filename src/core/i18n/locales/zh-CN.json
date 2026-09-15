@@ -203,6 +203,7 @@
   "Text input": "文本输入",
   "The Auto and B&W presets set contrast per pixel, so the sliders do not apply. Switch to Photo or Manual to use them.": "自动和黑白预设按像素设置对比度，因此滑块不适用。请切换到照片或手动模式以使用它们。",
   "The face is whatever script font your system provides — Stapler ships no webfonts.": "字体样式取决于您系统提供的手写字体 — Stapler 不附带任何网络字体。",
+  "The redacted copy also loses its bookmarks, attached files, named destinations, and tagged-structure (accessibility) tree: each one can quote or point straight back at what you removed, and none of them can be checked the way page content can. Document metadata and XMP go too. Page labels and layer visibility are kept.": "涂黑后的副本还会失去书签、附件、命名目标和带标记的结构（无障碍）树：它们都可能引用或直接指向你删除的内容，而且无法像页面内容那样进行核验。文档元数据和 XMP 也会一并移除。页面标签和图层可见性会保留。",
   "The same check runs automatically in CI on every change, so it cannot regress unnoticed. The source is public and MIT-licensed.": "同样的检查会在每次更改时自动在 CI 中运行，因此不可能在未被察觉的情况下发生回退。源代码是公开的，并采用 MIT 许可证。",
   "Theme": "主题",
   "These are stamped signature images. Stapler makes no claim about legal validity.": "这些是加盖印章的签名图像。Stapler 不对其法律效力做任何声明。",

@@ -110,6 +110,74 @@ export function isFrameQuad(quad: Quad, width: number, height: number, tolerance
   );
 }
 
+/**
+ * How thin a triple of corners may get before the quad stops describing a page.
+ *
+ * Measured as twice the triangle's area over the square of the quad's own
+ * diameter, which makes it scale-free: exactly 0.5 for a square, 0.05 for a 1:20
+ * sliver, 0.01 for a 1:100 one, and exactly 0 when the three corners lie on a
+ * line. A receipt photographed nearly edge-on therefore still sits three orders
+ * of magnitude above this threshold, while the rank-deficient configurations
+ * {@link solve} cannot tell apart from a healthy system fall below it.
+ */
+const MIN_CORNER_TRIPLE_RATIO = 1e-3;
+/**
+ * …and the quad has to enclose at least this fraction of the frame. Four corners
+ * can each be well clear of their neighbours' lines and still bound a few pixels,
+ * which shrinks the page to a thumbnail of itself rather than de-warping it.
+ *
+ * 0.1% of the area is 3.2% of each linear dimension: a 46×46 box in the 1275×1650
+ * frame the cleanup editor renders a letter page into at its 150 DPI working
+ * resolution, or 38×38 in a 1200×1600 one. A page fills most of its frame, so this
+ * leaves roughly three orders of magnitude of headroom below any real capture,
+ * while still catching a quad whose corners are individually healthy but
+ * collectively collapsed.
+ */
+const MIN_QUAD_AREA_FRACTION = 1e-3;
+
+/**
+ * True when `quad` cannot be the outline of a page: three corners on (or within
+ * rounding of) one line, all four on one point, or an enclosed area collapsed to
+ * nothing against the frame.
+ *
+ * `CleanupEditor`'s handles are unconstrained — no minimum area, no convexity, no
+ * ordering — so every one of these shapes is two drags away. The homography such a
+ * quad asks for is *rank-deficient rather than exactly singular*, so {@link solve}'s
+ * pivot guard does not fire: the elimination completes and returns a transform with
+ * a dead row, which maps every output row onto the same source line. Measured before
+ * this guard existed: three collinear corners smeared the page's top row over the
+ * whole output (a solid-black page for a photo with a dark border), and four
+ * coincident corners produced a 1×1 image. This predicate is what keeps either from
+ * reaching the warp; callers treat it the way they already treat {@link isFrameQuad}
+ * — skip the de-warp and leave the page as it came in.
+ */
+export function isDegenerateQuad(quad: Quad, frame: FrameSize): boolean {
+  const corners = [quad.tl, quad.tr, quad.br, quad.bl];
+
+  // The quad's own diameter, which every other measurement here is relative to.
+  let span = 0;
+  for (let i = 0; i < 4; i++) {
+    for (let j = i + 1; j < 4; j++) {
+      span = Math.max(span, Math.hypot(corners[i].x - corners[j].x, corners[i].y - corners[j].y));
+    }
+  }
+  // Every corner on one point: no diameter to normalise by, and nothing to warp.
+  if (!(span > 0)) return true;
+
+  for (let i = 0; i < 4; i++) {
+    const a = corners[i];
+    const b = corners[(i + 1) % 4];
+    const c = corners[(i + 2) % 4];
+    // |AB × AC| is twice the triangle's area.
+    const cross = Math.abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
+    if (!(cross / (span * span) >= MIN_CORNER_TRIPLE_RATIO)) return true;
+  }
+
+  const frameArea = frame.width * frame.height;
+  if (frameArea > 0 && quadArea(quad) < MIN_QUAD_AREA_FRACTION * frameArea) return true;
+  return false;
+}
+
 function lumaAt(image: ImageData, x: number, y: number): number | null {
   const px = Math.round(x);
   const py = Math.round(y);
@@ -244,6 +312,13 @@ function solve(A: number[][], B: number[]): number[] | null {
     let sum = B[i];
     for (let j = i + 1; j < n; j++) sum -= A[i][j] * x[j];
     x[i] = sum / A[i][i];
+    // The pivot guard above only rejects an *exactly* singular column. A system
+    // that is merely ill-conditioned survives it and blows up here instead, so
+    // back-substitution gets its own check rather than passing ±Infinity or NaN
+    // on as a homography. (Near-degenerate quads are refused before the solve —
+    // see `isDegenerateQuad` — but a caller reaching this directly must not get
+    // a non-finite transform back.)
+    if (!Number.isFinite(x[i])) return null;
   }
   return x;
 }
@@ -263,7 +338,12 @@ export function getPerspectiveTransform(src: Quad, dst: Quad): number[] {
   }
 
   const h = solve(A, B);
-  // Identity, so a degenerate quad returns the image unchanged instead of blank.
+  // Last-resort identity for a system the solver refused. It is *not* on its own
+  // the "leave the page alone" path the audit's comment here used to claim: a
+  // collinear quad's system is rank-deficient, not singular, so it solves fine and
+  // returns a transform with a dead row. `warpPerspective` rejects those quads up
+  // front via `isDegenerateQuad`; this branch only keeps a refused solve from
+  // reaching the sampler as NaN.
   if (!h) return [1, 0, 0, 0, 1, 0, 0, 0, 1];
   return [...h, 1];
 }
@@ -272,6 +352,15 @@ export function getPerspectiveTransform(src: Quad, dst: Quad): number[] {
  * Warps the quadrilateral `srcQuad` onto a `dstWidth`×`dstHeight` rectangle,
  * sampling bilinearly. Pixels with no source are white, not transparent — a
  * transparent edge becomes black once the page is flattened into a PDF.
+ *
+ * A quad that is not a quadrilateral (see {@link isDegenerateQuad}) returns
+ * `srcData` itself, unchanged and at its own size, rather than the smear or the
+ * 1×1 collapse the homography for it would produce. That is the same "there was
+ * nothing safe to do here" answer `deskew` gives for a sub-threshold angle, and
+ * the caller can tell it happened because the result is the very object it passed
+ * in. It is the caller's job to ask {@link isDegenerateQuad} first if it wants to
+ * tell the user about it; this guard exists so that not asking still cannot
+ * corrupt the page.
  */
 export function warpPerspective(
   srcData: ImageData,
@@ -279,6 +368,8 @@ export function warpPerspective(
   dstWidth: number,
   dstHeight: number
 ): ImageData {
+  if (isDegenerateQuad(srcQuad, srcData)) return srcData;
+
   const width = Math.max(1, Math.floor(dstWidth));
   const height = Math.max(1, Math.floor(dstHeight));
 
@@ -389,6 +480,18 @@ const NO_TRUST_EXTRAPOLATION = 400;
  * page, and a 12MP photo must not be allowed to warp into a 40MP buffer.
  */
 const MAX_PIXEL_GROWTH = 2;
+
+/**
+ * Absolute ceiling on a warp target's longer side and total pixel count,
+ * independent of {@link MAX_PIXEL_GROWTH}'s relative bound — see its use in
+ * {@link warpTargetSize}. 8192px is comfortably inside every mainstream
+ * browser's practical 2D canvas ceiling (Chrome, Firefox and current Safari
+ * all support at least this on ordinary hardware), and 48 megapixels is
+ * several times a realistic phone-camera capture while still keeping the
+ * RGBA buffer (4 bytes/pixel) under 200MB.
+ */
+const MAX_OUTPUT_DIMENSION = 8192;
+const MAX_OUTPUT_PIXELS = 48_000_000;
 
 type Vec3 = readonly [number, number, number];
 
@@ -585,6 +688,25 @@ export function warpTargetSize(quad: Quad, frame: FrameSize): { width: number; h
   const budget = baseWidth * baseHeight * MAX_PIXEL_GROWTH;
   if (budget > 0 && width * height > budget) {
     const shrink = Math.sqrt(budget / (width * height));
+    width *= shrink;
+    height *= shrink;
+  }
+
+  // §4 — an absolute ceiling, independent of the relative bound above. A large
+  // enough source frame passes MAX_PIXEL_GROWTH easily and can still land a
+  // target past what a real canvas allocates: a 10000×8000 frame with a tilted
+  // quad measured 16851×7999 here (~539MB as RGBA), well inside 2× the base
+  // area but past the working canvas-size ceiling this app can actually rely
+  // on across browsers. Shrunk in the same proportional way, area first (an
+  // extreme aspect ratio can have a huge single dimension on a modest area) and
+  // then per-dimension, so the result keeps its shape.
+  if (width * height > MAX_OUTPUT_PIXELS) {
+    const shrink = Math.sqrt(MAX_OUTPUT_PIXELS / (width * height));
+    width *= shrink;
+    height *= shrink;
+  }
+  if (width > MAX_OUTPUT_DIMENSION || height > MAX_OUTPUT_DIMENSION) {
+    const shrink = MAX_OUTPUT_DIMENSION / Math.max(width, height);
     width *= shrink;
     height *= shrink;
   }

@@ -436,6 +436,99 @@ describe('ocr/runOcr — the confirmation gate', () => {
   });
 });
 
+/**
+ * §2.3 — a page whose render throws (in reality, most likely a legal-but-huge
+ * page box past the browser's own canvas pixel-area limit at OCR_DPI) used to
+ * propagate straight out of the per-page loop, discarding recognition already
+ * completed for every earlier page in the run. `scanDocumentBarcodes`
+ * (`core/operations.ts`) already solves the identical shape of problem; this is
+ * the same fix applied here.
+ */
+describe('ocr/runOcr — a failing page does not lose the rest of the run (§2.3)', () => {
+  beforeEach(async () => {
+    settings.clear();
+    tesseractCacheStore.clear();
+    tesseractCacheStore.set('eng', new Uint8Array([1])); // model already cached: no consent dialog
+    requestOcrConsent.mockReset();
+    renderPin.lease.mockReset();
+    renderPin.release.mockReset();
+    cvLease.mockReset();
+    ocrLease.mockReset();
+    processLease.mockReset();
+    fetchVerifiedModel.mockReset();
+    const { __memoryFallback } = await import('../../src/core/opfs');
+    __memoryFallback.clear();
+  });
+
+  it('skips only the page that failed and keeps recognition from the others', async () => {
+    renderPin.lease.mockImplementation(async (fn: (api: unknown) => unknown) =>
+      fn({
+        loadDocument: async () => ({ handle: 'h' }),
+        renderPage: async (_handle: unknown, pageIndex: number) => {
+          if (pageIndex === 1) {
+            throw new Error('canvas area exceeds the maximum canvas size');
+          }
+          return { width: 100, height: 100, close() {} };
+        },
+        closeDocument: async () => {}
+      })
+    );
+    cvLease.mockImplementation(async (fn: (api: unknown) => unknown) =>
+      fn({ cleanupForOcr: async (bitmap: unknown) => bitmap })
+    );
+    ocrLease.mockImplementation(async (fn: (api: unknown) => unknown) =>
+      fn({ recognizePage: async () => ({ words: [{ text: 'ok' }], text: 'ok' }) })
+    );
+    let capturedLayers: { pageIndex: number }[] | undefined;
+    processLease.mockImplementation(async (fn: (api: unknown) => unknown) =>
+      fn({
+        addOcrTextLayer: async (_bytes: unknown, layers: { pageIndex: number }[]) => {
+          capturedLayers = layers;
+          return {
+            bytes: new Uint8Array([9]),
+            wordsAdded: 2,
+            wordsSkipped: 0,
+            pagesTouched: 2,
+            pagesReplaced: 0
+          };
+        }
+      })
+    );
+
+    const { runOcr } = await import('../../src/core/ocr/runOcr');
+    const result = await runOcr(new Uint8Array([1]), 3);
+
+    // Pages 0 and 2 still went all the way through recognition — the failure
+    // on page 1 did not abort the loop.
+    expect(ocrLease).toHaveBeenCalledTimes(2);
+    expect(result?.skippedPages).toEqual([
+      { pageIndex: 1, reason: expect.stringContaining('canvas area exceeds') }
+    ]);
+
+    // What was actually handed to addOcrTextLayer for writing: two layers, for
+    // pages 0 and 2, not zero and not three.
+    expect(capturedLayers?.map(l => l.pageIndex)).toEqual([0, 2]);
+  });
+
+  it('still throws on a real cancellation instead of recording it as a skip', async () => {
+    // The per-page catch must re-throw a cancellation rather than swallow it
+    // as a per-page failure — otherwise aborting a run would just look like
+    // every page "failed" instead of actually stopping.
+    renderPin.lease.mockImplementation(async (fn: (api: unknown) => unknown) =>
+      fn({
+        loadDocument: async () => ({ handle: 'h' }),
+        renderPage: async () => {
+          throw new DOMException('aborted', 'AbortError');
+        },
+        closeDocument: async () => {}
+      })
+    );
+
+    const { runOcr } = await import('../../src/core/ocr/runOcr');
+    await expect(runOcr(new Uint8Array([1]), 1)).rejects.toMatchObject({ name: 'AbortError' });
+  });
+});
+
 /*
  * A combined `eng+hin` run cannot lean on tesseract's own loader — each
  * component lives at a different base URL, and (post OCR-01 Defects 1 & 3)

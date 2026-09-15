@@ -55,6 +55,18 @@ export async function ensureFaceModelWeights(
   options.onProgress?.(0.4, 'Downloading the face detector');
   const shard = await fetchBinary(resolveShardUrl(shardPath), MAX_SHARD_BYTES, options);
 
+  // §2.6 — a response truncated by a dropped connection can still land inside
+  // the loose `0 < byteLength <= MAX_SHARD_BYTES` window `fetchBinary` checks,
+  // so this is the one place that actually knows the shard's *exact* expected
+  // size. Caught here, before the write below, a bad download never reaches
+  // the cache at all.
+  if (!shardMatchesManifest(shard, manifest)) {
+    throw internal(
+      `The face detector download was ${shard.byteLength} bytes, which does not match the ` +
+        'pinned model. Nothing was saved — try again.'
+    );
+  }
+
   // Written only after both files are in hand, so a half-finished download
   // cannot leave a cache that looks complete and loads as a broken network.
   options.onProgress?.(0.9, 'Saving the face detector');
@@ -86,7 +98,71 @@ async function readCachedWeights(): Promise<FaceModelWeights | null> {
   }
   const shard = await readFaceModelFile(shardPath);
   if (!shard) return null;
+  if (!shardMatchesManifest(shard, manifest)) {
+    // §2.6 — a shard truncated by a dropped connection still satisfies the old
+    // `0 < byteLength <= MAX_SHARD_BYTES` check and was cached and re-served
+    // forever, with no way for the user to recover short of clearing all site
+    // data. Treating a size mismatch the same way a corrupt manifest already
+    // was — "not downloaded" — means the very next confirmed run re-fetches
+    // and `writeFaceModelFile` overwrites these same two filenames with good
+    // bytes, so this is also the recovery path, not just the detection.
+    return null;
+  }
   return { manifest, shard };
+}
+
+/** uint8/float32/int32/bool are the only dtypes a TF.js weight manifest can name. */
+const DTYPE_BYTES: Record<string, number> = {
+  uint8: 1,
+  float32: 4,
+  int32: 4,
+  bool: 1,
+  complex64: 8
+};
+
+/**
+ * The exact byte length the manifest's own tensor shapes predict for the
+ * shard, or `null` when a weight spec is missing a `shape`/`dtype` this can't
+ * account for — in which case the caller falls back to trusting the shard, as
+ * it always did, rather than rejecting a legitimate file over an unrecognised
+ * but harmless manifest shape.
+ *
+ * `tinyFaceDetector`'s manifest is *quantized*: every weight's logical
+ * `dtype` reads `float32`, but what is actually sitting in the shard — and
+ * what `quantization.dtype` names — is one `uint8` byte per element, plus a
+ * `scale`/`min` pair the loader uses to reconstruct the float. Sizing this
+ * off the logical `dtype` alone overshoots by 4× and rejects every real
+ * download; `quantization.dtype`, when present, is what actually describes
+ * the on-disk bytes and must win.
+ */
+function expectedShardBytes(manifest: WeightManifest): number | null {
+  let total = 0;
+  for (const group of manifest) {
+    for (const raw of group.weights) {
+      const spec = raw as {
+        shape?: unknown;
+        dtype?: unknown;
+        quantization?: { dtype?: unknown };
+      };
+      const effectiveDtype =
+        typeof spec.quantization?.dtype === 'string' ? spec.quantization.dtype : spec.dtype;
+      const bytesPerElement =
+        typeof effectiveDtype === 'string' ? DTYPE_BYTES[effectiveDtype] : undefined;
+      if (!Array.isArray(spec.shape) || bytesPerElement === undefined) return null;
+      const elements = spec.shape.reduce(
+        (a: number, b: unknown) => a * (typeof b === 'number' ? b : NaN),
+        1
+      );
+      if (!Number.isFinite(elements)) return null;
+      total += elements * bytesPerElement;
+    }
+  }
+  return total;
+}
+
+function shardMatchesManifest(shard: Uint8Array, manifest: WeightManifest): boolean {
+  const expected = expectedShardBytes(manifest);
+  return expected === null || shard.byteLength === expected;
 }
 
 function parseManifest(bytes: Uint8Array): WeightManifest {

@@ -49,7 +49,7 @@ export interface ImportOutcome {
 
 const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46]; // %PDF
 
-function looksLikePdf(bytes: Uint8Array): boolean {
+export function looksLikePdf(bytes: Uint8Array): boolean {
   // A PDF may carry junk before the header, so scan the first KB as viewers do.
   const limit = Math.min(bytes.length, 1024);
   for (let i = 0; i + 4 <= limit; i++) {

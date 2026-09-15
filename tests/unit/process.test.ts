@@ -392,20 +392,46 @@ describe('collectOffPageText (RED-03 blind spot)', () => {
   });
 });
 
+/**
+ * Every indirect object in a file, with FlateDecode stream payloads inflated —
+ * so an assertion about a string being gone is about the real bytes, not about
+ * whether it happened to survive compression as readable text.
+ */
+async function allStreamsDecoded(bytes: Uint8Array): Promise<string> {
+  const { decodeStream } = await import('../../src/core/pdf/interpreter');
+  const doc = await PDFDocument.load(bytes);
+  let text = '';
+  for (const [, object] of doc.context.enumerateIndirectObjects()) {
+    text += `${object}\n`;
+    // `any`: pdf-lib exposes no common interface for "a stream I can read bytes
+    // from" across PDFRawStream and PDFContentStream.
+    const raw = (object as any).contents;
+    if (!(raw instanceof Uint8Array)) continue;
+    const filter = String((object as any).dict?.get(PDFName.of('Filter')) ?? '');
+    text += new TextDecoder('latin1').decode(
+      filter === '/FlateDecode' ? await decodeStream(raw) : raw
+    );
+  }
+  return text;
+}
+
 describe('applyRedactions: Form XObject text (RED-02 gap)', () => {
-  it('rejects a partial Form XObject overlap rather than deleting the whole form', async () => {
+  it('filters inside a partly covered Form XObject rather than deleting the whole form', async () => {
     // A Form XObject invocation is not a unit square like an image — its extent
-    // is its own /BBox through its own /Matrix. Before this was handled, every
+    // is its own /BBox through its own /Matrix. Before that was handled, every
     // Form Do call was measured with the image-style unit-square approximation,
     // so it could silently delete a whole form even when the mark only touched
-    // part of its visible content.
+    // part of its visible content. The first fix for that refused any partial
+    // overlap outright, which made redaction unusable on every producer that
+    // wraps a page in one form; the mark is now resolved *inside* the form.
     const { StandardFonts } = await import('pdf-lib');
     const doc = await PDFDocument.create();
     const font = await doc.embedFont(StandardFonts.Helvetica);
     const page = doc.addPage([600, 800]);
 
     const formStream = doc.context.flateStream(
-      'BT /F1 24 Tf 1 0 0 1 50 760 Tm (FORM SECRET TEXT) Tj ET',
+      'BT /F1 24 Tf 1 0 0 1 50 760 Tm (FORM SECRET TEXT) Tj ' +
+        '1 0 0 1 50 450 Tm (FORM KEPT TEXT) Tj ET',
       {
         Type: 'XObject',
         Subtype: 'Form',
@@ -423,15 +449,19 @@ describe('applyRedactions: Form XObject text (RED-02 gap)', () => {
       doc.context.register(doc.context.flateStream('q /Fm0 Do Q'))
     );
     const bytes = await doc.save({ useObjectStreams: false });
-    const before = Uint8Array.from(bytes);
 
-    // A small region inside the form's footprint (top band of the page).
-    await expect(
-      processWorkerImpl.applyRedactions(bytes, [
-        { pageIndex: 0, x: 0.1, y: 0.1, width: 0.3, height: 0.1 }
-      ])
-    ).rejects.toThrow(/Form XObject/);
-    expect(bytes).toEqual(before);
+    // The top band of the page: over the form's first line, well clear of its
+    // second, and covering only the top fifth of the form's own /BBox.
+    const out = await processWorkerImpl.applyRedactions(bytes, [
+      { pageIndex: 0, x: 0.05, y: 0, width: 0.5, height: 0.1 }
+    ]);
+
+    // Decompressed, across every object in the file: the marked run is gone
+    // from the bytes (retiring the unfiltered original is what buys that) and
+    // the run the mark never reached is still drawn.
+    const written = await allStreamsDecoded(out);
+    expect(written).not.toContain('FORM SECRET TEXT');
+    expect(written).toContain('FORM KEPT TEXT');
   });
 });
 

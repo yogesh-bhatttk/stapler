@@ -3,19 +3,47 @@
  * Keeps memory overhead low by offloading the raw Uint8Arrays
  * of documents to the Origin Private File System (OPFS).
  */
+import { internal } from './errors';
 
 export const __memoryFallback = new Map<string, Uint8Array>();
+
+function isQuotaError(err: unknown): boolean {
+  return err instanceof DOMException && (err.name === 'QuotaExceededError' || err.code === 22);
+}
+
+/**
+ * Writes one file into the OPFS root, turning quota exhaustion into the same
+ * clear, actionable message `core/db.ts`'s IndexedDB guard already gives for the
+ * identical failure, instead of an uncaught `QuotaExceededError` that surfaces as
+ * a generic "Something went wrong" (see AUDIT-EDGE-CASES-2026-09-15.md §1.9). OPFS
+ * holds the actual document bytes — often the largest thing this app ever writes
+ * to disk — so it is the storage path most likely to hit quota.
+ */
+async function writeOpfsFile(name: string, bytes: Uint8Array): Promise<void> {
+  const root = await navigator.storage.getDirectory();
+  const fileHandle = await root.getFileHandle(name, { create: true });
+  const writable = await fileHandle.createWritable();
+  try {
+    await writable.write(bytes);
+    await writable.close();
+  } catch (err) {
+    await (writable as unknown as { abort(): Promise<void> }).abort().catch(() => {});
+    if (isQuotaError(err)) {
+      throw internal(
+        'Local storage is full. Stapler could not save this document to browser storage — ' +
+          'delete saved signatures or clear site data to free space, then try again.'
+      );
+    }
+    throw err;
+  }
+}
 
 export async function writeSourceBytes(id: string, bytes: Uint8Array): Promise<void> {
   if (!navigator.storage?.getDirectory) {
     __memoryFallback.set(id, bytes);
     return;
   }
-  const root = await navigator.storage.getDirectory();
-  const fileHandle = await root.getFileHandle(`${id}.pdf`, { create: true });
-  const writable = await fileHandle.createWritable();
-  await writable.write(bytes);
-  await writable.close();
+  await writeOpfsFile(`${id}.pdf`, bytes);
 }
 
 export async function readSourceBytes(id: string): Promise<Uint8Array> {
@@ -68,11 +96,7 @@ export async function writeModelBytes(lang: string, bytes: Uint8Array): Promise<
     __memoryFallback.set(`model_${lang}`, bytes);
     return;
   }
-  const root = await navigator.storage.getDirectory();
-  const fileHandle = await root.getFileHandle(`${lang}.traineddata.gz`, { create: true });
-  const writable = await fileHandle.createWritable();
-  await writable.write(bytes);
-  await writable.close();
+  await writeOpfsFile(`${lang}.traineddata.gz`, bytes);
 }
 
 export async function readModelBytes(lang: string): Promise<Uint8Array | null> {
@@ -108,11 +132,7 @@ export async function writeFaceModelFile(name: string, bytes: Uint8Array): Promi
     __memoryFallback.set(fileName, bytes);
     return;
   }
-  const root = await navigator.storage.getDirectory();
-  const fileHandle = await root.getFileHandle(fileName, { create: true });
-  const writable = await fileHandle.createWritable();
-  await writable.write(bytes);
-  await writable.close();
+  await writeOpfsFile(fileName, bytes);
 }
 
 export async function readFaceModelFile(name: string): Promise<Uint8Array | null> {

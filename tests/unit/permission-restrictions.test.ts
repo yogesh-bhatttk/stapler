@@ -25,6 +25,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
+import type { PDFDict, PDFNumber } from 'pdf-lib';
 import { unzipSync } from 'fflate';
 
 /** Every file `platform.saveFileAs` was asked to write during a test. */
@@ -653,5 +654,101 @@ describe('withInheritedRestrictions', () => {
       allowCopying: false,
       allowModifying: false
     });
+  });
+});
+
+/**
+ * §1.5 — turning Protect **on** must never hand a permission back.
+ *
+ * Three `/P` bits have no checkbox in the Protect panel: 6 (add or modify
+ * annotations), 9 (fill in form fields) and 12 (print at high quality). A file
+ * that denied only one of them arrived with all three booleans still `true`,
+ * `withInheritedRestrictions` had nothing to narrow, and `permissionFlags`
+ * rebuilt `/P` from its `-4` base — re-granting exactly the bit the input
+ * forbade. Bit 10 (extraction for accessibility) is on the same list.
+ *
+ * Asserted on the `/P` integer and then on real encrypted output bytes, because
+ * "the settings object looks right" is not the thing a viewer reads.
+ */
+describe('turning Protect on never loosens an inherited restriction (§1.5)', () => {
+  const PERMISSIVE = {
+    userPassword: 'pw',
+    ownerPassword: '',
+    allowPrinting: true,
+    allowCopying: true,
+    allowModifying: true
+  };
+
+  /** Bit `n` of `/P` (1-based, as Table 22 numbers them), starting from -4. */
+  const denyingOnly = (bit: number) => -4 & ~(1 << (bit - 1));
+
+  const UNCHECKBOXED: [string, number][] = [
+    ['annotations (bit 6)', 6],
+    ['form filling (bit 9)', 9],
+    ['extraction for accessibility (bit 10)', 10],
+    ['assembly (bit 11)', 11],
+    ['high-quality printing (bit 12)', 12]
+  ];
+
+  for (const [label, bit] of UNCHECKBOXED) {
+    it(`keeps a /P that forbids only ${label}`, async () => {
+      const inherited = denyingOnly(bit);
+      const flags = permissionFlags(withInheritedRestrictions(PERMISSIVE, inherited));
+      expect(flags & (1 << (bit - 1))).toBe(0);
+      // And nothing else moved: the user asked for no restriction of their own.
+      expect(flags).toBe(inherited);
+    });
+  }
+
+  it('still applies the user’s own stricter choice on top of an inherited /P', async () => {
+    const inherited = denyingOnly(6); // annotations only
+    const flags = permissionFlags(
+      withInheritedRestrictions({ ...PERMISSIVE, allowPrinting: false }, inherited)
+    );
+    expect(flags & (1 << 5)).toBe(0); // bit 6, inherited
+    expect(flags & (1 << 2)).toBe(0); // bit 3, the user's own
+    expect(flags & (1 << 11)).toBe(0); // bit 12, implied by "no printing"
+    expect(flags & (1 << 4)).not.toBe(0); // bit 5 (copy) was never denied
+  });
+
+  it('leaves the reserved bits at their spec values even for a malformed /P', async () => {
+    // A producer that wrote the reserved high bits as 0 must not drag the
+    // export out of spec: bits 1–2 stay clear, 7–8 and 13–32 stay set.
+    const flags = permissionFlags(withInheritedRestrictions(PERMISSIVE, 0));
+    expect(flags & 0b11).toBe(0);
+    expect(flags & (1 << 6)).not.toBe(0); // bit 7
+    expect(flags & (1 << 7)).not.toBe(0); // bit 8
+    expect(flags >>> 12).toBe(-4 >>> 12); // bits 13–32
+  });
+
+  it('writes the preserved bit into the encrypted output bytes', async () => {
+    const { encryptPdf } = await import('../../src/core/pdf/encrypt');
+    const plain = await PDFDocument.create();
+    plain.addPage([200, 200]).drawText('hello', {
+      font: await plain.embedFont(StandardFonts.Helvetica),
+      size: 12
+    });
+
+    const inherited = denyingOnly(9); // form filling only
+    const out = await encryptPdf(
+      await plain.save(),
+      withInheritedRestrictions(PERMISSIVE, inherited)
+    );
+
+    const reparsed = await PDFDocument.load(out, {
+      ignoreEncryption: true,
+      updateMetadata: false
+    });
+    const { PDFName } = await import('pdf-lib');
+    const encryptDict = reparsed.context.lookup(
+      reparsed.context.trailerInfo.Encrypt
+    ) as InstanceType<typeof PDFDict>;
+    const p = encryptDict.lookup(PDFName.of('P')) as InstanceType<typeof PDFNumber>;
+    expect(p.asNumber() | 0).toBe(inherited);
+
+    // And a real reader agrees the permission is gone.
+    const lib = await pdfjs();
+    const pdf = await lib.getDocument({ data: out.slice(), password: 'pw' }).promise;
+    expect(await pdf.getPermissions()).not.toContain(lib.PermissionFlag.FILL_INTERACTIVE_FORMS);
   });
 });

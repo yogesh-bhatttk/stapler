@@ -66,6 +66,34 @@ const REMOTE_HOST_ALLOWED_FILES = new Set([
   'src/core/faceblur/download.ts'
 ]);
 
+// §4 (docs/AUDIT-EDGE-CASES-2026-09-15.md) — kept in sync with the identical
+// block in `.claude/hooks/check-invariants.mjs`. See that file's comment for
+// the reasoning; duplicated rather than shared because these two scripts have
+// no common module to import from without complicating the hook's own
+// zero-dependency, single-file invocation.
+const CSP_ALLOWED_HOSTS = new Set(['cdn.jsdelivr.net']);
+const CSP_ALLOWED_KEYWORDS = new Set(["'self'", "'none'", "'wasm-unsafe-eval'"]);
+
+function cspFindings(csp) {
+  const out = [];
+  for (const directive of csp
+    .split(';')
+    .map(d => d.trim())
+    .filter(Boolean)) {
+    const [name, ...sources] = directive.split(/\s+/);
+    for (const source of sources) {
+      if (CSP_ALLOWED_KEYWORDS.has(source)) continue;
+      const host = /^https?:\/\/([^/]+)\/?$/.exec(source)?.[1];
+      if (host && name === 'connect-src' && CSP_ALLOWED_HOSTS.has(host)) continue;
+      out.push(
+        `CSP directive "${name}" allows "${source}" — only 'self'/'wasm-unsafe-eval'/'none' and, ` +
+          `in connect-src only, the pinned model host are permitted. See PLAN §5.4 item 5.`
+      );
+    }
+  }
+  return out;
+}
+
 const COLOR_KEYWORDS = '(?:red|green|blue|white|black|orange|yellow|purple|gray|grey)';
 const COLOR_PROPS =
   '(?:color|background(?:-color)?|backgroundColor|border(?:-[a-z]+)?(?:-color)?|borderColor|' +
@@ -110,10 +138,17 @@ function getAllFiles(dirPath, arrayOfFiles = []) {
 }
 
 const root = process.cwd();
+// §4 — this named `manifest.json` at the repo root, which does not exist (the
+// real file is `public/manifest.json`); every scan of it below had been
+// silently reading nothing since `readFileSync` throws and the loop just
+// `continue`s past a missing file. Fixed alongside adding the CSP check that
+// exposed it, since a check wired to a path that never resolves is exactly
+// the same as no check at all.
+const manifestPath = path.join(root, 'public/manifest.json');
 const files = [
   ...getAllFiles(path.join(root, 'src')),
   path.join(root, 'public/privacy.html'),
-  path.join(root, 'manifest.json')
+  manifestPath
 ];
 
 const findings = [];
@@ -188,6 +223,29 @@ for (const file of files) {
       }
     });
   }
+}
+
+try {
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  for (const key of ['permissions', 'host_permissions', 'optional_permissions']) {
+    if (Array.isArray(manifest[key]) && manifest[key].length > 0) {
+      findings.push(
+        `public/manifest.json — "${key}" is non-empty (${manifest[key].join(', ')}). v1.0 ships ` +
+          `with zero permissions so Chrome shows no install warning. See PLAN §5.4 item 3.`
+      );
+    }
+  }
+  if (manifest.content_scripts) {
+    findings.push(
+      'public/manifest.json — content_scripts declared; the architecture has none (PLAN §2.1)'
+    );
+  }
+  const csp = manifest.content_security_policy?.extension_pages;
+  if (typeof csp === 'string') {
+    for (const msg of cspFindings(csp)) findings.push(`public/manifest.json — ${msg}`);
+  }
+} catch {
+  findings.push('public/manifest.json — invalid JSON');
 }
 
 const firefoxManifestPath = path.join(root, 'dist', 'firefox', 'manifest.json');

@@ -912,6 +912,34 @@ describe('CNV-10 — the page model', () => {
     expect(plan.skipped[0]).toMatch(/1 cell\(s\) were longer than Excel's 32767-character limit/);
   });
 
+  /**
+   * §4 — the read direction (`xlsx-reader.ts`) already caps at
+   * `MAX_SHEET_COLUMNS` because Excel's real column limit is 16,384 (XFD); the
+   * write direction had no equivalent guard, so a page whose glyph x-positions
+   * happened to cluster into more "columns" than any real table has could ask
+   * for a sheet Excel refuses to open. Shares the same constant as the reader,
+   * so both directions agree on the limit.
+   */
+  it("caps a detected table at Excel's practical column limit and says so", () => {
+    const wideRow = Array.from({ length: 50 }, (_, i) => `col${i}`);
+    const plan = planWorkbook([{ pageIndex: 0, tables: [[wideRow]], textLines: [] }], true);
+    expect(plan.sheets[0].rows[0]).toHaveLength(32);
+    expect(plan.sheets[0].rows[0]).toEqual(wideRow.slice(0, 32));
+    expect(plan.skipped).toContainEqual(
+      expect.stringMatching(/1 table\(s\) had more than 32 columns; only the first 32 were kept/)
+    );
+  });
+
+  it('leaves an ordinary table under the column limit untouched, and says nothing about it', () => {
+    const rows = [
+      ['a', 'b', 'c'],
+      ['1', '2', '3']
+    ];
+    const plan = planWorkbook([{ pageIndex: 0, tables: [rows], textLines: [] }], true);
+    expect(plan.sheets[0].rows).toEqual(rows);
+    expect(plan.skipped.some(s => s.includes('columns'))).toBe(false);
+  });
+
   it('recognises a document with no text layer at all', () => {
     expect(hasNoText([{ pageIndex: 0, tables: [], textLines: [] }])).toBe(true);
     expect(hasNoText([{ pageIndex: 0, tables: [], textLines: ['a'] }])).toBe(false);
@@ -1033,5 +1061,137 @@ describe('CNV-10 — the mandatory-preview gate', () => {
     expect(commitGate('merge')).toBeNull();
     setCommitGate('pdf-to-excel', null);
     expect(commitGate('pdf-to-excel')).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * RTL / bidi directionality
+ *
+ * The bug this covers: the writer emitted `<worksheet>` with a `<sheetData>` and
+ * nothing else, so a sheet of Arabic or Hebrew — correct Unicode, cell for cell —
+ * opened in Excel running left-to-right, column A on the left and every cell
+ * aligned and ordered the wrong way.
+ *
+ * Granularity is the sheet, because that is the granularity the input has: a
+ * page's extracted lines arrive as a grid of bare strings with no per-cell
+ * formatting, and the per-cell alternative (`<alignment readingOrder="2"/>`)
+ * means a whole `xl/styles.xml` and a style index on every cell for a
+ * distinction nothing upstream can make. That trade is asserted below, not
+ * assumed: a Latin-majority sheet is left alone.
+ * ------------------------------------------------------------------ */
+
+/** Whether one produced worksheet part carries `<sheetView rightToLeft="1"/>`. */
+function sheetIsRightToLeft(parts: Record<string, Uint8Array>, index: number): boolean {
+  const xml = strFromU8(parts[`xl/worksheets/sheet${index}.xml`]);
+  return /<sheetViews><sheetView rightToLeft="1" workbookViewId="0"\/><\/sheetViews>/.test(xml);
+}
+
+const ARABIC_LINE = 'مرحبا بالعالم';
+const HEBREW_LINE = 'שלום עולם';
+
+describe('CNV-10 — an RTL sheet is flagged right-to-left, not silently left-to-right', () => {
+  it('flags a real RTL PDF end to end, through the production entry point', async () => {
+    // `tests/fixtures/rtl.pdf`, the repo's own Arabic fixture, through
+    // `convertPdfToXlsx` — extraction, workbook plan and writer, nothing stubbed.
+    const { bytes, outline } = await convert(fixture('rtl.pdf'));
+    expect(outline.map(item => item.text).join('')).toMatch(/[؀-ۿ]/);
+
+    const book = readXlsx(bytes);
+    expect(book.order).toHaveLength(1);
+    expect(sheetIsRightToLeft(book.parts, 1)).toBe(true);
+    // The cells themselves still hold the real Arabic, which is what makes the
+    // flag worth anything.
+    expect(book.sheets.get(book.order[0])?.flat().join('')).toMatch(/[؀-ۿ]/);
+  }, 120_000);
+
+  it('writes the sheet view on the RTL sheet and leaves the Latin one alone', () => {
+    const bytes = buildXlsx([
+      { name: 'Arabic', rows: [[ARABIC_LINE], ['الشمال', 'الجنوب']] },
+      { name: 'English', rows: [['Region', 'Revenue']] },
+      { name: 'Hebrew', rows: [[HEBREW_LINE]] }
+    ]);
+    // `readXlsx` re-walks the relationship graph and asserts every part is
+    // well-formed XML, so this is also the guard that the new element did not
+    // break the package.
+    const book = readXlsx(bytes);
+    expect(book.order).toEqual(['Arabic', 'English', 'Hebrew']);
+    expect([1, 2, 3].map(i => sheetIsRightToLeft(book.parts, i))).toEqual([true, false, true]);
+  });
+
+  it('declares the workbook view the sheet view refers to', () => {
+    // `workbookViewId` is a required attribute of `CT_SheetView`; pointing it at
+    // a view the workbook never declares is the kind of schema hole Excel
+    // answers with a repair prompt. `bookViews` must also precede `sheets` in
+    // `CT_Workbook`'s sequence.
+    const workbook = strFromU8(
+      readXlsx(buildXlsx([{ name: 'Arabic', rows: [[ARABIC_LINE]] }])).parts['xl/workbook.xml']
+    );
+    expect(workbook).toContain('<bookViews><workbookView/></bookViews>');
+    expect(workbook.indexOf('<bookViews>')).toBeLessThan(workbook.indexOf('<sheets>'));
+  });
+
+  it('leaves an all-Latin workbook byte-for-byte free of direction markup', () => {
+    // A conversion with nothing to say about direction says nothing: no sheet
+    // view, no book view, and therefore no change to what every existing
+    // English workbook this writer produces looks like.
+    const book = readXlsx(
+      buildXlsx([
+        { name: 'One', rows: [['Region', 'Revenue']] },
+        { name: 'Two', rows: [['North', '1,204']] }
+      ])
+    );
+    expect(strFromU8(book.parts['xl/workbook.xml'])).not.toContain('bookViews');
+    for (const index of [1, 2]) {
+      expect(strFromU8(book.parts[`xl/worksheets/sheet${index}.xml`])).not.toContain('sheetView');
+    }
+  });
+
+  it('does not flip a sheet that merely contains some RTL text', () => {
+    // The majority rule. Reversing the column order of a mostly-English sheet
+    // because one cell holds an Arabic name would be worse than leaving it.
+    const book = readXlsx(
+      buildXlsx([
+        {
+          name: 'Mostly English',
+          rows: [
+            ['Region', 'Revenue', 'Contact'],
+            ['Northern Territory', '1,204', 'سمير']
+          ]
+        }
+      ])
+    );
+    expect(sheetIsRightToLeft(book.parts, 1)).toBe(false);
+  });
+
+  it('is not fooled by a sheet of Arabic figures, whose digits are not strong', () => {
+    // Arabic-Indic digits are bidi class AN, not strong; European digits are EN.
+    // Neither votes, so an Arabic invoice stays RTL and a numeric sheet with an
+    // Arabic header does too.
+    const book = readXlsx(
+      buildXlsx([
+        {
+          name: 'Invoice',
+          rows: [
+            ['الإجمالي', '١٢٣٤'],
+            ['الضريبة', '1,204.50']
+          ]
+        }
+      ])
+    );
+    expect(sheetIsRightToLeft(book.parts, 1)).toBe(true);
+  });
+
+  it('still opens in SheetJS, with every RTL cell intact', () => {
+    // An independent reader on the real bytes: the flag was added to a file that
+    // must still parse and still carry its text.
+    const grid = [
+      [ARABIC_LINE, HEBREW_LINE],
+      ['الشمال', 'الجنوب']
+    ];
+    const bytes = buildXlsx([{ name: 'RTL', rows: grid }], { title: 'تقرير' });
+    const workbook = XLSX.read(bytes, { type: 'array' });
+    expect(workbook.SheetNames).toEqual(['RTL']);
+    expect(sheetJsGrid(workbook.Sheets['RTL'])).toEqual(grid);
+    expect(workbook.Props?.Title).toBe('تقرير');
   });
 });

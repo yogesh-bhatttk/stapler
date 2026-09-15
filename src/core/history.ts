@@ -22,6 +22,7 @@ import { activeDocId, documents, selectedPageKeys, type StaplerDoc } from './sto
 import { cropBoxes, type CropBox } from '../ui/tools/crop/state';
 import { pageAnnotations, type Annotation } from '../ui/tools/annotate/state';
 import { activeToolId, findTool } from './tools';
+import { activeJob } from './notify';
 
 const MAX_DEPTH = 50;
 
@@ -141,7 +142,21 @@ export function beginTransaction(label: string): { end: () => void } {
   };
 }
 
+/**
+ * §2.2 — `undo`/`redo` swap `documents.value` for a snapshot with a different
+ * `pages`/`annotations` array for the same document id, wholesale. `commit.ts`
+ * captures `doc = activeDoc.value` once at the start of an export and holds
+ * that reference across several `await`s (compose, a confirm dialog, the save
+ * picker) before calling `refreshBaseline(doc.id, doc.pages)` on success —
+ * looked up by id, not by reference, against whatever `documents.value` holds
+ * *then*. An undo/redo that lands in between stamps that stale, pre-undo page
+ * list onto the document's `baseline`, corrupting the next export's diff.
+ * `activeJob` is the same signal `FileTabs.tsx` already blocks tab-switch and
+ * tab-close on for this reason, so refusing undo/redo while it is set is
+ * consistent with the rest of the app's concurrency model, not a new one.
+ */
 export function undo(): void {
+  if (activeJob.value !== null) return;
   const previous = undoStack.pop();
   const undoneEntry = undoLog.pop();
   if (!previous || !undoneEntry) return;
@@ -154,6 +169,7 @@ export function undo(): void {
 }
 
 export function redo(): void {
+  if (activeJob.value !== null) return;
   const next = redoStack.pop();
   const redoneEntry = redoLog.pop();
   if (!next || !redoneEntry) return;
@@ -197,8 +213,13 @@ export function historySourceRefCount(sourceId: string): number {
   return count;
 }
 
-export const canUndo = (): boolean => undoStack.length > 0;
-export const canRedo = (): boolean => redoStack.length > 0;
+// Also false while a job is in flight (§2.2), so both the keyboard shortcut
+// and every UI affordance that gates on these — CommandPalette's entries
+// included — disable themselves for the same reason FileTabs blocks a tab
+// switch: an export mid-flight is holding a reference into `documents.value`
+// that undo/redo would invalidate out from under it.
+export const canUndo = (): boolean => undoStack.length > 0 && activeJob.value === null;
+export const canRedo = (): boolean => redoStack.length > 0 && activeJob.value === null;
 
 /** Called when the workspace is replaced wholesale, e.g. on session load. */
 export function resetHistory(): void {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   estimateQuadAspectRatio,
+  isDegenerateQuad,
   isFrameQuad,
   warpPerspective,
   warpTargetSize,
@@ -305,6 +306,42 @@ describe('warpTargetSize', () => {
     }
   });
 
+  /**
+   * §4 — MAX_PIXEL_GROWTH is a *relative* bound: it protects a modest frame
+   * from an unbounded correction factor, but a large enough frame can pass it
+   * easily and still land a target past what a real canvas allocates. Measured
+   * before this fix: a 10000×8000 frame with a tilted quad computed a
+   * 16851×7999 target — comfortably inside 2× the base area, and ~539MB as an
+   * RGBA buffer.
+   */
+  it('caps the output at a real canvas can allocate, even on a large source frame', () => {
+    const bigFrame = { width: 10000, height: 8000 };
+    const quad = photograph(LETTER, bigFrame, { tilt: 78, pan: 15, roll: 8 });
+    const { width, height } = warpTargetSize(quad, bigFrame);
+
+    expect(width).toBeLessThanOrEqual(8192);
+    expect(height).toBeLessThanOrEqual(8192);
+    expect(width * height).toBeLessThanOrEqual(48_000_000);
+    // Still a real, non-degenerate warp target, not a fallback to nothing.
+    expect(width).toBeGreaterThan(1000);
+    expect(height).toBeGreaterThan(1000);
+  });
+
+  it('leaves an ordinary photo at its correctly-computed size, unaffected by the absolute cap', () => {
+    const quad = photograph(LETTER, FRAME, { tilt: 40, pan: 10, roll: 5 });
+    const uncapped = (() => {
+      const top = Math.hypot(quad.tr.x - quad.tl.x, quad.tr.y - quad.tl.y);
+      const bottom = Math.hypot(quad.br.x - quad.bl.x, quad.br.y - quad.bl.y);
+      const left = Math.hypot(quad.bl.x - quad.tl.x, quad.bl.y - quad.tl.y);
+      const right = Math.hypot(quad.br.x - quad.tr.x, quad.br.y - quad.tr.y);
+      return Math.max(top, bottom) * Math.max(left, right);
+    })();
+    expect(uncapped).toBeLessThan(48_000_000); // sanity: this case does not need the cap at all
+    const { width, height } = warpTargetSize(quad, FRAME);
+    expect(width).toBeLessThanOrEqual(8192);
+    expect(height).toBeLessThanOrEqual(8192);
+  });
+
   it('returns a usable size for a degenerate quad instead of throwing', () => {
     const collapsed: Quad = {
       tl: { x: 5, y: 5 },
@@ -316,6 +353,183 @@ describe('warpTargetSize', () => {
     expect(size.width).toBeGreaterThanOrEqual(1);
     expect(size.height).toBeGreaterThanOrEqual(1);
     expect(Number.isInteger(size.width) && Number.isInteger(size.height)).toBe(true);
+  });
+});
+
+/**
+ * Audit §2.7 — a degenerate crop quad blacking out or collapsing the page.
+ *
+ * `CleanupEditor`'s four handles have no minimum area, no convexity, and no
+ * ordering, so three of them can be dragged onto one line or all four onto a
+ * point. The homography such a quad asks for is rank-deficient but *not* exactly
+ * singular, so the solver's `|pivot| < 1e-12` guard never fires: the elimination
+ * completes and hands back a transform with a dead row.
+ *
+ * These tests push those quads through `warpPerspective` and assert on the pixels
+ * that come out — which is exactly what the block above this one did not do: it
+ * built the collinear quad and only checked `Number.isFinite` on an aspect ratio.
+ */
+describe('degenerate quads', () => {
+  /**
+   * A frame whose top row is black and whose body is white.
+   *
+   * This is the shape of the measured defect: the collinear quad's homography
+   * maps *every* output row onto source row 0, so before the fix the entire
+   * output came back solid black. Any page photographed against a dark desk, or
+   * with a shadow along its top edge, is this image.
+   */
+  function frameWithDarkTopRow(width: number, height: number): ImageData {
+    const image = new ImageData(width, height);
+    image.data.fill(255);
+    for (let x = 0; x < width; x++) {
+      const i = x * 4;
+      image.data[i] = 0;
+      image.data[i + 1] = 0;
+      image.data[i + 2] = 0;
+      image.data[i + 3] = 255;
+    }
+    return image;
+  }
+
+  const fractionDarkerThan = (image: ImageData, level: number) => {
+    let dark = 0;
+    for (let i = 0; i < image.data.length; i += 4) if (image.data[i] < level) dark += 1;
+    return dark / (image.width * image.height);
+  };
+
+  /** Three corners on the x axis, the audit's own example. */
+  const COLLINEAR: Quad = {
+    tl: { x: 0, y: 0 },
+    tr: { x: 100, y: 0 },
+    br: { x: 200, y: 0 },
+    bl: { x: 0, y: 50 }
+  };
+  /** All four handles dragged onto one point. */
+  const COINCIDENT: Quad = {
+    tl: { x: 150, y: 200 },
+    tr: { x: 150, y: 200 },
+    br: { x: 150, y: 200 },
+    bl: { x: 150, y: 200 }
+  };
+  /** Not exactly collinear — a real drag lands a pixel or so off the line. */
+  const NEARLY_COLLINEAR: Quad = {
+    tl: { x: 10, y: 10 },
+    tr: { x: 200, y: 10.5 },
+    br: { x: 290, y: 11 },
+    bl: { x: 10, y: 390 }
+  };
+  /** Four healthy corners bounding almost nothing: the page shrunk to a speck. */
+  const PINPOINT: Quad = {
+    tl: { x: 150, y: 200 },
+    tr: { x: 156, y: 200 },
+    br: { x: 156, y: 208 },
+    bl: { x: 150, y: 208 }
+  };
+
+  const SMALL = { width: 300, height: 400 };
+
+  it('recognises every shape that is not a page', () => {
+    expect(isDegenerateQuad(COLLINEAR, SMALL)).toBe(true);
+    expect(isDegenerateQuad(COINCIDENT, SMALL)).toBe(true);
+    expect(isDegenerateQuad(NEARLY_COLLINEAR, SMALL)).toBe(true);
+    expect(isDegenerateQuad(PINPOINT, SMALL)).toBe(true);
+  });
+
+  it('returns the page unchanged for three collinear corners, not a black page', () => {
+    const source = frameWithDarkTopRow(SMALL.width, SMALL.height);
+    // 1 row of 400 is dark to begin with.
+    expect(fractionDarkerThan(source, 110)).toBeCloseTo(1 / SMALL.height, 5);
+
+    const { width, height } = warpTargetSize(COLLINEAR, SMALL);
+    const out = warpPerspective(source, COLLINEAR, width, height);
+
+    // Measured before the fix: 196×210 (a size read off a quad that has no shape)
+    // and every pixel black. Now the frame comes back as it went in.
+    expect(out.width).toBe(SMALL.width);
+    expect(out.height).toBe(SMALL.height);
+    expect(fractionDarkerThan(out, 110)).toBeCloseTo(1 / SMALL.height, 5);
+    expect(Array.from(out.data)).toEqual(Array.from(source.data));
+    // The same object, so no pixel was resampled at all — the convention `deskew`
+    // already uses for "there was nothing safe to do here".
+    expect(out).toBe(source);
+  });
+
+  it('returns the page unchanged for four coincident corners, not a 1x1 image', () => {
+    const source = frameWithDarkTopRow(SMALL.width, SMALL.height);
+    // Measured before the fix: `warpTargetSize` reads 1×1 off this quad and the
+    // whole page became a single pixel.
+    expect(warpTargetSize(COINCIDENT, SMALL)).toEqual({ width: 1, height: 1 });
+
+    const out = warpPerspective(source, COINCIDENT, 1, 1);
+    expect(out.width).toBe(SMALL.width);
+    expect(out.height).toBe(SMALL.height);
+    expect(out).toBe(source);
+  });
+
+  it('returns the page unchanged for a near-collinear or pinpoint quad', () => {
+    const source = frameWithDarkTopRow(SMALL.width, SMALL.height);
+    for (const quad of [NEARLY_COLLINEAR, PINPOINT]) {
+      const { width, height } = warpTargetSize(quad, SMALL);
+      const out = warpPerspective(source, quad, width, height);
+      expect(out).toBe(source);
+      expect(fractionDarkerThan(out, 110)).toBeCloseTo(1 / SMALL.height, 5);
+    }
+  });
+
+  /**
+   * The other half of the contract, and the one that decides whether this guard is
+   * usable: a real page that merely *looks* extreme must still be de-warped.
+   */
+  it('still warps a genuinely thin page photographed at a sharp angle', () => {
+    // A 2.5"×11" till receipt — the thinnest thing anyone scans — tilted, panned
+    // and rolled hard enough that its projection is a long, narrow sliver.
+    const receipt = 2.5 / 11;
+    for (const pose of [
+      { tilt: 45, pan: 25, roll: 12 },
+      { tilt: 60, pan: 30, roll: -18 },
+      { tilt: 70, pan: 15, roll: 5 }
+    ]) {
+      const quad = photograph(receipt, FRAME, pose);
+      expect(isDegenerateQuad(quad, FRAME), JSON.stringify(pose)).toBe(false);
+
+      const source = frameWithDarkTopRow(FRAME.width, FRAME.height);
+      const { width, height } = warpTargetSize(quad, FRAME);
+      const out = warpPerspective(source, quad, width, height);
+      // Really warped: the requested size, and a new buffer rather than the input.
+      expect(out).not.toBe(source);
+      expect(out.width).toBe(width);
+      expect(out.height).toBe(height);
+    }
+  });
+
+  it('still warps every pose the aspect-ratio suite measures', () => {
+    for (const { tilt } of MEASURED) {
+      expect(isDegenerateQuad(photograph(LETTER, FRAME, { tilt }), FRAME), `tilt ${tilt}°`).toBe(
+        false
+      );
+    }
+    for (const pose of [
+      { tilt: 20, pan: 12, roll: 6 },
+      { tilt: 35, pan: 10, roll: -8 },
+      { tilt: 80, pan: 20, roll: 10 }
+    ]) {
+      expect(isDegenerateQuad(photograph(LETTER, FRAME, pose), FRAME)).toBe(false);
+    }
+    // And the two shapes the editor produces deliberately.
+    const whole: Quad = {
+      tl: { x: 0, y: 0 },
+      tr: { x: FRAME.width, y: 0 },
+      br: { x: FRAME.width, y: FRAME.height },
+      bl: { x: 0, y: FRAME.height }
+    };
+    expect(isDegenerateQuad(whole, FRAME)).toBe(false);
+    const inset: Quad = {
+      tl: { x: 100, y: 200 },
+      tr: { x: 700, y: 200 },
+      br: { x: 700, y: 1000 },
+      bl: { x: 100, y: 1000 }
+    };
+    expect(isDegenerateQuad(inset, FRAME)).toBe(false);
   });
 });
 

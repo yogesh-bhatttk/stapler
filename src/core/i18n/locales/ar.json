@@ -203,6 +203,7 @@
   "Text input": "إدخال نص",
   "The Auto and B&W presets set contrast per pixel, so the sliders do not apply. Switch to Photo or Manual to use them.": "تضبط الإعدادات المسبقة التلقائي والأبيض والأسود التباين لكل بكسل، لذا لا تنطبق أشرطة التمرير. بدّل إلى صورة أو يدوي لاستخدامها.",
   "The face is whatever script font your system provides — Stapler ships no webfonts.": "الخط هو أي خط يدوي يوفره نظامك — لا يشحن Stapler أي خطوط ويب.",
+  "The redacted copy also loses its bookmarks, attached files, named destinations, and tagged-structure (accessibility) tree: each one can quote or point straight back at what you removed, and none of them can be checked the way page content can. Document metadata and XMP go too. Page labels and layer visibility are kept.": "تفقد النسخة المنقّحة أيضًا إشاراتها المرجعية والملفات المرفقة والوجهات المسماة وشجرة البنية الموسومة (إمكانية الوصول): فكل منها قد يقتبس ما حذفته أو يشير إليه مباشرة، ولا يمكن التحقق من أيٍّ منها كما يُتحقق من محتوى الصفحة. كما تُحذف بيانات المستند الوصفية وXMP. أما تسميات الصفحات وحالة ظهور الطبقات فتبقى كما هي.",
   "The same check runs automatically in CI on every change, so it cannot regress unnoticed. The source is public and MIT-licensed.": "يعمل الفحص نفسه تلقائيًا في CI مع كل تغيير، لذا لا يمكن أن يتراجع دون ملاحظة. الكود المصدري عام ومرخّص بموجب MIT.",
   "Theme": "السمة",
   "These are stamped signature images. Stapler makes no claim about legal validity.": "هذه صور توقيع مختومة. لا يدّعي Stapler أي شيء بشأن الصلاحية القانونية.",

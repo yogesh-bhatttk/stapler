@@ -43,6 +43,22 @@ export interface ProtectionSettings {
   allowPrinting: boolean;
   allowCopying: boolean;
   allowModifying: boolean;
+  /**
+   * The `/P` the document was *imported* with, when it carried one.
+   *
+   * The three booleans above are the user's whole vocabulary, and they cannot
+   * name every bit in Table 22: a `/P` that forbids only annotations (bit 6),
+   * form filling (bit 9) or high-quality printing (bit 12) has no checkbox to
+   * turn off, so narrowing the booleans alone silently re-granted those bits
+   * from `permissionFlags`' `-4` base — turning a *protection* feature on
+   * loosened a restriction the file arrived with.
+   *
+   * Carried here rather than folded into the booleans because it is the only
+   * lossless form: {@link permissionFlags} intersects the user's choice with it
+   * bit for bit, so the export can only ever deny more than the input did.
+   * `undefined`/`null` means "nothing was inherited" and changes nothing.
+   */
+  inheritedPermissions?: number | null;
 }
 
 export const DEFAULT_PROTECTION: ProtectionSettings = {
@@ -88,6 +104,17 @@ export function permissionFlags(settings: ProtectionSettings): number {
     p &= ~(1 << 8); // fill in form fields
     p &= ~(1 << 10); // assemble document
   }
+
+  // Everything the input already denied stays denied, including the bits no
+  // checkbox names. Intersection is the whole point: a bit can only go from 1
+  // to 0 here, never back to 1, so enabling Protect cannot widen a `/P`. Only
+  // the permission bits are intersected — bits 7–8 and 13–32 are reserved and
+  // must read 1, and a non-conformant producer that wrote them 0 must not drag
+  // the export out of spec with it.
+  const inherited = settings.inheritedPermissions;
+  if (inherited !== undefined && inherited !== null) {
+    p = (p & (inherited | 0) & PERMISSION_BITS) | (p & ~PERMISSION_BITS);
+  }
   return p | 0;
 }
 
@@ -97,6 +124,15 @@ const PERMISSION_PRINT = 1 << 2;
 const PERMISSION_MODIFY = 1 << 3;
 /** Bit 5 — copy or extract. */
 const PERMISSION_COPY = 1 << 4;
+/**
+ * Every bit in `/P` that actually denies a user something: 3 (print), 4
+ * (modify), 5 (copy), 6 (annotate), 9 (fill form fields), 10 (extract for
+ * accessibility), 11 (assemble) and 12 (high-quality print). Mirrors
+ * `load.ts`'s `MEANINGFUL_PERMISSION_BITS`, which is the mask the same flags
+ * are *read* through on import.
+ */
+const PERMISSION_BITS =
+  (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 8) | (1 << 9) | (1 << 10) | (1 << 11);
 
 /**
  * The user's Protect settings, narrowed by restrictions the document arrived
@@ -108,10 +144,15 @@ const PERMISSION_COPY = 1 << 4;
  * anyone. Where the user's own choice is already the stricter of the two, the
  * user's choice wins; this only ever removes permissions.
  *
- * `inherited` is a `/P` integer, so this is a lossy narrowing on purpose: a
- * `/P` that forbids only form filling has no checkbox to turn off, and the
- * three booleans are all this path can carry. The permission-only export path
- * (`permissionOnlyPlan`) writes `/P` verbatim and loses nothing.
+ * `inherited` is a `/P` integer and the three booleans cannot express one: a
+ * `/P` that forbids only form filling has no checkbox to turn off. So the
+ * booleans are narrowed *and* the raw `/P` is carried through on
+ * `inheritedPermissions`, which {@link permissionFlags} intersects the final
+ * flags with. Narrowing the booleans alone was the bug: importing a file whose
+ * `/P` denied only annotations (bit 6), form filling (bit 9) or high-quality
+ * printing (bit 12) and then turning Protect **on** re-granted exactly those
+ * bits, because `permissionFlags` rebuilds `/P` from the `-4` base and no
+ * boolean had changed.
  */
 export function withInheritedRestrictions(
   settings: ProtectionSettings,
@@ -122,7 +163,8 @@ export function withInheritedRestrictions(
     ...settings,
     allowPrinting: settings.allowPrinting && (inherited & PERMISSION_PRINT) !== 0,
     allowCopying: settings.allowCopying && (inherited & PERMISSION_COPY) !== 0,
-    allowModifying: settings.allowModifying && (inherited & PERMISSION_MODIFY) !== 0
+    allowModifying: settings.allowModifying && (inherited & PERMISSION_MODIFY) !== 0,
+    inheritedPermissions: inherited | 0
   };
 }
 

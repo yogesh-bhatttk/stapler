@@ -26,6 +26,13 @@
 import { layoutLines, type TextRun } from '../text-layout';
 import { findTableRegions } from './table-regions';
 import { MAX_CELL_CHARS, uniqueSheetNames, type XlsxSheet } from './xlsx-writer';
+// §4 — the same limit `xlsx-reader.ts` already enforces on the read direction,
+// chosen there because Excel's real column cap is 16,384 (XFD) and a detected
+// table has no natural ceiling of its own: a page whose glyph x-positions
+// cluster into far more "columns" than any real table has could otherwise ask
+// for a sheet past what Excel will open. Shared, not re-picked, so the two
+// directions agree on what "too many columns" means.
+import { MAX_SHEET_COLUMNS } from './xlsx-reader';
 
 /** One page, reduced to what a workbook can hold. */
 export interface PageSheetData {
@@ -143,6 +150,7 @@ export function planWorkbook(
   const skipped: string[] = [];
   let tableCount = 0;
   let truncatedCells = 0;
+  let columnCappedTables = 0;
 
   const capped = (cell: string): string => {
     if (cell.length <= MAX_CELL_CHARS) return cell;
@@ -156,7 +164,9 @@ export function planWorkbook(
     page.tables.forEach((rows, index) => {
       const name =
         page.tables.length === 1 ? `Page ${human} Table` : `Page ${human} Table ${index + 1}`;
-      const grid = rows.map(row => row.map(capped));
+      const widestRow = rows.reduce((max, row) => Math.max(max, row.length), 0);
+      if (widestRow > MAX_SHEET_COLUMNS) columnCappedTables += 1;
+      const grid = rows.map(row => row.slice(0, MAX_SHEET_COLUMNS).map(capped));
       tableCount += 1;
       drafts.push({
         name,
@@ -201,6 +211,12 @@ export function planWorkbook(
     skipped.push(
       `${truncatedCells} cell(s) were longer than Excel's ${MAX_CELL_CHARS}-character limit and ` +
         'were truncated to fit.'
+    );
+  }
+  if (columnCappedTables > 0) {
+    skipped.push(
+      `${columnCappedTables} table(s) had more than ${MAX_SHEET_COLUMNS} columns; only the first ` +
+        `${MAX_SHEET_COLUMNS} were kept.`
     );
   }
 

@@ -237,6 +237,12 @@ export function RedactPanel() {
         )}
       </p>
 
+      <p className={panelStyles.note}>
+        {t(
+          'The redacted copy also loses its bookmarks, attached files, named destinations, and tagged-structure (accessibility) tree: each one can quote or point straight back at what you removed, and none of them can be checked the way page content can. Document metadata and XMP go too. Page labels and layer visibility are kept.'
+        )}
+      </p>
+
       {redactionReport.value && <VerificationReport />}
     </>
   );

@@ -211,6 +211,94 @@ describe('detectSkew, rotateImageData, and deskew', () => {
     expect(rowVariance(rightWay)).toBeGreaterThan(rowVariance(wrongWay));
   });
 
+  /*
+   * Audit §2.8 — a page with no skew signal picking an arbitrary angle.
+   *
+   * `searchSkew` seeded `bestScore = -1` and scores it with a variance, which is
+   * `>= 0` by construction. On a projection profile that is identically zero, the
+   * *first* candidate angle therefore always won: a blank 300×400 page measured
+   * -16° — outside the ±15° range the search was even given — and `deskew` resized
+   * it to 399×468. Nothing fed a blank or uniform image to this suite before, which
+   * is why the ±15° assertion above passed while the bound was being broken.
+   */
+  describe('a page with no skew signal', () => {
+    const uniform = (width: number, height: number, level: number): ImageData => {
+      const image = new ImageData(width, height);
+      for (let i = 0; i < image.data.length; i += 4) {
+        image.data[i] = level;
+        image.data[i + 1] = level;
+        image.data[i + 2] = level;
+        image.data[i + 3] = 255;
+      }
+      return image;
+    };
+
+    it('reports no skew for a blank page rather than the first angle tried', () => {
+      // The exact image from the audit: 300×400, all white. Measured -16° before.
+      expect(detectSkew(uniform(300, 400, 255))).toBe(0);
+    });
+
+    it.each([255, 250, 200, 129])('reports no skew for a uniform page at luma %i', level => {
+      expect(detectSkew(uniform(300, 400, level))).toBe(0);
+    });
+
+    it('reports no skew for a faint page whose ink cannot distinguish any angle', () => {
+      // Six ink pixels in one column: every candidate angle scores identically, so
+      // there is a non-zero variance but still nothing to optimise. Measured -16°.
+      const faint = uniform(300, 400, 255);
+      for (let k = 0; k < 6; k++) {
+        const i = ((50 + k * 13) * 300 + 150) * 4;
+        faint.data[i] = 0;
+        faint.data[i + 1] = 0;
+        faint.data[i + 2] = 0;
+      }
+      expect(detectSkew(faint)).toBe(0);
+    });
+
+    it('does not resize a blank page on its way through deskew', () => {
+      // The real damage: the arbitrary angle reached `rotateImageData(…, fit)`,
+      // which grew the canvas to the rotated bounding box. Measured 399×468.
+      const blank = uniform(300, 400, 255);
+      const { angle, image } = deskew(blank);
+      expect(angle).toBe(0);
+      expect(image.width).toBe(300);
+      expect(image.height).toBe(400);
+      // Not resampled at all — the same object, as for a sub-threshold angle.
+      expect(image).toBe(blank);
+    });
+
+    it('holds the ±maxDegrees bound even when the winner is at the edge', () => {
+      // The refine pass searched `coarse ± 1` unclamped, so a coarse winner at the
+      // range edge could report an angle outside it — which is how -15 became -16.
+      for (const image of [
+        uniform(300, 400, 255),
+        uniform(120, 90, 0),
+        pageWithTextLines(200, 200, 0),
+        rotateImageData(pageWithTextLines(200, 200, 0), 40)
+      ]) {
+        expect(Math.abs(detectSkew(image))).toBeLessThanOrEqual(15);
+        expect(Math.abs(detectSkew(image, 5))).toBeLessThanOrEqual(5);
+      }
+    });
+
+    it('still measures a real page that happens to be faint', () => {
+      // The guard is "no information", not "weak information": a low-contrast page
+      // with genuine text lines must still be straightened.
+      const faintText = pageWithTextLines(200, 200, 0);
+      for (let i = 0; i < faintText.data.length; i += 4) {
+        if (faintText.data[i] === 0) {
+          faintText.data[i] = 120;
+          faintText.data[i + 1] = 120;
+          faintText.data[i + 2] = 120;
+        }
+      }
+      const skewed = rotateImageData(faintText, 6);
+      const detected = detectSkew(skewed);
+      expect(detected).toBeGreaterThan(4.5);
+      expect(detected).toBeLessThan(7.5);
+    });
+  });
+
   it('returns the input untouched for a zero rotation', () => {
     const image = straight();
     expect(rotateImageData(image, 0)).toBe(image);

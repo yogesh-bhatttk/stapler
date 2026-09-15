@@ -56,6 +56,7 @@
 
 import { unsupported } from '../errors';
 import { checkpoint, type JobHandle } from '../workers/protocol';
+import { isRtlRunGroup } from './text-direction';
 import type { PlannedSlide, SlidePlan } from './slides';
 // Type-only, and therefore erased: this file's single *runtime* reference to
 // `pptxgenjs` is the `await import(...)` below, which is what keeps the library
@@ -332,10 +333,30 @@ function addSlide(
   }
 
   for (const box of planned.boxes) {
+    // Direction is decided once for the whole box, and set on *every* run.
+    //
+    // Both halves of that are forced by the format and by the library. In
+    // DrawingML, direction is a paragraph property — `<a:pPr rtl="1">` — and
+    // there is no run-level equivalent, so "this run is RTL" is not a thing a
+    // `.pptx` can express. And `pptxgenjs` reads `rtlMode` off the run objects
+    // rather than off the shape's own options (its `addText` option
+    // inheritance copies `align`, `lineSpacing`, `indentLevel` and friends down
+    // to each run, but never `rtlMode`), building the `<a:pPr>` from a run of
+    // the line. Setting it uniformly is therefore the only way to write the
+    // paragraph flag at all, and the granularity is the format's, not a
+    // shortcut.
+    //
+    // `align` is deliberately left at `'left'`: `slides.ts` positions each box
+    // at the line's own measured left edge with its own measured width and
+    // `wrap: false`, so the box *is* the text and alignment inside it has
+    // nothing to move. Switching it to `'right'` for RTL would shift every
+    // line away from where the page drew it, which is the one thing this tool
+    // promises not to do. `rtl="1"` is what fixes the reading order.
+    const rtlMode = isRtlRunGroup(box.runs.map(run => run.text));
     slide.addText(
       box.runs.map(run => ({
         text: run.text,
-        options: { bold: run.bold, italic: run.italic }
+        options: { bold: run.bold, italic: run.italic, ...(rtlMode ? { rtlMode: true } : {}) }
       })),
       {
         x: inches(box.x),

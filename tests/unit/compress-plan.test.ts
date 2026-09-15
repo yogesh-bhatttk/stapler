@@ -54,9 +54,35 @@ describe('classifyPages', () => {
     expect(plan.pages[0].reencode).toEqual([{ name: 'Im1', objectNumber: 10 }]);
   });
 
-  it('treats a stray label on a scan as no text layer', () => {
-    // "Scanned by CamScanner" is 21 characters — not a text layer.
-    const plan = classifyPages([page([image()])], [text(21)], OPTIONS);
+  /**
+   * §1.6 — short text is still text, and the raster route is destructive.
+   *
+   * This used to require 24 characters before a page was considered to have a
+   * text layer, so a scan carrying a Bates number, a "Page 1 of 12" stamp or a
+   * short caption was routed to `raster`: the text was irreversibly flattened
+   * into a JPEG while the report said the page had "no extractable text".
+   * Measured before the fix — 23 characters routed to `raster`, 24 to
+   * `surgical`.
+   *
+   * The page still gets compressed; it takes the non-destructive route, which
+   * re-encodes the same over-sampled scan image and leaves the stamp
+   * selectable.
+   */
+  it.each([
+    ['a Bates number', 'ACME-000123'],
+    ['a page stamp', 'Page 1 of 12'],
+    ['a single character', '7'],
+    ['a scanner watermark', 'Scanned by CamScanner']
+  ])('never rasterises a scan whose only text is %s', (_label, stamp) => {
+    const plan = classifyPages([page([image()])], [text(stamp.length)], OPTIONS);
+    expect(plan.pages[0].route).toBe('surgical');
+    expect(plan.pages[0].reencode).toEqual([{ name: 'Im1', objectNumber: 10 }]);
+  });
+
+  it('still rasterises a page whose text census is empty', () => {
+    // `charCount` sums `run.str.trim().length`, so a page of whitespace-only
+    // runs counts as nothing and stays on the raster route.
+    const plan = classifyPages([page([image()])], [text(0)], OPTIONS);
     expect(plan.pages[0].route).toBe('raster');
   });
 
@@ -81,7 +107,14 @@ describe('classifyPages', () => {
   it('keeps a sparse text-only page out of the raster path', () => {
     const plan = classifyPages([page([])], [text(21)], OPTIONS);
     expect(plan.pages[0].route).toBe('already-optimized');
-    expect(plan.pages[0].reason).toBe('Text-only page');
+    // Since §1.6 dropped the 24-character threshold, 21 characters *is* a text
+    // layer, so this page now reaches the same "nothing here to re-encode"
+    // verdict by the has-text path rather than by the textless one. Same route,
+    // same zero bytes, and the page is still never rasterised — which is what
+    // this test is for.
+    expect(plan.pages[0].reason).toBe(
+      'Text and vectors only, or images already at the target resolution'
+    );
     expect(plan.actionableBytes).toBe(0);
   });
 

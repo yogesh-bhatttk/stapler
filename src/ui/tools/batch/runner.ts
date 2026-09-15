@@ -28,6 +28,8 @@ import {
   stripPdfExtension,
   deduplicateNames
 } from '../../../core/batch-filename';
+import { corrupt } from '../../../core/errors';
+import { looksLikePdf } from '../../../core/import';
 import { zipSync } from 'fflate';
 
 /** Appends a per-file outcome to the run summary. */
@@ -38,12 +40,36 @@ function addNote(note: BatchNote): void {
   };
 }
 
+// §2.1 — a synchronous reentrancy guard, set before this function's first
+// `await`. `batchProgress.value.isProcessing` alone is not enough: it only
+// flips true after the `isSameEntry()` await below, so a fast double-click or
+// double-Enter on "Run Batch" before the first render disables the button
+// could start two concurrent runs, both mutating `batchProgress` and both
+// writing to the same output directory or ZIP handle. Checking and setting a
+// module-level flag synchronously closes that window — nothing can interleave
+// between the check and the set within one synchronous stretch of JS.
+let batchRunInFlight = false;
+
 export async function runBatch(signal?: AbortSignal) {
   const inDir = inputDirHandle.value;
   const outDir = outputDirHandle.value;
   const outZip = outputZipHandle.value;
   if (!inDir || (outputFormat.value === 'directory' ? !outDir : !outZip)) return;
+  if (batchRunInFlight) return;
+  batchRunInFlight = true;
+  try {
+    await runBatchBody(signal, inDir, outDir, outZip);
+  } finally {
+    batchRunInFlight = false;
+  }
+}
 
+async function runBatchBody(
+  signal: AbortSignal | undefined,
+  inDir: NonNullable<typeof inputDirHandle.value>,
+  outDir: typeof outputDirHandle.value,
+  outZip: typeof outputZipHandle.value
+) {
   // Safety: if the input and output directory are the same filesystem entry,
   // a batch run would overwrite the source files in-place with no backup —
   // the output handle is opened with { create: true } using the same filename,
@@ -149,76 +175,123 @@ export async function runBatch(signal?: AbortSignal) {
         const file = await fileHandle.getFile();
         const bytes = new Uint8Array(await file.arrayBuffer());
 
-        const { processWorker } = await import('../../../core/workers');
+        // Batch had no equivalent of importPdf()'s validation gate: a non-PDF file
+        // fell straight into pdf-lib's tolerant parser and surfaced a raw internal
+        // TypeError, and a truncated file could silently lose trailing pages with
+        // no error at all (see AUDIT-EDGE-CASES-2026-09-15.md §1.8). Mirror the
+        // single-file import path's checks — magic-byte sniff, then the pdf.js
+        // parse importPdf() also uses as the real corruption gate — so a bad file
+        // in a batch folder fails the same clear, classified way an equally bad
+        // file would fail through "Add PDF".
+        if (bytes.length === 0) throw corrupt('The file is empty.');
+        if (!looksLikePdf(bytes)) {
+          throw corrupt('The file does not start with a PDF header, so it is not a PDF.');
+        }
+
+        const { processWorker, renderWorker } = await import('../../../core/workers');
         const { hasWatermarkContent, hasHeaderFooterContent } = await import('../watermark/state');
+
+        const validationClient = renderWorker.pin();
+        try {
+          const info = await validationClient.lease(api => api.loadDocument(bytes));
+          try {
+            if (info.pageCount === 0) throw corrupt('The document contains no pages.');
+          } finally {
+            await validationClient.lease(api => api.closeDocument(info.handle));
+          }
+        } finally {
+          validationClient.release();
+        }
 
         let currentBytes = bytes;
         // Set only when a 'compress' step actually ran (not when it was
         // skipped as already-optimized) — the bytes fed into it, so the
         // never-grow guard below has something to fall back to.
         let preCompressBytes: Uint8Array | null = null;
+        // Index of the 'compress' step within `activeTools`, so the never-grow
+        // guard below knows which later tools (if any) it would have to replay.
+        let compressIndex = -1;
+
+        /**
+         * Applies one non-'compress' tool to `inputBytes`, returning the result.
+         *
+         * Factored out so the never-grow guard below can call it a second time —
+         * on the pre-compress bytes, for a recipe where 'compress' does not run
+         * last — without duplicating this logic. `compose` is idempotent given
+         * the same inputs, so calling it twice for the same tool costs an extra
+         * worker round trip, not a different answer.
+         */
+        const applyNonCompressTool = async (
+          toolId: string,
+          inputBytes: Uint8Array
+        ): Promise<Uint8Array> => {
+          if (toolId !== 'watermark' && toolId !== 'normalize' && toolId !== 'nup') {
+            return inputBytes;
+          }
+          // Re-inspect current bytes so page maps reflect the document state
+          // after any preceding tools (e.g. nup layout changes).
+          const inspect = await processWorker.lease(api => api.inspect(inputBytes));
+          const pages = Array.from({ length: inspect.pageCount }).map((_, i) => ({
+            key: `${fileHandle.name}-${i}`,
+            sourceDocId: fileHandle.name,
+            sourceIndex: i,
+            rotation: 0
+          }));
+
+          if (toolId === 'watermark') {
+            const applyWatermark = watermark && hasWatermarkContent(watermark);
+            const applyHF = headerFooter && hasHeaderFooterContent(headerFooter);
+            if (!applyWatermark && !applyHF) return inputBytes;
+            return processWorker.lease(api =>
+              api.compose(
+                pages,
+                { [fileHandle.name]: inputBytes },
+                [],
+                applyWatermark ? (watermark as unknown as WatermarkData) : undefined,
+                applyHF ? headerFooter : undefined,
+                undefined,
+                undefined,
+                [],
+                undefined
+              )
+            );
+          }
+          if (toolId === 'normalize') {
+            return processWorker.lease(api =>
+              api.compose(
+                pages,
+                { [fileHandle.name]: inputBytes },
+                [],
+                undefined,
+                undefined,
+                normalize,
+                undefined,
+                [],
+                undefined
+              )
+            );
+          }
+          // toolId === 'nup'
+          return processWorker.lease(api =>
+            api.compose(
+              pages,
+              { [fileHandle.name]: inputBytes },
+              [],
+              undefined,
+              undefined,
+              undefined,
+              nup,
+              [],
+              undefined
+            )
+          );
+        };
 
         // Apply tools in the order declared by recipe.tools (or defaults).
-        for (const toolId of activeTools) {
-          if (toolId === 'watermark' || toolId === 'normalize' || toolId === 'nup') {
-            // Re-inspect current bytes so page maps reflect the document state
-            // after any preceding tools (e.g. nup layout changes).
-            const inspect = await processWorker.lease(api => api.inspect(currentBytes));
-            const pages = Array.from({ length: inspect.pageCount }).map((_, i) => ({
-              key: `${fileHandle.name}-${i}`,
-              sourceDocId: fileHandle.name,
-              sourceIndex: i,
-              rotation: 0
-            }));
-
-            if (toolId === 'watermark') {
-              const applyWatermark = watermark && hasWatermarkContent(watermark);
-              const applyHF = headerFooter && hasHeaderFooterContent(headerFooter);
-              if (applyWatermark || applyHF) {
-                currentBytes = await processWorker.lease(api =>
-                  api.compose(
-                    pages,
-                    { [fileHandle.name]: currentBytes },
-                    [],
-                    applyWatermark ? (watermark as unknown as WatermarkData) : undefined,
-                    applyHF ? headerFooter : undefined,
-                    undefined,
-                    undefined,
-                    [],
-                    undefined
-                  )
-                );
-              }
-            } else if (toolId === 'normalize') {
-              currentBytes = await processWorker.lease(api =>
-                api.compose(
-                  pages,
-                  { [fileHandle.name]: currentBytes },
-                  [],
-                  undefined,
-                  undefined,
-                  normalize,
-                  undefined,
-                  [],
-                  undefined
-                )
-              );
-            } else if (toolId === 'nup') {
-              currentBytes = await processWorker.lease(api =>
-                api.compose(
-                  pages,
-                  { [fileHandle.name]: currentBytes },
-                  [],
-                  undefined,
-                  undefined,
-                  undefined,
-                  nup,
-                  [],
-                  undefined
-                )
-              );
-            }
-          } else if (toolId === 'compress' && compress) {
+        for (let toolIndex = 0; toolIndex < activeTools.length; toolIndex++) {
+          const toolId = activeTools[toolIndex];
+          if (toolId === 'compress' && compress) {
+            compressIndex = toolIndex;
             const report = await planCompression(currentBytes, compress);
             // CMP-04: a compress that cannot beat the input keeps the input. The
             // file is still written (later tools in the recipe may change it),
@@ -243,6 +316,8 @@ export async function runBatch(signal?: AbortSignal) {
                 currentBytes = res.bytes;
               }
             }
+          } else {
+            currentBytes = await applyNonCompressTool(toolId, currentBytes);
           }
         }
 
@@ -298,7 +373,7 @@ export async function runBatch(signal?: AbortSignal) {
         // was, so a real restriction cost isn't mistaken for one compression
         // caused — not the bare pre-compress bytes.
         if (preCompressBytes) {
-          const withoutCompress =
+          const withoutCompressBase =
             preCompressBytes === bytes
               ? bytes
               : permissionRestrictions !== null
@@ -309,14 +384,60 @@ export async function runBatch(signal?: AbortSignal) {
                     )
                   )
                 : preCompressBytes;
-          if (currentBytes.byteLength > withoutCompress.byteLength) {
-            currentBytes = withoutCompress;
-            addNote({
-              file: fileHandle.name,
-              kind: 'kept-original',
-              detail:
-                'Reapplying this document’s restrictions after compression would have produced a file no smaller than skipping compression, so the compressed version was discarded.'
-            });
+
+          // §4 — this comparison used to stop here, which is correct only when
+          // 'compress' was the last tool to touch the bytes. For a non-default
+          // recipe order (e.g. compress before watermark), `currentBytes` also
+          // carries whatever ran *after* compress, while `withoutCompressBase`
+          // does not — so a discard fell all the way back to the pre-compress,
+          // pre-watermark bytes, silently throwing away the watermark too. The
+          // note below only ever mentioned the compressed version being
+          // discarded, which was no longer the whole truth.
+          //
+          // `withoutCompressBase` is a safe, cheap lower bound on the correct
+          // counterfactual: replaying more tools onto it can only add bytes, not
+          // remove them, so if `currentBytes` already fits under this bound it
+          // is guaranteed to fit under the correct one too, and the expensive
+          // replay below is skipped on every batch item that does not need it.
+          if (currentBytes.byteLength > withoutCompressBase.byteLength) {
+            // Replayed from `preCompressBytes`, not from `withoutCompressBase`:
+            // a downstream tool's `compose` rebuilds the document from scratch,
+            // which does not carry the source's real `/Encrypt` dictionary
+            // forward the way leaving `bytes` byte-for-byte untouched does. So
+            // restriction has to be (re)applied *after* the replay, exactly
+            // once, exactly as the real pipeline above applies it once after
+            // every content-changing tool has run — not baked into the base
+            // before tools that change the content run on top of it.
+            let withoutCompressContent = preCompressBytes;
+            for (let i = compressIndex + 1; i < activeTools.length; i++) {
+              withoutCompressContent = await applyNonCompressTool(
+                activeTools[i],
+                withoutCompressContent
+              );
+            }
+            const withoutCompress =
+              withoutCompressContent === preCompressBytes
+                ? withoutCompressBase // nothing replayed; already computed above
+                : permissionRestrictions !== null
+                  ? await processWorker.lease(api =>
+                      api.restrictDocument(
+                        withoutCompressContent as Uint8Array,
+                        permissionRestrictions as number
+                      )
+                    )
+                  : withoutCompressContent;
+
+            if (currentBytes.byteLength > withoutCompress.byteLength) {
+              currentBytes = withoutCompress;
+              addNote({
+                file: fileHandle.name,
+                kind: 'kept-original',
+                detail:
+                  compressIndex < activeTools.length - 1
+                    ? 'Compressing this document did not make the final file any smaller once its restrictions and later steps were reapplied, so the compressed version was discarded and those later steps were redone without it.'
+                    : 'Reapplying this document’s restrictions after compression would have produced a file no smaller than skipping compression, so the compressed version was discarded.'
+              });
+            }
           }
         }
 

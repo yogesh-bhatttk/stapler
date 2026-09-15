@@ -1569,8 +1569,25 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       wordsAdded: result.wordsAdded,
       wordsSkipped: result.wordsSkipped,
       pages: result.pagesTouched,
-      pagesReplaced: result.pagesReplaced
+      pagesReplaced: result.pagesReplaced,
+      pagesSkipped: result.skippedPages.length
     };
+
+    // §2.3 — some pages could not be recognised (most likely an oversized page
+    // box past the browser's own canvas limit). The run still completed for
+    // the rest, so this is a warning alongside the export, not a reason to
+    // refuse it.
+    if (result.skippedPages.length > 0) {
+      notify(
+        'warning',
+        translate('{count} page(s) could not be scanned for text', {
+          count: result.skippedPages.length
+        }),
+        {
+          detail: result.skippedPages.map(p => `Page ${p.pageIndex + 1}: ${p.reason}`).join(' ')
+        }
+      );
+    }
 
     if (result.wordsAdded === 0) {
       notify('warning', translate('OCR found no text on those pages.'), {

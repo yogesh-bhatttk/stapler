@@ -15,7 +15,7 @@ import * as Comlink from 'comlink';
 import { renderWorker, cvWorker, ocrWorker, processWorker } from '../workers';
 import { createJobHandle, type JobOptions } from '../workers/protocol';
 import { requestOcrConsent } from '../notify';
-import { cancelled, internal } from '../errors';
+import { cancelled, internal, isCancellation, fromUnknown } from '../errors';
 import { markModelDownloaded } from './modelState';
 import { readModelBytes } from '../opfs';
 import { fetchVerifiedModel } from './download';
@@ -42,6 +42,14 @@ export interface OcrRunResult extends OcrLayerReport {
   bytes: Uint8Array;
   /** True when the model was fetched during this run rather than read from cache. */
   downloadedModel: boolean;
+  /**
+   * Pages recognition could not run on, with why — most likely a page whose box
+   * is legal PDF (the spec allows up to 14,400×14,400pt) but produces a canvas
+   * past the browser's own pixel-area limit at `OCR_DPI`. Recognition already
+   * completed for every other page in the run is kept rather than discarded;
+   * see `runOcr`'s per-page try/catch.
+   */
+  skippedPages: { pageIndex: number; reason: string }[];
 }
 
 /**
@@ -180,6 +188,13 @@ export async function runOcr(
   }
 
   const layers: OcrPageLayer[] = [];
+  // §2.3 — a page whose box is legal PDF but produces a canvas past the
+  // browser's pixel-area limit at OCR_DPI throws when rendered. That used to
+  // propagate straight out of the loop, discarding recognition already
+  // completed for every earlier page in the run. `scanDocumentBarcodes`
+  // (`core/operations.ts`) already solves the identical problem for the same
+  // reason: the other pages are still worth the user's time.
+  const skippedPages: { pageIndex: number; reason: string }[] = [];
 
   // `pin()` rather than the shared render cache: these bytes are the *export* of
   // the current workspace, not one of the registered sources, so a cached handle
@@ -200,64 +215,69 @@ export async function runOcr(
         const span = 1 / pages.length;
         options.onProgress?.(base, `Reading page ${pageIndex + 1} of ${pageCount}`);
 
-        const rawBitmap = await client.lease(api =>
-          api.renderPage(info.handle, pageIndex, OCR_DPI / 72)
-        );
-        const { width, height } = rawBitmap;
+        try {
+          const rawBitmap = await client.lease(api =>
+            api.renderPage(info.handle, pageIndex, OCR_DPI / 72)
+          );
+          const { width, height } = rawBitmap;
 
-        // Cleaned up before recognition — cancels the lighting/shadow gradient
-        // and JPEG speckle a phone-camera photo carries, which is most of what
-        // makes such a scan hard to recognise. Only recolours pixels in place
-        // (see `cv.worker.ts`'s `cleanupForOcr`), so the bitmap's dimensions —
-        // and therefore the `bitmapToUserSpace` mapping `textLayer.ts` uses to
-        // place each word back on the page — are unaffected.
-        const cleanupSpan = span * 0.15;
-        const bitmap = await cvWorker.lease(api =>
-          api.cleanupForOcr(
-            Comlink.transfer(rawBitmap, [rawBitmap]),
-            createJobHandle({
-              signal: options.signal,
-              onProgress: (fraction, label) =>
-                options.onProgress?.(
-                  fraction === null ? base : base + fraction * cleanupSpan,
-                  `${label} — page ${pageIndex + 1} of ${pageCount}`
-                )
-            })
-          )
-        );
+          // Cleaned up before recognition — cancels the lighting/shadow gradient
+          // and JPEG speckle a phone-camera photo carries, which is most of what
+          // makes such a scan hard to recognise. Only recolours pixels in place
+          // (see `cv.worker.ts`'s `cleanupForOcr`), so the bitmap's dimensions —
+          // and therefore the `bitmapToUserSpace` mapping `textLayer.ts` uses to
+          // place each word back on the page — are unaffected.
+          const cleanupSpan = span * 0.15;
+          const bitmap = await cvWorker.lease(api =>
+            api.cleanupForOcr(
+              Comlink.transfer(rawBitmap, [rawBitmap]),
+              createJobHandle({
+                signal: options.signal,
+                onProgress: (fraction, label) =>
+                  options.onProgress?.(
+                    fraction === null ? base : base + fraction * cleanupSpan,
+                    `${label} — page ${pageIndex + 1} of ${pageCount}`
+                  )
+              })
+            )
+          );
 
-        const recognizeBase = base + cleanupSpan;
-        const recognizeSpan = span - cleanupSpan;
-        const result = await ocrWorker.lease(api =>
-          api.recognizePage(
-            // Transferred, not copied — a 300 DPI A4 raster is ~35 MB of RGBA.
-            // The OCR worker takes ownership and closes it.
-            Comlink.transfer(bitmap, [bitmap]),
-            // No model bytes or path travel with this call: every language in
-            // `lang` is already sitting in tesseract's own cache by this point
-            // (seeded above, or on an earlier run), so the worker only ever
-            // needs the plain language string (see `ocr.worker.ts`).
-            { lang },
-            createJobHandle({
-              signal: options.signal,
-              onProgress: (fraction, label) =>
-                options.onProgress?.(
-                  // `fraction` is per-phase, so it is scaled into this page's
-                  // slice rather than replacing the document-wide number.
-                  fraction === null ? recognizeBase : recognizeBase + fraction * recognizeSpan,
-                  `${label} — page ${pageIndex + 1} of ${pageCount}`
-                )
-            })
-          )
-        );
+          const recognizeBase = base + cleanupSpan;
+          const recognizeSpan = span - cleanupSpan;
+          const result = await ocrWorker.lease(api =>
+            api.recognizePage(
+              // Transferred, not copied — a 300 DPI A4 raster is ~35 MB of RGBA.
+              // The OCR worker takes ownership and closes it.
+              Comlink.transfer(bitmap, [bitmap]),
+              // No model bytes or path travel with this call: every language in
+              // `lang` is already sitting in tesseract's own cache by this point
+              // (seeded above, or on an earlier run), so the worker only ever
+              // needs the plain language string (see `ocr.worker.ts`).
+              { lang },
+              createJobHandle({
+                signal: options.signal,
+                onProgress: (fraction, label) =>
+                  options.onProgress?.(
+                    // `fraction` is per-phase, so it is scaled into this page's
+                    // slice rather than replacing the document-wide number.
+                    fraction === null ? recognizeBase : recognizeBase + fraction * recognizeSpan,
+                    `${label} — page ${pageIndex + 1} of ${pageCount}`
+                  )
+              })
+            )
+          );
 
-        layers.push({
-          pageIndex,
-          bitmapWidth: width,
-          bitmapHeight: height,
-          dpi: OCR_DPI,
-          words: result.words
-        });
+          layers.push({
+            pageIndex,
+            bitmapWidth: width,
+            bitmapHeight: height,
+            dpi: OCR_DPI,
+            words: result.words
+          });
+        } catch (err) {
+          if (isCancellation(err)) throw err;
+          skippedPages.push({ pageIndex, reason: fromUnknown(err).message });
+        }
       }
     } finally {
       await client.lease(api => api.closeDocument(info.handle)).catch(() => {});
@@ -279,5 +299,5 @@ export async function runOcr(
   await Promise.all(missing.map(code => markModelDownloaded(code)));
 
   options.onProgress?.(1, 'Done');
-  return { ...written, downloadedModel: missing.length > 0 };
+  return { ...written, downloadedModel: missing.length > 0, skippedPages };
 }

@@ -80,6 +80,15 @@ export function OcrPanel() {
                   ' page' +
                   (report.pagesReplaced === 1 ? '' : 's') +
                   '.'
+                : '') +
+              (report.pagesSkipped > 0
+                ? ' ' +
+                  report.pagesSkipped +
+                  ' page' +
+                  (report.pagesSkipped === 1 ? '' : 's') +
+                  ' could not be scanned and ' +
+                  (report.pagesSkipped === 1 ? 'was' : 'were') +
+                  ' left as-is.'
                 : '')}
         </p>
       )}

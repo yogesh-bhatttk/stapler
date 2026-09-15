@@ -15,7 +15,8 @@
 
 import { internal } from '../errors';
 import { checkpoint, type JobHandle } from '../workers/protocol';
-import type { DocxBlock, DocxModel } from './blocks';
+import type { DocxModel, DocxRun } from './blocks';
+import { isRtlRunGroup, isRtlText } from './text-direction';
 
 /**
  * Tables fill the text column. Given `WidthType.PERCENTAGE`, `docx` turns a plain
@@ -47,8 +48,37 @@ export async function buildDocx(model: DocxModel, job?: JobHandle): Promise<Uint
 
   const children: (InstanceType<typeof Paragraph> | InstanceType<typeof Table>)[] = [];
 
-  const runsOf = (block: Extract<DocxBlock, { kind: 'paragraph' | 'heading' }>) =>
-    block.runs.map(run => new TextRun({ text: run.text, bold: run.bold, italics: run.italic }));
+  /**
+   * A paragraph's runs, each carrying its own direction.
+   *
+   * `rightToLeft` is `docx`'s name for `<w:rtl/>` in the run properties
+   * (`IRunOptionsBase.rightToLeft`), which is a genuine *run*-level property in
+   * WordprocessingML — unlike DrawingML, where direction lives only on the
+   * paragraph. So an English phrase quoted inside an Arabic sentence keeps its
+   * own direction rather than being force-flagged with the paragraph.
+   *
+   * `paragraphRtl` is the fallback for a run with no strong character of its
+   * own (a page number, a run of punctuation left over from run merging): it
+   * inherits the paragraph instead of silently reverting to LTR mid-sentence.
+   *
+   * The flag is *omitted* rather than written as `false` for LTR runs, so an
+   * all-Latin document's `document.xml` is byte-for-byte what it was before this
+   * change — `<w:rtl w:val="false"/>` on every run would be noise, and a
+   * conversion that has nothing to say about direction should say nothing.
+   */
+  const runsOf = (runs: readonly DocxRun[], paragraphRtl: boolean) =>
+    runs.map(
+      run =>
+        new TextRun({
+          text: run.text,
+          bold: run.bold,
+          italics: run.italic,
+          ...(isRtlText(run.text, paragraphRtl) ? { rightToLeft: true } : {})
+        })
+    );
+
+  /** The text of a group of runs, for the container-level direction decision. */
+  const groupRtl = (runs: readonly DocxRun[]) => isRtlRunGroup(runs.map(run => run.text));
 
   const totalBlocks = model.pages.reduce((sum, page) => sum + page.blocks.length, 0);
   let done = 0;
@@ -74,19 +104,35 @@ export async function buildDocx(model: DocxModel, job?: JobHandle): Promise<Uint
       first = false;
 
       switch (block.kind) {
-        case 'heading':
+        case 'heading': {
+          // `bidirectional` is `docx`'s name for `<w:bidi/>` in the paragraph
+          // properties (`IParagraphPropertiesOptionsBase.bidirectional`). It is
+          // what makes Word right-align the paragraph and resolve its bidi
+          // embedding level as RTL; without it, correctly-decoded Arabic or
+          // Hebrew lands left-aligned and in the wrong order.
+          const rtl = groupRtl(block.runs);
           children.push(
             new Paragraph({
               heading: block.level === 1 ? HeadingLevel.HEADING_1 : HeadingLevel.HEADING_2,
               pageBreakBefore: breakHere,
-              children: runsOf(block)
+              ...(rtl ? { bidirectional: true } : {}),
+              children: runsOf(block.runs, rtl)
             })
           );
           break;
+        }
 
-        case 'paragraph':
-          children.push(new Paragraph({ pageBreakBefore: breakHere, children: runsOf(block) }));
+        case 'paragraph': {
+          const rtl = groupRtl(block.runs);
+          children.push(
+            new Paragraph({
+              pageBreakBefore: breakHere,
+              ...(rtl ? { bidirectional: true } : {}),
+              children: runsOf(block.runs, rtl)
+            })
+          );
           break;
+        }
 
         case 'table': {
           // A page break cannot sit on a Table, so it goes on an empty paragraph
@@ -94,9 +140,18 @@ export async function buildDocx(model: DocxModel, job?: JobHandle): Promise<Uint
           if (breakHere) children.push(new Paragraph({ pageBreakBefore: true, children: [] }));
           const columnCount = block.rows.reduce((max, row) => Math.max(max, row.length), 0);
           if (columnCount === 0) break;
+          // Decided over every cell at once. `visuallyRightToLeft` is `docx`'s
+          // name for `<w:bidiVisual/>` in the table properties
+          // (`ITableOptions.visuallyRightToLeft`), which puts the first column
+          // on the right — the column order a reader of an RTL table expects,
+          // and the direct analogue of the sheet-level flag `xlsx-writer.ts`
+          // sets. Cell direction is still decided per cell underneath it, so a
+          // Latin identifier column inside an Arabic table keeps its own.
+          const tableRtl = isRtlRunGroup(block.rows.flat());
           children.push(
             new Table({
               width: { size: FULL_WIDTH_PCT, type: WidthType.PERCENTAGE },
+              ...(tableRtl ? { visuallyRightToLeft: true } : {}),
               rows: block.rows.map(
                 row =>
                   new TableRow({
@@ -105,8 +160,19 @@ export async function buildDocx(model: DocxModel, job?: JobHandle): Promise<Uint
                       // A short `<w:tr>` is what makes Word report the file as
                       // needing repair, and a repaired table is not an intact one.
                       const cell = row[c] ?? '';
+                      const cellRtl = isRtlText(cell, tableRtl);
                       return new TableCell({
-                        children: [new Paragraph({ children: [new TextRun(cell)] })]
+                        children: [
+                          new Paragraph({
+                            ...(cellRtl ? { bidirectional: true } : {}),
+                            children: [
+                              new TextRun({
+                                text: cell,
+                                ...(cellRtl ? { rightToLeft: true } : {})
+                              })
+                            ]
+                          })
+                        ]
                       });
                     })
                   })

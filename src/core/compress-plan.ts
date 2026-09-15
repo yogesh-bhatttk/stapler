@@ -53,8 +53,14 @@ export interface CompressionPlan {
   skipped: string[];
 }
 
-/** Filters pdf.js cannot re-encode losslessly through a canvas round-trip. */
-const UNDECODABLE_FILTERS = new Set(['JPXDecode', 'JBIG2Decode']);
+/**
+ * Filters pdf.js cannot re-encode losslessly through a canvas round-trip.
+ *
+ * Exported because `rebuildCompressed` re-checks the same names as its own
+ * second lock — see the mask check there — and two copies of this list is one
+ * copy too many.
+ */
+export const UNDECODABLE_FILTERS = new Set(['JPXDecode', 'JBIG2Decode']);
 
 /**
  * Colour spaces we refuse to re-encode.
@@ -73,11 +79,31 @@ const UNDECODABLE_FILTERS = new Set(['JPXDecode', 'JBIG2Decode']);
 const UNSAFE_COLOR_SPACES = new Set(['DeviceN', 'Separation']);
 
 /**
- * A page needs this much extractable text before we refuse to rasterise it. One
- * stray "Scanned by …" stamp is not a text layer, and treating it as one is what
- * sends scans down the useless already-optimized path.
+ * How much extractable text a page needs before we refuse to rasterise it.
+ *
+ * One non-whitespace character. This was 24, on the reasoning that a stray
+ * "Scanned by …" stamp is not a text layer and treating it as one sends a scan
+ * down the useless `already-optimized` path — but the price of that reasoning
+ * is paid in the other direction, and it is much higher: the `raster` route is
+ * *destructive*, so a scan carrying a Bates number, a "Page 1 of 12" stamp or a
+ * short caption — every one of them under 24 characters — had that real,
+ * selectable text irreversibly flattened into a JPEG, while the report said the
+ * page had "no extractable text". Losing text the user can select and search is
+ * silent corruption; losing a compression opportunity is not.
+ *
+ * The original concern is not reopened, only re-priced. A stamped scan now
+ * routes to `surgical`, which still re-encodes its over-sampled page image —
+ * the same image the raster route would have re-rendered — and leaves the text
+ * alone. The case that genuinely loses ground is a stamped scan whose image is
+ * *not* over-sampled for the target, which now reports `already-optimized`
+ * instead of being re-JPEGed at a lower quality: a smaller saving, truthfully
+ * reported, instead of a bigger one that eats the stamp.
+ *
+ * `charCount` is a sum of `run.str.trim().length` (`render.worker.ts`), so
+ * whitespace-only runs already count as nothing and a blank page still reaches
+ * the raster route.
  */
-const MEANINGFUL_TEXT_CHARS = 24;
+const MEANINGFUL_TEXT_CHARS = 1;
 
 /** Below this ratio of stored to displayed pixels there is nothing to gain. */
 const MIN_DOWNSCALE_RATIO = 1.15;
@@ -87,7 +113,38 @@ export interface ClassifyOptions {
   rasterDpi: number;
 }
 
-function imageIsSafe(image: ImageFacts): { safe: boolean; reason?: string } {
+/**
+ * What an image disqualifies, which is not the same question for both routes.
+ *
+ * The two actionable routes do very different things to an image, so one
+ * "is this image safe" boolean cannot answer for both:
+ *
+ *  • `surgical` re-encodes **the image's own stream** in place. It has to be
+ *    able to decode that stream and to express the result as a JPEG.
+ *  • `raster` never touches the image stream at all. pdf.js renders the whole
+ *    page to an 8-bit RGBA bitmap and that bitmap becomes the page, so what the
+ *    original samples were stored as is irrelevant — only whether pdf.js can
+ *    render them, and whether flattening the page destroys something the file
+ *    was carrying on purpose.
+ *
+ * Every verdict that blocks the raster route also blocks the surgical one; the
+ * reverse is not true, which is the whole point.
+ */
+interface ImageSafety {
+  /** Safe to re-encode this image's own stream in place. */
+  surgical: boolean;
+  /** Safe to re-render the page that carries it as a single bitmap. */
+  raster: boolean;
+  /** Shown in the report's skip list, so it reads as an explanation. */
+  reason?: string;
+}
+
+/** Blocked on both routes — the image cannot be touched at all. */
+function blocked(reason: string): ImageSafety {
+  return { surgical: false, raster: false, reason };
+}
+
+function imageIsSafe(image: ImageFacts): ImageSafety {
   // The whole `/Filter` chain, not just the name at its head: filters apply in
   // order, so `[/ASCII85Decode /JPXDecode]` is a JPEG2000 image wrapped in
   // ASCII85. Testing only the first entry reported that as `ASCII85Decode`,
@@ -95,40 +152,69 @@ function imageIsSafe(image: ImageFacts): { safe: boolean; reason?: string } {
   // list exists to keep it out of.
   const undecodable = (image.filters ?? [image.filter]).find(name => UNDECODABLE_FILTERS.has(name));
   if (undecodable) {
-    return {
-      safe: false,
-      reason: `${undecodable} image (decoder output cannot be re-encoded safely)`
-    };
+    return blocked(`${undecodable} image (decoder output cannot be re-encoded safely)`);
+  }
+  // The same test, applied to the image's *mask*. An `/SMask` (or a stencil
+  // `/Mask`) is a separate stream with its own `/Filter` chain, and nothing
+  // above looks at it — so a FlateDecode photo carrying a JPXDecode soft mask
+  // passed every check here and was routed to `surgical`, where pdf.js has no
+  // decoder for the mask it is asked to resample and `rebuildCompressed` would
+  // re-attach a mask built from data nothing ever read. A mask that cannot be
+  // decoded disqualifies the image it masks exactly as an undecodable base
+  // image does.
+  const undecodableMask = (image.maskFilters ?? []).find(name => UNDECODABLE_FILTERS.has(name));
+  if (undecodableMask) {
+    return blocked(
+      `${undecodableMask} soft mask (the mask's own stream cannot be decoded, so the image it masks cannot be re-encoded)`
+    );
   }
   if (UNSAFE_COLOR_SPACES.has(image.colorSpace)) {
-    return {
-      safe: false,
-      reason: `${image.colorSpace} image (re-encoding would flatten a named ink to RGB)`
-    };
+    return blocked(`${image.colorSpace} image (re-encoding would flatten a named ink to RGB)`);
   }
   if (image.isImageMask) {
-    return {
-      safe: false,
-      reason: 'Stencil mask (a 1-bit shape, not a picture — JPEG cannot carry it)'
-    };
+    return blocked('Stencil mask (a 1-bit shape, not a picture — JPEG cannot carry it)');
   }
   if (image.maskKind === 'colorKey') {
-    return {
-      safe: false,
-      reason: 'Colour-key masked image (transparency defined by exact pixel values)'
-    };
+    return blocked('Colour-key masked image (transparency defined by exact pixel values)');
   }
   if (image.maskKind === 'preblended') {
-    return {
-      safe: false,
-      reason: 'Pre-blended soft mask (/Matte), where colour and mask cannot be separated'
-    };
+    return blocked('Pre-blended soft mask (/Matte), where colour and mask cannot be separated');
   }
 
   if (image.bitsPerComponent < 8) {
-    return { safe: false, reason: `${image.bitsPerComponent}-bit image` };
+    // Surgical-only. Re-encoding a sub-byte image in place means decoding its
+    // packed samples and writing a JPEG that has no way to say "1 bit per
+    // component", so it stays off that route — but this used to mark the whole
+    // *page* unsafe, which took the archetypal input this feature exists for
+    // out of the game entirely: a 1-bit CCITT/JBIG2-style bilevel fax scan was
+    // reported "cannot be safely rasterized" and compressed by exactly nothing,
+    // without the raster route ever being tried. pdf.js renders bilevel images
+    // to 8-bit RGBA like anything else, and the raster route re-renders the
+    // page rather than reading this stream, so bit depth has no bearing on it.
+    return {
+      surgical: false,
+      raster: true,
+      reason: `${image.bitsPerComponent}-bit image`
+    };
   }
-  return { safe: true };
+  return { surgical: true, raster: true };
+}
+
+/**
+ * The stricter of two verdicts on the same image object, for the document-wide
+ * pass below: unsafe anywhere is unsafe everywhere, per route.
+ *
+ * The reason quoted prefers one that blocks the raster route, because that is
+ * the reason a blocked page prints — a surgical-only reason on a page that was
+ * refused rasterisation would not explain the refusal.
+ */
+function mergeSafety(a: ImageSafety, b: ImageSafety): ImageSafety {
+  return {
+    surgical: a.surgical && b.surgical,
+    raster: a.raster && b.raster,
+    reason:
+      (a.raster ? undefined : a.reason) ?? (b.raster ? undefined : b.reason) ?? a.reason ?? b.reason
+  };
 }
 
 /**
@@ -215,19 +301,19 @@ export function classifyPages(
    * the exact outcome this list exists to prevent. Unsafe anywhere is now unsafe
    * everywhere.
    */
-  const unsafeReasonByObject = new Map<number, string>();
+  const unsafeByObject = new Map<number, ImageSafety>();
   for (const page of inventory) {
     for (const image of page.images) {
       const verdict = imageIsSafe(image);
-      if (!verdict.safe && verdict.reason && image.objectNumber >= 0) {
-        unsafeReasonByObject.set(image.objectNumber, verdict.reason);
-      }
+      if (verdict.surgical && verdict.raster) continue;
+      if (image.objectNumber < 0) continue;
+      const existing = unsafeByObject.get(image.objectNumber);
+      unsafeByObject.set(image.objectNumber, existing ? mergeSafety(existing, verdict) : verdict);
     }
   }
-  const safetyOf = (image: ImageFacts): { safe: boolean; reason?: string } => {
-    const shared =
-      image.objectNumber >= 0 ? unsafeReasonByObject.get(image.objectNumber) : undefined;
-    return shared ? { safe: false, reason: shared } : imageIsSafe(image);
+  const safetyOf = (image: ImageFacts): ImageSafety => {
+    const shared = image.objectNumber >= 0 ? unsafeByObject.get(image.objectNumber) : undefined;
+    return shared ?? imageIsSafe(image);
   };
 
   const oversampled = (image: ImageFacts, pageWidth: number, pageHeight: number) =>
@@ -247,7 +333,7 @@ export function classifyPages(
     if (!hasTextOn(page.pageIndex)) continue;
     for (const image of page.images) {
       if (image.objectNumber < 0) continue;
-      if (!safetyOf(image).safe) continue;
+      if (!safetyOf(image).surgical) continue;
       if (oversampled(image, page.width, page.height)) candidateObjects.add(image.objectNumber);
     }
   }
@@ -260,14 +346,20 @@ export function classifyPages(
     const hasText = hasTextOn(page.pageIndex);
     const imagePixels = page.images.reduce((n, image) => n + image.width * image.height, 0);
     const safety = page.images.map(image => ({ image, ...safetyOf(image) }));
-    let hasUnsafeImage = false;
-    for (const entry of safety) {
-      if (!entry.safe && entry.reason) {
-        skipped.add(entry.reason);
-      }
-      if (!entry.safe) {
-        hasUnsafeImage = true;
-      }
+    const blocksRaster = safety.some(entry => !entry.raster);
+
+    /*
+     * `skipped` is the report's "constructs we deliberately did not touch"
+     * list, so what belongs in it depends on which route this page is about to
+     * take. A 1-bit image on a page with text really is left alone — it is not
+     * a re-encode candidate — and belongs there. The same image on a textless
+     * page that rasterises is not left alone at all: it is re-rendered into the
+     * page's new JPEG along with everything else, and listing it would be a
+     * false claim in the one report the user reads to find out what happened.
+     */
+    const reportable = hasText || blocksRaster ? safety.filter(entry => !entry.surgical) : [];
+    for (const entry of reportable) {
+      if (entry.reason) skipped.add(entry.reason);
     }
 
     if (!hasText) {
@@ -296,7 +388,7 @@ export function classifyPages(
         });
         continue;
       }
-      if (hasUnsafeImage) {
+      if (blocksRaster) {
         pages.push({
           pageIndex: page.pageIndex,
           route: 'already-optimized',
@@ -324,7 +416,7 @@ export function classifyPages(
     }
 
     const candidates = safety.filter(entry => {
-      if (!entry.safe) return false;
+      if (!entry.surgical) return false;
       // Only worth re-encoding if it is meaningfully over-sampled for the target
       // *on some page* — a shared image is judged once, document-wide, so every
       // page carrying it reports it and its largest placement decides the size.
@@ -334,7 +426,7 @@ export function classifyPages(
     });
 
     if (candidates.length === 0) {
-      const unsafeCount = safety.filter(entry => !entry.safe).length;
+      const unsafeCount = safety.filter(entry => !entry.surgical).length;
       pages.push({
         pageIndex: page.pageIndex,
         route: unsafeCount > 0 ? 'skip' : 'already-optimized',

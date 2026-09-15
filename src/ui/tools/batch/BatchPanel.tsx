@@ -33,6 +33,7 @@ import { useRef, useEffect, useState } from 'preact/hooks';
 
 import {
   hasDirectoryPicker,
+  hasFileSystemAccess,
   showDirectoryPicker,
   isAbort,
   showSaveFilePicker
@@ -110,6 +111,18 @@ export function BatchPanel() {
   };
 
   const handleSelectZipOutput = async () => {
+    // Unlike the folder pickers above, this one had no feature-detection at
+    // all — on Firefox/Safari it fell straight into `showSaveFilePicker`'s own
+    // internal guard ("showSaveFilePicker is unavailable"), a raw string never
+    // meant for a user to read, instead of the same clear explanation its
+    // sibling buttons already give.
+    if (!hasFileSystemAccess()) {
+      notify('warning', translate('Saving a ZIP file this way is unavailable'), {
+        detail:
+          'Batch processing requires a browser with File System Access support (Chrome or Edge).'
+      });
+      return;
+    }
     try {
       const handle = await showSaveFilePicker({
         suggestedName: 'batch-output.zip',
@@ -218,10 +231,21 @@ export function BatchPanel() {
   };
 
   const handleRun = async () => {
+    // §2.1 — checked and set synchronously, before the first `await`, so a
+    // fast double-click/double-Enter on this button (before the disabled
+    // state re-renders) cannot overwrite the in-flight run's controller with
+    // a second, inert one. Without this, Cancel would end up aborting the
+    // newer controller — the one runBatch() below never actually receives,
+    // since runner.ts's own reentrancy guard already made that second call a
+    // no-op — leaving the real run with nothing left able to cancel it.
+    if (abortControllerRef.current) return;
     const controller = new AbortController();
     abortControllerRef.current = controller;
-    await runBatch(controller.signal);
-    abortControllerRef.current = null;
+    try {
+      await runBatch(controller.signal);
+    } finally {
+      abortControllerRef.current = null;
+    }
   };
 
   const handleCancel = () => {

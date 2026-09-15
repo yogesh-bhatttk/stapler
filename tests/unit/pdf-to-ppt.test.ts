@@ -1960,3 +1960,146 @@ describe('CNV-12 — the mandatory-preview gate', () => {
     expect(commitGate('pdf-to-ppt')).toBeNull();
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * RTL / bidi directionality
+ *
+ * The bug this covers: every text box was written with no directionality at
+ * all, so Arabic or Hebrew extracted correctly as Unicode reached PowerPoint
+ * labelled — by omission — left-to-right, and rendered in the wrong reading
+ * order.
+ *
+ * In DrawingML direction is a *paragraph* property, `<a:pPr rtl="1">`; there is
+ * no run-level equivalent, so the granularity asserted here is the text box, not
+ * the run. That is the format's limit, not a shortcut: see the comment in
+ * `pptx-writer.ts`.
+ * ------------------------------------------------------------------ */
+
+/** One produced slide part, as a string. */
+function slideXml(pptx: Uint8Array, slideNumber = 1): string {
+  return strFromU8(unzipSync(pptx)[`ppt/slides/slide${slideNumber}.xml`]);
+}
+
+/**
+ * Each `<a:p>` on a slide, as its text and whether its `<a:pPr>` carries
+ * `rtl="1"` — read off the real part, because that attribute is the entire
+ * fix and a reader that normalised it away would prove nothing.
+ */
+function slideParagraphs(xml: string): { text: string; rtl: boolean }[] {
+  return [...xml.matchAll(/<a:p>([\s\S]*?)<\/a:p>/g)].map(match => ({
+    text: [...match[1].matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)].map(t => decodeXmlText(t[1])).join(''),
+    rtl: /<a:pPr[^>]*\brtl="1"/.test(match[1])
+  }));
+}
+
+const ARABIC_LINE = 'مرحبا بالعالم';
+const HEBREW_LINE = 'שלום עולם';
+
+/** One line of a page, with runs given explicitly so a mixed line can be built. */
+function runLine(
+  runs: { text: string; bold?: boolean; italic?: boolean }[],
+  baseline: number
+): PageSlideData['lines'][number] {
+  return {
+    runs: runs.map(run => ({
+      text: run.text,
+      bold: run.bold ?? false,
+      italic: run.italic ?? false
+    })),
+    x: 20,
+    baseline,
+    width: 200,
+    size: 12,
+    angle: 0,
+    truncated: 0
+  };
+}
+
+/** The real planner, then the real writer — no hand-built plan in between. */
+async function deckFromLines(lines: PageSlideData['lines']): Promise<Uint8Array> {
+  const { buildPptx } = await import('../../src/core/convert/pptx-writer');
+  const plan = planSlides([slidePage({ lines })], {
+    includeText: true,
+    includeImages: false,
+    placements: null,
+    entries: null,
+    archivedFiles: new Set()
+  });
+  return buildPptx(plan, { title: 'rtl', images: {} });
+}
+
+describe('CNV-12 — RTL text is flagged right-to-left, not silently left-to-right', () => {
+  it('flags a real RTL PDF end to end, through the production entry point', async () => {
+    // `tests/fixtures/rtl.pdf`, the repo's own Arabic fixture, through
+    // `convertPdfToPptx` — extraction, slide plan and writer, nothing stubbed.
+    const { bytes, outline } = await convert(fixture('rtl.pdf'));
+    expect(outline.map(item => item.text).join('')).toMatch(/[؀-ۿ]/);
+
+    const arabic = slideParagraphs(slideXml(bytes)).filter(p => /[؀-ۿ]/.test(p.text));
+    expect(arabic.length).toBeGreaterThan(0);
+    for (const paragraph of arabic) {
+      expect(paragraph.rtl, 'the paragraph carries <a:pPr rtl="1">').toBe(true);
+    }
+  }, 180_000);
+
+  it('writes rtl="1" on an RTL box and nothing on the Latin box beside it', async () => {
+    const pptx = await deckFromLines([
+      runLine([{ text: ARABIC_LINE }], 700),
+      runLine([{ text: 'Quarterly report' }], 660),
+      runLine([{ text: HEBREW_LINE }], 620)
+    ]);
+    const paragraphs = slideParagraphs(slideXml(pptx));
+    expect(paragraphs.map(p => p.text)).toEqual([ARABIC_LINE, 'Quarterly report', HEBREW_LINE]);
+    expect(paragraphs.map(p => p.rtl)).toEqual([true, false, true]);
+  }, 60_000);
+
+  it('leaves an all-Latin deck with no direction markup whatsoever', async () => {
+    const pptx = await deckFromLines([
+      runLine([{ text: 'Quarterly report' }], 700),
+      runLine([{ text: 'Revenue grew 12% in Q3.' }], 660)
+    ]);
+    expect(slideXml(pptx)).not.toContain('rtl="1"');
+  }, 60_000);
+
+  it('flags a box whose Latin-run first is still an RTL line overall', async () => {
+    // Direction is decided over the whole box, not from whichever run happens to
+    // be first — which matters because `pptxgenjs` builds `<a:pPr>` from the run
+    // objects, so a per-run decision could put the flag on the wrong paragraph
+    // or drop it entirely.
+    const pptx = await deckFromLines([
+      runLine([{ text: 'Q3 ', bold: true }, { text: ARABIC_LINE }], 700)
+    ]);
+    const paragraphs = slideParagraphs(slideXml(pptx));
+    expect(paragraphs[0].text).toBe(`Q3 ${ARABIC_LINE}`);
+    expect(paragraphs[0].rtl).toBe(true);
+  }, 60_000);
+
+  it('keeps bold, italic, position and size alongside the direction flag', async () => {
+    // The flag is added to a box that must still be the box `slides.ts` placed:
+    // a directionality fix that moved the text would be worse than the bug.
+    const plain = await deckFromLines([runLine([{ text: 'Quarterly report' }], 700)]);
+    const rtl = await deckFromLines([runLine([{ text: ARABIC_LINE, bold: true }], 700)]);
+    const offsetOf = (xml: string) => /<a:off x="(\d+)" y="(\d+)"\/>/.exec(xml)?.slice(1);
+
+    expect(offsetOf(slideXml(rtl))).toEqual(offsetOf(slideXml(plain)));
+    // `algn="l"` is kept deliberately: the box is exactly the line's measured
+    // width at the line's own left edge, so right-aligning would move the text
+    // away from where the page drew it. `rtl="1"` is what fixes reading order.
+    expect(slideXml(rtl)).toContain('algn="l"');
+    expect(slideXml(rtl)).toContain('<a:rPr lang="en-US" sz="1200" b="1"');
+  }, 60_000);
+
+  it('still reads back through the pptx reader, with the RTL text intact', async () => {
+    // An independent parse of the real bytes — `pptx-reader.ts` is CNV-13's, and
+    // knows nothing about this change.
+    const pptx = await deckFromLines([
+      runLine([{ text: ARABIC_LINE }], 700),
+      runLine([{ text: HEBREW_LINE }], 660)
+    ]);
+    const read = await readPptx(pptx);
+    expect(read.slides).toHaveLength(1);
+    const text = read.slides[0].shapes.map(shape => shape.text ?? '').join(' ');
+    expect(text).toContain(ARABIC_LINE);
+    expect(text).toContain(HEBREW_LINE);
+  }, 60_000);
+});

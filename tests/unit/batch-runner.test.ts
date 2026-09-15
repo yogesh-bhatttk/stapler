@@ -68,24 +68,57 @@ vi.mock('../../src/core/workers', () => ({
           pageCount: 1,
           permissionRestrictions: bytes[1] === 9 ? -3904 : null
         }),
-        compose: async (_pages: unknown, sources: Record<string, Uint8Array>) =>
-          Object.values(sources)[0],
+        // §4: appends a marker byte when a watermark is actually passed, so a
+        // test can tell "watermark ran and changed the bytes" apart from
+        // "watermark ran and was a no-op" — the same way `scrubMetadata`'s
+        // `0xff` and `restrictDocument`'s `0xee` stand in for their own effects.
+        compose: async (
+          _pages: unknown,
+          sources: Record<string, Uint8Array>,
+          _extraSources: unknown,
+          watermarkData: unknown
+        ) => {
+          const base = Object.values(sources)[0];
+          return watermarkData ? new Uint8Array([...base, 0x77]) : base;
+        },
         readMetadata: (...args: unknown[]) => readMetadata(...(args as [Uint8Array])),
         scrubMetadata: (...args: unknown[]) => scrubMetadata(...(args as [Uint8Array])),
         restrictDocument: (...args: unknown[]) =>
           restrictDocument(...(args as unknown as [Uint8Array]))
       })
+  },
+  // §1.8's validation gate pins a render-worker client to parse each file before
+  // any tool runs. Stubbed to always report one page, since real pdf.js parsing
+  // is out of scope for this test — the "§1.8" describe block below exercises
+  // the gate's own reject/accept behaviour, which only depends on the raw bytes
+  // and never reaches this stub.
+  renderWorker: {
+    pin: () => ({
+      lease: <T>(fn: (api: unknown) => Promise<T>) =>
+        fn({
+          loadDocument: async () => ({ pageCount: 1, handle: 0 }),
+          closeDocument: async () => {}
+        }),
+      release: () => {}
+    })
   }
 }));
 
 const { runBatch } = await import('../../src/ui/tools/batch/runner');
 const state = await import('../../src/ui/tools/batch/state');
 const { compressSettings } = await import('../../src/ui/tools/compress/state');
+const { watermarkSettings } = await import('../../src/ui/tools/watermark/state');
 
 interface Written {
   name: string;
   bytes: Uint8Array;
 }
+
+// §1.8's validation gate (runner.ts) rejects anything that doesn't contain a
+// `%PDF` header, so every fixture below carries one — appended after the
+// marker bytes the rest of this file reads by position (bytes[0]/bytes[1]),
+// so their meaning is unchanged.
+const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46]; // %PDF
 
 function fileHandle(
   name: string,
@@ -97,13 +130,22 @@ function fileHandle(
     getFile: async () => {
       if (options.fails) throw new Error(`cannot read ${name}`);
       return new File(
-        [new Uint8Array([options.marker ?? 0, options.restricted ? 9 : 2, 3])],
+        [new Uint8Array([options.marker ?? 0, options.restricted ? 9 : 2, 3, ...PDF_MAGIC])],
         name,
         {
           type: 'application/pdf'
         }
       );
     }
+  };
+}
+
+/** A file handle whose bytes are exactly what the test passes, for validation-gate tests. */
+function rawFileHandle(name: string, bytes: Uint8Array) {
+  return {
+    kind: 'file' as const,
+    name,
+    getFile: async () => new File([bytes], name, { type: 'application/pdf' })
   };
 }
 
@@ -139,6 +181,7 @@ beforeEach(() => {
   state.savedRecipes.value = [];
   state.outputPattern.value = '{basename}';
   state.scrubMetadataInBatch.value = false;
+  watermarkSettings.value = { ...watermarkSettings.value, kind: 'text', text: '' } as never;
 });
 
 describe('BAT-03: output names are indexed by input position', () => {
@@ -170,6 +213,91 @@ describe('BAT-03: output names are indexed by input position', () => {
     await runBatch();
 
     expect(written.map(w => w.name)).toEqual(['doc-a.pdf']);
+  });
+});
+
+/**
+ * §2.1 — `runBatch` used to have no reentrancy guard at all: only the "Run
+ * Batch" button's `disabled` prop stopped a second click, and that prop does
+ * not flip true until React re-renders after `batchProgress.value.isProcessing`
+ * is set — which itself happens only after this function's first `await`. A
+ * fast double-click/double-Enter before that render could start two
+ * concurrent runs, both mutating `batchProgress` and both writing to the same
+ * output. The fix is a plain module-level flag checked and set synchronously,
+ * before `runBatch`'s first `await`, so nothing can interleave between the
+ * check and the set.
+ */
+describe('§2.1: a second concurrent runBatch() call is a no-op', () => {
+  it('only the first call actually processes files', async () => {
+    const { inDir, outDir, written } = dirs([fileHandle('a.pdf'), fileHandle('b.pdf')]);
+    state.inputDirHandle.value = inDir as never;
+    state.outputDirHandle.value = outDir as never;
+
+    // Called back-to-back with no `await` between them — the second call
+    // lands inside the synchronous prefix of the first, before its first
+    // `await` yields control back to this test.
+    const first = runBatch();
+    const second = runBatch();
+    await Promise.all([first, second]);
+
+    // Exactly one run's worth of output — not zero, and not double-written.
+    expect(written.map(w => w.name).sort()).toEqual(['a.pdf', 'b.pdf']);
+    expect(state.batchProgress.value.completed).toBe(2);
+  });
+
+  it('a run started after the first one finishes is not blocked', async () => {
+    const { inDir, outDir, written } = dirs([fileHandle('a.pdf')]);
+    state.inputDirHandle.value = inDir as never;
+    state.outputDirHandle.value = outDir as never;
+
+    await runBatch();
+    expect(written.map(w => w.name)).toEqual(['a.pdf']);
+
+    const { inDir: inDir2, outDir: outDir2, written: written2 } = dirs([fileHandle('c.pdf')]);
+    state.inputDirHandle.value = inDir2 as never;
+    state.outputDirHandle.value = outDir2 as never;
+    await runBatch();
+
+    expect(written2.map(w => w.name)).toEqual(['c.pdf']);
+  });
+});
+
+/**
+ * §1.8 (AUDIT-EDGE-CASES-2026-09-15.md) — batch had no equivalent of
+ * importPdf()'s validation gate, so a non-PDF or corrupt file in a batch
+ * folder either threw a raw internal error or silently produced wrong output.
+ * It must fail the same clear, classified way "Add PDF" would.
+ */
+describe('§1.8: a bad file in a batch folder fails cleanly', () => {
+  it('rejects a file with no PDF header instead of crashing or silently mis-processing it', async () => {
+    const { inDir, outDir, written } = dirs([
+      rawFileHandle('good.pdf', new Uint8Array([0, 2, 3, ...PDF_MAGIC])),
+      rawFileHandle('not-a-pdf.pdf', new Uint8Array([1, 2, 3, 4, 5]))
+    ]);
+    state.inputDirHandle.value = inDir as never;
+    state.outputDirHandle.value = outDir as never;
+
+    await runBatch();
+
+    // The good file still processes; the bad one fails, not the whole batch.
+    expect(written.map(w => w.name)).toEqual(['good.pdf']);
+    expect(state.batchProgress.value.completed).toBe(1);
+    expect(state.batchProgress.value.failed).toBe(1);
+    const note = state.batchProgress.value.notes.find(n => n.file === 'not-a-pdf.pdf');
+    expect(note?.kind).toBe('failed');
+    expect(note?.detail).toMatch(/pdf header/i);
+  });
+
+  it('rejects an empty file cleanly', async () => {
+    const { inDir, outDir } = dirs([rawFileHandle('empty.pdf', new Uint8Array([]))]);
+    state.inputDirHandle.value = inDir as never;
+    state.outputDirHandle.value = outDir as never;
+
+    await runBatch();
+
+    expect(state.batchProgress.value.failed).toBe(1);
+    const note = state.batchProgress.value.notes.find(n => n.file === 'empty.pdf');
+    expect(note?.detail).toMatch(/empty/i);
   });
 });
 
@@ -260,9 +388,11 @@ describe('RED-09: batch metadata scrub', () => {
     // The scrubbed file's written bytes reflect the scrub call's output;
     // the clean file's bytes are untouched.
     expect(written.find(w => w.name === 'has-author.pdf')!.bytes).toEqual(
-      new Uint8Array([1, 2, 3, 0xff])
+      new Uint8Array([1, 2, 3, ...PDF_MAGIC, 0xff])
     );
-    expect(written.find(w => w.name === 'clean.pdf')!.bytes).toEqual(new Uint8Array([0, 2, 3]));
+    expect(written.find(w => w.name === 'clean.pdf')!.bytes).toEqual(
+      new Uint8Array([0, 2, 3, ...PDF_MAGIC])
+    );
   });
 });
 
@@ -288,7 +418,7 @@ describe('permission restrictions survive a batch run', () => {
     expect(restrictDocument.mock.calls[0][1]).toBe(-3904);
     // The scrubbed bytes, then the restriction pass over them \u2014 in that
     // order, so the flags are applied to what is actually written.
-    expect(written[0].bytes).toEqual(new Uint8Array([1, 9, 3, 0xff, 0xee]));
+    expect(written[0].bytes).toEqual(new Uint8Array([1, 9, 3, ...PDF_MAGIC, 0xff, 0xee]));
   });
 
   it('leaves an unrestricted file alone', async () => {
@@ -314,7 +444,7 @@ describe('permission restrictions survive a batch run', () => {
     await runBatch();
 
     expect(restrictDocument).not.toHaveBeenCalled();
-    expect(written[0].bytes).toEqual(new Uint8Array([0, 9, 3]));
+    expect(written[0].bytes).toEqual(new Uint8Array([0, 9, 3, ...PDF_MAGIC]));
   });
 });
 
@@ -331,7 +461,7 @@ describe('permission restrictions survive a batch run', () => {
 describe("compress's never-grow guarantee survives restriction reapplication", () => {
   it('discards a compressed result once reapplying restrictions regrows it past the original', async () => {
     const { inDir, outDir, written } = dirs([
-      // bytes: [1, 9, 3] \u2014 marker 1, restricted (byte[1] === 9), length 3.
+      // bytes: [1, 9, 3, ...PDF_MAGIC] \u2014 marker 1, restricted (byte[1] === 9).
       fileHandle('locked.pdf', { marker: 1, restricted: true })
     ]);
     state.inputDirHandle.value = inDir as never;
@@ -352,7 +482,7 @@ describe("compress's never-grow guarantee survives restriction reapplication", (
 
     // Reverted to the untouched original \u2014 already correctly restricted, so
     // no second restriction pass was needed once compression was discarded.
-    expect(written[0].bytes).toEqual(new Uint8Array([1, 9, 3]));
+    expect(written[0].bytes).toEqual(new Uint8Array([1, 9, 3, ...PDF_MAGIC]));
     expect(
       state.batchProgress.value.notes.some(
         n => n.file === 'locked.pdf' && n.kind === 'kept-original'
@@ -377,11 +507,66 @@ describe("compress's never-grow guarantee survives restriction reapplication", (
 
     await runBatch();
 
-    expect(written[0].bytes).toEqual(new Uint8Array([1, 0xee]));
+    expect(written[0].bytes).toEqual(new Uint8Array([1, 9, 3, 0x25, 0x50, 0xee]));
     expect(
       state.batchProgress.value.notes.some(
         n => n.file === 'locked.pdf' && n.kind === 'kept-original'
       )
     ).toBe(false);
+  });
+
+  /**
+   * §4 — for a non-default recipe order where 'compress' does not run last,
+   * discarding a compressed result used to fall all the way back to the
+   * pre-compress, pre-*every-later-tool* bytes — silently discarding whatever
+   * ran after compress too, not just the compression. It also has to reapply
+   * restrictions to that rebuilt result: a downstream tool's `compose` rebuilds
+   * the document from scratch and does not carry the source's real `/Encrypt`
+   * forward the way leaving the untouched original bytes alone does.
+   */
+  it('discarding compression does not also discard a tool that ran after it, and still restricts the result', async () => {
+    const { inDir, outDir, written } = dirs([
+      fileHandle('locked.pdf', { marker: 1, restricted: true })
+    ]);
+    state.inputDirHandle.value = inDir as never;
+    state.outputDirHandle.value = outDir as never;
+    // A recipe replays its own settings snapshot, never the live signals (see
+    // BAT-01 above) — so, unlike the other tests in this file, both tools'
+    // settings have to be embedded in the recipe itself, or neither runs.
+    state.savedRecipes.value = [
+      {
+        id: 'r1',
+        name: 'Compress then watermark',
+        tools: ['compress', 'watermark'],
+        settings: {
+          compress: { ...compressSettings.value } as never,
+          watermark: { ...watermarkSettings.value, kind: 'text', text: 'CONFIDENTIAL' } as never
+        }
+      }
+    ];
+    state.activeRecipeId.value = 'r1';
+
+    planCompression.mockResolvedValueOnce({ alreadyOptimized: false });
+    // Grows by one byte — enough that, once the watermark and the restriction
+    // pass are added on top, the compressed path ends up larger than skipping
+    // compression would have.
+    compressDocument.mockImplementationOnce(async (bytes: Uint8Array) => ({
+      bytes: new Uint8Array([...bytes, 0xcc]),
+      keptOriginal: false
+    }));
+
+    await runBatch();
+
+    // The watermark marker (0x77) survives the rollback, and the restriction
+    // marker (0xee) is still there — reapplied to the rebuilt result, not
+    // skipped because the bytes were no longer the untouched original once the
+    // watermark ran on top of them. Only compression's own marker (0xcc) is
+    // gone.
+    expect(written[0].bytes).toEqual(new Uint8Array([1, 9, 3, 0x25, 0x50, 0x44, 0x46, 0x77, 0xee]));
+    const note = state.batchProgress.value.notes.find(
+      n => n.file === 'locked.pdf' && n.kind === 'kept-original'
+    );
+    expect(note).toBeDefined();
+    expect(note?.detail).toMatch(/later steps were reapplied/);
   });
 });

@@ -77,8 +77,13 @@ describe('§0 — page-independent catalog survives a redaction', () => {
 
     const keys = catalogKeys(await load(out));
     expect(keys).toContain('/PageLabels');
-    expect(keys).not.toContain('/OCProperties');
     expect(keys).not.toContain('/StructTreeRoot');
+    // /OCProperties used to be dropped with the page-linked trees, which is the
+    // one place where dropping was not the safe direction: the `/OC` operators
+    // stay in the content stream, so a layer the author had switched *off* came
+    // back visible. It is carried across now (the group objects the pages name
+    // are made to match it) — see `redaction-optional-content.test.ts`.
+    expect(keys).toContain('/OCProperties');
   });
 });
 

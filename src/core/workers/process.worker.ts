@@ -86,6 +86,7 @@ import {
   PDFHexString,
   PDFTextField,
   degrees,
+  toDegrees,
   decodePDFRawStream,
   StandardFonts,
   LineCapStyle,
@@ -105,6 +106,7 @@ import { corrupt, fromUnknown, internal, unsupported } from '../errors';
 import { loadPdfDocument, loadPdfDocumentWithRestrictions } from '../pdf/load';
 import type { ImagesToPdfOptions } from '../operations';
 import type { ImageResultStat } from '../compress-report';
+import { UNDECODABLE_FILTERS } from '../compress-plan';
 import { DOC_HAIRLINE_RGB, DOC_INK_RGB, DOC_REDACT_RGB } from '../doc-colors';
 import { markdownToPdfBytes } from '../markdown-to-pdf';
 import {
@@ -133,7 +135,17 @@ import {
   decodeStream,
   areaTouches
 } from '../pdf/interpreter';
-import type { Rect, RedactionArea, GraphicsState, Matrix, Statement } from '../pdf/interpreter';
+import type {
+  Rect,
+  RedactionArea,
+  FontInfo,
+  FormContent,
+  FormRewrite,
+  GraphicsState,
+  Matrix,
+  Statement,
+  XObjectInfo
+} from '../pdf/interpreter';
 import {
   findImagePlacements,
   MAX_FORM_DEPTH,
@@ -141,7 +153,7 @@ import {
   type PlacementResolver,
   type PlacementXObject
 } from '../pdf/image-placements';
-import { hasXfaMarker, XFA_COMPOSE_MESSAGE, XFA_MESSAGE } from '../pdf/xfa';
+import { documentHasXfa, hasXfaMarker, XFA_COMPOSE_MESSAGE, XFA_MESSAGE } from '../pdf/xfa';
 import {
   encryptPdf,
   encryptWithPlan,
@@ -240,6 +252,21 @@ export interface ImageFacts {
    * always fills it in.
    */
   filters?: string[];
+  /**
+   * Every filter in the chain of this image's `/SMask`, or of a stencil `/Mask`
+   * stream, in application order — empty when the image carries neither.
+   *
+   * A mask is its own XObject with its own encoding, about which the base
+   * image's `/Filter` says nothing. Only the base chain was ever recorded, so a
+   * FlateDecode photograph carrying a JPXDecode soft mask matched no entry in
+   * the undecodable-filter skip list and was routed to the surgical re-encode
+   * that list exists to keep it out of — pdf.js has no JPEG 2000 decoder, so
+   * the mask it was asked to resample could not have been read.
+   *
+   * Optional only so a hand-built `ImageFacts` still type-checks; the inventory
+   * always fills it in.
+   */
+  maskFilters?: string[];
   hasSMask: boolean;
   hasMask: boolean;
   /**
@@ -2027,7 +2054,134 @@ const FULL_CATALOG_KEYS = [
   'Dests'
 ];
 
+/**
+ * `/OCProperties` is handled by {@link preserveOptionalContent} instead of by
+ * `preserveDocumentCatalog`: copying it with a copier of its own produces a
+ * layer configuration that names *different* optional-content group objects
+ * from the ones the copied pages reference, which is no configuration at all.
+ */
 const REDACTION_CATALOG_KEYS = [...PAGE_INDEPENDENT_CATALOG_KEYS, 'PageLabels'];
+
+/**
+ * Carries a document's optional-content (layer) configuration through a
+ * page-by-page rebuild, so a layer the author switched **off** stays off.
+ *
+ * Dropping `/OCProperties` and keeping the pages is not a neutral act. The
+ * `/OC` marked-content operators and the `/Properties` resources that name the
+ * groups survive in the content stream; with no configuration left to say the
+ * group is hidden, a viewer draws and prints it. A redaction pass that is only
+ * ever supposed to *remove* content would start revealing content the author
+ * had hidden — a draft watermark, an internal-comments layer, a pre-redaction
+ * version of the page underneath.
+ *
+ * Carrying it across is not as simple as adding the key to
+ * {@link REDACTION_CATALOG_KEYS}, which is why it is not there: `copyPages`
+ * builds a fresh `PDFObjectCopier` per call, so page 1's copy of an OCG, page
+ * 2's copy of the same OCG, and a catalog-level copy are three distinct objects.
+ * The `/OCGs` array would then list groups nothing draws with, and every group
+ * the pages do name would be absent from the configuration — which puts the
+ * hidden layer back on screen just as reliably as dropping the key did
+ * (measured; see `tests/unit/redaction-optional-content.test.ts`).
+ *
+ * So the groups are copied **once**, up front, and each page is re-pointed at
+ * those copies as it is added. `relink` walks the source page and its freshly
+ * copied twin in lockstep — the copy is a structural clone, so the two trees
+ * have the same shape — and swaps any reference to a known group for the
+ * canonical copy, wherever it sits: `/Resources/Properties`, an `/OC` on an
+ * image or form XObject, an `/OC` on an annotation, a nested form's own
+ * resources, or the `/OCGs` array inside a page-local `/OCMD`.
+ */
+function preserveOptionalContent(
+  source: PDFDocument,
+  out: PDFDocument
+): { relink: (sourcePage: PDFPage, copied: PDFPage) => void } | null {
+  const ocProperties = source.catalog.get(PDFName.of('OCProperties'));
+  if (ocProperties === undefined) return null;
+
+  const context = source.context;
+  const groups = new Set<PDFRef>();
+  const visited = new Set<PDFObject>();
+
+  /** Every `/OCG` and `/OCMD` object the configuration names, by reference. */
+  const collect = (value: unknown): void => {
+    if (value instanceof PDFRef) {
+      const target = context.lookup(value);
+      if (target instanceof PDFDict) {
+        const type = target.get(PDFName.of('Type'));
+        if (type === PDFName.of('OCG') || type === PDFName.of('OCMD')) groups.add(value);
+      }
+      collect(target);
+      return;
+    }
+    if (value instanceof PDFStream) return; // No layer lives inside stream bytes.
+    if (value instanceof PDFDict) {
+      if (visited.has(value)) return;
+      visited.add(value);
+      for (const [, entry] of value.entries()) collect(entry);
+      return;
+    }
+    if (value instanceof PDFArray) {
+      if (visited.has(value)) return;
+      visited.add(value);
+      for (let i = 0; i < value.size(); i++) collect(value.get(i));
+    }
+  };
+  collect(ocProperties);
+
+  const copier = PDFObjectCopier.for(context, out.context);
+  // Copied before the configuration itself, so the configuration's own copy
+  // reuses these objects rather than making a second set.
+  const canonical = new Map<string, PDFRef>();
+  for (const ref of groups) canonical.set(ref.toString(), copier.copy(ref));
+  out.catalog.set(PDFName.of('OCProperties'), copier.copy(ocProperties));
+
+  if (canonical.size === 0) return { relink: () => undefined };
+
+  const relinkPair = (src: unknown, copy: unknown, seen: Set<unknown>): void => {
+    if (src instanceof PDFRef && copy instanceof PDFRef) {
+      if (seen.has(src)) return;
+      seen.add(src);
+      relinkPair(context.lookup(src), out.context.lookup(copy), seen);
+      return;
+    }
+    if (src instanceof PDFStream && copy instanceof PDFStream) {
+      relinkPair(src.dict, copy.dict, seen);
+      return;
+    }
+    if (src instanceof PDFDict && copy instanceof PDFDict) {
+      if (seen.has(src)) return;
+      seen.add(src);
+      for (const [key, value] of src.entries()) {
+        const replacement = value instanceof PDFRef ? canonical.get(value.toString()) : undefined;
+        if (replacement) copy.set(key, replacement);
+        else relinkPair(value, copy.get(key), seen);
+      }
+      return;
+    }
+    if (src instanceof PDFArray && copy instanceof PDFArray && src.size() === copy.size()) {
+      if (seen.has(src)) return;
+      seen.add(src);
+      for (let i = 0; i < src.size(); i++) {
+        const value = src.get(i);
+        const replacement = value instanceof PDFRef ? canonical.get(value.toString()) : undefined;
+        if (replacement) copy.set(i, replacement);
+        else relinkPair(value, copy.get(i), seen);
+      }
+    }
+  };
+
+  return {
+    relink: (sourcePage, copied) => {
+      // `Resources()`/`Annots()` on both sides rather than a raw `get`: the
+      // source page may inherit its resources from the page tree, while the
+      // copy always carries its own — `copyPages` hoists inheritable entries
+      // into the leaf — so a key-by-key walk from the leaves would miss them.
+      const seen = new Set<unknown>();
+      relinkPair(sourcePage.node.Resources(), copied.node.Resources(), seen);
+      relinkPair(sourcePage.node.Annots(), copied.node.Annots(), seen);
+    }
+  };
+}
 
 function preserveDocumentCatalog(
   source: PDFDocument,
@@ -2110,20 +2264,34 @@ async function composePages(
   globalTotal: number = pages.length,
   extras: ComposeExtras = {}
 ): Promise<PDFDocument> {
+  const outDoc = await PDFDocument.create();
+  const getSource = sourceCache(sources);
+
   // An XFA form's fields live in an XML payload hanging off /AcroForm, which no
   // page-copying rebuild carries: composing one produced a document whose
   // dynamic form was gone, with every field blank, and said nothing. The tools
   // that *deliberately* flatten an XFA form to a static page — sign and
   // annotate, which is what XFA_MESSAGE tells the user to do — opt in.
+  //
+  // Both halves of the detection are needed and neither is redundant. The raw
+  // scan is the only one that sees a document whose catalog the parser repaired
+  // or never reached; the parsed one is the only one that sees a form saved with
+  // object streams, where `/XFA` is inside compressed bytes the scan reads as
+  // noise — measured: the same XFA document scans `true` saved without object
+  // streams and `false` saved with them, which is the ordinary shape of real
+  // LiveCycle output. With the scan alone this guard let that document straight
+  // through and composing silently discarded the payload.
   if (!extras.allowXfaLoss) {
     for (const docId of new Set(pages.map(p => p.sourceDocId))) {
       const raw = sources[docId];
-      if (raw && hasXfaMarker(raw)) throw unsupported(XFA_COMPOSE_MESSAGE);
+      if (!raw) continue;
+      if (hasXfaMarker(raw)) throw unsupported(XFA_COMPOSE_MESSAGE);
+      // Read off the catalog, before anything in this function can call
+      // `getForm()` — which would delete the very entry being looked for.
+      if (documentHasXfa(await getSource(docId))) throw unsupported(XFA_COMPOSE_MESSAGE);
     }
   }
 
-  const outDoc = await PDFDocument.create();
-  const getSource = sourceCache(sources);
   const fontCache: { font?: Awaited<ReturnType<PDFDocument['embedFont']>> } = {};
   const imageCache = new Map<string, PDFImage>();
 
@@ -2711,18 +2879,125 @@ function nameKey(key: PDFName): string {
 }
 
 /**
+ * Where to draw a page raster whose rotation is already baked into its pixels.
+ *
+ * `pageToImageBytes` renders through a pdf.js viewport whose `rotation`
+ * defaults to the page's `/Rotate`, so the returned JPEG is what the *viewer*
+ * shows: upright, and landscape for a `/Rotate 90` portrait page. The rebuilt
+ * page keeps the original's media box and `/Rotate` (annotation rectangles are
+ * stated in unrotated user space, so moving the box would move all of them), so
+ * the image has to be placed in unrotated user space such that the page's own
+ * `/Rotate` brings it back the right way up — i.e. rotated by the negative of
+ * what the page declares, anchored so the result exactly fills the box.
+ *
+ * Derived against pdf.js's own `PageViewport` transform rather than by eye: for
+ * `/Rotate 90` it maps user `(x, y)` to display `(y, W − x)`, so the image's
+ * own +x axis has to run along user +y and its +y axis along user −x, anchored
+ * at the box's bottom-right corner. The other quarter turns follow the same
+ * derivation, and each matrix maps the image's unit square exactly onto the
+ * media box — no scaling error, no reflection.
+ *
+ * Written as an explicit matrix rather than through `drawImage`'s `rotate`
+ * option because that composes three operators and takes `cos(π/2)` on the way,
+ * which lands `6.1e-17` in the content stream where an exact `0` belongs.
+ *
+ * Angles that are not multiples of 90 fall to the unrotated case, which is
+ * exactly what pdf.js does with them (`Page.rotate` zeroes anything that is not
+ * a multiple of 90 before the viewport ever sees it).
+ */
+function rasterPlacementMatrix(
+  width: number,
+  height: number,
+  rotation: number
+): [number, number, number, number, number, number] {
+  switch (((rotation % 360) + 360) % 360) {
+    case 90:
+      return [0, height, -width, 0, width, 0];
+    case 180:
+      return [-width, 0, 0, -height, width, height];
+    case 270:
+      return [0, -height, width, 0, 0, height];
+    default:
+      return [width, 0, 0, height, 0, 0];
+  }
+}
+
+/**
+ * Carries a rasterised page's `/Annots` — links, comments, stamps, form
+ * widgets — onto the replacement page.
+ *
+ * Everything that survives re-rasterisation is carried: an annotation's
+ * geometry is its own `/Rect` in unrotated user space and its appearance is its
+ * own `/AP` stream, neither of which is part of the page content that was
+ * replaced. Nothing is silently dropped here; an annotation that only made
+ * sense against the old content stream would still make sense against a raster
+ * of that same content.
+ *
+ * `/P` is deleted *before* the copy and restored after. It points at the source
+ * page leaf, and `PDFObjectCopier` follows every reference it meets, so leaving
+ * it would copy the original page — the content streams and full-resolution
+ * images this route exists to replace — into the output as an orphan beside the
+ * raster. `reattachAcroForm` sets `/P` for widgets too; setting it here as well
+ * keeps non-widget annotations correct, which it does not touch.
+ */
+function copyAnnotationsToRasterPage(
+  source: PDFDocument,
+  out: PDFDocument,
+  original: PDFPage,
+  page: PDFPage,
+  copier: PDFObjectCopier
+): void {
+  const annotsRaw = original.node.get(PDFName.of('Annots'));
+  const annots =
+    annotsRaw instanceof PDFArray
+      ? annotsRaw
+      : annotsRaw instanceof PDFRef
+        ? source.context.lookupMaybe(annotsRaw, PDFArray)
+        : undefined;
+  if (!annots || annots.size() === 0) return;
+
+  const carried = PDFArray.withContext(out.context);
+  for (let i = 0; i < annots.size(); i++) {
+    const entry = annots.get(i);
+    const dict =
+      entry instanceof PDFDict
+        ? entry
+        : entry instanceof PDFRef
+          ? source.context.lookupMaybe(entry, PDFDict)
+          : undefined;
+    if (!dict) continue;
+    // A shallow clone in the *source* context: its entries are still the
+    // source's own references, so the copier below deep-copies them exactly as
+    // it would have from the original — but dropping `/P` off the clone leaves
+    // the source document untouched.
+    const detached = dict.clone(source.context);
+    detached.delete(PDFName.of('P'));
+    const copiedDict = copier.copy(detached) as PDFDict;
+    copiedDict.set(PDFName.of('P'), page.ref);
+    carried.push(out.context.register(copiedDict));
+  }
+  if (carried.size() > 0) page.node.set(PDFName.of('Annots'), carried);
+}
+
+/**
  * What an image stream costs in the file: its *stored* bytes, after its own
  * filters, which is the number a replacement has to beat.
  *
  * `getContents()` on a stream loaded from a file returns exactly those bytes. A
- * stream pdf-lib built in memory can throw instead, in which case the size is
- * unknown and reported as 0 — callers treat 0 as "do not judge on size".
+ * stream pdf-lib built in memory can throw instead — which is `null` here, not
+ * `0`, because those are two different facts and collapsing them into one
+ * number quietly disabled the guard that reads it. A failed read returned `0`,
+ * the caller's `originalBytes > 0 &&` test then skipped the never-grow
+ * comparison for that image, and an image whose replacement was *larger* than
+ * the stream it replaced was reported "re-encoded" — through the same branch
+ * meant to ignore a genuinely empty stream. `null` says the original's size is
+ * unknown, and an unknown original is a reason to keep it, not to stop looking.
  */
-function storedStreamBytes(stream: PDFStream): number {
+function storedStreamBytes(stream: PDFStream): number | null {
   try {
     return stream.getContents().byteLength;
   } catch {
-    return 0;
+    return null;
   }
 }
 
@@ -3137,6 +3412,14 @@ function collectImages(
     const mask = dict.lookup(PDFName.of('Mask'));
     const isImageMask = dict.lookup(PDFName.of('ImageMask')) === PDFBool.True;
     const filters = filterNamesOf(dict.get(PDFName.of('Filter')), doc.context);
+    // The mask's own filter chain, read from whichever of `/SMask` or a stencil
+    // `/Mask` this image carries. `mask` is already resolved by `lookup`, so a
+    // `/Mask 12 0 R` pointing at a stream is a `PDFStream` here and a colour-key
+    // `/Mask [ … ]` is a `PDFArray`, which has no stream to read.
+    const maskStream = smask ?? (mask instanceof PDFStream ? mask : undefined);
+    const maskFilters = maskStream
+      ? filterNamesOf(maskStream.dict.get(PDFName.of('Filter')), doc.context)
+      : [];
 
     images.push({
       name: key.asString().replace(/^\//, ''),
@@ -3150,6 +3433,7 @@ function collectImages(
       colorSpace: colorSpaceNameOf(dict.get(PDFName.of('ColorSpace')), resources, doc.context),
       filter: filters[filters.length - 1] ?? 'unknown',
       filters,
+      maskFilters,
       hasSMask: dict.get(PDFName.of('SMask')) !== undefined,
       hasMask: dict.get(PDFName.of('Mask')) !== undefined,
       maskKind: maskKindOf(smask, mask),
@@ -4713,12 +4997,32 @@ Q
         const originalBytes = storedStreamBytes(oldStream);
         const compressedBytes = encoded.jpeg.byteLength;
 
+        // An unreadable original is not a small original. Without its stored
+        // size there is no way to show the replacement is smaller, and CMP-04's
+        // rule is that compression never grows anything — so the image that
+        // cannot be measured is the image that is left alone. (This used to be
+        // spelled `originalBytes > 0 &&` on the test below, which read a failed
+        // measurement as permission to skip the test.)
+        if (originalBytes === null) {
+          note({
+            pageIndex,
+            imageId,
+            objectNumber,
+            compressedBytes,
+            status: 'skipped',
+            skipReason:
+              'The original image stream could not be measured, so there was no way to confirm the ' +
+              'replacement is smaller; the original was kept.'
+          });
+          continue;
+        }
+
         // CMP-04, per image: "compression" that makes an image bigger is not
         // compression. The whole-file gate at the end of this function would
         // catch a net growth, but not an image that grew inside a run that shrank
         // overall — the file gets smaller and one image silently gets worse. A
         // replacement is only taken when it is actually smaller.
-        if (originalBytes > 0 && compressedBytes >= originalBytes) {
+        if (compressedBytes >= originalBytes) {
           note({
             pageIndex,
             imageId,
@@ -4791,6 +5095,38 @@ Q
           });
           continue;
         }
+
+        // The mask's *own* encoding, which the base image's `/Filter` says
+        // nothing about. A JPEG 2000 or JBIG2 soft mask has no decoder on this
+        // path, so `encoded.maskBytes` cannot have come from reading it and the
+        // original stream cannot be resampled to the new colour target either —
+        // the same verdict `compress-plan.ts` reaches from the inventory's
+        // `maskFilters`, re-taken here from the file so this lock does not
+        // depend on the classifier having reached it.
+        const maskStreamNow =
+          smaskStreamNow ??
+          (maskRef instanceof PDFRef
+            ? source.context.lookupMaybe(maskRef, PDFStream)
+            : maskRef instanceof PDFStream
+              ? maskRef
+              : undefined);
+        const undecodableMask = maskStreamNow
+          ? filterNamesOf(maskStreamNow.dict.get(PDFName.of('Filter')), source.context).find(name =>
+              UNDECODABLE_FILTERS.has(name)
+            )
+          : undefined;
+        if (undecodableMask) {
+          note({
+            pageIndex,
+            imageId,
+            objectNumber,
+            originalBytes,
+            status: 'skipped',
+            skipReason: `Its mask is ${undecodableMask}-encoded, which has no decoder here, so the original was kept.`
+          });
+          continue;
+        }
+
         if (oldStream.dict.lookup(PDFName.of('ImageMask')) === PDFBool.True) {
           note({
             pageIndex,
@@ -4803,12 +5139,33 @@ Q
           continue;
         }
 
-        const image = await source.embedJpg(encoded.jpeg);
-        // `embedJpg` only reserves a reference; the stream itself is written on
-        // save. Forcing it now is what makes the object exist to hang the mask
-        // off — without this the lookup below returns undefined and the mask is
-        // quietly dropped.
-        await image.embed();
+        // `embedJpg` is pdf-lib's JPEG *parser*, and a replacement it cannot
+        // parse throws (`SOI not found in JPEG`). Unguarded, that exception
+        // travelled straight out of `rebuildCompressed`: one unreadable
+        // replacement aborted compression for the entire document, with no
+        // fallback to the original bytes and no message naming the image —
+        // while every other failure on this path skips the one image and
+        // carries on. It now does the same.
+        let image: PDFImage;
+        try {
+          image = await source.embedJpg(encoded.jpeg);
+          // `embedJpg` only reserves a reference; the stream itself is written on
+          // save. Forcing it now is what makes the object exist to hang the mask
+          // off — without this the lookup below returns undefined and the mask is
+          // quietly dropped.
+          await image.embed();
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          note({
+            pageIndex,
+            imageId,
+            objectNumber,
+            originalBytes,
+            status: 'skipped',
+            skipReason: `The re-encoded replacement could not be read back as a JPEG (${message}), so the original was kept.`
+          });
+          continue;
+        }
         const newStream = source.context.lookup(image.ref);
         if (!(newStream instanceof PDFStream)) {
           note({
@@ -4901,8 +5258,40 @@ Q
     preserveDocumentCatalog(source, out);
     const total = source.getPageCount();
 
-    const hasRaster =
-      Object.keys(rasterPages).length > 0 && Object.values(rasterPages).some(Boolean);
+    /*
+     * Every replacement raster is parsed *before* the rebuild decides which
+     * pages it keeps, because `embedJpg` is a parser and a malformed raster
+     * throws out of it (`SOI not found in JPEG`). Left unguarded inside the
+     * page loop, that exception ended the whole operation — no fallback to the
+     * original bytes, no per-page note, one bad page costing the document its
+     * compression. Doing it here means a page whose raster does not parse is
+     * simply not a rasterised page: it falls into `kept` below and is copied
+     * across byte-for-byte, exactly like a page the plan never routed here.
+     *
+     * Forcing `embed()` now is what makes a failure surface here rather than at
+     * `save()`, long after the fallback is still available.
+     */
+    const rasterImages = new Map<number, PDFImage>();
+    for (let i = 0; i < total; i++) {
+      const raster = rasterPages[i];
+      if (!raster) continue;
+      try {
+        const image = await out.embedJpg(raster);
+        await image.embed();
+        rasterImages.set(i, image);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        note({
+          pageIndex: i,
+          // The identifier CMP-06's report already uses for a rasterised page.
+          imageId: `page-${i + 1}-raster`,
+          status: 'skipped',
+          skipReason: `The re-rendered page image could not be read back as a JPEG (${message}), so this page was left exactly as it was.`
+        });
+      }
+    }
+
+    const hasRaster = rasterImages.size > 0;
     const hasReencoded = embedded.size > 0;
     // No raster page and no image actually swapped means no compression work
     // happened at all. Rebuilding anyway would still change the byte length —
@@ -4924,30 +5313,69 @@ Q
     // the pages share — a logo on ten pages came out as ten identical JPEGs,
     // undoing the whole point of encoding it once.
     const kept: number[] = [];
-    for (let i = 0; i < total; i++) if (!rasterPages[i]) kept.push(i);
+    for (let i = 0; i < total; i++) if (!rasterImages.has(i)) kept.push(i);
     await checkpoint(job, 0.5, 'Rebuilding pages');
     const copies = await out.copyPages(source, kept);
     const copyByIndex = new Map(kept.map((pageIndex, at) => [pageIndex, copies[at]]));
 
+    // One copier for every rasterised page's annotations, so a form field whose
+    // widgets sit on two rasterised pages is carried across once rather than
+    // duplicated per page.
+    const annotationCopier = PDFObjectCopier.for(source.context, out.context);
+
     for (let i = 0; i < total; i++) {
       await checkpoint(job, 0.5 + (i / total) * 0.4, `Rebuilding page ${i + 1} of ${total}`);
-      const raster = rasterPages[i];
+      // Only a page whose raster actually parsed; one that did not is absent
+      // from this map, so it is in `kept` and takes the `copied` branch below.
+      const image = rasterImages.get(i);
       const copied = copyByIndex.get(i);
-      if (raster) {
+      if (image) {
         // A rasterised page keeps its box and its /Rotate, so the output lines up
         // with what the grid showed.
         const original = pages[i];
         const { width, height } = original.getSize();
         const page = out.addPage([width, height]);
         page.setRotation(original.getRotation());
-        const image = await out.embedJpg(raster);
-        page.drawImage(image, { x: 0, y: 0, width, height });
+        // *Not* `{ x: 0, y: 0, width, height }`. `pageToImageBytes` renders
+        // through a pdf.js viewport whose rotation defaults to the page's own
+        // `/Rotate`, so the JPEG's pixels are already rotated — a /Rotate 90
+        // letter page arrives as a 792×612 landscape image. Drawing it square
+        // into the 612×792 box and then re-declaring /Rotate 90 rotated it a
+        // second time and squashed it to the wrong aspect ratio. The placement
+        // below cancels exactly the rotation the page declares, so the image
+        // lands upright inside the box and the declared /Rotate turns it back.
+        //
+        // /Rotate is kept rather than folded into a pre-rotated page box
+        // because every annotation `/Rect` on this page is stated in unrotated
+        // user space: changing the box would silently move all of them.
+        page.pushOperators(
+          pushGraphicsState(),
+          concatTransformationMatrix(
+            ...rasterPlacementMatrix(width, height, toDegrees(original.getRotation()))
+          ),
+          drawObject(page.node.newXObject('Image', image.ref)),
+          popGraphicsState()
+        );
+        // CMP-02 used to drop every link, comment, stamp and form widget on a
+        // rasterised page — measured as `/Annots [ ]` on the output — because
+        // the replacement page was built from scratch and nothing carried them
+        // over. Re-rasterising the *content* is the point of this route;
+        // discarding the interactive layer with it is not.
+        copyAnnotationsToRasterPage(source, out, original, page, annotationCopier);
       } else if (copied) {
         out.addPage(copied);
       }
     }
 
     reattachAcroForm(out, [source]);
+    // Copying an annotation pulls its whole reference graph across, and a form
+    // widget's `/Parent` chain can lead back out to a sibling widget on another
+    // page and from there to that page's object — content streams, original
+    // images and all. Anything the finished catalog cannot reach is not part of
+    // this document, and pdf-lib serialises unreachable objects unless they are
+    // removed, so an orphan would be paid for in exactly the bytes this
+    // operation exists to save.
+    sweepUnreachableObjects(out);
     await checkpoint(job, 0.95, 'Writing file');
     const rebuilt = await pseudoLinearize(out).save({ useObjectStreams: true });
 
@@ -5701,6 +6129,7 @@ Q
 
     const out = await PDFDocument.create();
     preserveDocumentCatalog(source, out, undefined, REDACTION_CATALOG_KEYS);
+    const optionalContent = preserveOptionalContent(source, out);
     const total = sourcePages.length;
 
     for (let i = 0; i < total; i++) {
@@ -5708,6 +6137,9 @@ Q
 
       const [copied] = await out.copyPages(source, [i]);
       out.addPage(copied);
+      // Before anything else touches the page: a hidden layer must not become
+      // visible just because the document was rebuilt.
+      optionalContent?.relink(sourcePages[i], copied);
 
       const pageRegions = regionsByPage.get(i);
       if (!pageRegions) continue;
@@ -5715,17 +6147,26 @@ Q
       const rects = redactionRectsForPage(copied, pageRegions);
 
       // 1. Operator-level content removal.
-      const { content, strippedXObjectNames, partialImages } = await filterPageForRedaction(
-        copied,
-        out.context,
-        rects
-      );
+      const { content, strippedXObjectNames, partialImages, formRewrites, survivingXObjectNames } =
+        await filterPageForRedaction(copied, out.context, rects);
       if (content) {
         const newStream = out.context.flateStream(content);
         copied.node.set(PDFName.of('Contents'), out.context.register(newStream));
       }
 
       const xObjects = localizePageResources(copied, out.context);
+
+      // 1b. Form XObjects a mark reached *into*: the filtered content goes into
+      // a replacement object so the other placements of the same form — the
+      // ones no mark touched — keep painting what they always painted.
+      if (formRewrites.length > 0) {
+        if (!xObjects) {
+          throw internal('A page whose form XObjects were rewritten has no /XObject resources', {
+            pageIndex: i
+          });
+        }
+        applyFormRewrites(out, xObjects, formRewrites, survivingXObjectNames);
+      }
 
       // 2. Image XObjects whose `Do` was removed outright: unhook the name, then
       // drop the stream itself. pdf-lib serialises every object in its context
@@ -5816,17 +6257,10 @@ Q
   async collectOffPageText(bytes) {
     const doc = await load(bytes);
     const found: string[] = [];
-
-    const decode = (value: unknown): string | undefined => {
-      if (value instanceof PDFString || value instanceof PDFHexString) {
-        try {
-          return value.decodeText();
-        } catch {
-          return undefined;
-        }
-      }
-      return undefined;
-    };
+    // Shared across pages and the form tree: a widget reached from a page and
+    // the same widget reached through `/AcroForm /Fields` is one dictionary, and
+    // a field's `/Parent` chain is walked from every one of its widgets.
+    const seen = new Set<PDFDict>();
 
     for (const page of doc.getPages()) {
       const annotsRaw = page.node.get(PDFName.of('Annots'));
@@ -5841,23 +6275,22 @@ Q
         const ref = annots.get(i);
         const dict = ref instanceof PDFDict ? ref : doc.context.lookupMaybe(ref, PDFDict);
         if (!dict) continue;
-        const contents = decode(dict.get(PDFName.of('Contents')));
-        if (contents) found.push(contents);
+        await collectHiddenText(dict, doc.context, found, seen);
       }
     }
 
-    try {
-      const form = doc.getForm();
-      for (const field of form.getFields()) {
-        if (field instanceof PDFTextField) {
-          const text = field.getText();
-          if (text) found.push(text);
-        } else if (field instanceof PDFDropdown || field instanceof PDFOptionList) {
-          found.push(...field.getSelected());
-        }
-      }
-    } catch {
-      // No AcroForm, or a malformed one — nothing to collect.
+    // The form tree directly, not through `doc.getForm()`: the typed accessors
+    // only expose text fields, dropdowns and option lists, so a check box or
+    // radio group whose export value *is* the redacted string, a field with no
+    // widget on any page, and every `/TU` tooltip and `/DV` default were all
+    // invisible to them. `getForm()` also creates an `/AcroForm` on a document
+    // that has none, which a read-only verifier has no business doing.
+    const acroForm = doc.catalog.lookupMaybe(PDFName.of('AcroForm'), PDFDict);
+    const fields = acroForm?.lookupMaybe(PDFName.of('Fields'), PDFArray);
+    for (let i = 0; i < (fields?.size() ?? 0); i++) {
+      const ref = fields!.get(i);
+      const dict = ref instanceof PDFDict ? ref : doc.context.lookupMaybe(ref, PDFDict);
+      if (dict) await collectHiddenText(dict, doc.context, found, seen);
     }
 
     return found;
@@ -6428,8 +6861,8 @@ function standardFontWidths(
 }
 
 /**
- * An upper bound on any glyph's advance in this font, in 1/1000 em, or
- * `undefined` when the font declares nothing to bound it with.
+ * An upper bound on any glyph's advance in this font, in the font's own glyph
+ * space, or `undefined` when the font declares nothing to bound it with.
  *
  * Fed to `FontInfo.maxGlyphWidth`, which uses it *only* to widen the redaction
  * filter's hit-testing box for a code whose width had to be guessed — never to
@@ -6442,7 +6875,9 @@ function maxGlyphWidthOf(
   widths: Map<number, number> | undefined,
   declaredDefault: number | undefined,
   descriptor: PDFDict | undefined,
-  context: PDFContext
+  context: PDFContext,
+  /** Glyph space → text space, so the sanity cap below stays "four ems". */
+  glyphSpaceScale = 0.001
 ): number | undefined {
   let max = 0;
   if (widths) for (const width of widths.values()) if (width > max) max = width;
@@ -6462,8 +6897,10 @@ function maxGlyphWidthOf(
 
   if (max <= 0) return undefined;
   // A bogus /FontBBox must not turn one glyph's coverage box into a page-wide
-  // one, which would silently redact the whole line around the mark.
-  return Math.min(max, 4000);
+  // one, which would silently redact the whole line around the mark. Four ems,
+  // expressed in whatever glyph space this font measures in.
+  const cap = glyphSpaceScale > 0 ? 4 / glyphSpaceScale : 4000;
+  return Math.min(max, cap);
 }
 
 /**
@@ -6524,6 +6961,17 @@ function fontInfoFor(name: string, fonts: PDFDict | undefined, context: PDFConte
     };
   }
 
+  // A Type 3 font's `/Widths` are in *its* glyph space, which `/FontMatrix`
+  // maps to text space — nothing like the 1/1000 em every other font type uses.
+  // `dvips`/LaTeX bitmap fonts routinely declare something like
+  // `[0.00048828 0 0 0.00048828 0 0]` (1/2048), so reading their widths as
+  // thousandths under-measured a run by three orders of magnitude and no mark
+  // could be found to overlap it.
+  const glyphSpaceScale =
+    subtype === PDFName.of('Type3')
+      ? type3GlyphSpaceScale(asArray(dict.get(PDFName.of('FontMatrix')), context), context)
+      : undefined;
+
   const descriptor = asDict(dict.get(PDFName.of('FontDescriptor')), context);
   const missingRaw = descriptor?.get(PDFName.of('MissingWidth'));
   const missingWidth = missingRaw instanceof PDFNumber ? missingRaw.asNumber() : undefined;
@@ -6536,7 +6984,9 @@ function fontInfoFor(name: string, fonts: PDFDict | undefined, context: PDFConte
     // real metrics live in the viewer's own standard-14 tables. Read them from
     // the same AFM data pdf.js measures with, so the filter agrees with the
     // extractor that verifies it rather than guessing 0.6 em per glyph.
-    const standard = standardFontWidths(dict, context);
+    // Only ever reached for a font with no `/FontMatrix` of its own, so the
+    // standard-14 tables' own 1/1000 em is the right space to read them in.
+    const standard = glyphSpaceScale === undefined ? standardFontWidths(dict, context) : undefined;
     if (standard) {
       return {
         twoByte: false,
@@ -6560,8 +7010,9 @@ function fontInfoFor(name: string, fonts: PDFDict | undefined, context: PDFConte
     // the font to zero width and drag every later run's box to the wrong place.
     return {
       twoByte: false,
+      glyphSpaceScale,
       defaultWidth: missingWidth !== undefined && missingWidth > 0 ? missingWidth : undefined,
-      maxGlyphWidth: maxGlyphWidthOf(undefined, missingWidth, descriptor, context)
+      maxGlyphWidth: maxGlyphWidthOf(undefined, missingWidth, descriptor, context, glyphSpaceScale)
     };
   }
 
@@ -6572,10 +7023,35 @@ function fontInfoFor(name: string, fonts: PDFDict | undefined, context: PDFConte
   }
   return {
     twoByte: false,
-    widths,
+    glyphSpaceScale,
     defaultWidth: missingWidth,
-    maxGlyphWidth: maxGlyphWidthOf(widths, missingWidth, descriptor, context)
+    maxGlyphWidth: maxGlyphWidthOf(widths, missingWidth, descriptor, context, glyphSpaceScale)
   };
+}
+
+/**
+ * A Type 3 font's horizontal glyph space → text space factor, read from its
+ * `/FontMatrix`.
+ *
+ * The spec's displacement rule (PDF 32000 9.2.4) transforms the glyph-space
+ * vector `(w, 0)` by the font matrix, so the horizontal advance is `w · a`.
+ * `a` is taken on its own — not `hypot(a, b)` — because a mirrored font (a
+ * negative `a`) really does advance leftwards, and the run box is built from
+ * the min/max of the cursor either way.
+ *
+ * A rotated matrix (`a` at zero, the ink all in `b`) has no horizontal
+ * component to read, so the magnitude of the whole first row stands in: it is
+ * never smaller than the real advance, and over-measuring a run only ever
+ * over-removes. Anything unreadable falls back to the 1/1000 every other font
+ * uses, which is also what a `/FontMatrix`-less (invalid) Type 3 gets.
+ */
+function type3GlyphSpaceScale(matrix: PDFArray | undefined, context: PDFContext): number {
+  if (!matrix || matrix.size() < 6) return 0.001;
+  const a = numberAt(matrix, 0, context);
+  const b = numberAt(matrix, 1, context);
+  if (a !== undefined && Number.isFinite(a) && Math.abs(a) > 1e-9) return a;
+  const magnitude = Math.hypot(a ?? 0, b ?? 0);
+  return Number.isFinite(magnitude) && magnitude > 1e-9 ? magnitude : 0.001;
 }
 
 interface PageRedactionFilter {
@@ -6584,6 +7060,141 @@ interface PageRedactionFilter {
   strippedXObjectNames: string[];
   /** Name → the union of every unit-space rect that covers part of that image. */
   partialImages: Map<string, RedactionArea[]>;
+  /** Form XObject placements a mark reached into; see {@link FormRewrite}. */
+  formRewrites: FormRewrite[];
+  /** Every `/XObject` name the *filtered* page still draws with `Do`. */
+  survivingXObjectNames: Set<string>;
+}
+
+/** The `/XObject` names a statement list still paints, by their `Do` operands. */
+function doNamesIn(statements: Statement[]): Set<string> {
+  const names = new Set<string>();
+  for (const stmt of statements) {
+    if (String.fromCharCode(...stmt.operator.bytes) !== 'Do') continue;
+    const operand = stmt.operands[stmt.operands.length - 1];
+    if (operand?.type === 'name') names.add(String.fromCharCode(...operand.bytes).slice(1));
+  }
+  return names;
+}
+
+/** `/Resources`-style sub-dictionary lookup that follows an indirect reference. */
+function resourceSubDict(
+  resources: PDFDict | undefined,
+  key: string,
+  context: PDFContext
+): PDFDict | undefined {
+  const raw = resources?.get(PDFName.of(key));
+  return raw instanceof PDFDict
+    ? raw
+    : raw instanceof PDFRef
+      ? (context.lookup(raw) as PDFDict | undefined)
+      : undefined;
+}
+
+/**
+ * The redaction filter's view of one `/Resources` dictionary: what every
+ * `/XObject` name in it is, and how wide every `/Font` name in it draws.
+ *
+ * Form XObjects are decoded and parsed **here**, eagerly, because
+ * `filterContentStream` is synchronous and decoding is not — and because a form
+ * whose content cannot be read has to be distinguishable from one that simply
+ * has none. Nothing is thrown for a form that fails to decode: the filter only
+ * refuses if a mark actually reaches that form, and refusing for a form on the
+ * far side of the page would block redactions that are perfectly safe.
+ *
+ * `ancestors` is the chain of form streams currently being walked, so a form
+ * that draws itself (directly or through a cousin) stops rather than recursing
+ * forever; `usedNames` accumulates every XObject name at every level, so the
+ * replacement names the filter allocates cannot collide with a real one.
+ */
+async function buildRedactionResolvers(
+  resources: PDFDict | undefined,
+  context: PDFContext,
+  usedNames: Set<string>,
+  ancestors: Set<PDFStream>,
+  depth: number
+): Promise<{
+  resolveXObject: (name: string) => XObjectInfo | undefined;
+  resolveFont: (name: string) => FontInfo | undefined;
+}> {
+  const xObjects = resourceSubDict(resources, 'XObject', context);
+  const fonts = resourceSubDict(resources, 'Font', context);
+  const infos = new Map<string, XObjectInfo>();
+
+  if (xObjects) {
+    for (const [key, entry] of xObjects.entries()) {
+      const name = key.asString().replace(/^\//, '');
+      usedNames.add(name);
+
+      const resolved = entry instanceof PDFRef ? context.lookup(entry) : entry;
+      const stream = resolved instanceof PDFStream ? resolved : undefined;
+      const dict = stream ? stream.dict : resolved instanceof PDFDict ? resolved : undefined;
+      if (!dict) continue;
+
+      const subtypeName = dict.get(PDFName.of('Subtype'));
+      const subtype =
+        subtypeName === PDFName.of('Form')
+          ? ('Form' as const)
+          : subtypeName === PDFName.of('Image')
+            ? ('Image' as const)
+            : ('Unknown' as const);
+      if (subtype !== 'Form') {
+        infos.set(name, { subtype });
+        continue;
+      }
+
+      const bboxArr = asArray(dict.get(PDFName.of('BBox')), context);
+      const bboxValues =
+        bboxArr && bboxArr.size() === 4
+          ? [0, 1, 2, 3].map(k => numberAt(bboxArr, k, context))
+          : undefined;
+      const bbox = bboxValues?.every((v): v is number => v !== undefined)
+        ? (bboxValues as [number, number, number, number])
+        : undefined;
+
+      const matrixArr = asArray(dict.get(PDFName.of('Matrix')), context);
+      const matrixValues =
+        matrixArr && matrixArr.size() === 6
+          ? [0, 1, 2, 3, 4, 5].map(k => numberAt(matrixArr, k, context))
+          : undefined;
+      const matrix = matrixValues?.every((v): v is number => v !== undefined)
+        ? (matrixValues as Matrix)
+        : undefined;
+
+      let content: FormContent | undefined;
+      if (stream && !ancestors.has(stream) && depth < 8) {
+        try {
+          const statements = parseContentStream(
+            tokenizeContentStream(await decodeContentStreamBytes(stream, context))
+          );
+          const nested = await buildRedactionResolvers(
+            resourceSubDict(dict, 'Resources', context),
+            context,
+            usedNames,
+            new Set([...ancestors, stream]),
+            depth + 1
+          );
+          content = { statements, ...nested };
+        } catch {
+          // An undecodable filter chain, or an inline image this filter cannot
+          // take apart. Left absent so the mark's own geometry decides whether
+          // that matters at all.
+          content = undefined;
+        }
+      }
+
+      infos.set(name, { subtype, bbox, matrix, content });
+    }
+  }
+
+  const fontCache = new Map<string, FontInfo | undefined>();
+  return {
+    resolveXObject: name => infos.get(name),
+    resolveFont: name => {
+      if (!fontCache.has(name)) fontCache.set(name, fontInfoFor(name, fonts, context));
+      return fontCache.get(name);
+    }
+  };
 }
 
 /**
@@ -6610,61 +7221,39 @@ async function filterPageForRedaction(
 
   const strippedXObjectNames: string[] = [];
   const partialImages = new Map<string, RedactionArea[]>();
-  if (streamRefs.length === 0) return { content: null, strippedXObjectNames, partialImages };
-
-  const xObjects = pageXObjectDictOf(page, context);
+  const formRewrites: FormRewrite[] = [];
+  const survivingXObjectNames = new Set<string>();
+  if (streamRefs.length === 0) {
+    return {
+      content: null,
+      strippedXObjectNames,
+      partialImages,
+      formRewrites,
+      survivingXObjectNames
+    };
+  }
 
   // A Form XObject's true extent is its own /BBox (through its own /Matrix) —
-  // nothing like an image's implicit unit square. Without this, every Form
-  // invocation was measured as a bogus tiny box and could never be detected as
-  // overlapping a redaction region, however large it actually painted.
-  const resolveXObject = (name: string) => {
-    const entry = xObjects?.get(PDFName.of(name));
-    const resolved = entry instanceof PDFRef ? context.lookup(entry) : entry;
-    const dict =
-      resolved instanceof PDFDict
-        ? resolved
-        : resolved instanceof PDFStream || resolved instanceof PDFRawStream
-          ? resolved.dict
-          : undefined;
-    if (!dict) return undefined;
-    const subtypeName = dict.get(PDFName.of('Subtype'));
-    const subtype =
-      subtypeName === PDFName.of('Form')
-        ? ('Form' as const)
-        : subtypeName === PDFName.of('Image')
-          ? ('Image' as const)
-          : ('Unknown' as const);
-    if (subtype !== 'Form') return { subtype };
+  // nothing like an image's implicit unit square — and its own content is what
+  // decides what a mark that only partly covers it actually reaches. Both come
+  // out of the page's resources, walked once, here.
+  const usedNames = new Set<string>();
+  const { resolveXObject, resolveFont } = await buildRedactionResolvers(
+    page.node.Resources(),
+    context,
+    usedNames,
+    new Set(),
+    0
+  );
 
-    const bboxArr = dict.get(PDFName.of('BBox'));
-    const bbox =
-      bboxArr instanceof PDFArray && bboxArr.size() === 4
-        ? ([
-            (bboxArr.get(0) as PDFNumber).asNumber(),
-            (bboxArr.get(1) as PDFNumber).asNumber(),
-            (bboxArr.get(2) as PDFNumber).asNumber(),
-            (bboxArr.get(3) as PDFNumber).asNumber()
-          ] as [number, number, number, number])
-        : undefined;
-
-    const matrixArr = dict.get(PDFName.of('Matrix'));
-    const matrix =
-      matrixArr instanceof PDFArray && matrixArr.size() === 6
-        ? (Array.from({ length: 6 }, (_, k) =>
-            (matrixArr.get(k) as PDFNumber).asNumber()
-          ) as Matrix)
-        : undefined;
-
-    return { subtype, bbox, matrix };
-  };
-
-  // Text widths come from the page's own font resources, not a 0.6em guess.
-  const fonts = pageFontDictOf(page, context);
-  const fontCache = new Map<string, ReturnType<typeof fontInfoFor>>();
-  const resolveFont = (name: string) => {
-    if (!fontCache.has(name)) fontCache.set(name, fontInfoFor(name, fonts, context));
-    return fontCache.get(name);
+  // Replacement names for rewritten forms. Checked against every XObject name
+  // at every level, so one can never shadow a resource the page already has.
+  let allocated = 0;
+  const allocateFormName = () => {
+    let name = `StaplerRdct${allocated++}`;
+    while (usedNames.has(name)) name = `StaplerRdct${allocated++}`;
+    usedNames.add(name);
+    return name;
   };
 
   const filteredChunks: Uint8Array[] = [];
@@ -6687,7 +7276,9 @@ async function filterPageForRedaction(
 
     const decoded = await decodeContentStreamBytes(resolved, context);
     const statements = parseContentStream(tokenizeContentStream(decoded));
-    const result = filterContentStream(statements, rects, carryState, resolveXObject, resolveFont);
+    const result = filterContentStream(statements, rects, carryState, resolveXObject, resolveFont, {
+      allocateFormName
+    });
     carryState = result.finalState;
     strippedXObjectNames.push(...result.strippedXObjectNames);
     for (const partial of result.partialImageCoverage) {
@@ -6695,6 +7286,8 @@ async function filterPageForRedaction(
       if (existing) existing.push(...partial.rects);
       else partialImages.set(partial.name, [...partial.rects]);
     }
+    formRewrites.push(...result.formRewrites);
+    for (const name of doNamesIn(result.filtered)) survivingXObjectNames.add(name);
     filteredChunks.push(serializeStatements(result.filtered));
   }
 
@@ -6708,7 +7301,92 @@ async function filterPageForRedaction(
     merged[pos++] = 0x0a;
   }
 
-  return { content: merged.slice(0, pos), strippedXObjectNames, partialImages };
+  return {
+    content: merged.slice(0, pos),
+    strippedXObjectNames,
+    partialImages,
+    formRewrites,
+    survivingXObjectNames
+  };
+}
+
+/**
+ * Writes the replacement Form XObjects a page's filter asked for, and retires
+ * the originals it no longer draws.
+ *
+ * The original form is *not* edited in place: it may be drawn at several
+ * placements, and only the ones a mark reached are filtered. Each rewrite is a
+ * new stream carrying the original's own dictionary (its `/BBox`, `/Matrix`,
+ * `/Group`, `/Resources`) with the filtered content, named alongside it in the
+ * same resource dictionary.
+ *
+ * Retiring matters as much as writing: the unfiltered original still contains
+ * the text the mark covered, so once no surviving `Do` names it, it is dropped
+ * from the dictionary. `sweepUnreachableObjects` then deletes the stream itself
+ * — pdf-lib serialises every registered object, reachable or not, so unhooking
+ * the name alone would leave the redacted text in the saved bytes.
+ */
+function applyFormRewrites(
+  doc: PDFDocument,
+  xObjects: PDFDict,
+  rewrites: FormRewrite[],
+  survivingNames: Set<string>
+): void {
+  if (rewrites.length === 0) return;
+  const context = doc.context;
+
+  for (const rewrite of rewrites) {
+    const originalName = PDFName.of(rewrite.originalName);
+    const entry = xObjects.get(originalName);
+    const resolved = entry instanceof PDFRef ? context.lookup(entry) : entry;
+    if (!(resolved instanceof PDFStream)) {
+      throw internal('A rewritten Form XObject is no longer a stream', {
+        name: rewrite.originalName
+      });
+    }
+
+    const replacement = context.flateStream(serializeStatements(rewrite.filtered));
+    for (const [key, value] of resolved.dict.entries()) {
+      // The new stream sets its own length and filter; everything else — the
+      // bounding box, the matrix, the transparency group, the resources the
+      // filtered operators still name — has to come across unchanged.
+      if (
+        key === PDFName.of('Filter') ||
+        key === PDFName.of('Length') ||
+        key === PDFName.of('DecodeParms')
+      ) {
+        continue;
+      }
+      replacement.dict.set(key, value);
+    }
+
+    if (rewrite.nested.length > 0) {
+      // A form inside this one was rewritten too, so this form needs resource
+      // dictionaries of its own to name the replacement in — mutating the ones
+      // it shares with the untouched original would edit that original's view
+      // of the world as well.
+      const sourceResources = resourceSubDict(resolved.dict, 'Resources', context);
+      const localResources = context.obj({}) as PDFDict;
+      if (sourceResources) {
+        for (const [key, value] of sourceResources.entries()) localResources.set(key, value);
+      }
+      const sourceXObjects = resourceSubDict(sourceResources, 'XObject', context);
+      const localXObjects = context.obj({}) as PDFDict;
+      if (sourceXObjects) {
+        for (const [key, value] of sourceXObjects.entries()) localXObjects.set(key, value);
+      }
+      localResources.set(PDFName.of('XObject'), localXObjects);
+      replacement.dict.set(PDFName.of('Resources'), localResources);
+      applyFormRewrites(doc, localXObjects, rewrite.nested, doNamesIn(rewrite.filtered));
+    }
+
+    xObjects.set(PDFName.of(rewrite.newName), context.register(replacement));
+  }
+
+  for (const rewrite of rewrites) {
+    if (survivingNames.has(rewrite.originalName)) continue;
+    xObjects.delete(PDFName.of(rewrite.originalName));
+  }
 }
 
 /**
@@ -6765,6 +7443,154 @@ function xObjectDictReferences(
       return true;
   }
   return false;
+}
+
+/**
+ * Keys on an annotation, a form field, an action or a file specification whose
+ * value is text a viewer never draws on the page — and which pdf.js's page-text
+ * extraction therefore never sees.
+ *
+ * Each one was a hole the redaction verifier looked straight through:
+ *
+ *  • `Contents` — a comment or sticky note's body (already covered).
+ *  • `RC` — its rich-text twin, which a markup annotation may carry *instead*
+ *    of `/Contents`, as a string or as a stream.
+ *  • `TU` — a field's tooltip, routinely a fuller restatement of the value.
+ *  • `V` / `DV` — a field's value and default value. As a *name*, not a string,
+ *    for a check box or radio group whose export value can itself be the
+ *    redacted word.
+ *  • `AS` — the widget's current appearance state, i.e. the same name again.
+ *  • `URI` — a link's destination, where a redacted case number or surname very
+ *    often reappears.
+ *  • `F` / `UF` / `Desc` — an attached file's name and description. (`/F` is
+ *    also the annotation flags integer; numbers are not text and are skipped.)
+ */
+const HIDDEN_TEXT_KEYS = ['Contents', 'RC', 'TU', 'V', 'DV', 'AS', 'URI', 'F', 'UF', 'Desc'];
+
+/**
+ * Keys worth following out of one of those dictionaries. Deliberately a
+ * whitelist: a blind walk would descend `/P` into the page and `/AP` into
+ * appearance resources, and end up traversing the whole document.
+ */
+const HIDDEN_TEXT_LINK_KEYS = ['Parent', 'Kids', 'A', 'AA', 'Next', 'FS', 'EF'];
+
+/** Decoded text of any value that can carry some, or `undefined`. */
+function hiddenTextOf(value: unknown): string | undefined {
+  if (value instanceof PDFString || value instanceof PDFHexString) {
+    try {
+      return value.decodeText();
+    } catch {
+      return undefined;
+    }
+  }
+  // A name, which is how a check box, a radio group or an appearance state
+  // spells its value: `/V /Smith` is the string "Smith" to anyone reading the
+  // file, whatever the type system calls it.
+  if (value instanceof PDFName) return value.asString().replace(/^\//, '');
+  return undefined;
+}
+
+/**
+ * An embedded file's bytes as text, best effort.
+ *
+ * The honest bound: an attachment whose own container is compressed or binary
+ * (a .docx, a .zip, an image) cannot be searched for a plain string by anyone,
+ * so a secret buried in one is outside what this check can prove. A plain text,
+ * CSV, XML or JSON attachment — the shape that actually carries a copy of the
+ * redacted paragraph — decodes here exactly.
+ */
+async function embeddedFileText(stream: PDFStream): Promise<string> {
+  let bytes: Uint8Array;
+  try {
+    bytes =
+      stream instanceof PDFRawStream && stream.dict.get(PDFName.of('Filter')) !== undefined
+        ? decodePDFRawStream(stream).decode()
+        : stream.getContents();
+  } catch {
+    try {
+      // Undecodable is not a reason to look at nothing: the stored bytes are
+      // still bytes, and a string sitting in an unfiltered region of them
+      // should still fail the verification.
+      bytes = stream.getContents();
+    } catch {
+      return '';
+    }
+  }
+  return new TextDecoder('utf-8').decode(bytes);
+}
+
+/**
+ * Collects every off-page text value reachable from `start` — an annotation or
+ * a form field — into `found`.
+ *
+ * This is the read side of RED-03's "the string is not anywhere in the output"
+ * check. It only ever adds candidate haystack text: a false positive costs a
+ * redaction that refuses to save, a false negative costs the user the secret
+ * they asked to remove, so over-collecting is the only safe direction.
+ */
+async function collectHiddenText(
+  start: PDFDict,
+  context: PDFContext,
+  found: string[],
+  seen: Set<PDFDict>
+): Promise<void> {
+  const resolve = (value: unknown): unknown =>
+    value instanceof PDFRef ? context.lookup(value) : value;
+
+  const harvest = async (value: unknown): Promise<void> => {
+    const resolved = resolve(value);
+    const text = hiddenTextOf(resolved);
+    if (text) {
+      found.push(text);
+      return;
+    }
+    if (resolved instanceof PDFArray) {
+      // A multi-select field's `/V`, or an `/RC` split across parts.
+      for (let i = 0; i < resolved.size(); i++) await harvest(resolved.get(i));
+      return;
+    }
+    if (resolved instanceof PDFStream) found.push(await embeddedFileText(resolved));
+  };
+
+  const queue: PDFDict[] = [start];
+  while (queue.length > 0) {
+    const dict = queue.pop()!;
+    if (seen.has(dict)) continue;
+    seen.add(dict);
+
+    for (const key of HIDDEN_TEXT_KEYS) {
+      const value = dict.get(PDFName.of(key));
+      if (value !== undefined) await harvest(value);
+    }
+
+    for (const key of HIDDEN_TEXT_LINK_KEYS) {
+      const value = resolve(dict.get(PDFName.of(key)));
+      if (value === undefined) continue;
+      if (key === 'AA' || key === 'EF') {
+        // Both are dictionaries whose *entries* are the interesting objects —
+        // `/AA` maps a trigger (`/K`, `/F`, `/U`, …) to an action, `/EF` maps a
+        // file-system flavour (`/F`, `/UF`, …) to the embedded stream itself.
+        if (!(value instanceof PDFDict)) continue;
+        for (const [, entry] of value.entries()) {
+          const target = resolve(entry);
+          if (target instanceof PDFDict) queue.push(target);
+          else if (target instanceof PDFStream) found.push(await embeddedFileText(target));
+        }
+        continue;
+      }
+      if (value instanceof PDFDict) queue.push(value);
+      else if (value instanceof PDFArray) {
+        for (let i = 0; i < value.size(); i++) {
+          const entry = resolve(value.get(i));
+          if (entry instanceof PDFDict) queue.push(entry);
+        }
+      } else {
+        // `/FS` may be a bare string — a file specification in its simplest
+        // form is just the path.
+        await harvest(value);
+      }
+    }
+  }
 }
 
 /**
@@ -6840,6 +7666,16 @@ function stripOverlappingAnnotations(
     // The value lives on the widget, on its field ancestors, or on both. Clear
     // it everywhere along the chain before the annotation itself goes, so a
     // field shared with a surviving widget cannot carry the string out.
+    //
+    // `/TU` is on this list for the same reason `/V` is: a tooltip is text no
+    // viewer paints on the page and every extraction tool reads, and on a real
+    // form it usually restates the value in full ("Claimant's national
+    // insurance number"). `/AS` — the widget's appearance state, which for a
+    // check box or radio group is the export value spelled as a name — goes
+    // with the widget itself below, and `/A`, `/AA` and `/FS` (a link's URI, a
+    // field's scripts, an attachment's embedded stream) are separate objects
+    // the sweep at the end of `applyRedactions` collects once nothing points at
+    // them.
     let node: PDFDict | undefined = annotDict;
     const seen = new Set<PDFDict>();
     while (node && !seen.has(node)) {
@@ -6848,6 +7684,7 @@ function stripOverlappingAnnotations(
       node.delete(PDFName.of('DV'));
       node.delete(PDFName.of('Contents'));
       node.delete(PDFName.of('RC'));
+      node.delete(PDFName.of('TU'));
       const parent: unknown = node.get(PDFName.of('Parent'));
       const parentDict =
         parent instanceof PDFDict

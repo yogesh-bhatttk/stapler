@@ -59,16 +59,34 @@ export function HomeView() {
   }, [query]);
 
   const reopen = async (entry: RecentEntry) => {
+    // Shared by both ways a Recents entry turns out to be unreachable: no
+    // handle at all, or a handle whose permission is still 'granted' from a
+    // prior session but whose underlying file was moved or deleted since —
+    // FSA permission state does not verify the file still exists, so that
+    // second case only surfaces once `getFile()` actually tries to read it.
+    // Both deserve the same message; only the generic catch-all below used to
+    // answer for the second one.
+    const reportUnreachable = () => {
+      notify('warning', translate('Could not reopen {name}.', { name: entry.name }), {
+        detail: 'Permission was declined, or the file has moved. Open it again from disk.'
+      });
+    };
+
     try {
       // Chrome drops file permission between sessions, so this re-prompts.
       const handle = await platform.reopenHandle(entry.id);
       if (!handle) {
-        notify('warning', translate('Could not reopen {name}.', { name: entry.name }), {
-          detail: 'Permission was declined, or the file has moved. Open it again from disk.'
-        });
+        reportUnreachable();
         return;
       }
-      const files = [await handle.getFile()];
+      let file: File;
+      try {
+        file = await handle.getFile();
+      } catch {
+        reportUnreachable();
+        return;
+      }
+      const files = [file];
       let imageOptions = undefined;
       if (files.some(f => !isPdfFile(f) && isSupportedImage(f))) {
         const opts = await requestOptions(files);

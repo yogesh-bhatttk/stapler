@@ -437,14 +437,31 @@ interface DocEntry {
 /**
  * The subset of pdf.js's annotation shape this module reads. `getAnnotations()`
  * returns a loosely-typed grab-bag whose exact fields vary by annotation type
- * (`contents` for markup annotations, `fieldValue`/`buttonValue` for form
+ * (the note body for markup annotations, `fieldValue`/`buttonValue` for form
  * widgets) — pdf.js does not export a discriminated union for it.
+ *
+ * A markup annotation's body has been `contentsObj` — `{ str, dir }`, so the
+ * text is `contentsObj.str` — since pdf.js 3 (`Annotation.setContents` assigns
+ * `this._contents` into `data.contentsObj`; see `pdf.worker.mjs` in the pinned
+ * 6.2.108). There is no `data.contents` at all, so every read of `.contents`
+ * here was `undefined`: a sticky note's text was invisible to find-and-mark, to
+ * search-and-redact, and to the whole-document text the verifier compares
+ * against. `contents` is kept in the type only as the shape older builds used,
+ * so a downgrade degrades rather than breaks.
  */
 interface PdfJsAnnotation {
+  contentsObj?: { str?: string };
   contents?: string;
   fieldValue?: string;
   buttonValue?: string;
   rect?: [number, number, number, number];
+}
+
+/** Every piece of text one annotation carries, in a stable order. */
+function annotationTexts(annot: PdfJsAnnotation): string[] {
+  return [annot.contentsObj?.str, annot.contents, annot.fieldValue, annot.buttonValue].filter(
+    (s): s is string => typeof s === 'string' && s.length > 0
+  );
 }
 
 const docs = new Map<string, DocEntry>();
@@ -1414,8 +1431,8 @@ const api: RenderJob = {
         const textFromRuns = (await textRuns(page)).map(run => run.str).join('');
         const annots = (await page.getAnnotations()) as PdfJsAnnotation[];
         const textFromAnnots = annots
-          .flatMap(a => [a.contents, a.fieldValue, a.buttonValue])
-          .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+          .flatMap(annotationTexts)
+          .filter(s => s.trim().length > 0)
           .join('\n');
         pages.push(textFromRuns + '\n' + textFromAnnots);
       } finally {
@@ -1466,9 +1483,7 @@ const api: RenderJob = {
 
         const annots = (await page.getAnnotations()) as PdfJsAnnotation[];
         for (const annot of annots) {
-          const contents = [annot.contents, annot.fieldValue, annot.buttonValue]
-            .filter((s): s is string => typeof s === 'string')
-            .join(' ');
+          const contents = annotationTexts(annot).join(' ');
           if (!contents.trim()) continue;
 
           const haystack = matchCase ? contents : contents.toLowerCase();

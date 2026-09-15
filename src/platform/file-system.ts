@@ -164,7 +164,21 @@ export async function saveOverHandle(fileId: string, bytes: Uint8Array): Promise
   const handle = session.get(fileId) ?? (await readHandle(fileId));
   if (!handle) return false;
   if (!(await ensureWritePermission(handle))) return false;
-  const writable = await handle.createWritable();
+  let writable: Awaited<ReturnType<typeof handle.createWritable>>;
+  try {
+    // Unlike the missing-handle and permission-refused cases above,
+    // `createWritable()` can still throw here: FSA permission state does not
+    // verify the file still exists, so a file moved or deleted since it was
+    // opened passes both checks above and only fails here, with a raw
+    // `NotFoundError`/`NoModificationAllowedError`. Every other failure in
+    // this function is reported the same way — `return false` — so the
+    // caller's existing "Could not save over the original file… try again to
+    // save a new file instead" message covers this too, instead of an
+    // uncaught exception surfacing a generic internal error.
+    writable = await handle.createWritable();
+  } catch {
+    return false;
+  }
   try {
     await writable.write(bytes);
     await writable.close();

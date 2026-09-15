@@ -258,27 +258,65 @@ export function deskew(
 }
 
 /**
+ * How much the candidate scores in one search have to differ, relative to the
+ * best of them, before the best is treated as a real winner rather than as the
+ * first of a set of ties. See {@link searchSkew}.
+ */
+const SCORE_SPREAD_EPSILON = 1e-6;
+
+/**
  * Estimates page skew in degrees by projection profile: text lines give the
  * highest row-to-row variance when horizontal. Searches ±`maxDegrees` (SCN-02
  * specifies ±15°) coarsely, then refines.
  *
  * Returns the *measured* skew: positive means the page's lines run down to the right.
  * To straighten, call {@link deskew} rather than negating this by hand.
+ *
+ * Zero means "nothing to correct" — the same answer {@link deskew} gives for a
+ * sub-threshold angle — and covers both a page that is already straight and a page
+ * that carries no skew signal at all (see {@link searchSkew}).
  */
 export function detectSkew(imageData: ImageData, maxDegrees = 15): number {
   const coarse = searchSkew(imageData, -maxDegrees, maxDegrees, 1);
+  // Nothing in this page distinguishes one candidate angle from another: a blank
+  // separator sheet, the back of a duplex scan, an underexposed page. There is no
+  // skew to find, so report none rather than rotating by whichever angle happened
+  // to be scored first.
+  if (coarse === null) return 0;
   // A degree of residual skew is still visible across a full page of text, so
-  // refine around the winner instead of returning the integer estimate.
-  return searchSkew(imageData, coarse - 1, coarse + 1, 0.25);
+  // refine around the winner instead of returning the integer estimate — clamped
+  // to the search range, so refining a winner at the edge cannot report an angle
+  // outside the ±`maxDegrees` this function promises.
+  const fine = searchSkew(
+    imageData,
+    Math.max(-maxDegrees, coarse - 1),
+    Math.min(maxDegrees, coarse + 1),
+    0.25
+  );
+  return fine ?? coarse;
 }
 
-function searchSkew(imageData: ImageData, from: number, to: number, step: number): number {
+/**
+ * The best angle in `[from, to]` by projection-profile variance, or `null` when
+ * the image carries no signal to choose one with.
+ *
+ * Variance is `>= 0` by construction and is *identically* 0 for a page with no
+ * ink in it at all, so the previous `bestScore = -1` seed meant the first
+ * candidate always won an empty search: a blank 300×400 page measured as -16°
+ * (outside the ±15° range this search is given) and was resized to 399×468 on the
+ * way through {@link deskew}. Two things have to hold for a winner to mean
+ * anything — some candidate has to score above zero, and the candidates have to
+ * actually differ. A faint page whose few ink pixels land in the same rows at
+ * every angle satisfies the first and fails the second.
+ */
+function searchSkew(imageData: ImageData, from: number, to: number, step: number): number | null {
   const { width, height, data } = imageData;
   // Sampling every third pixel keeps a 12MP photo interactive and does not change
   // which angle wins.
   const stride = 3;
   let bestAngle = 0;
-  let bestScore = -1;
+  let bestScore = 0;
+  let worstScore = Infinity;
 
   for (let angle = from; angle <= to + 1e-9; angle += step) {
     const rad = (angle * Math.PI) / 180;
@@ -308,7 +346,17 @@ function searchSkew(imageData: ImageData, from: number, to: number, step: number
       bestScore = variance;
       bestAngle = angle;
     }
+    if (variance < worstScore) worstScore = variance;
   }
+
+  // No candidate cleared zero: there is no ink in this page to align.
+  if (!(bestScore > 0)) return null;
+  // Every candidate scored the same to within floating-point noise, so the
+  // "winner" is an artefact of evaluation order. The weakest real page measured
+  // here spreads by 0.48 of its best score in the narrow refine window and 0.87
+  // in the coarse one — five orders of magnitude clear of this, so it is a
+  // no-information gate rather than a confidence threshold.
+  if (bestScore - worstScore <= bestScore * SCORE_SPREAD_EPSILON) return null;
 
   return Number(bestAngle.toFixed(2));
 }

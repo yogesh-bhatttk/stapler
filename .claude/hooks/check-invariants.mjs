@@ -30,6 +30,34 @@ const NETWORK_APIS = [
 const REMOTE_HOSTS =
   /(fonts\.googleapis|fonts\.gstatic|cdn\.jsdelivr|unpkg\.com|cdnjs\.cloudflare|googletagmanager|google-analytics|sentry\.io)/;
 
+// §4 (docs/AUDIT-EDGE-CASES-2026-09-15.md) — the manifest's own
+// `content_security_policy` had no check at all here, only its `permissions`
+// arrays did. `connect-src` is the one directive allowed to name an external
+// host, and only the single pinned model host both OCR-01 and RED-08 fetch
+// from — everywhere else (script-src, style-src, …) must stay 'self' and the
+// couple of MV3 keyword sources. Kept in sync with `scripts/check-invariants.mjs`
+// and with `MODEL_HOST` in `src/core/ocr/model.ts` / `src/core/faceblur/model.ts`.
+const CSP_ALLOWED_HOSTS = new Set(['cdn.jsdelivr.net']);
+const CSP_ALLOWED_KEYWORDS = new Set(["'self'", "'none'", "'wasm-unsafe-eval'"]);
+
+/** Every CSP violation in one `content_security_policy.extension_pages` string. */
+function cspFindings(csp) {
+  const out = [];
+  for (const directive of csp.split(';').map(d => d.trim()).filter(Boolean)) {
+    const [name, ...sources] = directive.split(/\s+/);
+    for (const source of sources) {
+      if (CSP_ALLOWED_KEYWORDS.has(source)) continue;
+      const host = /^https?:\/\/([^/]+)\/?$/.exec(source)?.[1];
+      if (host && name === 'connect-src' && CSP_ALLOWED_HOSTS.has(host)) continue;
+      out.push(
+        `CSP directive "${name}" allows "${source}" — only 'self'/'wasm-unsafe-eval'/'none' and, ` +
+          `in connect-src only, the pinned model host are permitted. See PLAN §5.4 item 5.`
+      );
+    }
+  }
+  return out;
+}
+
 // OCR-01 Defect 4: this used to carve out `src/core/ocr/` and
 // `src/core/faceblur/` *wholesale*, so a `fetch()` or a remote-host reference
 // added anywhere in either directory — not just the one legitimate
@@ -206,6 +234,10 @@ if (base === 'manifest.json') {
     }
     if (m.content_scripts)
       findings.push(`${rel} — content_scripts declared; the architecture has none (PLAN §2.1)`);
+    const csp = m.content_security_policy?.extension_pages;
+    if (typeof csp === 'string') {
+      for (const msg of cspFindings(csp)) findings.push(`${rel} — ${msg}`);
+    }
   } catch {
     findings.push(`${rel} — invalid JSON`);
   }

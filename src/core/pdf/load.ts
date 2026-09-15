@@ -148,12 +148,30 @@ async function restrictionsInBytes(bytes: Uint8Array): Promise<RestrictionsProbe
 /** Whether the empty user password opens this file, i.e. it only restricts. */
 async function opensWithEmptyPassword(bytes: Uint8Array): Promise<boolean> {
   try {
-    await PDFDocument.load(bytes, { password: '', updateMetadata: false });
+    await PDFDocument.load(bytes, { password: '', ...LOAD_OPTIONS });
     return true;
   } catch {
     return false;
   }
 }
+
+/**
+ * Why every load here asks for `preserveXFA`.
+ *
+ * pdf-lib deletes `/AcroForm /XFA` as a *side effect of `getForm()`* unless this
+ * is set — it warns to the console and calls `deleteXFA()`. So without it every
+ * `form.hasXFA()` in this codebase answers `false` on its first and only call,
+ * for every document that has one: the check runs after the thing it is looking
+ * for has already been destroyed. That is what left `inspect`, `getFormFields`,
+ * `fillFormFields` and `flattenDocument` relying entirely on `hasXfaMarker`'s
+ * raw byte scan, which cannot see an `/XFA` key stored inside a compressed
+ * object stream (the ordinary shape of a real LiveCycle form).
+ *
+ * Preserving it is also the right answer on its own terms: silently dropping an
+ * XML payload out of a document Stapler is only rewriting the metadata of is
+ * exactly the kind of quiet destruction this codebase refuses elsewhere.
+ */
+const LOAD_OPTIONS = { updateMetadata: false, preserveXFA: true } as const;
 
 async function loadInternal(
   bytes: Uint8Array,
@@ -164,13 +182,13 @@ async function loadInternal(
   try {
     doc = await PDFDocument.load(bytes, {
       ignoreEncryption: allowEncrypted,
-      updateMetadata: false
+      ...LOAD_OPTIONS
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (/encrypt/i.test(message)) {
       try {
-        const decrypted = await PDFDocument.load(bytes, { password: '', updateMetadata: false });
+        const decrypted = await PDFDocument.load(bytes, { password: '', ...LOAD_OPTIONS });
         // The empty password opened it, so this is a permission-only file and
         // its `/P` is exactly what an export of it must carry back.
         const probe = wantRestrictions

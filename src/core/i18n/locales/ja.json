@@ -203,6 +203,7 @@
   "Text input": "テキスト入力",
   "The Auto and B&W presets set contrast per pixel, so the sliders do not apply. Switch to Photo or Manual to use them.": "自動および白黒プリセットはピクセル単位でコントラストを設定するため、スライダーは適用されません。使用するには写真または手動に切り替えてください。",
   "The face is whatever script font your system provides — Stapler ships no webfonts.": "書体はシステムが提供する筆記体フォントです — Staplerはウェブフォントを同梱していません。",
+  "The redacted copy also loses its bookmarks, attached files, named destinations, and tagged-structure (accessibility) tree: each one can quote or point straight back at what you removed, and none of them can be checked the way page content can. Document metadata and XMP go too. Page labels and layer visibility are kept.": "墨消し後のコピーでは、しおり、添付ファイル、名前付きの移動先、タグ付き構造（アクセシビリティ）ツリーも失われます。いずれも削除した内容を引用したり直接指し示したりする可能性があり、ページ内容のように検証できないためです。文書のメタデータと XMP も削除されます。ページラベルとレイヤーの表示状態は保持されます。",
   "The same check runs automatically in CI on every change, so it cannot regress unnoticed. The source is public and MIT-licensed.": "同じチェックが変更のたびにCIで自動的に実行されるため、気づかれずに退行することはありません。ソースコードは公開されており、MITライセンスです。",
   "Theme": "テーマ",
   "These are stamped signature images. Stapler makes no claim about legal validity.": "これらはスタンプされた署名画像です。Staplerは法的有効性について一切主張しません。",

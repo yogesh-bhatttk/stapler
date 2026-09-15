@@ -19,6 +19,7 @@
  * stamp; a false negative costs them a form that reports success and drops their
  * typing. This module deliberately errs toward the first.
  */
+import { PDFDict, PDFName, type PDFDocument } from 'pdf-lib';
 
 /** The `/XFA` key as bytes; comparing bytes avoids any text-decoding decisions. */
 const XFA_KEY = [0x2f, 0x58, 0x46, 0x41]; // "/XFA"
@@ -50,9 +51,13 @@ function isNameTerminator(byte: number | undefined): boolean {
  * no allocation, safe on a 300MB file.
  *
  * Note the deliberate limitation: a `/XFA` key inside a compressed object stream
- * is not visible here. That is why callers combine this with the parsed checks
- * ({@link isXfaDocument}) rather than replacing them — the raw scan catches what
- * the parser drops, and the parser catches what compression hides.
+ * is not visible here — and an Adobe LiveCycle form saved with object streams,
+ * which is the ordinary real-world shape, hides it exactly there. Verified: the
+ * same document saved with `useObjectStreams: false` scans `true` and with
+ * `useObjectStreams: true` scans `false`. That is why callers combine this with
+ * a parsed check ({@link isXfaDocument}, {@link documentHasXfa}) rather than
+ * replacing them — the raw scan catches what the parser drops, and the parser
+ * catches what compression hides.
  */
 export function hasXfaMarker(bytes: Uint8Array): boolean {
   const limit = bytes.length - XFA_KEY.length;
@@ -82,6 +87,36 @@ export const XFA_MESSAGE =
  */
 export function isXfaDocument(bytes: Uint8Array, parserSaysXfa: boolean): boolean {
   return parserSaysXfa || hasXfaMarker(bytes);
+}
+
+/**
+ * The parsed half of the check: `/AcroForm /XFA` read straight off the catalog.
+ *
+ * This is what sees an XFA payload that {@link hasXfaMarker} cannot — the key
+ * compressed inside an object stream — because pdf-lib has already decompressed
+ * it by the time the catalog is reachable.
+ *
+ * Read through the *dictionary*, deliberately, not through `getForm()`:
+ * `PDFDocument.getForm()` deletes the `/XFA` entry as a side effect unless the
+ * document was loaded with `preserveXFA` (it warns to the console and calls
+ * `deleteXFA`), so `form.hasXFA()` answers `false` on the very first call for
+ * every document that has one. `getForm()` also *creates* an `/AcroForm` on a
+ * document that has none, which is a mutation a read-only guard has no business
+ * making. This function does neither.
+ *
+ * `/XFA` present but empty still counts: a guard's false positive costs an
+ * explanatory message, a false negative costs the user their form.
+ */
+export function documentHasXfa(doc: PDFDocument): boolean {
+  try {
+    const acroForm = doc.catalog.lookupMaybe(PDFName.of('AcroForm'), PDFDict);
+    return acroForm?.has(PDFName.of('XFA')) ?? false;
+  } catch {
+    // A catalog whose /AcroForm does not resolve to a dictionary at all. Nothing
+    // to refuse over, and a throw here would fail an operation that has no XFA
+    // problem.
+    return false;
+  }
 }
 
 /**

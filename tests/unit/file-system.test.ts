@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { saveViaPicker } from '../../src/platform/file-system';
+import { openFilesViaPicker, saveOverHandle, saveViaPicker } from '../../src/platform/file-system';
 
 /**
  * Regression coverage for a real bug found while investigating a user report:
@@ -56,5 +56,69 @@ describe('saveViaPicker', () => {
 
     const [{ types }] = picker.mock.calls[0];
     expect(Object.keys(types[0].accept)).toEqual(['application/octet-stream']);
+  });
+});
+
+/**
+ * §3's `saveOverHandle` finding: FSA permission state does not verify the
+ * underlying file still exists, so a handle whose permission is still
+ * 'granted' can still throw out of `createWritable()` — most commonly
+ * `NotFoundError` for a file moved or deleted since it was opened. Every
+ * other failure in this function reports itself the same way, by returning
+ * `false`, so the caller's one "could not save over the original" message
+ * covers all of them; `createWritable()` used to be the one exception,
+ * propagating an uncaught exception instead.
+ */
+describe('saveOverHandle', () => {
+  afterEach(() => {
+    delete (globalThis as Record<string, unknown>).showOpenFilePicker;
+  });
+
+  async function openWithHandle(handle: {
+    kind: 'file';
+    name: string;
+    getFile: ReturnType<typeof vi.fn>;
+    createWritable: ReturnType<typeof vi.fn>;
+    queryPermission: ReturnType<typeof vi.fn>;
+    requestPermission: ReturnType<typeof vi.fn>;
+    isSameEntry: ReturnType<typeof vi.fn>;
+  }): Promise<string> {
+    const showOpenFilePicker = vi.fn().mockResolvedValue([handle]);
+    (globalThis as Record<string, unknown>).showOpenFilePicker = showOpenFilePicker;
+    const [opened] = await openFilesViaPicker();
+    return opened.id;
+  }
+
+  it('returns false, rather than throwing, when the file was moved or deleted since it was opened', async () => {
+    const handle = {
+      kind: 'file' as const,
+      name: 'report.pdf',
+      getFile: vi.fn(),
+      createWritable: vi.fn().mockRejectedValue(new DOMException('not found', 'NotFoundError')),
+      queryPermission: vi.fn().mockResolvedValue('granted'),
+      requestPermission: vi.fn().mockResolvedValue('granted'),
+      isSameEntry: vi.fn()
+    };
+    const id = await openWithHandle(handle);
+
+    await expect(saveOverHandle(id, new Uint8Array([1, 2, 3]))).resolves.toBe(false);
+  });
+
+  it('still saves normally when the file is actually still there', async () => {
+    const write = vi.fn().mockResolvedValue(undefined);
+    const close = vi.fn().mockResolvedValue(undefined);
+    const handle = {
+      kind: 'file' as const,
+      name: 'report.pdf',
+      getFile: vi.fn(),
+      createWritable: vi.fn().mockResolvedValue({ write, close }),
+      queryPermission: vi.fn().mockResolvedValue('granted'),
+      requestPermission: vi.fn().mockResolvedValue('granted'),
+      isSameEntry: vi.fn()
+    };
+    const id = await openWithHandle(handle);
+
+    await expect(saveOverHandle(id, new Uint8Array([1, 2, 3]))).resolves.toBe(true);
+    expect(write).toHaveBeenCalledWith(new Uint8Array([1, 2, 3]));
   });
 });

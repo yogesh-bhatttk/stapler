@@ -26,4 +26,6 @@ export const ocrReport = signal<{
   wordsSkipped: number;
   pages: number;
   pagesReplaced: number;
+  /** §2.3 — pages recognition could not run on at all (see `runOcr`'s per-page try/catch). */
+  pagesSkipped: number;
 } | null>(null);

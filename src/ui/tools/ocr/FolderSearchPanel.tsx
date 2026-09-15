@@ -4,7 +4,7 @@
  * Allows folder selection, displays indexing progress bar, search input field,
  * and search result list with snippet matching, page number attribution, and jump-to-page.
  */
-import { useState } from 'preact/hooks';
+import { useRef, useState } from 'preact/hooks';
 import { Field, TextInput } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
 import { useTranslation } from '../../../core/i18n';
@@ -28,6 +28,13 @@ export function FolderSearchPanel() {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResultItem[]>([]);
   const [searching, setSearching] = useState(false);
+  // Each keystroke starts a new lookup with no cancellation and no guarantee
+  // it resolves in order — a fast type-then-backspace can let an earlier
+  // (longer) query's results land after a shorter one's, overwriting what's
+  // shown for the query currently in the box. Same bug class 6bab634 fixed
+  // for the Sign panel's fetch race; the fix here is the same shape: only the
+  // most recently started search is allowed to write its result.
+  const searchSeq = useRef(0);
 
   const handleSelectFolder = async () => {
     try {
@@ -67,15 +74,22 @@ export function FolderSearchPanel() {
   const handleSearch = async (val: string) => {
     setQuery(val);
     if (!val.trim()) {
+      // An empty query has no lookup to race, but it still has to win against
+      // one already in flight — otherwise that older search's results can
+      // land after the box has been cleared.
+      searchSeq.current += 1;
       setResults([]);
+      setSearching(false);
       return;
     }
+    const seq = ++searchSeq.current;
     setSearching(true);
     try {
       const res = await searchFolderIndex(val);
+      if (seq !== searchSeq.current) return; // a newer search has since started
       setResults(res);
     } finally {
-      setSearching(false);
+      if (seq === searchSeq.current) setSearching(false);
     }
   };
 

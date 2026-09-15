@@ -49,6 +49,7 @@ import {
 import { buildDocx } from '../../src/core/convert/docx-writer';
 import { layoutLines } from '../../src/core/text-layout';
 import { hasXfaMarker, xfaConvertMessage } from '../../src/core/pdf/xfa';
+import { isRtlRunGroup } from '../../src/core/convert/text-direction';
 import { StaplerError } from '../../src/core/errors';
 
 vi.mock('comlink', () => ({
@@ -784,5 +785,279 @@ describe('CNV-08 — the mandatory-preview gate', () => {
     expect(commitGate('compress')).toBeNull();
     setCommitGate('pdf-to-word', null);
     expect(commitGate('pdf-to-word')).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * RTL / bidi directionality
+ *
+ * The bug this covers: the writer built every paragraph, run and table cell
+ * with no directionality metadata at all, so Arabic or Hebrew extracted
+ * correctly as Unicode was handed to Word labelled — by omission — as
+ * left-to-right, and rendered left-aligned and in the wrong reading order.
+ *
+ * Graded against `word/document.xml` itself rather than against `mammoth`:
+ * mammoth produces semantic HTML and drops run and paragraph *properties*
+ * entirely, so it cannot see `<w:bidi/>` or `<w:rtl/>`. The flags only exist in
+ * the package.
+ * ------------------------------------------------------------------ */
+
+/** `word/document.xml`, as a string, out of a produced package. */
+function documentXml(docx: Uint8Array): string {
+  return strFromU8(unzipSync(docx)['word/document.xml']);
+}
+
+interface ReadRun {
+  text: string;
+  /** `<w:rtl/>` — with no `w:val="false"` — in this run's properties. */
+  rtl: boolean;
+}
+
+interface ReadParagraph {
+  text: string;
+  /** `<w:bidi/>` in this paragraph's properties. */
+  bidi: boolean;
+  runs: ReadRun[];
+}
+
+/**
+ * Every `<w:p>` in the body, with the two direction flags read off the XML.
+ *
+ * Deliberately a scan of the real part rather than a library: what is being
+ * asserted is the presence of specific elements in specific places, and a
+ * reader that normalised them away would be grading its own model instead of
+ * the file.
+ */
+function paragraphs(xml: string): ReadParagraph[] {
+  const out: ReadParagraph[] = [];
+  for (const match of xml.matchAll(/<w:p>([\s\S]*?)<\/w:p>/g)) {
+    const body = match[1];
+    const pPr = /<w:pPr>([\s\S]*?)<\/w:pPr>/.exec(body)?.[1] ?? '';
+    const runs: ReadRun[] = [];
+    for (const run of body.matchAll(/<w:r>([\s\S]*?)<\/w:r>/g)) {
+      const rPr = /<w:rPr>([\s\S]*?)<\/w:rPr>/.exec(run[1])?.[1] ?? '';
+      runs.push({
+        text: [...run[1].matchAll(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g)].map(t => t[1]).join(''),
+        rtl: /<w:rtl\s*\/>/.test(rPr)
+      });
+    }
+    out.push({
+      text: runs.map(run => run.text).join(''),
+      bidi: /<w:bidi\s*\/>/.test(pPr),
+      runs
+    });
+  }
+  return out;
+}
+
+const ARABIC_SENTENCE = 'مرحبا بالعالم';
+const HEBREW_SENTENCE = 'שלום עולם';
+
+/** A minimal model, so a direction test states only what it is about. */
+function model(blocks: DocxPage['blocks']): Parameters<typeof buildDocx>[0] {
+  return { title: 'rtl', skipped: [], pages: [{ pageIndex: 0, blocks }] };
+}
+
+function textRuns(text: string) {
+  return [{ text, bold: false, italic: false }];
+}
+
+describe('CNV-08 — RTL text is flagged right-to-left, not silently left-to-right', () => {
+  it('flags a real RTL PDF end to end, through the production entry point', async () => {
+    // `tests/fixtures/rtl.pdf`, the repo's own Arabic fixture, through
+    // `convertPdfToDocx` — extraction, block model and writer, nothing stubbed.
+    const { docx, outline } = await convert(fixture('rtl.pdf'));
+    // The characters still arrive as real Arabic, which is the precondition for
+    // the flag meaning anything at all.
+    expect(outline.map(item => item.text).join('')).toMatch(/[؀-ۿ]/);
+
+    const body = paragraphs(documentXml(docx));
+    expect(body.length).toBeGreaterThan(0);
+    const arabic = body.filter(p => /[؀-ۿ]/.test(p.text));
+    expect(arabic.length).toBeGreaterThan(0);
+    for (const paragraph of arabic) {
+      expect(paragraph.bidi, 'the paragraph carries <w:bidi/>').toBe(true);
+      expect(
+        paragraph.runs.every(run => run.rtl),
+        'each run carries <w:rtl/>'
+      ).toBe(true);
+    }
+  }, 120_000);
+
+  it('writes <w:bidi/> on an RTL paragraph and <w:rtl/> on its runs', async () => {
+    const docx = await buildDocx(
+      model([
+        { kind: 'paragraph', runs: textRuns(ARABIC_SENTENCE) },
+        { kind: 'paragraph', runs: textRuns(HEBREW_SENTENCE) }
+      ])
+    );
+    const body = paragraphs(documentXml(docx));
+    expect(body.map(p => p.text)).toEqual([ARABIC_SENTENCE, HEBREW_SENTENCE]);
+    expect(body.map(p => p.bidi)).toEqual([true, true]);
+    expect(body.flatMap(p => p.runs).map(run => run.rtl)).toEqual([true, true]);
+  });
+
+  it('flags an RTL heading too, alongside its heading style', async () => {
+    const docx = await buildDocx(
+      model([{ kind: 'heading', level: 1, runs: textRuns(ARABIC_SENTENCE) }])
+    );
+    const xml = documentXml(docx);
+    // Both properties, in the same `<w:pPr>` — the heading style is not lost to
+    // the new flag, and the flag is not lost to the style.
+    expect(xml).toMatch(/<w:pPr><w:pStyle w:val="Heading1"\/><w:bidi\/><\/w:pPr>/);
+    expect(paragraphs(xml)[0].runs[0].rtl).toBe(true);
+  });
+
+  it('leaves an all-Latin document with no direction markup whatsoever', async () => {
+    // The other half of the fix: a conversion with nothing to say about
+    // direction says nothing, rather than stamping `w:val="false"` on every
+    // run of every English document.
+    const docx = await buildDocx(
+      model([
+        { kind: 'heading', level: 1, runs: textRuns('Quarterly report') },
+        { kind: 'paragraph', runs: textRuns('Revenue grew 12% in Q3.') },
+        {
+          kind: 'table',
+          rows: [
+            ['Region', 'Revenue'],
+            ['North', '1,204']
+          ]
+        }
+      ])
+    );
+    const xml = documentXml(docx);
+    expect(xml).not.toContain('<w:bidi');
+    expect(xml).not.toContain('<w:rtl');
+    expect(xml).not.toContain('<w:bidiVisual');
+  });
+
+  it('keeps a Latin run inside an RTL paragraph left-to-right', async () => {
+    // Run-level direction is real in WordprocessingML, so the quoted English
+    // product name is not force-flagged along with the sentence around it.
+    const docx = await buildDocx(
+      model([
+        {
+          kind: 'paragraph',
+          runs: [
+            { text: ARABIC_SENTENCE, bold: false, italic: false },
+            { text: ' Stapler ', bold: true, italic: false },
+            { text: 'بالعربية', bold: false, italic: false }
+          ]
+        }
+      ])
+    );
+    const paragraph = paragraphs(documentXml(docx))[0];
+    expect(paragraph.bidi, 'the paragraph as a whole is RTL').toBe(true);
+    expect(paragraph.runs.map(run => run.rtl)).toEqual([true, false, true]);
+  });
+
+  it('gives a neutral run the direction of the paragraph it sits in', async () => {
+    // "(2024)" has no strong character of its own. Inside an Arabic paragraph
+    // it must not revert to LTR mid-sentence.
+    const docx = await buildDocx(
+      model([
+        {
+          kind: 'paragraph',
+          runs: [
+            { text: ARABIC_SENTENCE, bold: false, italic: false },
+            { text: ' (2024)', bold: false, italic: false }
+          ]
+        }
+      ])
+    );
+    expect(paragraphs(documentXml(docx))[0].runs.map(run => run.rtl)).toEqual([true, true]);
+  });
+
+  it('leaves an LTR paragraph unflagged in a document that also has an RTL one', async () => {
+    const docx = await buildDocx(
+      model([
+        { kind: 'paragraph', runs: textRuns(ARABIC_SENTENCE) },
+        { kind: 'paragraph', runs: textRuns('Appendix A') }
+      ])
+    );
+    const body = paragraphs(documentXml(docx));
+    expect(body.map(p => p.text)).toEqual([ARABIC_SENTENCE, 'Appendix A']);
+    expect(body.map(p => p.bidi)).toEqual([true, false]);
+    expect(body.map(p => p.runs[0].rtl)).toEqual([true, false]);
+  });
+
+  it('writes <w:bidiVisual/> on an RTL table, and flags its cells', async () => {
+    const docx = await buildDocx(
+      model([
+        {
+          kind: 'table',
+          rows: [
+            ['المنطقة', 'الإيرادات'],
+            ['الشمال', '1,204']
+          ]
+        }
+      ])
+    );
+    const xml = documentXml(docx);
+    // `<w:bidiVisual/>` puts the first column on the right, which is the column
+    // order a reader of an RTL table expects.
+    expect(xml).toContain('<w:tblPr><w:bidiVisual/>');
+    // Every cell paragraph in the table carries the paragraph flag; the "1,204"
+    // cell is neutral and inherits the table's direction rather than reverting.
+    const cells = paragraphs(xml).filter(p => p.text.length > 0);
+    expect(cells.map(p => p.text)).toEqual(['المنطقة', 'الإيرادات', 'الشمال', '1,204']);
+    expect(cells.map(p => p.bidi)).toEqual([true, true, true, true]);
+    expect(cells.map(p => p.runs[0].rtl)).toEqual([true, true, true, true]);
+  });
+
+  it('keeps a Latin column of an RTL table left-to-right', async () => {
+    const docx = await buildDocx(
+      model([
+        {
+          kind: 'table',
+          rows: [
+            ['المنطقة', 'Region code', 'الإيرادات'],
+            ['الشمال', 'NORTH', 'الشمال']
+          ]
+        }
+      ])
+    );
+    const xml = documentXml(docx);
+    expect(xml).toContain('<w:bidiVisual/>');
+    const cells = paragraphs(xml).filter(p => p.text.length > 0);
+    expect(cells.map(p => p.text)).toEqual([
+      'المنطقة',
+      'Region code',
+      'الإيرادات',
+      'الشمال',
+      'NORTH',
+      'الشمال'
+    ]);
+    // Cell direction is decided per cell underneath the table's own flag.
+    expect(cells.map(p => p.bidi)).toEqual([true, false, true, true, false, true]);
+    expect(cells.map(p => p.runs[0].rtl)).toEqual([true, false, true, true, false, true]);
+  });
+
+  it('does not flip the columns of a table that is only incidentally part-RTL', () => {
+    // The majority rule, stated as a table: two Latin columns against one
+    // Arabic one keeps the Latin column order — reversing it would move every
+    // column of a mostly-English table. The Arabic cells are still flagged
+    // individually, which is asserted in the test above.
+    expect(isRtlRunGroup(['Region code', 'NORTH', 'Quarterly revenue', 'المنطقة', 'الشمال'])).toBe(
+      false
+    );
+  });
+
+  it('still produces a document mammoth reads, with the RTL text intact', async () => {
+    // The flags are added to a file that must still open and still carry its
+    // text: a directionality fix that corrupted the package would be worse than
+    // the bug.
+    const docx = await buildDocx(
+      model([
+        { kind: 'heading', level: 1, runs: textRuns(ARABIC_SENTENCE) },
+        { kind: 'paragraph', runs: textRuns(HEBREW_SENTENCE) },
+        { kind: 'table', rows: [['المنطقة', 'الشمال']] }
+      ])
+    );
+    const { value, messages } = await toHtml(docx);
+    expect(messages).toEqual([]);
+    expect(value).toContain(ARABIC_SENTENCE);
+    expect(value).toContain(HEBREW_SENTENCE);
+    expect(value).toContain('<table>');
   });
 });

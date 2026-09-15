@@ -400,4 +400,80 @@ describe('faceblur/download — the cache that makes it happen once', () => {
     // A half-finished download must not leave a cache that looks complete.
     expect(await hasCachedFaceModel()).toBe(false);
   });
+
+  /**
+   * §2.6 — the old check was `0 < byteLength <= MAX_SHARD_BYTES` (4 MiB), a
+   * ceiling loose enough that a connection dropped partway through a ~193 KB
+   * shard still passed it. The manifest's own tensor shapes give the *exact*
+   * expected length; this is what actually catches a truncated download
+   * instead of caching it.
+   */
+  it('refuses a shard truncated to half its real size, even though it is still under the size ceiling', async () => {
+    let call = 0;
+    const realShard = readFileSync(path.join(MODEL_DIR, 'tiny_face_detector_model.bin'));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        call += 1;
+        const bytes =
+          call === 1
+            ? readFileSync(path.join(MODEL_DIR, MANIFEST_FILE))
+            : realShard.subarray(0, Math.floor(realShard.byteLength / 2));
+        void url;
+        return {
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          arrayBuffer: async () =>
+            bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+        } as unknown as Response;
+      })
+    );
+    const { setModelBaseOverride } = await import('../../src/core/faceblur/model');
+    setModelBaseOverride('https://example.invalid/weights');
+    const { ensureFaceModelWeights, hasCachedFaceModel } =
+      await import('../../src/core/faceblur/download');
+
+    await expect(ensureFaceModelWeights()).rejects.toThrow(/does not match the pinned model/);
+    expect(await hasCachedFaceModel()).toBe(false);
+  });
+
+  /**
+   * §2.6's recovery half: a shard that was already cached in a corrupted state
+   * (the failure mode a dropped connection left behind, before this fix, with
+   * no way out short of clearing all site data) is treated as "not
+   * downloaded" and self-heals the moment a real download succeeds — the same
+   * `writeFaceModelFile` call that would run on first install overwrites the
+   * bad file in place.
+   */
+  it('self-heals a corrupted cache on the next successful download instead of staying broken forever', async () => {
+    const manifestBytes = readFileSync(path.join(MODEL_DIR, MANIFEST_FILE));
+    const realShard = readFileSync(path.join(MODEL_DIR, 'tiny_face_detector_model.bin'));
+    const shardFileName = (JSON.parse(manifestBytes.toString('utf8')) as { paths: string[] }[])[0]
+      .paths[0];
+
+    const { writeFaceModelFile } = await import('../../src/core/opfs');
+    await writeFaceModelFile(MANIFEST_FILE, new Uint8Array(manifestBytes));
+    // The corrupted state: present, but half the real shard's length.
+    await writeFaceModelFile(
+      shardFileName,
+      new Uint8Array(realShard.subarray(0, Math.floor(realShard.byteLength / 2)))
+    );
+
+    const { ensureFaceModelWeights, hasCachedFaceModel } =
+      await import('../../src/core/faceblur/download');
+    // Not "cached" — the mismatch is caught on read, before any model ever
+    // tries to load these bytes.
+    expect(await hasCachedFaceModel()).toBe(false);
+
+    const requested: string[] = [];
+    vi.stubGlobal('fetch', localFetch(requested));
+    const { setModelBaseOverride } = await import('../../src/core/faceblur/model');
+    setModelBaseOverride(`file://${MODEL_DIR}`);
+
+    const result = await ensureFaceModelWeights();
+    expect(requested.length).toBe(2); // it actually re-fetched, not a no-op
+    expect(result.shard.byteLength).toBe(realShard.byteLength);
+    expect(await hasCachedFaceModel()).toBe(true);
+  });
 });
