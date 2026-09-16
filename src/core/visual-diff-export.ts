@@ -1,9 +1,8 @@
 import { PDFDocument } from 'pdf-lib';
 import { encodePng } from './png';
 import { pixelDiff } from './pixel-diff';
-import { sources, type StaplerDoc } from './store';
+import { type StaplerDoc } from './store';
 import { composeDocument } from './operations';
-import { readSourceBytes } from './opfs';
 import { renderWorker } from './workers';
 import { internal } from './errors';
 
@@ -41,16 +40,22 @@ export async function exportVisualDiff(
     throw internal('There are no pages to export.');
   }
 
-  const sourceA = docA.pages[0] ? sources.value[docA.pages[0].sourceDocId] : undefined;
-  const sourceB = docB.pages[0] ? sources.value[docB.pages[0].sourceDocId] : undefined;
+  // Compose documents to include user edits (reorder, rotation, annotations, etc.)
+  const composedBytesA = docA.pages.length > 0
+    ? await composeDocument({ pages: docA.pages, annotations: docA.annotations ?? [] })
+    : null;
+  const composedBytesB = docB.pages.length > 0
+    ? await composeDocument({ pages: docB.pages, annotations: docB.annotations ?? [] })
+    : null;
 
   for (let i = 0; i < totalPages; i++) {
     if (options.signal?.aborted) break;
 
     const pageDiff = diffResults.find(d => d.pageIndex === i) ?? diffResults[i];
 
-    const sizeA = sourceA?.pageSizes[docA.pages[i]?.sourceIndex ?? 0];
-    const sizeB = sourceB?.pageSizes[docB.pages[i]?.sourceIndex ?? 0];
+    // Page sizes from the composed documents (pages are in sequential order)
+    const sizeA = i < pageCountA ? { width: 612, height: 792 } : undefined;
+    const sizeB = i < pageCountB ? { width: 612, height: 792 } : undefined;
     const pageWidthPt = sizeA?.width ?? sizeB?.width ?? 612;
     const pageHeightPt = sizeA?.height ?? sizeB?.height ?? 792;
 
@@ -63,12 +68,8 @@ export async function exportVisualDiff(
     // background we do not need.
     if (!diffImg) {
       try {
-        const bytesA = sourceA
-          ? await readSourceBytes(sourceA.id)
-          : await composeDocument({ pages: docA.pages, annotations: docA.annotations });
-        const bytesB = sourceB
-          ? await readSourceBytes(sourceB.id)
-          : await composeDocument({ pages: docB.pages, annotations: docB.annotations });
+        const bytesA = composedBytesA!;
+        const bytesB = composedBytesB!;
 
         await renderWorker.lease(async api => {
           let handleA: string | undefined;
@@ -85,7 +86,7 @@ export async function exportVisualDiff(
 
             const scale = 1.5;
             if (handleA && !baseImg) {
-              const bitmapA = await api.renderPage(handleA, docA.pages[i].sourceIndex, scale);
+              const bitmapA = await api.renderPage(handleA, i, scale);
               const canvasA = document.createElement('canvas');
               canvasA.width = bitmapA.width;
               canvasA.height = bitmapA.height;
@@ -98,7 +99,7 @@ export async function exportVisualDiff(
             }
 
             if (handleB && !compareImg) {
-              const bitmapB = await api.renderPage(handleB, docB.pages[i]?.sourceIndex ?? 0, scale);
+              const bitmapB = await api.renderPage(handleB, i, scale);
               const canvasB = document.createElement('canvas');
               canvasB.width = bitmapB.width;
               canvasB.height = bitmapB.height;

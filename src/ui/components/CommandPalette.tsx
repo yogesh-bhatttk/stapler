@@ -169,7 +169,7 @@ export const CommandPalette = forwardRef<HTMLDivElement, Record<string, never>>(
       // Capture, so the palette answers before the shell's global shortcuts do.
       document.addEventListener('keydown', onKeyDown, true);
       return () => document.removeEventListener('keydown', onKeyDown, true);
-    });
+    }, [open, active, results]);
 
     if (!open) return null;
 

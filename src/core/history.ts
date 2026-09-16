@@ -19,6 +19,7 @@
  */
 import { signal } from '@preact/signals';
 import { activeDocId, documents, selectedPageKeys, type StaplerDoc } from './store';
+import { batch } from '@preact/signals';
 import { cropBoxes, type CropBox } from '../ui/tools/crop/state';
 import { pageAnnotations, type Annotation } from '../ui/tools/annotate/state';
 import { activeToolId, findTool } from './tools';
@@ -105,11 +106,13 @@ function push() {
 }
 
 function restore(state: Snapshot) {
-  documents.value = state.docs;
-  activeDocId.value = state.activeId;
-  selectedPageKeys.value = new Set(state.selection);
-  cropBoxes.value = state.cropBoxes;
-  pageAnnotations.value = state.pageAnnotations;
+  batch(() => {
+    documents.value = state.docs;
+    activeDocId.value = state.activeId;
+    selectedPageKeys.value = new Set(state.selection);
+    cropBoxes.value = state.cropBoxes;
+    pageAnnotations.value = state.pageAnnotations;
+  });
 }
 
 /**
@@ -157,6 +160,7 @@ export function beginTransaction(label: string): { end: () => void } {
  */
 export function undo(): void {
   if (activeJob.value !== null) return;
+  if (openTransaction !== null) return;
   const previous = undoStack.pop();
   const undoneEntry = undoLog.pop();
   if (!previous || !undoneEntry) return;
@@ -170,6 +174,7 @@ export function undo(): void {
 
 export function redo(): void {
   if (activeJob.value !== null) return;
+  if (openTransaction !== null) return;
   const next = redoStack.pop();
   const redoneEntry = redoLog.pop();
   if (!next || !redoneEntry) return;

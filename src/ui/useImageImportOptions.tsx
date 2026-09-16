@@ -18,7 +18,10 @@ export function useImageImportOptions() {
   // one at a time instead of clobbering whichever is currently pending.
   const queueRef = useRef<PendingRequest[]>([]);
 
-  const showNext = () => setPending(queueRef.current.shift() ?? null);
+  const showNext = () => {
+    queueRef.current.shift(); // Remove the completed request
+    setPending(queueRef.current[0] ?? null); // Show the next one (if any)
+  };
 
   const requestOptions = async (files: File[]): Promise<ImagesToPdfOptions | undefined> => {
     const images = files.filter(f => !isPdfFile(f) && isSupportedImage(f));

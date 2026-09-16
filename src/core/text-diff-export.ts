@@ -2,8 +2,8 @@ import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import { diffText, type DiffChunk } from './diff';
 import { internal } from './errors';
 import { renderWorker } from './workers';
-import { sources, type StaplerDoc } from './store';
-import { readSourceBytes } from './opfs';
+import { type StaplerDoc } from './store';
+import { composeDocument } from './operations';
 import {
   DOC_PAGE_RGB,
   DOC_REDACT_RGB,
@@ -114,29 +114,28 @@ export async function exportTextDiff(docA: StaplerDoc, docB: StaplerDoc): Promis
     throw internal('There are no pages to export.');
   }
 
-  const sourceA = docA.pages[0] ? sources.value[docA.pages[0].sourceDocId] : undefined;
-  const sourceB = docB.pages[0] ? sources.value[docB.pages[0].sourceDocId] : undefined;
-  if (!sourceA || !sourceB) {
-    throw internal('Cannot export text diff without both compare sources loaded.');
+  if (docA.pages.length === 0 || docB.pages.length === 0) {
+    throw internal('Cannot export text diff without both documents having pages.');
   }
+
+  const composedBytesA = await composeDocument({ pages: docA.pages, annotations: docA.annotations ?? [] });
+  const composedBytesB = await composeDocument({ pages: docB.pages, annotations: docB.annotations ?? [] });
 
   await renderWorker.lease(async api => {
     let handleA: string | undefined;
     let handleB: string | undefined;
     try {
-      handleA = (await api.loadDocument(await readSourceBytes(sourceA.id))).handle;
-      handleB = (await api.loadDocument(await readSourceBytes(sourceB.id))).handle;
+      handleA = (await api.loadDocument(composedBytesA)).handle;
+      handleB = (await api.loadDocument(composedBytesB)).handle;
 
       let fullBaseText = '';
       let fullCompareText = '';
 
       for (let i = 0; i < pageCountA; i++) {
-        const pageA = docA.pages[i];
-        fullBaseText += (await api.extractText(handleA, pageA.sourceIndex, 'text')) + '\n\n';
+        fullBaseText += (await api.extractText(handleA, i, 'text')) + '\n\n';
       }
       for (let i = 0; i < pageCountB; i++) {
-        const pageB = docB.pages[i];
-        fullCompareText += (await api.extractText(handleB, pageB.sourceIndex, 'text')) + '\n\n';
+        fullCompareText += (await api.extractText(handleB, i, 'text')) + '\n\n';
       }
 
       const chunks = diffText(fullBaseText, fullCompareText);

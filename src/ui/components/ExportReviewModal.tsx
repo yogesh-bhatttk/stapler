@@ -202,9 +202,11 @@ function SinglePageReview({
   const requestId = useRef(0);
 
   useEffect(() => {
+    let active = true;
     documentPageCount(resultBytes)
-      .then(count => setPageCount(count))
-      .catch(() => setPageCount(null));
+      .then(count => { if (active) setPageCount(count); })
+      .catch(() => { if (active) setPageCount(null); });
+    return () => { active = false; };
   }, [resultBytes]);
 
   const align = alignment?.entries[pageIndex];

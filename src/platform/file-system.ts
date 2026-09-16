@@ -176,8 +176,22 @@ export async function saveOverHandle(fileId: string, bytes: Uint8Array): Promise
     // save a new file instead" message covers this too, instead of an
     // uncaught exception surfacing a generic internal error.
     writable = await handle.createWritable();
-  } catch {
-    return false;
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'NotAllowedError') {
+      // FS-02: Handle went stale (e.g. after sleep), but queryPermission still
+      // claimed 'granted'. Re-requesting refreshes the internal OS handle.
+      if ((await handle.requestPermission({ mode: 'readwrite' })) === 'granted') {
+        try {
+          writable = await handle.createWritable();
+        } catch {
+          return false;
+        }
+      } else {
+        return false;
+      }
+    } else {
+      return false;
+    }
   }
   try {
     await writable.write(bytes);

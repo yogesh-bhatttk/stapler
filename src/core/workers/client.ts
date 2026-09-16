@@ -89,7 +89,7 @@ export function createWorkerClient<T>(
   };
 
   const scheduleIdle = (inst: Instance<T>) => {
-    if (inst.leases > 0 || idleMs <= 0) return;
+    if (inst.leases > 0 || idleMs <= 0 || !pool.includes(inst)) return;
     clearIdle(inst);
     inst.idleTimer = setTimeout(() => terminateInstance(inst), idleMs);
   };

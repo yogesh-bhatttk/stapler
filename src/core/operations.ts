@@ -763,6 +763,7 @@ export async function compressDocument(
     if (Object.keys(replacements).length > 0) replacedImages[pageIndex] = replacements;
   }
 
+  if (options.signal?.aborted) throw cancelled();
   const result = await processWorker.lease(api =>
     api.rebuildCompressed(bytes, rasterPages, replacedImages, job)
   );

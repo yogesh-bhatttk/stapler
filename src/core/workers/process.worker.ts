@@ -2420,7 +2420,7 @@ async function composePages(
     }
 
     const srcPage = srcDoc.getPage(ref.sourceIndex);
-    const leaf = copier.copy(srcPage.node);
+    const leaf = copier.copy(srcPage.node) as any;
     const leafRef = outDoc.context.register(leaf);
     const copied = PDFPage.of(leaf, leafRef, outDoc);
 
@@ -4935,13 +4935,14 @@ Q
       const pageIndex = Number(pageIndexKey);
       const page = pages[pageIndex];
       if (!page) continue;
-      const pageXObjects = page.node.Resources()?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+      const resources = page.node.Resources();
+      const pageXObjects = resources?.lookupMaybe(PDFName.of('XObject'), PDFDict);
       if (!pageXObjects) continue;
 
       // Every Image entry reachable from this page, tagged with the object
       // number it points at — resolved once per page, since a page can carry
       // several images to replace and each needs the same full scan.
-      const refs = collectImageRefs(pageXObjects, source.context, new Set());
+      const refs = collectImageRefs(pageXObjects, source.context, new Set(), resources);
 
       for (const [objectNumberKey, encoded] of Object.entries(byObjectNumber)) {
         const objectNumber = Number(objectNumberKey);
@@ -5315,7 +5316,24 @@ Q
     const kept: number[] = [];
     for (let i = 0; i < total; i++) if (!rasterImages.has(i)) kept.push(i);
     await checkpoint(job, 0.5, 'Rebuilding pages');
-    const copies = await out.copyPages(source, kept);
+    
+    // OP-03: Use a shared copier to copy pages AND AcroForm, so widget references
+    // in the AcroForm /Fields array map to the exact same objects as the page /Annots.
+    const copier = PDFObjectCopier.for(source.context, out.context);
+    const copies: PDFPage[] = [];
+    for (const idx of kept) {
+      const srcPage = source.getPage(idx);
+      const leaf = copier.copy(srcPage.node) as any;
+      const leafRef = out.context.register(leaf);
+      copies.push(PDFPage.of(leaf, leafRef, out));
+    }
+    
+    const acroForm = source.catalog.get(PDFName.of('AcroForm'));
+    if (acroForm) {
+      out.catalog.set(PDFName.of('AcroForm'), copier.copy(acroForm));
+    }
+    
+    // Add the copied/rasterized pages to the output document.
     const copyByIndex = new Map(kept.map((pageIndex, at) => [pageIndex, copies[at]]));
 
     // One copier for every rasterised page's annotations, so a form field whose

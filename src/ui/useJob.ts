@@ -68,25 +68,36 @@ export function useJob() {
         cancel: () => controller.abort()
       };
 
+      const jobOptions: JobOptions = {
+        signal: controller.signal,
+        onProgress: (fraction, label) => {
+          // Only update while this job owns the slot, so a late report from an
+          // aborted job cannot resurrect the progress bar.
+          if (controllerRef.current !== controller) return;
+          activeJob.value = {
+            label: label || options.label,
+            progress: fraction,
+            cancel: () => controller.abort()
+          };
+        }
+      };
+
       try {
-        return await task({
-          signal: controller.signal,
-          onProgress: (fraction, label) => {
-            // Only update while this job owns the slot, so a late report from an
-            // aborted job cannot resurrect the progress bar.
-            if (controllerRef.current !== controller) return;
-            activeJob.value = {
-              label: label || options.label,
-              progress: fraction,
-              cancel: () => controller.abort()
-            };
-          }
-        });
+        return await task(jobOptions);
       } catch (err) {
         // A cancellation is the user getting what they asked for, not a failure.
         if (!isCancellation(err)) notifyError(options.scope, err);
         return undefined;
       } finally {
+        if (jobOptions._proxies) {
+          import('comlink').then(Comlink => {
+            for (const proxy of jobOptions._proxies!) {
+              if (proxy && proxy[Comlink.releaseProxy]) {
+                proxy[Comlink.releaseProxy]();
+              }
+            }
+          });
+        }
         if (controllerRef.current === controller) {
           controllerRef.current = null;
           activeJob.value = null;

@@ -39,6 +39,8 @@ export type JobHandle = Comlink.Remote<JobPort> | JobPort;
 export interface JobOptions {
   signal?: AbortSignal;
   onProgress?: (fraction: number | null, label: string) => void;
+  /** Internal tracking for Comlink proxies to prevent memory leaks (W-07). */
+  _proxies?: any[];
 }
 
 /**
@@ -55,7 +57,12 @@ export function createJobHandle(options: JobOptions = {}): JobHandle {
       return options.signal?.aborted ?? false;
     }
   };
-  return Comlink.proxy(port);
+  const proxy = Comlink.proxy(port);
+  if (options) {
+    if (!options._proxies) options._proxies = [];
+    options._proxies.push(proxy);
+  }
+  return proxy;
 }
 
 /** A no-op port, for callers that genuinely have nothing to report. */

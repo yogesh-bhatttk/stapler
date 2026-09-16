@@ -17,6 +17,12 @@ vi.mock('../../src/core/workers', () => ({
   }
 }));
 
+vi.mock('../../src/core/operations', () => ({
+  composeDocument: vi.fn(async (req: any) => {
+    return new Uint8Array([req.pages[0].sourceDocId === 'base' ? 1 : 2]);
+  })
+}));
+
 import { exportTextDiff } from '../../src/core/text-diff-export';
 import { sources } from '../../src/core/store';
 import { writeSourceBytes } from '../../src/core/opfs';

@@ -587,6 +587,14 @@ function CornerHandles({
   imageHeight: number;
   onChange: (quad: Quad) => void;
 }) {
+  const cleanupDrag = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    return () => {
+      cleanupDrag.current?.();
+    };
+  }, []);
+
   const drag = (corner: keyof Quad) => (event: PointerEvent) => {
     event.preventDefault();
     event.stopPropagation();
@@ -612,9 +620,11 @@ function CornerHandles({
     const end = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', end);
+      cleanupDrag.current = null;
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', end);
+    cleanupDrag.current = end;
   };
 
   return (

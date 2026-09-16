@@ -81,11 +81,8 @@ export function SinglePageView({
         const { handle, client } = await renderHandleFor(source.id);
         if (cancelled) return;
         const bitmap = await client.lease(api => api.renderPage(handle, page.sourceIndex, scale));
-        if (cancelled) {
-          bitmap.close();
-          return;
-        }
         thumbnailCache.set(key, bitmap);
+        if (cancelled) return;
         draw(bitmap);
       } catch (err) {
         if (!cancelled && !isCancellation(err)) {

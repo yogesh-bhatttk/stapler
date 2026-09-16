@@ -21,6 +21,7 @@ export function useUnsavedGuard(): void {
       // Browsers show their own wording; assigning returnValue is what arms it.
       event.preventDefault();
       event.returnValue = '';
+      return '';
     };
     window.addEventListener('beforeunload', onBeforeUnload);
     return () => window.removeEventListener('beforeunload', onBeforeUnload);

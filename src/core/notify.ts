@@ -62,7 +62,7 @@ export function notify(
  */
 export function notifyError(scope: string, value: unknown): StaplerError {
   const err = logError(scope, value);
-  if (isCancellation(value)) return err;
+  if (isCancellation(err)) return err;
   notify(
     err.kind === 'UnsupportedFeature' || err.kind === 'Encrypted' ? 'warning' : 'danger',
     err.copy.title,
@@ -101,7 +101,8 @@ function createModalQueue<
   const queue: TRequest[] = [];
 
   function advance() {
-    current.value = queue.shift() ?? null;
+    queue.shift(); // Remove the completed request
+    current.value = queue[0] ?? null; // Show the next one (if any)
   }
 
   function enqueue(build: (resolve: (result: TResult) => void) => Omit<TRequest, 'resolve'>) {

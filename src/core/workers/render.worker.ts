@@ -1173,6 +1173,11 @@ const api: RenderJob = {
       const { canvas, ctx } = offscreen(viewport.width, viewport.height);
       await page.render(renderParams(ctx, viewport)).promise;
       const bitmap = canvas.transferToImageBitmap();
+      // transferToImageBitmap takes ownership of the backing buffer, leaving the
+      // canvas with a 0x0 buffer, so manual release (canvas.width = 0) is not
+      // strictly necessary here, but we'll add it for consistency.
+      canvas.width = 0;
+      canvas.height = 0;
       return Comlink.transfer(bitmap, [bitmap]);
     } finally {
       page.cleanup();
@@ -1190,6 +1195,8 @@ const api: RenderJob = {
         quality: format === 'jpeg' ? (quality ?? 0.92) : undefined
       });
       const bytes = new Uint8Array(await blob.arrayBuffer());
+      canvas.width = 0;
+      canvas.height = 0;
       return Comlink.transfer(bytes, [bytes.buffer]);
     } finally {
       page.cleanup();
@@ -1613,6 +1620,8 @@ const api: RenderJob = {
         await page.render(renderParams(ctx, viewport)).promise;
         const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
         if (inkCoverage(data) <= limit) blank.push(i - 1);
+        canvas.width = 0;
+        canvas.height = 0;
       } finally {
         page.cleanup();
       }

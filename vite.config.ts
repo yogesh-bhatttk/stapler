@@ -221,6 +221,7 @@ export default defineConfig(() => {
     build: {
       outDir: isFirefox ? 'dist/firefox' : isExt ? 'dist/ext' : 'dist/web',
       emptyOutDir: true,
+      sourcemap: true,
       chunkSizeWarningLimit: 1024,
       rollupOptions: {
         input,

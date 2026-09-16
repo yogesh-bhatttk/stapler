@@ -259,9 +259,7 @@ export async function putSearchIndexRecordsBatch(records: SearchIndexRecord[]): 
   }
   const result = await guard('db.putSearchIndexRecordsBatch', async db => {
     const tx = db.transaction('searchIndex', 'readwrite');
-    for (const rec of records) {
-      await tx.store.put(rec);
-    }
+    await Promise.all(records.map(rec => tx.store.put(rec)));
     await tx.done;
   });
   return result.ok;
@@ -341,21 +339,26 @@ export async function deleteSearchIndexRecordsByFileId(fileId: string): Promise<
   }
   const result = await guard('db.deleteSearchIndexRecordsByFileId', async db => {
     const records = await db.getAllFromIndex('searchIndex', 'by-fileId', fileId);
-    const tokenRecords = await db.getAllFromIndex('searchIndex', 'by-type', 'token');
     const tx = db.transaction('searchIndex', 'readwrite');
-    for (const rec of records) {
-      await tx.store.delete(rec.id);
-    }
-    for (const rec of tokenRecords) {
-      if (rec.occurrences?.some(o => o.fileId === fileId)) {
-        const filtered = rec.occurrences.filter(o => o.fileId !== fileId);
+    const deletePromises = records.map(rec => tx.store.delete(rec.id));
+    // Instead of loading ALL token records, use a cursor to walk only
+    // the 'token' type and update/delete only those referencing fileId.
+    const index = tx.store.index('by-type');
+    let cursor = await index.openCursor('token');
+    const cursorOps: Promise<void>[] = [];
+    while (cursor) {
+      const rec = cursor.value;
+      if (rec.occurrences?.some((o: { fileId: string }) => o.fileId === fileId)) {
+        const filtered = rec.occurrences.filter((o: { fileId: string }) => o.fileId !== fileId);
         if (filtered.length === 0) {
-          await tx.store.delete(rec.id);
+          cursorOps.push(cursor.delete().then(() => {}));
         } else {
-          await tx.store.put({ ...rec, occurrences: filtered });
+          cursorOps.push(cursor.update({ ...rec, occurrences: filtered }).then(() => {}));
         }
       }
+      cursor = await cursor.continue();
     }
+    await Promise.all([...deletePromises, ...cursorOps]);
     await tx.done;
   });
   return result.ok;

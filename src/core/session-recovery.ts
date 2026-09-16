@@ -19,6 +19,7 @@
  */
 import { signal } from '@preact/signals';
 import { documents, sources, activeDocId, selectedPageKeys } from './store';
+import { batch } from '@preact/signals';
 import type { StaplerDoc, SourceDocument } from './store';
 import { cropBoxes } from '../ui/tools/crop/state';
 import type { CropBox } from '../ui/tools/crop/state';
@@ -61,27 +62,43 @@ export async function clearSession(): Promise<void> {
   await writeSetting(SESSION_KEY, null);
 }
 
+let isSaving = false;
+let needsSave = false;
+
 /**
  * Writes the current workspace as the recovery record, or clears it once
  * nothing is open — an empty record is not "a session to restore," and
  * leaving a stale one around would offer to restore nothing back to nothing.
  */
 export async function saveSession(): Promise<void> {
-  if (documents.value.length === 0) {
-    await clearSession();
+  if (isSaving) {
+    needsSave = true;
     return;
   }
-  const record: SessionRecord = {
-    documents: documents.value,
-    sources: sources.value,
-    activeDocId: activeDocId.value,
-    selection: [...selectedPageKeys.value],
-    cropBoxes: cropBoxes.value,
-    pageAnnotations: pageAnnotations.value,
-    history: serializeHistory(),
-    savedAt: Date.now()
-  };
-  await writeSetting(SESSION_KEY, record);
+  isSaving = true;
+  try {
+    if (documents.value.length === 0) {
+      await clearSession();
+      return;
+    }
+    const record: SessionRecord = {
+      documents: documents.value,
+      sources: sources.value,
+      activeDocId: activeDocId.value,
+      selection: [...selectedPageKeys.value],
+      cropBoxes: cropBoxes.value,
+      pageAnnotations: pageAnnotations.value,
+      history: serializeHistory(),
+      savedAt: Date.now()
+    };
+    await writeSetting(SESSION_KEY, record);
+  } finally {
+    isSaving = false;
+    if (needsSave) {
+      needsSave = false;
+      scheduleSessionSave();
+    }
+  }
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -123,7 +140,8 @@ export async function checkRecovery(record: SessionRecord): Promise<RecoveryChec
   const existing = new Set<string>();
   await Promise.all(
     ids.map(async id => {
-      if (await sourceBytesExist(id)) existing.add(id);
+      const expectedSize = (record.sources[id] as any)?.byteLength;
+      if (await sourceBytesExist(id, expectedSize)) existing.add(id);
     })
   );
   if (existing.size === ids.length) return { record, droppedDocuments: 0 };
@@ -181,11 +199,13 @@ export function restoreSession(record: SessionRecord): void {
   // gets; it just means edits from the session that crashed aren't visible
   // in the very next review, which is the honest answer when there is no
   // real baseline to recover.
-  documents.value = record.documents.map(doc => ({ ...doc, baseline: doc.baseline ?? doc.pages }));
-  sources.value = record.sources;
-  activeDocId.value = record.activeDocId;
-  selectedPageKeys.value = new Set(record.selection);
-  cropBoxes.value = record.cropBoxes;
-  pageAnnotations.value = record.pageAnnotations;
+  batch(() => {
+    documents.value = record.documents.map(doc => ({ ...doc, baseline: doc.baseline ?? doc.pages }));
+    sources.value = record.sources;
+    activeDocId.value = record.activeDocId;
+    selectedPageKeys.value = new Set(record.selection);
+    cropBoxes.value = record.cropBoxes;
+    pageAnnotations.value = record.pageAnnotations;
+  });
   restoreHistoryFromRecord(record.history);
 }

@@ -5,7 +5,7 @@ import { translate } from '../../core/i18n';
  * had no way to switch documents, and DOC-01's per-document tabs were unreachable.
  */
 import { X } from 'lucide-preact';
-import { activeDocId, closeDocument, documents } from '../../core/store';
+import { activeDocId, closeDocument, documents, switchDocument } from '../../core/store';
 import { activeJob, confirmAction } from '../../core/notify';
 import styles from './TopBar.module.css';
 
@@ -72,7 +72,7 @@ export function FileTabs() {
                   ? translate('Finish the current operation before switching documents.')
                   : undefined
               }
-              onClick={() => (activeDocId.value = doc.id)}
+              onClick={() => switchDocument(doc.id)}
             >
               {doc.dirty && (
                 <span className={styles.dirtyDot} aria-label={translate('Unsaved changes')} />

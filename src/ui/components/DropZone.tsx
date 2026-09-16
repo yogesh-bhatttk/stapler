@@ -83,17 +83,20 @@ export const DropZone = forwardRef<HTMLLabelElement, DropZoneProps>(function Dro
         }}
         onDragEnter={event => {
           event.preventDefault();
+          event.stopPropagation();
           depth.current += 1;
           setState(accepts(event.dataTransfer) ? 'active' : 'reject');
         }}
         onDragOver={event => {
           event.preventDefault();
+          event.stopPropagation();
           if (event.dataTransfer) {
             event.dataTransfer.dropEffect = accepts(event.dataTransfer) ? 'copy' : 'none';
           }
         }}
         onDragLeave={event => {
           event.preventDefault();
+          event.stopPropagation();
           depth.current -= 1;
           if (depth.current <= 0) setState('idle');
         }}

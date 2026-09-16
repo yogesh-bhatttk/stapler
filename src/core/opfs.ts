@@ -73,7 +73,11 @@ export async function readSourceBytes(id: string): Promise<Uint8Array> {
   if (!root) {
     const bytes = __memoryFallback.get(id);
     if (!bytes) throw new Error(`Source not found in fallback: ${id}`);
-    return bytes;
+    // Return a copy — callers (composeDocument, splitDocument) may transfer the
+    // buffer to a worker via Comlink.transfer, which detaches the ArrayBuffer.
+    // Returning the canonical reference would permanently destroy the in-memory
+    // document for all subsequent operations.
+    return bytes.slice();
   }
   const fileHandle = await root.getFileHandle(`${id}.pdf`);
   const file = await fileHandle.getFile();
@@ -89,12 +93,18 @@ export async function readSourceBytes(id: string): Promise<Uint8Array> {
  * but for a multi-document session that's real bytes copied out of OPFS for
  * nothing.
  */
-export async function sourceBytesExist(id: string): Promise<boolean> {
+export async function sourceBytesExist(id: string, expectedSize?: number): Promise<boolean> {
   const root = await tryGetOpfsRoot();
-  if (!root) return __memoryFallback.has(id);
+  if (!root) {
+    const mem = __memoryFallback.get(id);
+    if (!mem) return false;
+    return expectedSize === undefined || mem.byteLength === expectedSize;
+  }
   try {
-    await root.getFileHandle(`${id}.pdf`);
-    return true;
+    const handle = await root.getFileHandle(`${id}.pdf`);
+    const file = await handle.getFile();
+    if (expectedSize !== undefined) return file.size === expectedSize;
+    return file.size > 0;
   } catch {
     return false;
   }

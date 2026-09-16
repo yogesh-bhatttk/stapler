@@ -20,11 +20,12 @@
  * OPFS (`opfs.ts`), keyed by source id, and already survive a reload on their
  * own; recovery only restores the pointers that say which OPFS files matter.
  */
-import { computed, signal } from '@preact/signals';
+import { batch, computed, signal } from '@preact/signals';
 import { commit, forgetDocumentInHistory, historySourceRefCount } from './history';
 import { normalizeRotation } from './rotation';
 import { pruneRenderHandles } from './render-cache';
 import { deleteSourceBytes, readSourceBytes } from './opfs';
+import { logEvent } from './errors';
 import { sideBySideSourceId } from '../ui/tools/side-by-side/state';
 import { compareSettings } from '../ui/tools/compare/state';
 import { cropBoxes, type CropBox } from '../ui/tools/crop/state';
@@ -346,8 +347,22 @@ export function makePageRefs(sourceDocId: string, pageCount: number): PageRef[] 
 }
 
 export function addDocument(doc: Omit<StaplerDoc, 'baseline'>): void {
-  documents.value = [...documents.value, { ...doc, baseline: doc.pages }];
-  activeDocId.value = doc.id;
+  batch(() => {
+    documents.value = [...documents.value, { ...doc, baseline: doc.pages }];
+    activeDocId.value = doc.id;
+    if (selectedPageKeys.value.size > 0) selectedPageKeys.value = new Set();
+    activePageIndex.value = 0;
+  });
+}
+
+export function switchDocument(id: string): void {
+  const target = documents.value.find(d => d.id === id);
+  if (!target) return;
+  batch(() => {
+    activeDocId.value = id;
+    if (selectedPageKeys.value.size > 0) selectedPageKeys.value = new Set();
+    activePageIndex.value = Math.max(0, Math.min(activePageIndex.value, target.pages.length - 1));
+  });
 }
 
 /**
@@ -362,10 +377,17 @@ export function refreshBaseline(docId: string, pages: PageRef[]): void {
 
 export function closeDocument(id: string): void {
   const closed = documents.value.find(d => d.id === id);
-  documents.value = documents.value.filter(d => d.id !== id);
-  if (activeDocId.value === id) {
-    activeDocId.value = documents.value[0]?.id ?? null;
-  }
+  batch(() => {
+    documents.value = documents.value.filter(d => d.id !== id);
+    if (activeDocId.value === id) {
+      const nextDoc = documents.value[0];
+      activeDocId.value = nextDoc?.id ?? null;
+      if (selectedPageKeys.value.size > 0) selectedPageKeys.value = new Set();
+      if (nextDoc) {
+        activePageIndex.value = Math.max(0, Math.min(activePageIndex.value, nextDoc.pages.length - 1));
+      }
+    }
+  });
   // Drop sources nothing references any more, so closing a tab frees its bytes.
   // ANN-07's side-by-side comparison document, and Compare's own comparison
   // document, are sources that live outside every `StaplerDoc.pages` array —
@@ -383,7 +405,9 @@ export function closeDocument(id: string): void {
       kept[key] = value;
     } else {
       sourceOriginalFiles.delete(key);
-      deleteSourceBytes(key).catch(() => {});
+      deleteSourceBytes(key).catch(err =>
+        logEvent('warn', 'store', `Failed to delete source bytes for ${key}: ${String(err)}`)
+      );
     }
   }
   sources.value = kept;
@@ -416,41 +440,168 @@ export function renameDocument(docId: string, name: string): void {
 export function deletePages(docId: string, pageKeys: Iterable<string>): void {
   const keys = new Set(pageKeys);
   if (keys.size === 0) return;
-  commit();
-  let remainingCount = 0;
-  mutateDoc(docId, d => {
-    const pages = d.pages.filter(p => !keys.has(p.key));
-    remainingCount = pages.length;
-    return { ...d, pages };
-  });
-  selectedPageKeys.value = new Set([...selectedPageKeys.value].filter(key => !keys.has(key)));
-  pruneOrphanedPageState(keys);
-  // `activePageIndex` indexes into whichever document is active and is not
-  // itself reset by this mutation — left unclamped, a delete that shrinks the
-  // page array below the current index leaves it pointing out of bounds,
-  // which several consumers (`Canvas.tsx`, `CropPanel.tsx`, `CropOverlay.tsx`,
-  // `operations.ts`) index into without their own bounds check.
-  if (activeDocId.value === docId) {
-    activePageIndex.value = Math.min(activePageIndex.value, Math.max(0, remainingCount - 1));
+  const doc = documents.value.find(d => d.id === docId);
+  const activeKey =
+    doc && activeDocId.value === docId ? doc.pages[activePageIndex.value]?.key : undefined;
+
+  // A PDF must have at least one page; deleting every last one closes the
+  // document instead of creating an invalid zero-page PDF.
+  if (doc && keys.size >= doc.pages.length && doc.pages.every(p => keys.has(p.key))) {
+    closeDocument(docId);
+    return;
   }
+
+  commit();
+  batch(() => {
+    let remainingCount = 0;
+    mutateDoc(docId, d => {
+      const pages = d.pages.filter(p => !keys.has(p.key));
+      remainingCount = pages.length;
+      return { ...d, pages };
+    });
+    selectedPageKeys.value = new Set([...selectedPageKeys.value].filter(key => !keys.has(key)));
+    pruneOrphanedPageState(keys);
+    // `activePageIndex` indexes into whichever document is active and is not
+    // itself reset by this mutation — left unclamped, a delete that shrinks the
+    // page array below the current index leaves it pointing out of bounds,
+    // which several consumers (`Canvas.tsx`, `CropPanel.tsx`, `CropOverlay.tsx`,
+    // `operations.ts`) index into without their own bounds check.
+    if (activeDocId.value === docId) {
+      let newIndex = -1;
+      mutateDoc(docId, d => {
+        newIndex = d.pages.findIndex(p => p.key === activeKey);
+        return d;
+      });
+      if (newIndex !== -1) {
+        activePageIndex.value = newIndex;
+      } else {
+        activePageIndex.value = Math.min(activePageIndex.value, Math.max(0, remainingCount - 1));
+      }
+    }
+  });
 }
 
 export function deletePage(docId: string, pageKey: string): void {
   deletePages(docId, [pageKey]);
 }
 
+function rotateDocAnnotation(a: Annotation, delta: number): Annotation {
+  const rotation = normalizeRotation(delta);
+  if (rotation === 0) return a;
+  let { x, y, width, height } = a;
+  if (rotation === 90) {
+    x = 1 - (a.y + a.height);
+    y = a.x;
+    width = a.height;
+    height = a.width;
+  } else if (rotation === 180) {
+    x = 1 - (a.x + a.width);
+    y = 1 - (a.y + a.height);
+  } else if (rotation === 270) {
+    x = a.y;
+    y = 1 - (a.x + a.width);
+    width = a.height;
+    height = a.width;
+  }
+  return {
+    ...a,
+    x,
+    y,
+    width,
+    height,
+    rotation: normalizeRotation((a.rotation ?? 0) + rotation)
+  };
+}
+
+function rotatePageAnnotation(a: PageAnnotation, delta: number): PageAnnotation {
+  const rotation = normalizeRotation(delta);
+  if (rotation === 0) return a;
+  const out = { ...a };
+  if (out.rect) {
+    let { x, y, width, height } = out.rect;
+    if (rotation === 90) {
+      x = 1 - (out.rect.y + out.rect.height);
+      y = out.rect.x;
+      width = out.rect.height;
+      height = out.rect.width;
+    } else if (rotation === 180) {
+      x = 1 - (out.rect.x + out.rect.width);
+      y = 1 - (out.rect.y + out.rect.height);
+    } else if (rotation === 270) {
+      x = out.rect.y;
+      y = 1 - (out.rect.x + out.rect.width);
+      width = out.rect.height;
+      height = out.rect.width;
+    }
+    out.rect = { x, y, width, height };
+  }
+  if (out.points) {
+    out.points = out.points.map(p => {
+      if (rotation === 90) return { x: 1 - p.y, y: p.x };
+      if (rotation === 180) return { x: 1 - p.x, y: 1 - p.y };
+      if (rotation === 270) return { x: p.y, y: 1 - p.x };
+      return p;
+    });
+  }
+  return out;
+}
+
 export function rotatePages(docId: string, pageKeys: Iterable<string>, delta: number): void {
   const keys = new Set(pageKeys);
   if (keys.size === 0) return;
+  
+  const newCropBoxes = { ...cropBoxes.value };
+  let cropBoxesChanged = false;
+  for (const key of keys) {
+    const box = newCropBoxes[key];
+    if (box) {
+      const rotation = normalizeRotation(delta);
+      if (rotation !== 0) {
+        let { x, y, width, height } = box;
+        if (rotation === 90) {
+          x = 1 - (box.y + box.height);
+          y = box.x;
+          width = box.height;
+          height = box.width;
+        } else if (rotation === 180) {
+          x = 1 - (box.x + box.width);
+          y = 1 - (box.y + box.height);
+        } else if (rotation === 270) {
+          x = box.y;
+          y = 1 - (box.x + box.width);
+          width = box.height;
+          height = box.width;
+        }
+        newCropBoxes[key] = { x, y, width, height };
+        cropBoxesChanged = true;
+      }
+    }
+  }
+
+  const newPageAnnotations = { ...pageAnnotations.value };
+  let pageAnnotationsChanged = false;
+  for (const key of keys) {
+    const annotations = newPageAnnotations[key];
+    if (annotations && annotations.length > 0) {
+      newPageAnnotations[key] = annotations.map(a => rotatePageAnnotation(a, delta));
+      pageAnnotationsChanged = true;
+    }
+  }
+
   commit();
-  mutateDoc(docId, doc => ({
-    ...doc,
-    pages: doc.pages.map(p =>
-      // A plain `%` produced -90 when rotating anticlockwise from 0, which is not
-      // a legal /Rotate value.
-      keys.has(p.key) ? { ...p, rotation: normalizeRotation(p.rotation + delta) } : p
-    )
-  }));
+  batch(() => {
+    mutateDoc(docId, doc => ({
+      ...doc,
+      pages: doc.pages.map(p =>
+        // A plain `%` produced -90 when rotating anticlockwise from 0, which is not
+        // a legal /Rotate value.
+        keys.has(p.key) ? { ...p, rotation: normalizeRotation(p.rotation + delta) } : p
+      ),
+      annotations: doc.annotations.map(a => keys.has(a.pageKey) ? rotateDocAnnotation(a, delta) : a)
+    }));
+    if (cropBoxesChanged) cropBoxes.value = newCropBoxes;
+    if (pageAnnotationsChanged) pageAnnotations.value = newPageAnnotations;
+  });
 }
 
 /**
@@ -485,39 +636,41 @@ export function duplicatePages(docId: string, pageKeys: Iterable<string>): void 
   // deliberate "duplicates start clean" design.
   const newCropBoxes: Record<string, CropBox> = {};
   const newAnnotations: Record<string, PageAnnotation[]> = {};
-  mutateDoc(docId, doc => {
-    const pages: PageRef[] = [];
-    for (const page of doc.pages) {
-      pages.push(page);
-      // A duplicate is a new ref to the same source page, with its own key so
-      // selection and thumbnails treat the two independently.
-      if (keys.has(page.key)) {
-        const newKey = crypto.randomUUID();
-        pages.push({ ...page, key: newKey });
-        const crop = cropBoxes.value[page.key];
-        if (crop) newCropBoxes[newKey] = crop;
-        const annotations = pageAnnotations.value[page.key];
-        if (annotations?.length) {
-          // Fresh ids too, not just a new map key — these are meant to be
-          // independent marks on independent pages from here on, and a
-          // shared id could confuse any lookup that expects ids to be unique
-          // across the document.
-          newAnnotations[newKey] = annotations.map(a => ({
-            ...a,
-            id: crypto.randomUUID(),
-            pageKey: newKey
-          }));
+  batch(() => {
+    mutateDoc(docId, doc => {
+      const pages: PageRef[] = [];
+      for (const page of doc.pages) {
+        pages.push(page);
+        // A duplicate is a new ref to the same source page, with its own key so
+        // selection and thumbnails treat the two independently.
+        if (keys.has(page.key)) {
+          const newKey = crypto.randomUUID();
+          pages.push({ ...page, key: newKey });
+          const crop = cropBoxes.value[page.key];
+          if (crop) newCropBoxes[newKey] = crop;
+          const annotations = pageAnnotations.value[page.key];
+          if (annotations?.length) {
+            // Fresh ids too, not just a new map key — these are meant to be
+            // independent marks on independent pages from here on, and a
+            // shared id could confuse any lookup that expects ids to be unique
+            // across the document.
+            newAnnotations[newKey] = annotations.map(a => ({
+              ...a,
+              id: crypto.randomUUID(),
+              pageKey: newKey
+            }));
+          }
         }
       }
+      return { ...doc, pages };
+    });
+    if (Object.keys(newCropBoxes).length > 0) {
+      cropBoxes.value = { ...cropBoxes.value, ...newCropBoxes };
     }
-    return { ...doc, pages };
+    if (Object.keys(newAnnotations).length > 0) {
+      pageAnnotations.value = { ...pageAnnotations.value, ...newAnnotations };
+    }
   });
-  if (Object.keys(newCropBoxes).length > 0) {
-    cropBoxes.value = { ...cropBoxes.value, ...newCropBoxes };
-  }
-  if (Object.keys(newAnnotations).length > 0) {
-    pageAnnotations.value = { ...pageAnnotations.value, ...newAnnotations };
-  }
 }
 
 /**
@@ -529,14 +682,27 @@ export function movePages(docId: string, pageKeys: Iterable<string>, toIndex: nu
   const keys = new Set(pageKeys);
   if (keys.size === 0) return;
   commit();
-  mutateDoc(docId, doc => {
-    const moving = doc.pages.filter(p => keys.has(p.key));
-    const rest = doc.pages.filter(p => !keys.has(p.key));
-    // Count how many of the moved pages were before the target, so the insertion
-    // point still refers to the same visual gap after removal.
-    const removedBefore = doc.pages.slice(0, toIndex).filter(p => keys.has(p.key)).length;
-    const at = Math.max(0, Math.min(rest.length, toIndex - removedBefore));
-    return { ...doc, pages: [...rest.slice(0, at), ...moving, ...rest.slice(at)] };
+  batch(() => {
+    let newIndex = activePageIndex.value;
+    mutateDoc(docId, doc => {
+      const activeKey = doc.pages[activePageIndex.value]?.key;
+      const moving = doc.pages.filter(p => keys.has(p.key));
+      const rest = doc.pages.filter(p => !keys.has(p.key));
+      // Count how many of the moved pages were before the target, so the insertion
+      // point still refers to the same visual gap after removal.
+      const removedBefore = doc.pages.slice(0, toIndex).filter(p => keys.has(p.key)).length;
+      const at = Math.max(0, Math.min(rest.length, toIndex - removedBefore));
+      const newPages = [...rest.slice(0, at), ...moving, ...rest.slice(at)];
+      
+      if (activeKey) {
+        const found = newPages.findIndex(p => p.key === activeKey);
+        if (found !== -1) newIndex = found;
+      }
+      return { ...doc, pages: newPages };
+    });
+    if (activeDocId.value === docId) {
+      activePageIndex.value = newIndex;
+    }
   });
 }
 

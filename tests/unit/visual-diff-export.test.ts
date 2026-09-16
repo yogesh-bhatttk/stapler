@@ -1,8 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { PDFDocument, PDFName } from 'pdf-lib';
 import { pixelDiff } from '../../src/core/pixel-diff';
 import { exportVisualDiff, type PageDiffResult } from '../../src/core/visual-diff-export';
 import { type StaplerDoc } from '../../src/core/store';
+
+vi.mock('../../src/core/operations', () => ({
+  composeDocument: vi.fn(async () => new Uint8Array(0))
+}));
 
 function createMockImageData(
   width: number,
