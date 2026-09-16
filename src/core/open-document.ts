@@ -8,7 +8,7 @@ import { platform } from '../platform/current';
 import { PDF_AND_IMAGES, type OpenedFile } from '../platform/index';
 import { importFiles, isPdfFile } from './import';
 import { isSupportedImage } from './image';
-import { addDocument, makePageRefs } from './store';
+import { addDocument } from './store';
 import { resetHistory } from './history';
 import { notify, notifyError } from './notify';
 import { translate } from './i18n';
@@ -32,17 +32,17 @@ export async function importFilesAsDocuments(
 ): Promise<ImportFilesResult> {
   if (files.length === 0) return { imported: 0 };
 
-  let imageOptions: ImagesToPdfOptions | undefined;
-  const hasImages = files.some(f => !isPdfFile(f) && isSupportedImage(f));
-  if (hasImages) {
-    const options = await deps.requestImageOptions(files);
-    if (!options) return { imported: 0 }; // user cancelled
-    imageOptions = options;
-  }
-
-  deps.onImportStart?.();
-
   try {
+    let imageOptions: ImagesToPdfOptions | undefined;
+    const hasImages = files.some(f => !isPdfFile(f) && isSupportedImage(f));
+    if (hasImages) {
+      const options = await deps.requestImageOptions(files);
+      if (!options) return { imported: 0 }; // user cancelled
+      imageOptions = options;
+    }
+
+    deps.onImportStart?.();
+
     const outcome = await importFiles(
       files,
       { onProgress: (value, label) => deps.onProgress?.(value, label) },
@@ -58,7 +58,12 @@ export async function importFilesAsDocuments(
       addDocument({
         id: crypto.randomUUID(),
         name: imported.source.name,
-        pages: makePageRefs(imported.source.id, imported.source.pageCount),
+        // `importFiles` already built these (same source id, same page count)
+        // — regenerating a second set here just produced a different set of
+        // page-key UUIDs than the ones `imported.pages` actually carries,
+        // wasted work with no effect other than confusing anything that
+        // tried to correlate a page key back to the import step.
+        pages: imported.pages,
         annotations: [],
         dirty: false,
         sourceHandle: handle?.writable ? { fileId: handle.id, writable: true } : undefined

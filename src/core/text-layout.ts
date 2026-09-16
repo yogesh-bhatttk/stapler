@@ -84,11 +84,22 @@ export function layoutLines(items: TextRun[]): PageTextLayout {
   // number of points.
   const tolerance = Math.max(2, bodySize * 0.4);
 
+  // Only the most-recently-opened line can ever match: items are visited in
+  // strictly non-increasing baseline order, so once an item's baseline falls
+  // outside the *current* line's tolerance window (measured from that line's
+  // first item), it is by construction further from every earlier line's
+  // (higher) baseline too — no earlier line can ever match again. Scanning
+  // just that one line instead of every line already opened turns this from
+  // O(items × lines) into O(items), which matters for a table-heavy PDF with
+  // thousands of text runs.
   const lines: TextRun[][] = [];
   for (const item of [...items].sort((a, b) => b.transform[5] - a.transform[5])) {
-    const line = lines.find(l => Math.abs(l[0].transform[5] - item.transform[5]) <= tolerance);
-    if (line) line.push(item);
-    else lines.push([item]);
+    const current = lines[lines.length - 1];
+    if (current && Math.abs(current[0].transform[5] - item.transform[5]) <= tolerance) {
+      current.push(item);
+    } else {
+      lines.push([item]);
+    }
   }
 
   const baselines = lines.map(line => line[0].transform[5]);
@@ -233,13 +244,20 @@ export function inkCoverage(rgba: Uint8ClampedArray | Uint8Array, cutoff = 250):
  * corrupts the image, and the compressor would then write that corruption into
  * the user's file. Refusing is the only safe answer (PLAN §5.2).
  */
+// A 10,000×10,000 scan is already ~400MB as RGBA with nothing to catch a
+// failed allocation; well above any real scanned page (a 600dpi A3 page is
+// ~34 megapixels), so refusing past this is the same "guessing wrong here
+// silently corrupts the image" refusal this function already applies to a
+// layout it does not recognise, not a new failure mode.
+const MAX_TOTAL_PIXELS = 40_000_000;
+
 export function toRgba(
   pixels: Uint8Array | Uint8ClampedArray,
   width: number,
   height: number,
   kind: number
 ): Uint8ClampedArray | null {
-  if (width <= 0 || height <= 0) return null;
+  if (width <= 0 || height <= 0 || width * height > MAX_TOTAL_PIXELS) return null;
   const rgba = new Uint8ClampedArray(width * height * 4);
 
   if (kind === IMAGE_KIND.RGBA_32BPP) {

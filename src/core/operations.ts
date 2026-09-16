@@ -207,7 +207,12 @@ export function extractFormFieldsToCreate(annotations: Annotation[]): NewFormFie
       fields.push({
         pageKey: ann.pageKey,
         type: ann.type,
-        name: ann.fieldName || ann.data || 'field',
+        // A shared literal fallback (e.g. plain `'field'`) would give every
+        // field left unnamed the same name — PDF treats same-named fields as
+        // one linked field, so typing in one would mirror into all the
+        // others. `ann.id` is unique per annotation, so an unnamed field
+        // never collides with another one.
+        name: ann.fieldName || ann.data || `field_${ann.id}`,
         exportValue: ann.exportValue,
         x: ann.x,
         y: ann.y,
@@ -295,6 +300,7 @@ export interface SplitRequest extends ComposeRequest {
 }
 
 export async function splitDocument(request: SplitRequest, options: JobOptions = {}) {
+  if (request.pages.length === 0) throw internal('There are no pages to export.');
   const stamps = await resolveStamps(request.pages, request.annotations);
   const job = createJobHandle(options);
   const mappedPages = request.pages.map(p => ({
@@ -637,7 +643,7 @@ export async function planCompression(
         alreadyOptimized: estimate.estimatedFraction < MEANINGFUL_SAVING
       };
     } finally {
-      await api.closeDocument(handle);
+      await api.closeDocument(handle).catch(() => {});
     }
   });
 }
@@ -739,7 +745,7 @@ export async function compressDocument(
         }
       }
     } finally {
-      await api.closeDocument(handle);
+      await api.closeDocument(handle).catch(() => {});
     }
   });
 
@@ -916,7 +922,7 @@ export async function findTextRegions(
     try {
       return await api.findText(handle, query, matchCase, job);
     } finally {
-      await api.closeDocument(handle);
+      await api.closeDocument(handle).catch(() => {});
     }
   });
 }
@@ -938,7 +944,7 @@ export async function scanForPatterns(
     try {
       return await api.findPatterns(handle, job);
     } finally {
-      await api.closeDocument(handle);
+      await api.closeDocument(handle).catch(() => {});
     }
   });
 }
@@ -1064,7 +1070,7 @@ async function redactOverlappedImages(
       }
       return replacements;
     } finally {
-      await api.closeDocument(handle);
+      await api.closeDocument(handle).catch(() => {});
     }
   });
 }
@@ -1431,7 +1437,7 @@ async function verifyRedaction(
         };
       });
     } finally {
-      await api.closeDocument(handle);
+      await api.closeDocument(handle).catch(() => {});
     }
   });
 }
@@ -1468,7 +1474,7 @@ export async function extractPageTextItems(
     try {
       return await api.extractPageTextItems(handle, pageIndex);
     } finally {
-      await api.closeDocument(handle);
+      await api.closeDocument(handle).catch(() => {});
     }
   });
 }
@@ -1489,7 +1495,7 @@ export async function extractPageText(
     try {
       return await api.extractText(handle, pageIndex, mode);
     } finally {
-      await api.closeDocument(handle);
+      await api.closeDocument(handle).catch(() => {});
     }
   });
 }
@@ -1586,7 +1592,7 @@ export async function extractDocumentText(
       }
       return parts.join('\n\n');
     } finally {
-      await api.closeDocument(handle);
+      await api.closeDocument(handle).catch(() => {});
     }
   });
 }
@@ -1602,7 +1608,7 @@ export async function detectBlankPages(
     try {
       return await api.detectBlankPages(handle, threshold, job);
     } finally {
-      await api.closeDocument(handle);
+      await api.closeDocument(handle).catch(() => {});
     }
   });
 }
@@ -1617,7 +1623,7 @@ export async function detectSignatureLines(
     try {
       return await api.detectSignatureLines(handle, job);
     } finally {
-      await api.closeDocument(handle);
+      await api.closeDocument(handle).catch(() => {});
     }
   });
 }
@@ -1649,7 +1655,7 @@ export async function pagesToImageArchive(
         files[name] = image;
       }
     } finally {
-      await api.closeDocument(handle);
+      await api.closeDocument(handle).catch(() => {});
     }
   });
 
@@ -2648,7 +2654,7 @@ export async function autoTrimDocument(
           updates[page.key] = box;
         }
       } finally {
-        await api.closeDocument(handle);
+        await api.closeDocument(handle).catch(() => {});
       }
     });
   }

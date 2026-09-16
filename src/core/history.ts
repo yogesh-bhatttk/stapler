@@ -221,6 +221,35 @@ export function historySourceRefCount(sourceId: string): number {
 export const canUndo = (): boolean => undoStack.length > 0 && activeJob.value === null;
 export const canRedo = (): boolean => redoStack.length > 0 && activeJob.value === null;
 
+/**
+ * Removes one document from every historical snapshot, instead of discarding
+ * the whole undo/redo stack the way `resetHistory` does.
+ *
+ * `closeDocument` (`store.ts`) frees a source's bytes once no *current*
+ * document references it any more — but a past snapshot can still hold a
+ * `StaplerDoc` for the document that just closed, pointing at those now-freed
+ * bytes; undoing back into it would restore a document that can no longer be
+ * exported. The fix used to be `resetHistory()`, wiping every open
+ * document's undo/redo history for the sin of sharing a signal with the one
+ * that closed. This targets only the closed document's entries — wherever it
+ * appears in either stack — and leaves every other document's history
+ * exactly as it was.
+ */
+export function forgetDocumentInHistory(docId: string): void {
+  const strip = (state: Snapshot): Snapshot => {
+    if (!state.docs.some(d => d.id === docId)) return state;
+    const docs = state.docs.filter(d => d.id !== docId);
+    return {
+      ...state,
+      docs,
+      activeId: state.activeId === docId ? (docs[0]?.id ?? null) : state.activeId
+    };
+  };
+  undoStack = undoStack.map(strip);
+  redoStack = redoStack.map(strip);
+  historyVersion.value++;
+}
+
 /** Called when the workspace is replaced wholesale, e.g. on session load. */
 export function resetHistory(): void {
   undoStack = [];

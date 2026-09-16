@@ -16,8 +16,6 @@ import * as Comlink from 'comlink';
 import { notify } from '../notify';
 
 export interface WorkerClient<T> {
-  /** The RPC proxy of whichever instance the next call would use. Spawns on first use. */
-  api(): Comlink.Remote<T>;
   /**
    * Runs `fn` against one pool instance, marked busy for its duration. A lease
    * prefers an idle instance, then spawns a new one below the pool cap, and only
@@ -148,9 +146,6 @@ export function createWorkerClient<T>(
       : null;
 
   return {
-    api() {
-      return acquire().proxy;
-    },
     async lease(fn) {
       const inst = acquire();
       inst.leases += 1;

@@ -71,7 +71,18 @@ function fillRect(
 /** OPS-18 — encodes `text` as a QR raster, ready to embed and stamp onto a page. */
 export function generateQrRaster(text: string): BarcodeRaster {
   if (!text.trim()) throw internal('There is no text to encode.');
-  const qr = QRCode.create(text, { errorCorrectionLevel: 'M' });
+  let qr: ReturnType<typeof QRCode.create>;
+  try {
+    qr = QRCode.create(text, { errorCorrectionLevel: 'M' });
+  } catch (err) {
+    // `qrcode` throws its own raw error for text too long to fit any QR
+    // version at this error-correction level ("too big to be stored") —
+    // surfaced with a clear, actionable message instead of that library
+    // internal reaching the user as-is.
+    throw internal(
+      `This text is too long to encode as a QR code: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
   const size = qr.modules.size;
   const dim = size * QR_MODULE_PX + QR_QUIET_MODULES * 2 * QR_MODULE_PX;
   const samples = new Uint8Array(dim * dim * 3).fill(255);

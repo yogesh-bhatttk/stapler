@@ -60,12 +60,18 @@ const MAX_REFINEMENTS = 256;
 /** Reduction factors tried for the first pass, largest (cheapest) first. */
 const PYRAMID_FACTORS = [4, 2, 1];
 
-/** Rec. 601 luma. Same weighting `core/cv/enhance.ts` uses, so the two agree. */
+/**
+ * Rec. 709 luma — matching the weighting `core/cv/enhance.ts`'s own `luma()`
+ * uses (0.2126/0.7152/0.0722), not Rec. 601 (0.299/0.587/0.114) as this
+ * function used before despite its comment claiming the two already agreed.
+ */
 export function toGray(image: RgbaImage): GrayImage {
   const { rgba, width, height } = image;
   const data = new Uint8Array(width * height);
   for (let p = 0; p < width * height; p++) {
-    data[p] = Math.round(0.299 * rgba[p * 4] + 0.587 * rgba[p * 4 + 1] + 0.114 * rgba[p * 4 + 2]);
+    data[p] = Math.round(
+      0.2126 * rgba[p * 4] + 0.7152 * rgba[p * 4 + 1] + 0.0722 * rgba[p * 4 + 2]
+    );
   }
   return { data, width, height };
 }

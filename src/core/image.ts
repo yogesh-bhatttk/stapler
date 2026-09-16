@@ -6,7 +6,7 @@
  * `imageOrientation: 'from-image'` applies EXIF rotation — the acceptance
  * criterion that a sideways photo must not stay sideways.
  */
-import { corrupt } from './errors';
+import { cancelled, corrupt, isCancellation } from './errors';
 import { DOC_PAGE_WHITE } from './doc-colors';
 
 const SUPPORTED = new Set([
@@ -47,15 +47,25 @@ export async function bitmapToJpeg(bitmap: ImageBitmap, quality = 0.9): Promise<
   return new Uint8Array(await blob.arrayBuffer());
 }
 
-export async function imageFileToJpegs(file: File, quality = 0.9): Promise<Uint8Array[]> {
+export async function imageFileToJpegs(
+  file: File,
+  quality = 0.9,
+  signal?: AbortSignal
+): Promise<Uint8Array[]> {
   let sourceBlobs: Blob[] = [file];
 
   if (file.name.toLowerCase().endsWith('.heic') || file.type === 'image/heic') {
     try {
+      // `heic2any` takes no signal of its own — a single HEIC decode cannot
+      // be interrupted mid-call — but checking right after it resolves still
+      // stops a batch from starting the next file's (potentially just as
+      // slow) decode once cancel has been requested.
       const heic2any = (await import('heic2any')).default;
       const result = await heic2any({ blob: file, toType: 'image/png' });
+      if (signal?.aborted) throw cancelled();
       sourceBlobs = Array.isArray(result) ? result : [result];
     } catch (err) {
+      if (isCancellation(err)) throw err;
       throw corrupt(
         `Failed to decode HEIC file ${file.name}: ${err instanceof Error ? err.message : String(err)}`
       );
@@ -71,6 +81,11 @@ export async function imageFileToJpegs(file: File, quality = 0.9): Promise<Uint8
       const ifds = UTIF.decode(buffer);
       const blobs: Blob[] = [];
       for (const ifd of ifds) {
+        // A multi-page TIFF (the 30-second case this exists for) decodes one
+        // page at a time here — checked per page instead of only once for
+        // the whole file, so cancelling actually takes effect partway
+        // through instead of only between whole files.
+        if (signal?.aborted) throw cancelled();
         UTIF.decodeImage(buffer, ifd);
         const rgba = UTIF.toRGBA8(ifd);
 
@@ -84,9 +99,17 @@ export async function imageFileToJpegs(file: File, quality = 0.9): Promise<Uint8
         ctx.putImageData(imageData, 0, 0);
 
         blobs.push(await canvas.convertToBlob({ type: 'image/png' }));
+        // Each iteration's canvas becomes unreachable once the loop moves on,
+        // but its GPU-backed 2D backing store is not guaranteed to be freed
+        // the moment it does — a 20-page/25MP TIFF could otherwise hold many
+        // full-size backing stores alive at once waiting on GC. Zeroing the
+        // dimensions forces an immediate release (same fix as `diff-preview.ts`).
+        canvas.width = 0;
+        canvas.height = 0;
       }
       sourceBlobs = blobs;
     } catch (err) {
+      if (isCancellation(err)) throw err;
       throw corrupt(
         `Failed to decode TIFF file ${file.name}: ${err instanceof Error ? err.message : String(err)}`
       );
@@ -95,6 +118,7 @@ export async function imageFileToJpegs(file: File, quality = 0.9): Promise<Uint8
 
   const jpegs: Uint8Array[] = [];
   for (const blob of sourceBlobs) {
+    if (signal?.aborted) throw cancelled();
     let bitmap: ImageBitmap;
     try {
       bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' });

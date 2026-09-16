@@ -21,7 +21,7 @@
  * own; recovery only restores the pointers that say which OPFS files matter.
  */
 import { computed, signal } from '@preact/signals';
-import { commit, historySourceRefCount, resetHistory } from './history';
+import { commit, forgetDocumentInHistory, historySourceRefCount } from './history';
 import { normalizeRotation } from './rotation';
 import { pruneRenderHandles } from './render-cache';
 import { deleteSourceBytes, readSourceBytes } from './opfs';
@@ -104,6 +104,38 @@ export interface StaplerDoc {
 
 /** Workspace documents — what the file tabs show. */
 export const documents = signal<StaplerDoc[]>([]);
+
+/**
+ * Drops `cropBoxes`/`pageAnnotations` entries for page keys that are no
+ * longer reachable from any open document's `pages` *or* `baseline` (a
+ * discard/export-review diff can still reach a baseline-only page). Called
+ * from `deletePages` and `closeDocument` — the two mutators that can make a
+ * page key unreachable — with the keys each is about to orphan; undo/redo
+ * needs no equivalent, since every snapshot already carries its own full copy
+ * of both maps (`history.ts`), independent of what the live signal holds.
+ */
+function pruneOrphanedPageState(candidateKeys: Iterable<string>): void {
+  const stillLive = new Set<string>();
+  for (const doc of documents.value) {
+    for (const page of doc.pages) stillLive.add(page.key);
+    for (const page of doc.baseline ?? []) stillLive.add(page.key);
+  }
+  const toDrop = new Set<string>();
+  for (const key of candidateKeys) {
+    if (!stillLive.has(key)) toDrop.add(key);
+  }
+  if (toDrop.size === 0) return;
+  if (Object.keys(cropBoxes.value).some(key => toDrop.has(key))) {
+    const next = { ...cropBoxes.value };
+    for (const key of toDrop) delete next[key];
+    cropBoxes.value = next;
+  }
+  if (Object.keys(pageAnnotations.value).some(key => toDrop.has(key))) {
+    const next = { ...pageAnnotations.value };
+    for (const key of toDrop) delete next[key];
+    pageAnnotations.value = next;
+  }
+}
 
 /**
  * Byte sources, keyed by id. Separate from `documents` so a source can back pages
@@ -291,13 +323,16 @@ export function sourceOwners(sourceId: string): SourceOwners {
 
 /** Bytes for every source the given pages refer to, and nothing else. */
 export async function bytesForPages(pages: PageRef[]): Promise<Record<string, Uint8Array>> {
-  const out: Record<string, Uint8Array> = {};
+  const ids = new Set<string>();
   for (const page of pages) {
-    const source = sources.value[page.sourceDocId];
-    if (source && !out[page.sourceDocId]) {
-      out[page.sourceDocId] = await readSourceBytes(page.sourceDocId);
-    }
+    if (sources.value[page.sourceDocId]) ids.add(page.sourceDocId);
   }
+  const out: Record<string, Uint8Array> = {};
+  await Promise.all(
+    [...ids].map(async id => {
+      out[id] = await readSourceBytes(id);
+    })
+  );
   return out;
 }
 
@@ -326,6 +361,7 @@ export function refreshBaseline(docId: string, pages: PageRef[]): void {
 }
 
 export function closeDocument(id: string): void {
+  const closed = documents.value.find(d => d.id === id);
   documents.value = documents.value.filter(d => d.id !== id);
   if (activeDocId.value === id) {
     activeDocId.value = documents.value[0]?.id ?? null;
@@ -353,12 +389,16 @@ export function closeDocument(id: string): void {
   sources.value = kept;
   pruneRenderHandles(stillUsed);
   clearPageSelection();
-  // Reset undo/redo: the history stack is a single global list (not keyed by
-  // document). Any snapshot that references the closed document's source bytes
-  // is now invalid — undoing into it produces a document that cannot be exported
-  // because its source bytes have been freed. A full reset is the safe choice
-  // and matches what happens on import (importDocument also calls resetHistory).
-  resetHistory();
+  if (closed) {
+    pruneOrphanedPageState([...closed.pages, ...(closed.baseline ?? [])].map(p => p.key));
+  }
+  // A snapshot that still holds this document would otherwise point at the
+  // source bytes just freed above — but only *this* document's entries are
+  // invalid, not the other open documents' undo/redo history, so this trims
+  // just those instead of wiping every open document's history via
+  // resetHistory() (which remains reserved for the workspace actually being
+  // replaced wholesale, e.g. on session load).
+  forgetDocumentInHistory(id);
 }
 
 /** Applies `mutate` to one document and marks it dirty. */
@@ -377,8 +417,22 @@ export function deletePages(docId: string, pageKeys: Iterable<string>): void {
   const keys = new Set(pageKeys);
   if (keys.size === 0) return;
   commit();
-  mutateDoc(docId, doc => ({ ...doc, pages: doc.pages.filter(p => !keys.has(p.key)) }));
+  let remainingCount = 0;
+  mutateDoc(docId, d => {
+    const pages = d.pages.filter(p => !keys.has(p.key));
+    remainingCount = pages.length;
+    return { ...d, pages };
+  });
   selectedPageKeys.value = new Set([...selectedPageKeys.value].filter(key => !keys.has(key)));
+  pruneOrphanedPageState(keys);
+  // `activePageIndex` indexes into whichever document is active and is not
+  // itself reset by this mutation — left unclamped, a delete that shrinks the
+  // page array below the current index leaves it pointing out of bounds,
+  // which several consumers (`Canvas.tsx`, `CropPanel.tsx`, `CropOverlay.tsx`,
+  // `operations.ts`) index into without their own bounds check.
+  if (activeDocId.value === docId) {
+    activePageIndex.value = Math.min(activePageIndex.value, Math.max(0, remainingCount - 1));
+  }
 }
 
 export function deletePage(docId: string, pageKey: string): void {

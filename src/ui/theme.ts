@@ -21,8 +21,22 @@ export const themePreference = signal<ThemePreference>('system');
 /** The theme actually painted, after resolving `system`. */
 export const resolvedTheme = signal<'light' | 'dark'>('light');
 
-const media = () =>
-  typeof window === 'undefined' ? null : window.matchMedia('(prefers-color-scheme: dark)');
+// Cached rather than reconstructed on every call: `window.matchMedia(...)`
+// returns a fresh `MediaQueryList` each time, and one with nothing else
+// holding a reference to it can be garbage-collected in Safari/WebKit —
+// which silently detaches whatever `addEventListener('change', …)` was
+// attached to it, so the theme stops following OS changes with no error
+// anywhere. Keeping the single instance alive for the module's lifetime
+// keeps its listener alive too.
+let mediaQuery: MediaQueryList | null | undefined;
+
+const media = (): MediaQueryList | null => {
+  if (mediaQuery === undefined) {
+    mediaQuery =
+      typeof window === 'undefined' ? null : window.matchMedia('(prefers-color-scheme: dark)');
+  }
+  return mediaQuery;
+};
 
 function resolve(preference: ThemePreference): 'light' | 'dark' {
   if (preference !== 'system') return preference;

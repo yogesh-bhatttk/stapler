@@ -39,6 +39,11 @@ export const webPlatform: PlatformAdapter = {
   },
   restoreHandles: async () => (hasFileSystemAccess() ? listRecent() : []),
   reopenHandle: async id => (hasFileSystemAccess() ? reopenPersisted(id) : null),
-  revokeHandle: revokePersisted,
+  // Unlike its siblings above, this used to call through unconditionally —
+  // without the picker, nothing was ever persisted to IndexedDB in the first
+  // place, so this would write a needless delete for an id that can't exist.
+  revokeHandle: async id => {
+    if (hasFileSystemAccess()) await revokePersisted(id);
+  },
   readClipboardImage
 };

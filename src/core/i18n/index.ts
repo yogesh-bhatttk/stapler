@@ -33,18 +33,35 @@ const LOCALE_STORAGE_KEY = 'stapler.locale';
 export const dictionaryVersion = signal(0);
 
 export async function setLocale(locale: Locale) {
-  if (!dictionaries[locale]) {
+  let loaded = Boolean(dictionaries[locale]);
+  if (!loaded) {
     try {
       const dict = await import(`./locales/${locale}.json`);
       dictionaries[locale] = dict.default || dict;
+      loaded = true;
     } catch {
       console.warn(`Failed to load locale: ${locale}`);
     }
   }
 
+  if (!loaded) {
+    // Setting `currentLocale` here anyway would leave every `t()` call
+    // rendering its raw key (no dictionary loaded) while everything *looks*
+    // switched to `locale` — silently wrong, with nothing telling the caller
+    // it failed. Leaving whatever locale was already in effect is the honest
+    // answer when there is no dictionary to switch to.
+    return;
+  }
+
   currentLocale.value = locale;
   dictionaryVersion.value++;
-  localStorage.setItem(LOCALE_STORAGE_KEY, locale);
+  try {
+    localStorage.setItem(LOCALE_STORAGE_KEY, locale);
+  } catch {
+    // Safari private browsing (historically a 0-byte quota) and similar
+    // hardened environments can throw here. The locale still applies for
+    // this session; it just won't be remembered for the next one.
+  }
 
   if (locale === 'ar') {
     document.documentElement.dir = 'rtl';
@@ -54,7 +71,13 @@ export async function setLocale(locale: Locale) {
 }
 
 export function initLocale(savedLocale?: string) {
-  const persisted = savedLocale ?? localStorage.getItem(LOCALE_STORAGE_KEY) ?? undefined;
+  let stored: string | null = null;
+  try {
+    stored = localStorage.getItem(LOCALE_STORAGE_KEY);
+  } catch {
+    // Same hardened-environment throw `setLocale` guards against below.
+  }
+  const persisted = savedLocale ?? stored ?? undefined;
   let target = 'en';
   if (persisted && locales.includes(persisted as Locale)) {
     target = persisted;

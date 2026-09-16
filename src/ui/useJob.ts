@@ -33,6 +33,14 @@ export function useJob() {
       // to unmount, such as when the user switches tools while an export is running.
       if (controllerRef.current) {
         controllerRef.current.abort();
+        // Null it out (not just abort) so `run`'s own `finally` — which fires
+        // later, once the aborted task actually unwinds — sees its guard
+        // `controllerRef.current === controller` fail and leaves `activeJob`
+        // alone. Left set, that stale ref would still match `controller`
+        // when the finally runs, and null out `activeJob` a second time —
+        // wiping out a *new* job a different `useJob()` instance had since
+        // started, because `activeJob` is one signal shared by all of them.
+        controllerRef.current = null;
         activeJob.value = null;
       }
     },

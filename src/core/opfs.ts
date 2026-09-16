@@ -12,6 +12,24 @@ function isQuotaError(err: unknown): boolean {
 }
 
 /**
+ * `navigator.storage.getDirectory()` existing is not proof it works: Firefox
+ * Private Browsing, a restrictive iframe sandbox, or storage access revoked
+ * mid-session can all make it throw a `SecurityError` even though the API is
+ * present. OPFS holds every document's actual bytes, so treating that throw
+ * as fatal instead of falling back to the in-memory map would make the whole
+ * app non-functional in those environments. Every read/write below goes
+ * through this instead of touching `navigator.storage` directly.
+ */
+async function tryGetOpfsRoot(): Promise<FileSystemDirectoryHandle | null> {
+  if (!navigator.storage?.getDirectory) return null;
+  try {
+    return await navigator.storage.getDirectory();
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Writes one file into the OPFS root, turning quota exhaustion into the same
  * clear, actionable message `core/db.ts`'s IndexedDB guard already gives for the
  * identical failure, instead of an uncaught `QuotaExceededError` that surfaces as
@@ -19,8 +37,11 @@ function isQuotaError(err: unknown): boolean {
  * holds the actual document bytes — often the largest thing this app ever writes
  * to disk — so it is the storage path most likely to hit quota.
  */
-async function writeOpfsFile(name: string, bytes: Uint8Array): Promise<void> {
-  const root = await navigator.storage.getDirectory();
+async function writeOpfsFile(
+  root: FileSystemDirectoryHandle,
+  name: string,
+  bytes: Uint8Array
+): Promise<void> {
   const fileHandle = await root.getFileHandle(name, { create: true });
   const writable = await fileHandle.createWritable();
   try {
@@ -39,20 +60,21 @@ async function writeOpfsFile(name: string, bytes: Uint8Array): Promise<void> {
 }
 
 export async function writeSourceBytes(id: string, bytes: Uint8Array): Promise<void> {
-  if (!navigator.storage?.getDirectory) {
+  const root = await tryGetOpfsRoot();
+  if (!root) {
     __memoryFallback.set(id, bytes);
     return;
   }
-  await writeOpfsFile(`${id}.pdf`, bytes);
+  await writeOpfsFile(root, `${id}.pdf`, bytes);
 }
 
 export async function readSourceBytes(id: string): Promise<Uint8Array> {
-  if (!navigator.storage?.getDirectory) {
+  const root = await tryGetOpfsRoot();
+  if (!root) {
     const bytes = __memoryFallback.get(id);
     if (!bytes) throw new Error(`Source not found in fallback: ${id}`);
     return bytes;
   }
-  const root = await navigator.storage.getDirectory();
   const fileHandle = await root.getFileHandle(`${id}.pdf`);
   const file = await fileHandle.getFile();
   return new Uint8Array(await file.arrayBuffer());
@@ -68,9 +90,9 @@ export async function readSourceBytes(id: string): Promise<Uint8Array> {
  * nothing.
  */
 export async function sourceBytesExist(id: string): Promise<boolean> {
-  if (!navigator.storage?.getDirectory) return __memoryFallback.has(id);
+  const root = await tryGetOpfsRoot();
+  if (!root) return __memoryFallback.has(id);
   try {
-    const root = await navigator.storage.getDirectory();
     await root.getFileHandle(`${id}.pdf`);
     return true;
   } catch {
@@ -79,12 +101,12 @@ export async function sourceBytesExist(id: string): Promise<boolean> {
 }
 
 export async function deleteSourceBytes(id: string): Promise<void> {
-  if (!navigator.storage?.getDirectory) {
+  const root = await tryGetOpfsRoot();
+  if (!root) {
     __memoryFallback.delete(id);
     return;
   }
   try {
-    const root = await navigator.storage.getDirectory();
     await root.removeEntry(`${id}.pdf`);
   } catch {
     // Harmless if the file does not exist.
@@ -92,19 +114,20 @@ export async function deleteSourceBytes(id: string): Promise<void> {
 }
 
 export async function writeModelBytes(lang: string, bytes: Uint8Array): Promise<void> {
-  if (!navigator.storage?.getDirectory) {
+  const root = await tryGetOpfsRoot();
+  if (!root) {
     __memoryFallback.set(`model_${lang}`, bytes);
     return;
   }
-  await writeOpfsFile(`${lang}.traineddata.gz`, bytes);
+  await writeOpfsFile(root, `${lang}.traineddata.gz`, bytes);
 }
 
 export async function readModelBytes(lang: string): Promise<Uint8Array | null> {
-  if (!navigator.storage?.getDirectory) {
+  const root = await tryGetOpfsRoot();
+  if (!root) {
     return __memoryFallback.get(`model_${lang}`) ?? null;
   }
   try {
-    const root = await navigator.storage.getDirectory();
     const fileHandle = await root.getFileHandle(`${lang}.traineddata.gz`);
     const file = await fileHandle.getFile();
     return new Uint8Array(await file.arrayBuffer());
@@ -128,20 +151,21 @@ function faceModelFileName(name: string): string {
 
 export async function writeFaceModelFile(name: string, bytes: Uint8Array): Promise<void> {
   const fileName = faceModelFileName(name);
-  if (!navigator.storage?.getDirectory) {
+  const root = await tryGetOpfsRoot();
+  if (!root) {
     __memoryFallback.set(fileName, bytes);
     return;
   }
-  await writeOpfsFile(fileName, bytes);
+  await writeOpfsFile(root, fileName, bytes);
 }
 
 export async function readFaceModelFile(name: string): Promise<Uint8Array | null> {
   const fileName = faceModelFileName(name);
-  if (!navigator.storage?.getDirectory) {
+  const root = await tryGetOpfsRoot();
+  if (!root) {
     return __memoryFallback.get(fileName) ?? null;
   }
   try {
-    const root = await navigator.storage.getDirectory();
     const fileHandle = await root.getFileHandle(fileName);
     const file = await fileHandle.getFile();
     return new Uint8Array(await file.arrayBuffer());
@@ -151,11 +175,11 @@ export async function readFaceModelFile(name: string): Promise<Uint8Array | null
 }
 
 export async function hasModelBytes(lang: string): Promise<boolean> {
-  if (!navigator.storage?.getDirectory) {
+  const root = await tryGetOpfsRoot();
+  if (!root) {
     return __memoryFallback.has(`model_${lang}`);
   }
   try {
-    const root = await navigator.storage.getDirectory();
     await root.getFileHandle(`${lang}.traineddata.gz`);
     return true;
   } catch {

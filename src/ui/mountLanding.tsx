@@ -35,7 +35,13 @@ export function mountLanding(toolId: ToolId): void {
   if (!root) throw new Error('The #app mount point is missing from the landing page');
 
   initTheme();
-  void initLocale();
   installErrorHooks();
-  render(<App />, root);
+  // Awaited before the first render, same as `app.tsx` — otherwise a
+  // non-English visitor's first paint is English/raw keys until the
+  // dictionary (a bundled asset, not a network fetch) resolves and forces a
+  // re-render.
+  void (async () => {
+    await initLocale();
+    render(<App />, root);
+  })();
 }

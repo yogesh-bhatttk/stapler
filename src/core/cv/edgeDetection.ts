@@ -280,23 +280,46 @@ function pointLineDistance(p: Point, a: Point, b: Point) {
   return den === 0 ? 0 : num / den;
 }
 
+/**
+ * Iterative rather than the textbook recursive formulation — a pathological
+ * contour (each split trimming only a single point) recurses to a depth
+ * proportional to the point count, and a real scanned-page contour can
+ * easily reach tens of thousands of points, well past what the call stack
+ * can hold. An explicit stack of `[start, end]` index ranges over the
+ * original array (rather than repeatedly slicing new sub-arrays, which the
+ * original recursive version did at every level) produces the identical
+ * result with no recursion at all.
+ */
 function douglasPeucker(points: Point[], epsilon: number): Point[] {
-  let maxDist = 0;
-  let index = 0;
-  for (let i = 1; i < points.length - 1; i++) {
-    const dist = pointLineDistance(points[i], points[0], points[points.length - 1]);
-    if (dist > maxDist) {
-      maxDist = dist;
-      index = i;
+  if (points.length < 2) return points;
+  const keep = new Uint8Array(points.length);
+  keep[0] = 1;
+  keep[points.length - 1] = 1;
+
+  const stack: [number, number][] = [[0, points.length - 1]];
+  while (stack.length > 0) {
+    const [start, end] = stack.pop() as [number, number];
+    let maxDist = 0;
+    let index = -1;
+    for (let i = start + 1; i < end; i++) {
+      const dist = pointLineDistance(points[i], points[start], points[end]);
+      if (dist > maxDist) {
+        maxDist = dist;
+        index = i;
+      }
+    }
+    if (maxDist > epsilon && index !== -1) {
+      keep[index] = 1;
+      stack.push([start, index]);
+      stack.push([index, end]);
     }
   }
-  if (maxDist > epsilon) {
-    const res1 = douglasPeucker(points.slice(0, index + 1), epsilon);
-    const res2 = douglasPeucker(points.slice(index), epsilon);
-    return res1.slice(0, res1.length - 1).concat(res2);
-  } else {
-    return [points[0], points[points.length - 1]];
+
+  const result: Point[] = [];
+  for (let i = 0; i < points.length; i++) {
+    if (keep[i]) result.push(points[i]);
   }
+  return result;
 }
 
 function approxPoly(points: Point[], epsilon: number): Point[] {

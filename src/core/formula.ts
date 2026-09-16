@@ -99,6 +99,51 @@ function isDigit(char: string): boolean {
   return char >= '0' && char <= '9';
 }
 
+interface FieldNameTrieNode {
+  children: Map<string, FieldNameTrieNode>;
+  /** Set at the node where some field name ends — the longest one seen so far
+   * on the path to here, since field names sharing a prefix (`Total` and
+   * `Total Amount`) both mark nodes on the same path. */
+  fieldName?: string;
+}
+
+/** Built once per `tokenize()` call — `source.length` lookups then each cost
+ * O(matched name length), not O(fieldNames.length), which is what "thousands
+ * of fields and a long formula" needs to stay fast. */
+function buildFieldNameTrie(names: readonly string[]): FieldNameTrieNode {
+  const root: FieldNameTrieNode = { children: new Map() };
+  for (const name of names) {
+    let node = root;
+    for (const ch of name) {
+      let next = node.children.get(ch);
+      if (!next) {
+        next = { children: new Map() };
+        node.children.set(ch, next);
+      }
+      node = next;
+    }
+    node.fieldName = name;
+  }
+  return root;
+}
+
+/** The longest field name that is a prefix of `source` starting at `i`, or `undefined`. */
+function longestFieldNameAt(
+  trie: FieldNameTrieNode,
+  source: string,
+  i: number
+): string | undefined {
+  let node = trie;
+  let best: string | undefined;
+  for (let j = i; j < source.length; j++) {
+    const next = node.children.get(source[j]);
+    if (!next) break;
+    node = next;
+    if (node.fieldName !== undefined) best = node.fieldName;
+  }
+  return best;
+}
+
 /**
  * Field names are matched *first* and *longest-first* against the document's own
  * list, which is what lets a form built by someone else be referenced at all:
@@ -109,8 +154,8 @@ function isDigit(char: string): boolean {
  * is one reference rather than a subtraction.
  */
 function tokenize(source: string, fieldNames: readonly string[]): Token[] | { error: string } {
-  // Longest first so `taxable` never matches as `tax` with a dangling `able`.
-  const names = [...fieldNames].filter(name => name.length > 0).sort((a, b) => b.length - a.length);
+  const names = fieldNames.filter(name => name.length > 0);
+  const trie = buildFieldNameTrie(names);
 
   const tokens: Token[] = [];
   let i = 0;
@@ -127,7 +172,7 @@ function tokenize(source: string, fieldNames: readonly string[]): Token[] | { er
       return { error: `That formula is too long (over ${MAX_TOKENS} terms).` };
     }
 
-    const name = names.find(candidate => source.startsWith(candidate, i));
+    const name = longestFieldNameAt(trie, source, i);
     if (name !== undefined) {
       tokens.push({ kind: 'field', name, at: i });
       i += name.length;

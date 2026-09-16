@@ -66,13 +66,18 @@ export function highlightsForRegions(
       continue;
     }
     const centerY = region.y + region.height / 2;
+    // A degenerate page (0-width, from a malformed source) would make
+    // `aspect` `NaN` or `Infinity` — `Math.max(NaN, 0.001)` is itself `NaN`,
+    // so this falls back to a square aspect rather than writing a `NaN`
+    // stroke width into the annotation.
+    const aspect = Number.isFinite(page.aspect) && page.aspect > 0 ? page.aspect : 1;
     highlights.push({
       pageKey: page.key,
       annotation: {
         id: newId(),
         type: 'highlight',
         color,
-        strokeWidth: Math.max(region.height * page.aspect, 0.001),
+        strokeWidth: Math.max(region.height * aspect, 0.001),
         points: [
           { x: region.x, y: centerY },
           { x: region.x + region.width, y: centerY }

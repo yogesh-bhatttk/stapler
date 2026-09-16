@@ -190,7 +190,7 @@ export async function imagesToPdfBytes(
     // 120MB TIFF is as slow to decode as a 120MB PDF is to parse.
     const oversized = largeFileWarning(files[i].size);
     if (oversized) warnings.push(`${files[i].name}: ${oversized}`);
-    jpegs.push(...(await imageFileToJpegs(files[i], imageOptions?.quality ?? 0.9)));
+    jpegs.push(...(await imageFileToJpegs(files[i], imageOptions?.quality ?? 0.9, options.signal)));
   }
 
   const bytes = await processWorker.lease(api => api.imagesToPdf(jpegs, imageOptions, job));

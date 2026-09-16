@@ -166,12 +166,27 @@ export async function runOcr(
       // URL, and tesseract's own hardcoded default has no version pin at all
       // (see `model.ts`), so leaving it to fetch a language itself would
       // silently reintroduce the unpinned-URL problem this fix closes.
-      await Promise.all(
+      // `Promise.all` would reject on the *first* failure while the other
+      // downloads kept running unobserved in the background — their eventual
+      // success or failure was invisible, and a combined run reported only
+      // one language's error even when several failed. `allSettled` waits for
+      // every one, then reports every failure together.
+      const results = await Promise.allSettled(
         missing.map(async code => {
           const verified = await fetchVerifiedModel(code, options.signal);
           await writeCachedModel(code, verified);
+          return code;
         })
       );
+      const failures = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+      if (failures.length > 0) {
+        if (failures.some(f => isCancellation(f.reason))) throw cancelled();
+        throw internal(
+          failures
+            .map(f => (f.reason instanceof Error ? f.reason.message : String(f.reason)))
+            .join('; ')
+        );
+      }
     } else {
       // 'upload' is only offered when `missing.length === 1` — one file
       // cannot cover two languages — and the consent dialog's handler has

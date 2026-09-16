@@ -353,7 +353,10 @@ export async function markdownToPdfBytes(markdown: string): Promise<MarkdownPdfR
       // Simplistic table rendering: each cell wraps to fit its column rather
       // than truncating (CNV-05) — a row's height is the tallest cell in it.
       advanceY(5);
-      const colWidth = (PAGE_WIDTH - MARGIN * 2) / (token.header?.length ?? 1);
+      // `?? 1` only catches null/undefined — an empty header row (`[]`, length
+      // 0) is neither, and would otherwise divide by zero and draw every cell
+      // at `x: Infinity`.
+      const colWidth = (PAGE_WIDTH - MARGIN * 2) / Math.max(token.header?.length ?? 1, 1);
       const cellPadding = 4;
       const lineHeight = 12;
 
@@ -366,11 +369,39 @@ export async function markdownToPdfBytes(markdown: string): Promise<MarkdownPdfR
           return wrapCellLines(plain, font, 10, colWidth - cellPadding * 2);
         });
         const rowLines = Math.max(1, ...cellLines.map(lines => lines.length));
+        const rowHeight = (rowLines - 1) * lineHeight;
+        const usableHeight = PAGE_HEIGHT - MARGIN * 2;
 
         advanceY(lineHeight); // top of the row, before any page-break check below
+
+        if (rowHeight > usableHeight - lineHeight) {
+          // A row with more wrapped lines than a whole page can hold — no
+          // single page-break avoids splitting it, so draw it line by line,
+          // starting a fresh page whenever the next line would cross the
+          // bottom margin, instead of drawing every remaining line past it.
+          let sincePageTop = 0;
+          for (let lineIndex = 0; lineIndex < rowLines; lineIndex++) {
+            if (state.y - sincePageTop * lineHeight < MARGIN) {
+              page = doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+              state.y = PAGE_HEIGHT - MARGIN - lineHeight;
+              sincePageTop = 0;
+            }
+            const y = state.y - sincePageTop * lineHeight;
+            cellLines.forEach((lines, i) => {
+              const line = lines[lineIndex];
+              if (line !== undefined) {
+                page.drawText(line, { x: state.x + i * colWidth, y, size: 10, font });
+              }
+            });
+            sincePageTop++;
+          }
+          state.y -= (sincePageTop - 1) * lineHeight;
+          return;
+        }
+
         // A multi-line row must not have its later lines pushed onto a new
         // page while its first line stays on the old one.
-        if (state.y - (rowLines - 1) * lineHeight < MARGIN) {
+        if (state.y - rowHeight < MARGIN) {
           page = doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
           state.y = PAGE_HEIGHT - MARGIN - lineHeight;
         }
@@ -385,7 +416,7 @@ export async function markdownToPdfBytes(markdown: string): Promise<MarkdownPdfR
             });
           });
         });
-        state.y -= (rowLines - 1) * lineHeight;
+        state.y -= rowHeight;
       };
 
       drawRow(token.header ?? [], true);

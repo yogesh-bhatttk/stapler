@@ -238,10 +238,27 @@ export async function exportAnnotationSummary(
       const rawText = ann.text || ann.data || '(No text content)';
       const textClean = sanitizeWinAnsiText(rawText);
 
-      const textLines = wordWrap(textClean, fontNormal, 10, CONTENT_WIDTH - 20);
+      let textLines = wordWrap(textClean, fontNormal, 10, CONTENT_WIDTH - 20);
 
       // Card height calculation: header (16) + meta (14) + textLines * 13 + padding (20)
-      const cardHeight = 30 + textLines.length * 13 + 16;
+      let cardHeight = 30 + textLines.length * 13 + 16;
+
+      // A single annotation's text long enough that its card is taller than
+      // one whole fresh page can hold would otherwise draw past the bottom
+      // margin no matter which page it starts on — a card's background is
+      // one rectangle, so (unlike a table row) there is no reasonable way to
+      // split it across pages. Truncate the text instead, with a visible
+      // note, rather than silently overflow it off the page.
+      const maxCardHeight = PAGE_HEIGHT - MARGIN * 2 - 20;
+      if (cardHeight > maxCardHeight) {
+        const maxLines = Math.max(1, Math.floor((maxCardHeight - 30 - 16) / 13) - 1);
+        const omitted = textLines.length - maxLines;
+        textLines = [
+          ...textLines.slice(0, maxLines),
+          sanitizeWinAnsiText(`… (${omitted} more line${omitted === 1 ? '' : 's'} not shown)`)
+        ];
+        cardHeight = 30 + textLines.length * 13 + 16;
+      }
 
       if (currentY - cardHeight < MARGIN + 20) {
         currentPage = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);

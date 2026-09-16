@@ -19,15 +19,15 @@ export function pixelDiff(img1: ImageData, img2: ImageData, sensitivity: number)
     const r1 = data1[i];
     const g1 = data1[i + 1];
     const b1 = data1[i + 2];
-    const a1 = data1[i + 3];
 
     const r2 = data2[i];
     const g2 = data2[i + 1];
     const b2 = data2[i + 2];
-    const a2 = data2[i + 3];
 
-    // Simple absolute difference
-    const diff = Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2) + Math.abs(a1 - a2);
+    // RGB only, matching the RGB-only threshold above (765 = 255×3) — a pixel
+    // identical in colour but different only in alpha must not be flagged as
+    // "changed" just because its alpha byte happened to move.
+    const diff = Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2);
 
     if (diff > threshold) {
       // Differing pixel: Color it red

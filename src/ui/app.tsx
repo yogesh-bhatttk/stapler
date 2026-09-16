@@ -22,6 +22,8 @@ const root = document.getElementById('app');
 if (!root) throw new Error('The #app mount point is missing from editor.html');
 
 initTheme();
+installErrorHooks();
+
 // `initLocale` was defined but never called — the dictionary for every
 // locale, including the 'en' default, never loaded on boot. Most `t()` calls
 // use the raw English string as their own key, so the "no dictionary loaded"
@@ -29,6 +31,12 @@ initTheme();
 // coincidence; any call using a symbolic key (`t('header.title')` and every
 // key this audit added) rendered its literal dotted key instead of real text
 // until the user manually touched the language switcher once.
-void initLocale();
-installErrorHooks();
-render(<App />, root);
+//
+// Awaited before the first render — like `initTheme`, so a non-English
+// locale never flashes English/raw-key content first. The dictionary is a
+// bundled JSON asset (dynamic `import()`, not a network fetch — this app
+// makes none), so this adds an imperceptible delay, not a real network wait.
+void (async () => {
+  await initLocale();
+  render(<App />, root);
+})();

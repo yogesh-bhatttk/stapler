@@ -6,6 +6,7 @@
  */
 import { signal } from '@preact/signals';
 import { readSetting, writeSetting } from './db';
+import { logEvent } from './errors';
 
 export interface ShortcutBinding {
   key: string; // Normalized lowercase, e.g. 'k', 'z', 'y', 'a', 'r', 'delete', 'backspace', '?'
@@ -77,10 +78,16 @@ export const customShortcuts = signal<Record<string, ShortcutBinding>>({});
 
 // Load from IndexedDB / localStorage fallback on init
 if (typeof window !== 'undefined') {
-  void readSetting<Record<string, ShortcutBinding>>(STORAGE_KEY).then(saved => {
-    if (saved && typeof saved === 'object') {
-      customShortcuts.value = saved;
-    } else {
+  void readSetting<Record<string, ShortcutBinding>>(STORAGE_KEY)
+    .then(saved => {
+      if (saved && typeof saved === 'object') {
+        customShortcuts.value = saved;
+        return;
+      }
+      // `localStorage.getItem` can throw in Safari private browsing and
+      // similar hardened environments — this whole callback has no `.catch`
+      // below it purely as a backstop, but this specific call is the one
+      // realistic way it would actually be needed.
       const local = localStorage.getItem(STORAGE_KEY);
       if (local) {
         try {
@@ -89,8 +96,8 @@ if (typeof window !== 'undefined') {
           // Ignore invalid JSON
         }
       }
-    }
-  });
+    })
+    .catch(err => logEvent('warn', 'shortcuts', `Failed to load custom shortcuts: ${String(err)}`));
 }
 
 export function getEffectiveBinding(id: string): ShortcutBinding {
@@ -147,6 +154,18 @@ export function findConflict(id: string, newBinding: ShortcutBinding): ShortcutD
   return null;
 }
 
+// A bare `void writeSetting(...)` per call gives IndexedDB no guarantee that
+// two rapid calls' writes *complete* in the order they were made — a second
+// rebind's write finishing before the first's would leave the persisted
+// record one rebind behind what's in memory. Chaining every write onto the
+// same promise forces them to complete in call order.
+let writeChain: Promise<unknown> = Promise.resolve();
+function persistShortcuts(next: Record<string, ShortcutBinding>): void {
+  writeChain = writeChain
+    .then(() => writeSetting(STORAGE_KEY, next))
+    .catch(err => logEvent('warn', 'shortcuts', `Failed to persist shortcuts: ${String(err)}`));
+}
+
 export function setShortcutOverride(
   id: string,
   newBinding: ShortcutBinding
@@ -158,7 +177,7 @@ export function setShortcutOverride(
 
   const next = { ...customShortcuts.value, [id]: newBinding };
   customShortcuts.value = next;
-  void writeSetting(STORAGE_KEY, next);
+  persistShortcuts(next);
   if (typeof localStorage !== 'undefined') {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
   }
@@ -167,7 +186,7 @@ export function setShortcutOverride(
 
 export function resetShortcuts() {
   customShortcuts.value = {};
-  void writeSetting(STORAGE_KEY, {});
+  persistShortcuts({});
   if (typeof localStorage !== 'undefined') {
     localStorage.removeItem(STORAGE_KEY);
   }

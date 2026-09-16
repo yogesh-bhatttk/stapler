@@ -90,9 +90,20 @@ export function pickerTypes(
   return accept ? [{ description, accept }] : undefined;
 }
 
-/** True when the user dismissed a picker — not an error worth reporting. */
+/**
+ * True when the user dismissed a picker, or the browser refused to even show
+ * one — not an error worth reporting. Chromium throws `NotAllowedError`
+ * (not `AbortError`) when a file-picker call isn't the direct result of a
+ * user gesture, e.g. the page lost focus between the click and the picker
+ * call; treated the same as a dismissed picker (silently return to the
+ * caller's "nothing happened" path) rather than falling through to a
+ * generic `InternalError` that reads as "Stapler crashed" for what is really
+ * "just click the button again."
+ */
 export function isAbort(err: unknown): boolean {
-  return err instanceof DOMException && err.name === 'AbortError';
+  return (
+    err instanceof DOMException && (err.name === 'AbortError' || err.name === 'NotAllowedError')
+  );
 }
 
 /**

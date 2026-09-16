@@ -18,7 +18,16 @@ async function toImageData(bitmap: ImageBitmap): Promise<ImageData | null> {
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   ctx?.drawImage(bitmap, 0, 0);
   bitmap.close();
-  return ctx ? ctx.getImageData(0, 0, canvas.width, canvas.height) : null;
+  const imageData = ctx ? ctx.getImageData(0, 0, canvas.width, canvas.height) : null;
+  // This canvas is never attached to the DOM, so nothing keeps it visible —
+  // but its GPU-backed 2D backing store is not guaranteed to be freed the
+  // moment it becomes unreachable; some engines only reclaim it on the next
+  // GC pass, which for repeated page-by-page review comparisons can mean many
+  // full-size backing stores alive at once. Zeroing the dimensions forces an
+  // immediate release instead of waiting on that.
+  canvas.width = 0;
+  canvas.height = 0;
+  return imageData;
 }
 
 /** The after-document's page count — used to size the review UI's page navigator. */

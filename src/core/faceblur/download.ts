@@ -223,6 +223,22 @@ async function fetchBinary(
     );
   }
 
+  // Checked against the header before buffering the body: `arrayBuffer()`
+  // reads the whole response into memory first and only then hands back a
+  // size to check against `maxBytes`, so a misconfigured CDN serving a huge
+  // file would already have to be fully loaded before this could ever refuse
+  // it. Not a complete guard — a server that lies about or omits
+  // `Content-Length` still reaches the same check after the fact below — but
+  // it turns the common case of an honestly-reported oversized response into
+  // an early refusal instead of an OOM risk.
+  const contentLength = response.headers?.get('content-length') ?? null;
+  const declaredLength = contentLength === null ? null : Number(contentLength);
+  if (declaredLength !== null && Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    throw internal(
+      `The face detector download was ${declaredLength} bytes, which is not the pinned file. Nothing was saved.`
+    );
+  }
+
   const bytes = new Uint8Array(await response.arrayBuffer());
   if (bytes.byteLength === 0 || bytes.byteLength > maxBytes) {
     throw internal(

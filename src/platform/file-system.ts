@@ -245,7 +245,11 @@ export function openFilesViaInput(options?: OpenOptions): Promise<OpenedFile[]> 
 
     // A dismissed picker fires no `change` event in most browsers, so without this
     // the promise never settles and the calling job hangs forever.
+    let settled = false;
     const settle = (files: FileList | null) => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener('focus', onWindowFocus);
       resolve(
         Array.from(files ?? []).map(file => ({
           id: crypto.randomUUID(),
@@ -258,6 +262,17 @@ export function openFilesViaInput(options?: OpenOptions): Promise<OpenedFile[]> 
       input.remove();
     };
 
+    // `cancel` only exists from Firefox 91 on; some Android WebViews fire
+    // neither `change` nor `cancel` when the picker is dismissed, which would
+    // otherwise hang this Promise (and the job awaiting it) forever. The
+    // native picker reliably steals window focus while open on every browser
+    // tested, so refocusing is a cross-browser signal the picker closed.
+    // `change` always fires before focus returns, so a short delay lets it
+    // win that race; if it hasn't fired by then, treat this as a cancel.
+    const onWindowFocus = () => {
+      setTimeout(() => settle(input.files && input.files.length > 0 ? input.files : null), 300);
+    };
+
     input.style.position = 'fixed';
     input.style.left = '-9999px';
     input.style.top = '0';
@@ -268,33 +283,48 @@ export function openFilesViaInput(options?: OpenOptions): Promise<OpenedFile[]> 
     document.body.append(input);
     input.addEventListener('change', () => settle(input.files), { once: true });
     input.addEventListener('cancel', () => settle(null), { once: true });
+    window.addEventListener('focus', onWindowFocus);
     input.click();
   });
 }
 
-/** Fallback: anchor download, for saving without the picker. */
+/**
+ * Fallback: anchor download, for saving without the picker.
+ *
+ * The `<a download>` technique has no completion event and no error channel —
+ * once `anchor.click()` returns, the actual save is entirely up to the browser
+ * and OS, invisible to this page. There is no browser API that reports back
+ * whether it succeeded, so the boolean this returns can only ever mean
+ * "the download was *started* without an immediate synchronous failure," not
+ * "the file was saved" — callers should not treat `true` as a completion
+ * guarantee the way `saveViaPicker`'s real success/failure result is.
+ */
 export function saveViaDownload(bytes: Uint8Array, suggestedName: string): boolean {
-  // Copy into a fresh buffer: a transferred Uint8Array may be a view on a larger
-  // ArrayBuffer, and Blob would then write the whole thing.
-  const blob = new Blob([bytes.slice()], { type: mimeForName(suggestedName) });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = suggestedName;
-  anchor.rel = 'noopener';
-  document.body.append(anchor);
-  anchor.click();
-  anchor.remove();
-  let revoked = false;
-  const cleanup = () => {
-    if (revoked) return;
-    revoked = true;
-    URL.revokeObjectURL(url);
-    window.removeEventListener('focus', cleanup);
-  };
-  window.addEventListener('focus', cleanup);
-  setTimeout(cleanup, 60_000);
-  return true;
+  try {
+    // Copy into a fresh buffer: a transferred Uint8Array may be a view on a larger
+    // ArrayBuffer, and Blob would then write the whole thing.
+    const blob = new Blob([bytes.slice()], { type: mimeForName(suggestedName) });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = suggestedName;
+    anchor.rel = 'noopener';
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    let revoked = false;
+    const cleanup = () => {
+      if (revoked) return;
+      revoked = true;
+      URL.revokeObjectURL(url);
+      window.removeEventListener('focus', cleanup);
+    };
+    window.addEventListener('focus', cleanup);
+    setTimeout(cleanup, 60_000);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export { hasFileSystemAccess };

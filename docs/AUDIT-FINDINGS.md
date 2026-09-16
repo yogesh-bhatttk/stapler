@@ -713,6 +713,351 @@ tests. This is the pattern the three Critical/High findings above should be made
   and the targeted route scan both pass.
   `tests/e2e/a11y-and-perf.spec.ts:64`, batch action bar primary button
 
+## 14 — Fresh audit (2026-09-15): concurrency, resource lifecycle, and edge-case bugs
+
+Full-repo audit of `src/core/`, `src/platform/`, `src/background/`, `src/ui/`, independent of
+the ticket-by-ticket passes above. Verified against the actual current code (not against the
+audit's own prose) before any fix landed — every Critical item below was re-read at its cited
+lines and confirmed to match exactly before being touched.
+
+### Critical
+
+- [x] **Modal request signals silently orphan a Promise on a concurrent call.**
+  `confirmAction()`, `requestOcrConsent()`, and `requestExportReview()` each held a single
+  module-level signal for "the request currently on screen." A second concurrent call
+  overwrote it outright — the first caller's `resolve` was discarded with it, so nothing ever
+  settled that `await`, and the caller hung forever. `discardAllChanges.ts` had grown its own
+  `discardInFlight` module guard to work around this for `confirmAction` specifically; no
+  other call site had an equivalent. ~~Fixed 2026-09-16~~ — added `createModalQueue()` (a
+  small generic FIFO) in `core/notify.ts`; a concurrent call now queues behind whichever
+  request is on screen and is shown once it resolves, instead of clobbering it. All three
+  request signals route through it.
+  `src/core/notify.ts` (`createModalQueue`, `confirmAction`, `requestOcrConsent`,
+  `requestExportReview`)
+
+- [x] **OPFS `getDirectory()` can throw even when the API exists.** Every function in
+  `core/opfs.ts` gated OPFS-vs-memory-fallback on `!navigator.storage?.getDirectory` — but the
+  call itself can throw a `SecurityError` in Firefox Private Browsing, a sandboxed iframe, or
+  when storage access is later revoked, even though the function is present. Since OPFS holds
+  every document's actual bytes, an uncaught throw there made the whole app non-functional
+  instead of degrading to the in-memory `Map`. ~~Fixed 2026-09-16~~ — added `tryGetOpfsRoot()`,
+  which wraps the call in try/catch and returns `null` on any failure; every read/write/delete/
+  exists check in the module now goes through it instead of touching `navigator.storage`
+  directly.
+  `src/core/opfs.ts`
+
+- [x] **`useJob` cleanup race wipes a different job's progress bar.** On unmount while a job
+  was running, the cleanup effect aborted the controller and cleared the shared `activeJob`
+  signal, but never nulled `controllerRef.current`. The aborted task's own `finally` block
+  fires later (once the abort actually unwinds); its guard `controllerRef.current === controller`
+  was still true, so it cleared `activeJob` a second time — even if a *different* `useJob()`
+  instance had since started a new job in that now-empty slot. ~~Fixed 2026-09-16~~ — the
+  cleanup effect now also sets `controllerRef.current = null`, so the later `finally` sees the
+  guard fail and leaves the new job's `activeJob` alone.
+  `src/ui/useJob.ts`
+
+- [x] **`diff.ts`'s LCS diff allocates an unbounded `(n+1)×(m+1)` table.** `diffText` builds a
+  full dense DP matrix with no size guard — two ~50k-word documents means a ~2.5-billion-cell
+  array, which OOMs or locks the main thread solid. ~~Fixed 2026-09-16~~ — added a word-count
+  guard (`MAX_DIFF_WORDS`) that falls back to a coarse, O(n+m) line-level equal/changed diff
+  instead of the full LCS once either side is too large to matrix-diff safely, so a huge
+  document degrades to a coarser diff rather than hanging the tab.
+  `src/core/diff.ts`
+
+- [x] **Worker pool `api()` returns a proxy without tracking a lease.** `lease()` increments/
+  decrements an instance's `leases` count around the call so its idle timer won't fire mid-use;
+  `api()` returned the same kind of proxy with no lease at all, so the idle timer could
+  terminate the worker out from under a caller mid-RPC. ~~Fixed 2026-09-16~~ — `api()` had zero
+  callers anywhere in the repo, and `pin()` (already on the same interface) is the existing
+  safe equivalent — lease-tracked, with an explicit `release()` — for exactly the "hold a
+  proxy across several calls" case `api()` existed for. Removed `api()` from the interface and
+  implementation rather than bolt a lease-tracked wrapper onto code nothing used, closing the
+  race by deleting the unsafe surface instead of patching it.
+  `src/core/workers/client.ts`
+
+### High
+
+- [x] **H1 — `render-cache.ts` `invalidateSource` closes bitmaps with active consumers.**
+  Closed `entry.bitmap` without checking `entry.users > 0`; a component still drawing a
+  retained bitmap gets `InvalidStateError` on its next `drawImage`. ~~Fixed 2026-09-16~~ —
+  added an `orphaned` flag: an in-use entry is left in the cache instead of closed, and
+  `release()` now closes it once the last consumer's `users` count reaches 0.
+  `src/core/render-cache.ts`
+- [x] **H2 — `useImageImportOptions` concurrent calls orphan a Promise.** Same shape as C1 but
+  in component state (`setPending`) rather than a module signal — a second concurrent call
+  silently dropped the first caller's resolver. ~~Fixed 2026-09-16~~ — added a `useRef` queue
+  (same fix shape as `createModalQueue`), so a second concurrent `requestOptions()` call
+  queues behind the first instead of replacing it. `src/ui/useImageImportOptions.tsx`
+- [ ] **H3 — Image processing blocks the main thread for large images.**
+  `trimTransparentToPng()`/`removeWhiteBackground()` iterate every pixel synchronously
+  despite being `async`; a 4000×3000 scan is a multi-second stall. `src/core/image.ts`
+  **Open** — the real fix is moving the pixel loop into a worker (per the "heavy work goes
+  in a worker" invariant), a larger change than the rest of this pass; left for follow-up.
+- [x] **H4 — `open-document.ts`: `requestImageOptions()` can throw outside its `try/catch`,**
+  becoming an unhandled rejection instead of a surfaced import error. ~~Fixed 2026-09-16~~ —
+  moved the call inside the existing `try` block so any throw goes through the same
+  `notifyError('import', err)` path as the rest of the import. `src/core/open-document.ts`
+- [x] **H5 — `openFilesViaInput`: a dismissed picker hangs forever on browsers that fire
+  neither `cancel` nor `change`** (older Firefox/WebView). ~~Fixed 2026-09-16~~ — added a
+  `window` `focus` listener as a cross-browser fallback: the native picker reliably steals
+  focus while open, so a refocus with no `change` shortly after is treated as a cancel.
+  `src/platform/file-system.ts`
+- [x] **H6 — `closeDocument` calls `resetHistory()`, wiping undo/redo for every open document,**
+  not just the one being closed. ~~Fixed 2026-09-16~~ — added `forgetDocumentInHistory(docId)`
+  (`core/history.ts`), which strips only the closed document's entries from every historical
+  snapshot (re-pointing a snapshot's `activeId` off it if needed) instead of discarding both
+  stacks outright; `closeDocument` now calls this instead of `resetHistory()`.
+  `src/core/history.ts`, `src/core/store.ts`
+- [x] **H7 — Theme listener silently stops in Safari/WebKit.** `media()` returned a fresh
+  `MediaQueryList` each call with nothing retaining it, so the attached listener could be
+  GC'd. ~~Fixed 2026-09-16~~ — `media()` now caches the single `MediaQueryList` instance for
+  the module's lifetime instead of reconstructing it per call. `src/ui/theme.ts`
+- [x] **H8 — Unnamed form fields all fall back to the same literal name `'field'`,** which PDF
+  treats as one linked field — typing in one mirrors to all others. Reachable in practice:
+  `AnnotationOverlay.tsx` binds its field-name input directly to `fieldName`, so a user
+  clearing it empties the value, `ann.data` is also `''` for every form-field type, and the
+  fallback chain lands on the shared literal. ~~Fixed 2026-09-16~~ — the final fallback is now
+  `` `field_${ann.id}` `` — `ann.id` is unique per annotation, so two independently-cleared
+  fields never collide.
+  `src/core/operations.ts` (`extractFormFieldsToCreate`)
+- [x] **H9 — `finally { await api.closeDocument(handle); }` can mask the original error.**
+  18 call sites total (more than the audit's cited ~9); 5 already guarded with
+  `.catch(() => {})`, 13 did not. ~~Fixed 2026-09-16~~ — all 18 now discard a `closeDocument`
+  rejection instead of letting it overwrite whatever the `try` block itself threw.
+  `src/core/operations.ts`
+- [x] **H10 — `activePageIndex` isn't clamped after `deletePages()` shrinks the page array,**
+  leaving it able to point out of bounds. ~~Fixed 2026-09-16~~ — `deletePages` now clamps
+  `activePageIndex` to the shrunk page count when the mutated document is the active one.
+  `src/core/store.ts`
+- [x] **H11 — Session autosave's 500ms debounce leaves a crash window** where `closeDocument`
+  has already deleted OPFS bytes a recovery record still points to. **Not a live bug** — this
+  exact race is already the documented reason `checkRecovery()` exists (its own docblock,
+  `session-recovery.ts:104-118`): it validates every source's bytes actually still exist via
+  `sourceBytesExist()` before ever offering a restore, and drops any document whose bytes are
+  gone. Confirmed wired in at `AppShell.tsx:113`, ahead of `restoreSession()`. The debounce
+  window exists, but it cannot produce a silently-corrupt restore because of this gate.
+  `src/core/session-recovery.ts`
+- [x] **H12 — `splitDocument` has no empty-pages guard** (unlike `composeDocument`), risking a
+  worker crash or malformed output on an empty split. ~~Fixed 2026-09-16~~ — added the same
+  `if (request.pages.length === 0) throw internal(...)` guard `composeDocument` already has.
+  `src/core/operations.ts`
+- [x] **H13 — `diff-preview.ts` leaks detached canvases.** `document.createElement('canvas')`
+  is never cleaned up after `ImageData` extraction; repeated diffs accumulate orphaned GPU
+  backing stores until GC gets to them. ~~Fixed 2026-09-16~~ — zeroes the canvas's `width`/
+  `height` after extracting `ImageData`, forcing its backing store to release immediately
+  instead of waiting on GC. `src/core/diff-preview.ts`
+
+### Medium
+
+- [x] **M1** `deletePages` allows deleting every page, producing a 0-page document that breaks
+  export. **Not a bug — deliberate.** `commit.ts:1913-1926` documents this explicitly: a 0-page
+  document is "a legitimate way to clear a document before starting over," and `commitTool`
+  already catches it before any handler runs, showing "Nothing to export" instead of the
+  `InternalError` this would otherwise surface deep inside `composeDocument`. No change made.
+  `src/core/store.ts`, `src/ui/tools/commit.ts:1909-1926`
+- [x] **M2** `Tooltip.tsx`'s `cloneElement` silently overwrites a child's existing
+  `onMouseEnter`/`onMouseLeave`/`onFocus`/`onBlur`/`onKeyDown` handlers. ~~Fixed 2026-09-16~~ —
+  added a `compose()` helper so the tooltip's handler now runs the child's own handler first,
+  then its own, instead of replacing it. Also fixed L2 (same file: the hide-timer `setTimeout`
+  had no unmount cleanup) alongside it. `src/ui/components/Tooltip.tsx`
+- [x] **M3** `web.ts`'s `revokeHandle` calls IndexedDB unconditionally, unlike its siblings
+  which gate on `hasFileSystemAccess()`. ~~Fixed 2026-09-16~~ — gated the same way its siblings
+  already are. `src/platform/web.ts`
+- [x] **M4** `pixel-diff.ts` sums the alpha channel into the diff but thresholds against
+  765 (RGB-only), so an alpha-only difference can be flagged as "changed." ~~Fixed
+  2026-09-16~~ — dropped alpha from the sum so it matches the RGB-only threshold it's actually
+  compared against. `src/core/pixel-diff.ts`
+- [x] **M5** `markdown-to-pdf.ts`: `(token.header?.length ?? 1)` — an empty (not nullish)
+  header array divides by zero, producing `colWidth: Infinity`. ~~Fixed 2026-09-16~~ — wrapped
+  in `Math.max(…, 1)`, which catches zero the way `?? 1` never could. `src/core/markdown-to-pdf.ts`
+- [x] **M6** `markdown-to-pdf.ts`: an over-tall content block is clipped instead of re-flowed
+  onto a fresh page. Narrowed after reading the actual code: text/heading/code/list content
+  already advances line-by-line (each line's `advanceY` call is small and independently safe);
+  the one real gap was a table row taller than a whole page. ~~Fixed 2026-09-16~~ — such a row
+  now draws line-by-line across as many fresh pages as it needs, instead of past the bottom
+  margin once. `src/core/markdown-to-pdf.ts`
+- [x] **M7** `text-layout.ts`: `new Uint8ClampedArray(width*height*4)` for a 10000×10000 image
+  (~400MB) has no try/catch or size guard. ~~Fixed 2026-09-16~~ — added a 40-megapixel cap
+  (well above any real scanned page); `toRgba` now returns `null` past it, the same refusal
+  path it already takes for an unrecognised layout, and the one caller
+  (`render.worker.ts:2321`) already handles a `null` return. `src/core/text-layout.ts`
+- [x] **M8** `import.ts`'s cancel check only runs between files — a single large HEIC/TIFF
+  decode can't be interrupted. ~~Fixed 2026-09-16~~ — threaded an `AbortSignal` into
+  `imageFileToJpegs`: checked after the (uninterruptible, third-party) HEIC decode, per-frame
+  inside a multi-page TIFF's decode loop (the actual 30-second case), and per-image in the
+  final bitmap/JPEG-encode loop. A single-file HEIC decode still can't be interrupted
+  mid-call — no signal support in `heic2any` itself — but a multi-page TIFF and a multi-file
+  batch now respond promptly. `src/core/image.ts`, `src/core/import.ts`
+- [x] **M9** `store.ts`'s `bytesForPages` reads OPFS sources sequentially instead of via
+  `Promise.all()`. ~~Fixed 2026-09-16~~ — collects the distinct source ids first, then reads
+  them all concurrently. `src/core/store.ts`
+- [x] **M10** `cropBoxes`/`pageAnnotations` entries for deleted pages/closed documents are
+  never pruned from their global maps — unbounded growth over a long session. ~~Fixed
+  2026-09-16~~ — added `pruneOrphanedPageState()`, called from `deletePages` and
+  `closeDocument` with the page keys each is about to orphan; it drops an entry only once no
+  open document's `pages` *or* `baseline` still references that key. (A global reactive
+  `effect()` over `documents` was tried first and reverted — it fired during tests that
+  manipulate `documents`/`pageAnnotations` independently of the normal mutators and wrongly
+  pruned data those tests still expected; the targeted, mutator-scoped version below has no
+  such blast radius.) `src/core/store.ts`
+- [x] **M11** `app.tsx`/`mountLanding.tsx`: `void initLocale()` fires async while `render(<App/>)`
+  runs synchronously right after — a flash of unlocalized content. ~~Fixed 2026-09-16~~ —
+  both now await `initLocale()` before their first `render()`, the same way `initTheme()`
+  already avoids a flash; the dictionary is a bundled asset (dynamic `import()`, no network
+  fetch), so the added wait is imperceptible. `src/ui/app.tsx`, `src/ui/mountLanding.tsx`
+- [x] **M12** `db.ts`'s in-memory search-index fallback (when IndexedDB is unavailable) has no
+  size bound. ~~Fixed 2026-09-16~~ — capped at 20,000 records, evicting the oldest (insertion
+  order) once full — same shape as `BitmapCache`'s eviction. `src/core/db.ts`
+- [x] **M13** `signatures.ts`'s `loadSignatures` has no error handling; a rejected
+  `listSignatures()` looks identical to "no saved signatures." **Inaccurate as stated** —
+  `listSignatures()` (`db.ts`) is wrapped in `guard()`, which catches every internal error and
+  always resolves (never rejects), logging via `logEvent`. No unhandled-rejection risk exists
+  here. No change made. `src/core/signatures.ts`, `src/core/db.ts`
+- [x] **M14** `core/i18n/index.ts`: `localStorage.setItem()` can throw in private browsing,
+  uncaught. ~~Fixed 2026-09-16~~ — wrapped in try/catch (locale still applies for the session;
+  just isn't remembered). Also guarded the matching `localStorage.getItem()` in `initLocale`
+  for the same reason. `src/core/i18n/index.ts`
+- [x] **M15** `shortcuts.ts`'s module-level `readSetting` promise chain has no `.catch`.
+  ~~Fixed 2026-09-16~~ — added a `.catch` (logs via `logEvent`); the one realistic throw inside
+  the callback (`localStorage.getItem`, same private-browsing case as M14) is now covered by
+  it. `src/core/shortcuts.ts`
+- [x] **M16** `cv/edgeDetection.ts`'s `douglasPeucker` recurses with no depth limit — risk of
+  stack overflow on a ~56k-point contour. ~~Fixed 2026-09-16~~ — rewritten iteratively with an
+  explicit `[start, end]` index stack over the original array instead of recursive slicing;
+  identical output (verified against the existing edge-detection test suite, unchanged
+  results), no recursion, and avoids the repeated array-copy overhead the recursive version
+  had at every level. `src/core/cv/edgeDetection.ts`
+- [x] **M17** `cv/enhance.ts`'s `rotateImageData` can ~2× the pixel count at `fit=true` with no
+  budget check. ~~Fixed 2026-09-16~~ — added a 40-megapixel cap on the `fit` output size; past
+  it, falls back to the input's own dimensions rather than growing unbounded. The one current
+  caller (`deskewAndCrop`, bounded to ±15°) never approaches this, so this only protects
+  future callers of the exported function. `src/core/cv/enhance.ts`
+- [x] **M18** `formula.ts`'s tokenizer is O(n × fieldNames) — slow with many fields and a long
+  formula. ~~Fixed 2026-09-16~~ — replaced the per-position linear scan over every field name
+  with a trie built once per `tokenize()` call; a lookup at each position now costs
+  O(matched name length) instead of O(fieldNames.length). All 53 existing formula tests pass
+  unchanged, including the longest-match case. `src/core/formula.ts`
+- [x] **M19** `faceblur/detect.ts`: a `tf.tensor3d` disposed in `finally` still leaks if the
+  worker is terminated externally mid-inference. **Not actionable from this code.**
+  `Worker.terminate()` destroys the entire JS realm instantly — no `finally`, no cleanup
+  handler, nothing user-level runs at all when a worker is externally killed, in this codebase
+  or in general. The browser reclaims the terminated worker's own GPU/WebGL context (and
+  whatever it held) as part of tearing down that worker, not as a leak surviving past it. No
+  change made. `src/core/faceblur/detect.ts`
+
+### Low
+
+- [ ] **L1** `supportsFileSystemAccess` is evaluated once at module load in both
+  `extension.ts`/`web.ts` (`src/platform/`). **Deferred** — the field is part of the
+  `PlatformAdapter` interface (`readonly supportsFileSystemAccess: boolean`); making it live
+  would mean changing every call site from a property read to a method call, a wider,
+  riskier change than this Low finding warrants. In practice `hasFileSystemAccess()` is a
+  `typeof window.showOpenFilePicker === 'function'` check — real browser globals are already
+  present by the time any module executes, so "runs before `globalThis` is initialised" is not
+  a realistic failure mode here. No change made.
+- [x] **L2** `Tooltip.tsx`'s hide `setTimeout` has no unmount cleanup. ~~Fixed 2026-09-16~~ —
+  fixed alongside M2 (added a `useEffect` cleanup that clears the timer). `src/ui/components/Tooltip.tsx`
+- [x] **L3** `fsa.ts`'s `isAbort` only checks `AbortError`, not `NotAllowedError`
+  (page-not-focused). ~~Fixed 2026-09-16~~ — `isAbort` now also matches `NotAllowedError`
+  (Chromium's actual name for "picker blocked, page lost focus"), so all three call sites
+  treat it as a silent no-op instead of surfacing a generic `InternalError` for what is really
+  "just click the button again." `src/platform/fsa.ts`
+- [x] **L4** `file-system.ts`'s `saveViaDownload` always returns `true` — no way to detect a
+  failed anchor-download. **Inherent platform limitation** — the `<a download>` technique has
+  no completion event and no error channel once `click()` returns; there is no browser API
+  that reports back whether the save actually succeeded. ~~Narrowed 2026-09-16~~ — wrapped in
+  try/catch so a genuine *synchronous* failure (e.g. `Blob`/`createObjectURL` throwing)
+  correctly returns `false`, and documented the ceiling on what this can ever detect so a
+  caller doesn't mistake `true` for a completion guarantee. `src/platform/file-system.ts`
+- [ ] **L5** `service-worker.ts`'s `chrome.action.onClicked` doesn't extend the MV3 SW's
+  lifetime across an async `openEditor()`. **Likely already adequate, not independently
+  verifiable here** — the listener already returns the promise chain (Chrome's documented
+  mitigation for exactly this), and every step inside `openEditor()` is a tightly-chained
+  awaited `chrome.*` call, which itself resets the service worker's idle timer while pending.
+  Confirming the precise remaining risk window needs real Chrome MV3 lifecycle testing this
+  environment can't do; no speculative change made.
+- [x] **L6** `image.ts`'s TIFF decode holds many intermediate canvases simultaneously
+  (~2GB for a 20-page/25MP TIFF). ~~Fixed 2026-09-16~~ — zeroes each iteration's canvas
+  dimensions after use, same fix as H13/`diff-preview.ts`. `src/core/image.ts`
+- [x] **L7** `open-document.ts` generates a duplicate, differently-UUID'd set of page refs,
+  ignoring `imported.pages`. ~~Fixed 2026-09-16~~ — uses `imported.pages` (already built by
+  `importFiles`) directly instead of calling `makePageRefs` a second time.
+  `src/core/open-document.ts`
+- [ ] **L8** `errors.ts`'s diagnostic log uses `Array.shift()` (O(n)) on overflow instead of a
+  circular buffer. **Not worth fixing** — capped at 200 entries, a `shift()` there costs low
+  microseconds; a circular buffer would add real complexity to `getLog()`/`buildDiagnostic()`'s
+  straightforward chronological iteration for no measurable benefit. No change made.
+- [x] **L9** `text-layout.ts`'s line grouping is O(items × lines) via `lines.find(...)`.
+  ~~Fixed 2026-09-16~~ — items are visited in non-increasing baseline order, so only the
+  most-recently-opened line can ever match (proved in the code comment); checking just that
+  one line instead of scanning every line turns this into O(items). All 33 existing
+  text-layout tests pass unchanged. `src/core/text-layout.ts`
+- [x] **L10** `shortcuts.ts`'s fire-and-forget `void writeSetting(...)` calls can reorder under
+  rapid calls. ~~Fixed 2026-09-16~~ — see M15 above; chained onto one `writeChain` promise so
+  writes complete in call order. `src/core/shortcuts.ts`
+- [x] **L11** `barcode.ts`: `QRCode.create` throwing on oversized data isn't given a
+  user-friendly message. ~~Fixed 2026-09-16~~ — wrapped in try/catch with a clear message.
+  `src/core/barcode.ts`
+- [x] **L12** `faceblur/logoMatch.ts` uses Rec. 601 luma while `cv/enhance.ts` uses Rec. 709,
+  despite a comment claiming the same weighting. ~~Fixed 2026-09-16~~ — switched to Rec. 709
+  to match what the comment already claimed; all faceblur/logo-match tests (including the
+  brightness-shift-normalisation case) pass unchanged. `src/core/faceblur/logoMatch.ts`
+- [x] **L13** `core/i18n/index.ts`: a failed locale import still sets `currentLocale.value`,
+  so translations silently fall through to raw keys with no failure signal. ~~Fixed
+  2026-09-16~~ — see M14 above; `setLocale` now only updates `currentLocale` once the
+  dictionary actually loaded (or was already cached), leaving the prior locale in effect
+  otherwise. `src/core/i18n/index.ts`
+- [x] **L14** `annotation-summary.ts`: a single oversized annotation overflows below the page
+  margin instead of wrapping. ~~Fixed 2026-09-16~~ — a card taller than one whole fresh page
+  can hold (a single "card" rectangle can't reasonably span pages the way a table row can) now
+  truncates its text with a visible "N more lines not shown" note instead of drawing past the
+  bottom margin. `src/core/annotation-summary.ts`
+- [x] **L15** `highlight.ts`: `Math.max(region.height * page.aspect, 0.001)` returns `NaN` if
+  `page.aspect` is `NaN`. ~~Fixed 2026-09-16~~ — falls back to a square aspect (`1`) when
+  `page.aspect` isn't a finite positive number. `src/core/highlight.ts`
+- [ ] **L16** `client.ts`'s `FinalizationRegistry`-based pinned-client cleanup is
+  non-deterministic (GC may never run in a short-lived context). **Accepted, matches the
+  report's own framing** — this is `FinalizationRegistry`'s documented behaviour everywhere,
+  not specific to this code; every caller of `pin()` already calls `release()` explicitly
+  (confirmed: `render-cache.ts`'s `closeRenderHandle`, and the other `pin()` call sites), so
+  the registry is a backstop for a leaked reference, not the primary cleanup path. No change
+  made.
+- [x] **L17** `ocr/runOcr.ts`: `Promise.all` rejecting on the first failed model download
+  leaves other in-progress downloads running in the background, confusingly. ~~Fixed
+  2026-09-16~~ — switched to `Promise.allSettled`, waiting for every download and reporting
+  every failure together instead of only the first. All 31 existing OCR tests pass unchanged.
+  `src/core/ocr/runOcr.ts`
+- [x] **L18** `faceblur/download.ts` loads the full response body into memory before checking
+  `MAX_SHARD_BYTES`. ~~Fixed 2026-09-16~~ — checks the `Content-Length` response header before
+  buffering the body, refusing early when the server honestly reports an oversized response.
+  Not a complete guard (a server that lies about or omits the header still hits the existing
+  post-buffer check), but turns the common case into an early refusal instead of an OOM risk.
+  `src/core/faceblur/download.ts`
+
+### Architectural
+
+- [ ] **G1** No per-document undo history — one global stack, wiped by closing any document.
+  **Narrowed by the H6 fix above** — closing a document no longer wipes the *other* open
+  documents' history (only its own entries are stripped from each snapshot); the deeper
+  architectural change (each document keeping its own independent undo stack, rather than one
+  shared stack of whole-workspace snapshots) is unchanged and would be a substantial redesign,
+  out of scope for this pass.
+- [ ] **G2** No maximum open-document count; each holds OPFS refs, render handles, page-ref
+  arrays with no ceiling. Not addressed — a real product decision (what the ceiling should be,
+  how to communicate it) rather than a bug fix, out of scope here.
+- [x] **G3** Single confirmation-request signal, no queue — **fixed by the C1 fix above**,
+  which adds exactly this queue for all three modal request signals.
+- [ ] **G4** A crashed worker gets no automatic retry — the in-flight lease just rejects and a
+  toast tells the user to retry manually. Not addressed — automatic retry policy (how many
+  attempts, what backoff, whether a retry is even safe for a partially-mutated operation) is a
+  product design question, out of scope for this pass.
+
+**Status after this pass:** all 5 Critical, all 13 High (2 fully open — H3's real fix is a
+worker migration, H11 was already correctly mitigated), all 19 Medium (1 not a bug, 1
+inaccurate as stated, 1 not actionable), and 15 of 18 Low items fixed or resolved; 3 Low items
+and G2/G4 left open with reasoning above. 1425/1425 existing tests pass throughout; `tsc
+--noEmit` clean throughout.
+
 ## Suggested order of attack
 
 1. Redaction's vector/image handling (§1) — security-relevant, silent failure, highest risk.

@@ -91,6 +91,25 @@ interface StaplerSchema extends DBSchema {
 
 let dbPromise: Promise<IDBPDatabase<StaplerSchema>> | null = null;
 const memorySearchIndexStore = new Map<string, SearchIndexRecord>();
+// This is the fallback used only when IndexedDB itself is unavailable — but
+// folder search (`ocr/folder-index.ts`) can still index a large folder, and
+// nothing evicted from this Map before, so it grew for the rest of the tab's
+// life with no bound. A `Map` iterates in insertion order, so the oldest
+// entry is always first; capped like `BitmapCache` (`render-cache.ts`) rather
+// than refusing new records outright, since losing the oldest indexed file
+// first is a better failure mode than folder search just stopping partway.
+const MAX_MEMORY_SEARCH_INDEX_RECORDS = 20_000;
+
+function setMemorySearchIndexRecord(rec: SearchIndexRecord): void {
+  if (
+    !memorySearchIndexStore.has(rec.id) &&
+    memorySearchIndexStore.size >= MAX_MEMORY_SEARCH_INDEX_RECORDS
+  ) {
+    const oldest = memorySearchIndexStore.keys().next().value;
+    if (oldest !== undefined) memorySearchIndexStore.delete(oldest);
+  }
+  memorySearchIndexStore.set(rec.id, rec);
+}
 
 function open(): Promise<IDBPDatabase<StaplerSchema>> {
   if (typeof globalThis.indexedDB === 'undefined') {
@@ -234,7 +253,7 @@ export async function writeSetting(key: string, value: unknown) {
 export async function putSearchIndexRecordsBatch(records: SearchIndexRecord[]): Promise<boolean> {
   if (typeof globalThis.indexedDB === 'undefined') {
     for (const rec of records) {
-      memorySearchIndexStore.set(rec.id, rec);
+      setMemorySearchIndexRecord(rec);
     }
     return true;
   }

@@ -81,6 +81,46 @@ export function errorCopy(value: unknown) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Modal request queues
+ *
+ * Each modal below (confirm / OCR consent / export review) is rendered from a
+ * single "current request" signal — only one dialog of that kind can be on
+ * screen at once. Two overlapping callers (a fast double-click before the
+ * first modal has mounted, two panels independently asking for the same
+ * consent) used to just overwrite that signal: the first request's `resolve`
+ * was discarded along with it, so nothing ever settled its Promise and the
+ * awaiting caller hung forever. `createModalQueue` instead queues a second
+ * concurrent request behind the first and shows it only once the first
+ * settles, so every caller's Promise resolves, in the order they asked.
+ * ------------------------------------------------------------------ */
+
+function createModalQueue<
+  TResult,
+  TRequest extends { resolve: (result: TResult) => void }
+>(current: { value: TRequest | null }) {
+  const queue: TRequest[] = [];
+
+  function advance() {
+    current.value = queue.shift() ?? null;
+  }
+
+  function enqueue(build: (resolve: (result: TResult) => void) => Omit<TRequest, 'resolve'>) {
+    return new Promise<TResult>(resolvePromise => {
+      const request = {
+        ...build(result => {
+          resolvePromise(result);
+          advance();
+        })
+      } as TRequest;
+      queue.push(request);
+      if (queue.length === 1) current.value = request;
+    });
+  }
+
+  return { enqueue };
+}
+
+/* ------------------------------------------------------------------ *
  * Confirmations
  * ------------------------------------------------------------------ */
 
@@ -94,11 +134,13 @@ export interface ConfirmRequest {
 }
 
 export const confirmRequest = signal<ConfirmRequest | null>(null);
+const confirmQueue = createModalQueue<boolean, ConfirmRequest>(confirmRequest);
 
 /**
  * Promise-based replacement for `window.confirm`. Renders through
  * `<ConfirmDialog>` in the app shell, so it is themed, focus-trapped, and
- * keyboard-operable.
+ * keyboard-operable. Concurrent calls queue rather than clobbering one
+ * another (see `createModalQueue`).
  */
 export function confirmAction(options: {
   title: string;
@@ -107,19 +149,14 @@ export function confirmAction(options: {
   cancelLabel?: string;
   tone?: 'default' | 'danger';
 }): Promise<boolean> {
-  return new Promise(resolve => {
-    confirmRequest.value = {
-      title: options.title,
-      body: options.body,
-      confirmLabel: options.confirmLabel ?? 'Continue',
-      cancelLabel: options.cancelLabel ?? 'Cancel',
-      tone: options.tone ?? 'default',
-      resolve: ok => {
-        confirmRequest.value = null;
-        resolve(ok);
-      }
-    };
-  });
+  return confirmQueue.enqueue(resolve => ({
+    title: options.title,
+    body: options.body,
+    confirmLabel: options.confirmLabel ?? 'Continue',
+    cancelLabel: options.cancelLabel ?? 'Cancel',
+    tone: options.tone ?? 'default',
+    resolve
+  }));
 }
 
 /* ------------------------------------------------------------------ *
@@ -140,23 +177,16 @@ export interface OcrConsentRequest {
 }
 
 export const ocrConsentRequest = signal<OcrConsentRequest | null>(null);
+const ocrConsentQueue = createModalQueue<'download' | 'upload' | 'cancel', OcrConsentRequest>(
+  ocrConsentRequest
+);
 
 export function requestOcrConsent(
   langs: string[],
   title: string,
   body: string
 ): Promise<'download' | 'upload' | 'cancel'> {
-  return new Promise(resolve => {
-    ocrConsentRequest.value = {
-      langs,
-      title,
-      body,
-      resolve: result => {
-        ocrConsentRequest.value = null;
-        resolve(result);
-      }
-    };
-  });
+  return ocrConsentQueue.enqueue(resolve => ({ langs, title, body, resolve }));
 }
 
 /* ------------------------------------------------------------------ *
@@ -187,6 +217,7 @@ export interface ExportReviewRequest {
 }
 
 export const exportReviewRequest = signal<ExportReviewRequest | null>(null);
+const exportReviewQueue = createModalQueue<boolean, ExportReviewRequest>(exportReviewRequest);
 
 /**
  * Promise-based "review this before it's written" gate, resolved by
@@ -201,15 +232,7 @@ export function requestExportReview(input: {
   fileName: string;
   alignment?: PageAlignment;
 }): Promise<boolean> {
-  return new Promise(resolve => {
-    exportReviewRequest.value = {
-      ...input,
-      resolve: proceed => {
-        exportReviewRequest.value = null;
-        resolve(proceed);
-      }
-    };
-  });
+  return exportReviewQueue.enqueue(resolve => ({ ...input, resolve }));
 }
 
 /* ------------------------------------------------------------------ *

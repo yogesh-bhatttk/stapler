@@ -175,6 +175,8 @@ export function applyContrastBrightness(
  * by hand — the previous code did, got the sign wrong, and doubled the skew instead of
  * removing it. Use {@link deskew}.
  */
+const MAX_FIT_OUTPUT_PIXELS = 40_000_000;
+
 export function rotateImageData(imageData: ImageData, angleDeg: number, fit = false): ImageData {
   if (angleDeg === 0) return imageData;
 
@@ -188,8 +190,18 @@ export function rotateImageData(imageData: ImageData, angleDeg: number, fit = fa
   // which is what deskewing a full-bleed scan did: at the ±15° limit a straight
   // rotation shears roughly 13% off each corner, taking the page's own corners
   // (and any content near them) with it.
-  const outWidth = fit ? Math.ceil(Math.abs(w * cos) + Math.abs(h * sin)) : w;
-  const outHeight = fit ? Math.ceil(Math.abs(w * sin) + Math.abs(h * cos)) : h;
+  let outWidth = fit ? Math.ceil(Math.abs(w * cos) + Math.abs(h * sin)) : w;
+  let outHeight = fit ? Math.ceil(Math.abs(w * sin) + Math.abs(h * cos)) : h;
+  // A `fit` rotation near 45° can nearly double the pixel count (up to
+  // `sqrt(2)` per side). The only caller today (`deskewAndCrop`) stays well
+  // under this — its angle is bounded to ±15° — but this is exported as a
+  // general utility with no such guarantee from any future caller, so refuse
+  // to grow the canvas past a sane budget rather than let one silently
+  // allocate an unbounded amount of memory.
+  if (fit && outWidth * outHeight > MAX_FIT_OUTPUT_PIXELS) {
+    outWidth = w;
+    outHeight = h;
+  }
 
   const out = new ImageData(outWidth, outHeight);
   const dst = out.data;

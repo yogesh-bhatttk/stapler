@@ -25,6 +25,14 @@ interface CacheEntry {
   bitmap: ImageBitmap;
   /** Number of live consumers. An entry in use is never evicted. */
   users: number;
+  /**
+   * Set by `invalidateSource` when it found this entry still in use: its
+   * source is gone, but a consumer (e.g. `Thumbnail`, mid-`drawImage`) is
+   * still holding the bitmap, so closing it here would throw
+   * `InvalidStateError` on that consumer's next paint. Left in the cache
+   * instead, and closed by `release()` once the last consumer lets go.
+   */
+  orphaned?: boolean;
 }
 
 export class BitmapCache {
@@ -60,7 +68,12 @@ export class BitmapCache {
 
   release(key: string): void {
     const entry = this.entries.get(key);
-    if (entry && entry.users > 0) entry.users -= 1;
+    if (!entry || entry.users === 0) return;
+    entry.users -= 1;
+    if (entry.users === 0 && entry.orphaned) {
+      entry.bitmap.close();
+      this.entries.delete(key);
+    }
   }
 
   private evictIfNeeded(): void {
@@ -87,6 +100,13 @@ export class BitmapCache {
   invalidateSource(sourceId: string): void {
     for (const [key, entry] of [...this.entries]) {
       if (!key.startsWith(`${sourceId}:`)) continue;
+      if (entry.users > 0) {
+        // A consumer is still drawing this one — closing it now would break
+        // that in-progress paint. Leave it for `release()` to close once
+        // free, below.
+        entry.orphaned = true;
+        continue;
+      }
       entry.bitmap.close();
       this.entries.delete(key);
     }
