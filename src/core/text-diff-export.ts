@@ -118,8 +118,14 @@ export async function exportTextDiff(docA: StaplerDoc, docB: StaplerDoc): Promis
     throw internal('Cannot export text diff without both documents having pages.');
   }
 
-  const composedBytesA = await composeDocument({ pages: docA.pages, annotations: docA.annotations ?? [] });
-  const composedBytesB = await composeDocument({ pages: docB.pages, annotations: docB.annotations ?? [] });
+  const composedBytesA = await composeDocument({
+    pages: docA.pages,
+    annotations: docA.annotations ?? []
+  });
+  const composedBytesB = await composeDocument({
+    pages: docB.pages,
+    annotations: docB.annotations ?? []
+  });
 
   await renderWorker.lease(async api => {
     let handleA: string | undefined;

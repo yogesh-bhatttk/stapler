@@ -39,8 +39,6 @@ export type JobHandle = Comlink.Remote<JobPort> | JobPort;
 export interface JobOptions {
   signal?: AbortSignal;
   onProgress?: (fraction: number | null, label: string) => void;
-  /** Internal tracking for Comlink proxies to prevent memory leaks (W-07). */
-  _proxies?: any[];
 }
 
 /**
@@ -57,12 +55,41 @@ export function createJobHandle(options: JobOptions = {}): JobHandle {
       return options.signal?.aborted ?? false;
     }
   };
-  const proxy = Comlink.proxy(port);
-  if (options) {
-    if (!options._proxies) options._proxies = [];
-    options._proxies.push(proxy);
-  }
-  return proxy;
+  return Comlink.proxy(port);
+}
+
+/**
+ * Wraps a Comlink-exposed worker API so that every call releases any
+ * `JobHandle` argument once it settles (W-07).
+ *
+ * Each time a `Comlink.proxy()`-marked object crosses the postMessage
+ * boundary as an argument, Comlink opens a fresh `MessageChannel` and
+ * `expose()`s the object on it — a listener that lives until something
+ * sends it a release message. Only the *receiving* side (here, the worker,
+ * which gets the argument back as a `Remote<JobPort>`) can send that
+ * message; the main thread's original marked object never gains a
+ * `releaseProxy` method, so it has no way to close a channel it never held
+ * a handle to. Wrapping the exposed API at this single boundary releases
+ * every job argument the worker receives, without every one of its ~30
+ * methods needing its own `finally` block.
+ */
+export function releaseJobHandlesAfterCall<T extends object>(api: T): T {
+  return new Proxy(api, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value !== 'function') return value;
+      return function (this: unknown, ...args: unknown[]) {
+        return Promise.resolve(value.apply(target, args)).finally(() => {
+          for (const arg of args) {
+            const release = (arg as { [Comlink.releaseProxy]?: unknown } | null)?.[
+              Comlink.releaseProxy
+            ];
+            if (typeof release === 'function') release.call(arg);
+          }
+        });
+      };
+    }
+  });
 }
 
 /** A no-op port, for callers that genuinely have nothing to report. */

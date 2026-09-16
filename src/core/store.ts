@@ -384,7 +384,10 @@ export function closeDocument(id: string): void {
       activeDocId.value = nextDoc?.id ?? null;
       if (selectedPageKeys.value.size > 0) selectedPageKeys.value = new Set();
       if (nextDoc) {
-        activePageIndex.value = Math.max(0, Math.min(activePageIndex.value, nextDoc.pages.length - 1));
+        activePageIndex.value = Math.max(
+          0,
+          Math.min(activePageIndex.value, nextDoc.pages.length - 1)
+        );
       }
     }
   });
@@ -549,7 +552,7 @@ function rotatePageAnnotation(a: PageAnnotation, delta: number): PageAnnotation 
 export function rotatePages(docId: string, pageKeys: Iterable<string>, delta: number): void {
   const keys = new Set(pageKeys);
   if (keys.size === 0) return;
-  
+
   const newCropBoxes = { ...cropBoxes.value };
   let cropBoxesChanged = false;
   for (const key of keys) {
@@ -597,7 +600,9 @@ export function rotatePages(docId: string, pageKeys: Iterable<string>, delta: nu
         // a legal /Rotate value.
         keys.has(p.key) ? { ...p, rotation: normalizeRotation(p.rotation + delta) } : p
       ),
-      annotations: doc.annotations.map(a => keys.has(a.pageKey) ? rotateDocAnnotation(a, delta) : a)
+      annotations: doc.annotations.map(a =>
+        keys.has(a.pageKey) ? rotateDocAnnotation(a, delta) : a
+      )
     }));
     if (cropBoxesChanged) cropBoxes.value = newCropBoxes;
     if (pageAnnotationsChanged) pageAnnotations.value = newPageAnnotations;
@@ -693,7 +698,7 @@ export function movePages(docId: string, pageKeys: Iterable<string>, toIndex: nu
       const removedBefore = doc.pages.slice(0, toIndex).filter(p => keys.has(p.key)).length;
       const at = Math.max(0, Math.min(rest.length, toIndex - removedBefore));
       const newPages = [...rest.slice(0, at), ...moving, ...rest.slice(at)];
-      
+
       if (activeKey) {
         const found = newPages.findIndex(p => p.key === activeKey);
         if (found !== -1) newIndex = found;

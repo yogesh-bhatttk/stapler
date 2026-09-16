@@ -60,7 +60,7 @@ import {
 import { buildPptx as buildPptxFile } from '../convert/pptx-writer';
 import { readPptxAsBlocks, type SlideSummary } from '../convert/pptx-slides';
 import { fromUnknown, unsupported } from '../errors';
-import { checkpoint, subJob, type JobHandle } from './protocol';
+import { checkpoint, releaseJobHandlesAfterCall, subJob, type JobHandle } from './protocol';
 import type { ExtractedImageEntry, ImagePlacementReport } from './process.worker';
 
 export interface DocxBuildResult {
@@ -460,4 +460,4 @@ export const convertWorkerImpl: ConvertJob = {
   }
 };
 
-Comlink.expose(convertWorkerImpl);
+Comlink.expose(releaseJobHandlesAfterCall(convertWorkerImpl));

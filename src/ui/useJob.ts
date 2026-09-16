@@ -89,15 +89,6 @@ export function useJob() {
         if (!isCancellation(err)) notifyError(options.scope, err);
         return undefined;
       } finally {
-        if (jobOptions._proxies) {
-          import('comlink').then(Comlink => {
-            for (const proxy of jobOptions._proxies!) {
-              if (proxy && proxy[Comlink.releaseProxy]) {
-                proxy[Comlink.releaseProxy]();
-              }
-            }
-          });
-        }
         if (controllerRef.current === controller) {
           controllerRef.current = null;
           activeJob.value = null;

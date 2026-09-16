@@ -52,7 +52,10 @@ export function ToolRail() {
             <ul className={styles.railList} id={groupId} hidden={isCollapsed}>
               {tools.map(tool => {
                 const href = toolRoute(tool.id);
-                const active = location === href || location.startsWith(href + '?') || location.startsWith(href + '/');
+                const active =
+                  location === href ||
+                  location.startsWith(href + '?') ||
+                  location.startsWith(href + '/');
                 return (
                   <li key={tool.id}>
                     <a

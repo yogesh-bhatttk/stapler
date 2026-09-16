@@ -101,7 +101,7 @@ import { Encodings, Font as StandardFontMetrics, FontNames } from '@pdf-lib/stan
 import type { IFontNames } from '@pdf-lib/standard-fonts';
 import { zipSync } from 'fflate';
 import type { JobHandle } from './protocol';
-import { checkpoint, subJob } from './protocol';
+import { checkpoint, releaseJobHandlesAfterCall, subJob } from './protocol';
 import { corrupt, fromUnknown, internal, unsupported } from '../errors';
 import { loadPdfDocument, loadPdfDocumentWithRestrictions } from '../pdf/load';
 import type { ImagesToPdfOptions } from '../operations';
@@ -2420,7 +2420,7 @@ async function composePages(
     }
 
     const srcPage = srcDoc.getPage(ref.sourceIndex);
-    const leaf = copier.copy(srcPage.node) as any;
+    const leaf = copier.copy(srcPage.node);
     const leafRef = outDoc.context.register(leaf);
     const copied = PDFPage.of(leaf, leafRef, outDoc);
 
@@ -5316,23 +5316,23 @@ Q
     const kept: number[] = [];
     for (let i = 0; i < total; i++) if (!rasterImages.has(i)) kept.push(i);
     await checkpoint(job, 0.5, 'Rebuilding pages');
-    
+
     // OP-03: Use a shared copier to copy pages AND AcroForm, so widget references
     // in the AcroForm /Fields array map to the exact same objects as the page /Annots.
     const copier = PDFObjectCopier.for(source.context, out.context);
     const copies: PDFPage[] = [];
     for (const idx of kept) {
       const srcPage = source.getPage(idx);
-      const leaf = copier.copy(srcPage.node) as any;
+      const leaf = copier.copy(srcPage.node);
       const leafRef = out.context.register(leaf);
       copies.push(PDFPage.of(leaf, leafRef, out));
     }
-    
+
     const acroForm = source.catalog.get(PDFName.of('AcroForm'));
     if (acroForm) {
       out.catalog.set(PDFName.of('AcroForm'), copier.copy(acroForm));
     }
-    
+
     // Add the copied/rasterized pages to the output document.
     const copyByIndex = new Map(kept.map((pageIndex, at) => [pageIndex, copies[at]]));
 
@@ -7793,6 +7793,6 @@ if (
   typeof self !== 'undefined' &&
   typeof (self as unknown as { addEventListener?: unknown }).addEventListener === 'function'
 ) {
-  Comlink.expose(api);
+  Comlink.expose(releaseJobHandlesAfterCall(api));
 }
 export const processWorkerImpl = api;

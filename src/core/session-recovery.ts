@@ -140,8 +140,7 @@ export async function checkRecovery(record: SessionRecord): Promise<RecoveryChec
   const existing = new Set<string>();
   await Promise.all(
     ids.map(async id => {
-      const expectedSize = (record.sources[id] as any)?.byteLength;
-      if (await sourceBytesExist(id, expectedSize)) existing.add(id);
+      if (await sourceBytesExist(id)) existing.add(id);
     })
   );
   if (existing.size === ids.length) return { record, droppedDocuments: 0 };
@@ -200,7 +199,10 @@ export function restoreSession(record: SessionRecord): void {
   // in the very next review, which is the honest answer when there is no
   // real baseline to recover.
   batch(() => {
-    documents.value = record.documents.map(doc => ({ ...doc, baseline: doc.baseline ?? doc.pages }));
+    documents.value = record.documents.map(doc => ({
+      ...doc,
+      baseline: doc.baseline ?? doc.pages
+    }));
     sources.value = record.sources;
     activeDocId.value = record.activeDocId;
     selectedPageKeys.value = new Set(record.selection);

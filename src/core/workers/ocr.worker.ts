@@ -41,7 +41,7 @@
  * a warm engine, which is why it is a last resort rather than the normal path.
  */
 import * as Comlink from 'comlink';
-import { checkpoint, type JobHandle } from './protocol';
+import { checkpoint, releaseJobHandlesAfterCall, type JobHandle } from './protocol';
 import { cancelled as cancelledError, internal } from '../errors';
 import type { OcrPageResult, OcrWord } from '../ocr/types';
 // Type-only, so it is erased: the runtime import stays dynamic (see the header).
@@ -215,4 +215,4 @@ const api: OCRJob = {
   }
 };
 
-Comlink.expose(api);
+Comlink.expose(releaseJobHandlesAfterCall(api));

@@ -10,6 +10,32 @@ Pre-1.0. See `docs/TICKETS.md` for the ticket-by-ticket state of every feature �
 this file starts tracking user-facing changes from the first tagged release
 onward, not the full development history before it.
 
+## [0.2.1] — 2026-09-16
+
+### Fixed
+
+- Switching tools or documents while a job was running could clobber the
+  active-job progress bar, defeat the unsaved-changes guard, leak Compare's
+  second file source, or let a slow Sign panel form-field fetch overwrite
+  state for a document you'd already switched away from.
+- A batch of concurrency and edge-case issues found across an internal audit:
+  concurrent confirmation dialogs could hang forever, OPFS unavailability
+  crashed the app instead of falling back to memory, undo/redo history could
+  be corrupted by overlapping operations, and several tools (compression,
+  redaction, scan cleanup, OCR, batch processing) mishandled degenerate or
+  adversarial inputs. Full details in `docs/AUDIT-FINDINGS.md` and
+  `docs/AUDIT-EDGE-CASES-2026-09-15.md`.
+- Document and page-selection state updates are now batched, session
+  auto-save no longer re-enters itself under rapid changes, and worker job
+  proxies and render canvases now release their memory immediately instead
+  of waiting on garbage collection.
+
+### Changed
+
+- Completed translations for all 10 supported locales — the 173 strings
+  added by the Word/Excel/PowerPoint converters and the export-review flow
+  were previously English-only outside the app's default locale.
+
 ## [0.2.0] — 2026-09-05
 
 ### Added

@@ -204,9 +204,15 @@ function SinglePageReview({
   useEffect(() => {
     let active = true;
     documentPageCount(resultBytes)
-      .then(count => { if (active) setPageCount(count); })
-      .catch(() => { if (active) setPageCount(null); });
-    return () => { active = false; };
+      .then(count => {
+        if (active) setPageCount(count);
+      })
+      .catch(() => {
+        if (active) setPageCount(null);
+      });
+    return () => {
+      active = false;
+    };
   }, [resultBytes]);
 
   const align = alignment?.entries[pageIndex];

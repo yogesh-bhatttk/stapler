@@ -93,17 +93,12 @@ export async function readSourceBytes(id: string): Promise<Uint8Array> {
  * but for a multi-document session that's real bytes copied out of OPFS for
  * nothing.
  */
-export async function sourceBytesExist(id: string, expectedSize?: number): Promise<boolean> {
+export async function sourceBytesExist(id: string): Promise<boolean> {
   const root = await tryGetOpfsRoot();
-  if (!root) {
-    const mem = __memoryFallback.get(id);
-    if (!mem) return false;
-    return expectedSize === undefined || mem.byteLength === expectedSize;
-  }
+  if (!root) return __memoryFallback.has(id);
   try {
     const handle = await root.getFileHandle(`${id}.pdf`);
     const file = await handle.getFile();
-    if (expectedSize !== undefined) return file.size === expectedSize;
     return file.size > 0;
   } catch {
     return false;

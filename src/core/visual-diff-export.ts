@@ -41,12 +41,14 @@ export async function exportVisualDiff(
   }
 
   // Compose documents to include user edits (reorder, rotation, annotations, etc.)
-  const composedBytesA = docA.pages.length > 0
-    ? await composeDocument({ pages: docA.pages, annotations: docA.annotations ?? [] })
-    : null;
-  const composedBytesB = docB.pages.length > 0
-    ? await composeDocument({ pages: docB.pages, annotations: docB.annotations ?? [] })
-    : null;
+  const composedBytesA =
+    docA.pages.length > 0
+      ? await composeDocument({ pages: docA.pages, annotations: docA.annotations ?? [] })
+      : null;
+  const composedBytesB =
+    docB.pages.length > 0
+      ? await composeDocument({ pages: docB.pages, annotations: docB.annotations ?? [] })
+      : null;
 
   for (let i = 0; i < totalPages; i++) {
     if (options.signal?.aborted) break;

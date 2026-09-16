@@ -20,7 +20,7 @@ import {
   deskew,
   type Preset
 } from '../cv/enhance';
-import { checkpoint, type JobHandle } from './protocol';
+import { checkpoint, releaseJobHandlesAfterCall, type JobHandle } from './protocol';
 import { internal } from '../errors';
 
 export interface ScanSettings {
@@ -201,4 +201,4 @@ const api: CVJob = {
   }
 };
 
-Comlink.expose(api);
+Comlink.expose(releaseJobHandlesAfterCall(api));

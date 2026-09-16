@@ -10,7 +10,7 @@
  */
 import * as Comlink from 'comlink';
 import { openDocument, pdfjsLib } from './pdfjs-setup';
-import { checkpoint, type JobHandle } from './protocol';
+import { checkpoint, releaseJobHandlesAfterCall, type JobHandle } from './protocol';
 import { corrupt, encrypted, internal } from '../errors';
 import { DOC_PAGE_WHITE, DOC_REDACT_RGB } from '../doc-colors';
 import { blankCoverageLimit, inkCoverage, layoutText, toRgba, type TextRun } from '../text-layout';
@@ -2539,7 +2539,7 @@ async function encodeMask(
   }
 }
 
-Comlink.expose(api);
+Comlink.expose(releaseJobHandlesAfterCall(api));
 
 /**
  * The same object `Comlink.expose` publishes, exported so tests can drive the
