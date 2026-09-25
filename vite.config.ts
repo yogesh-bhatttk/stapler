@@ -12,6 +12,11 @@ import {
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { transformManifestForFirefox } from './scripts/firefox-manifest.mjs';
+import { STAPLER_CSP } from './scripts/csp.mjs';
+import {
+  collectThirdPartyLicenses,
+  renderThirdPartyLicenses
+} from './scripts/third-party-licenses.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 
@@ -153,6 +158,84 @@ function copyZxingAssets(): Plugin {
 }
 
 /**
+ * Audit 2026-09-25 PLT-4 — the website twin had no CSP at all, so its
+ * zero-network promise had no runtime backstop. GitHub Pages (where it is
+ * deployed) cannot set response headers, so the same policy the extension's
+ * manifest carries (`scripts/csp.mjs`) is injected as the first element of
+ * every entry page's `<head>`, before any script or stylesheet it governs.
+ * Build-only: the dev server's HMR client needs a websocket and inline
+ * modules this policy rightly forbids. (`frame-ancestors` cannot be set from a
+ * meta tag; the policy does not use it.)
+ */
+export function webCspMeta(): Plugin {
+  return {
+    name: 'stapler:web-csp',
+    apply: 'build',
+    transformIndexHtml: {
+      order: 'pre',
+      handler() {
+        return [
+          {
+            tag: 'meta',
+            attrs: { 'http-equiv': 'Content-Security-Policy', content: STAPLER_CSP },
+            injectTo: 'head-prepend'
+          }
+        ];
+      }
+    }
+  };
+}
+
+/**
+ * Audit 2026-09-25 PLT-12 — the MIT, BSD and Apache licences of the bundled
+ * packages (and Apache NOTICE files, where a package ships one) have to travel
+ * with the redistribution. Emitted into every build as
+ * `THIRD_PARTY_LICENSES.txt`, generated from the production dependency tree
+ * (`scripts/third-party-licenses.mjs`), and linked from the trust panel and
+ * `privacy.html`.
+ */
+function thirdPartyLicenses(): Plugin {
+  return {
+    name: 'stapler:third-party-licenses',
+    apply: 'build',
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: 'THIRD_PARTY_LICENSES.txt',
+        source: renderThirdPartyLicenses(collectThirdPartyLicenses(root), 'Stapler')
+      });
+    }
+  };
+}
+
+/**
+ * Audit 2026-09-25 PLT-14 — `public/` is shared, but not everything in it
+ * belongs in every build: `robots.txt`/`sitemap.xml` are for the crawled
+ * website only, and the website has no use for the extension's
+ * `manifest.json` (nothing links or fetches it; it only advertised the
+ * extension CSP and a `background.js` that does not exist there). Vite copies
+ * `public/` before `writeBundle`, so the extras are removed here.
+ */
+export const PUBLIC_ONLY_FOR: Record<string, 'ext' | 'web'> = {
+  'manifest.json': 'ext',
+  'robots.txt': 'web',
+  'sitemap.xml': 'web'
+};
+
+function filterPublicDir(kind: 'ext' | 'web'): Plugin {
+  return {
+    name: 'stapler:filter-public',
+    apply: 'build',
+    writeBundle(options) {
+      const dir = resolve(root, options.dir ?? 'dist');
+      for (const [file, onlyFor] of Object.entries(PUBLIC_ONLY_FOR)) {
+        if (onlyFor !== kind) rmSync(resolve(dir, file), { force: true });
+      }
+    }
+  };
+}
+
+/**
  * The website twin has to answer at `/`, but the shared entry point is `editor.html`
  * because that is the page the extension's service worker opens. Emitting an
  * `index.html` copy for the web target is what makes `pnpm build:web` deployable
@@ -215,14 +298,23 @@ export default defineConfig(() => {
       copyPdfJsAssets(),
       copyTesseractAssets(),
       copyZxingAssets(),
+      thirdPartyLicenses(),
+      filterPublicDir(isAnyExt ? 'ext' : 'web'),
       ...(isFirefox ? [firefoxManifest()] : []),
-      ...(isAnyExt ? [] : [emitWebIndex()])
+      ...(isAnyExt ? [] : [emitWebIndex(), webCspMeta()])
     ],
     build: {
       outDir: isFirefox ? 'dist/firefox' : isExt ? 'dist/ext' : 'dist/web',
       emptyOutDir: true,
-      sourcemap: true,
+      // Not shipped with the extension: 43 maps were 23 MB of a 44 MB package
+      // (AUDIT-2026-09-25 PLT-13). The web twin keeps hidden maps (emitted, not
+      // referenced) for debugging; AMO reviewers build from source instead.
+      sourcemap: isAnyExt ? false : ('hidden' as const),
       chunkSizeWarningLimit: 1024,
+      // PLT-14: an extension page loads every chunk from its own package, so
+      // Vite's modulepreload polyfill and links bought nothing there and logged
+      // console errors. The website keeps them.
+      ...(isAnyExt ? { modulePreload: false as const } : {}),
       rollupOptions: {
         input,
         output: {
@@ -233,7 +325,7 @@ export default defineConfig(() => {
       }
     },
     worker: {
-      format: 'es'
+      format: 'es' as const
     }
   };
 });

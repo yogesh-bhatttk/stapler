@@ -243,11 +243,25 @@ so it gets its own explicit step below rather than being buried inside "run veri
 - [ ] **No Console Errors:** Open DevTools for the extension's editor tab and ensure there are no errors in the console.
 
 ## 4. Packaging
-- [ ] **Zip the Extension:** Compress the *contents* of `dist/ext` into a `.zip` file (e.g., `stapler-v1.0.0.zip`) — zip the files inside `dist/ext`, not the `dist/ext` folder itself.
+- [ ] **Package:** Run `pnpm package` (`scripts/package.mjs`). It builds all three
+      targets, runs `validate-builds.mjs`, re-checks the built manifests (version matches
+      `package.json`, zero permissions, no content scripts, `THIRD_PARTY_LICENSES.txt`
+      present, no extension `manifest.json` in `dist/web`), then writes
+      `dist/release/stapler-<version>-chrome.zip` and `…-firefox.zip` — the *contents*
+      of `dist/ext` / `dist/firefox`, every `*.map` left out, fixed timestamps so a
+      rebuild of the same tree gives identical bytes — plus `dist/release/SHA256SUMS`.
+      Do not zip by hand. (`--skip-build` re-packages existing `dist/` output.)
+- [ ] **Extension e2e:** `pnpm test:e2e:ext` passes against that build (with
+      `STAPLER_EXT_PREBUILT=1` to test the `dist/ext` you just packaged rather than a
+      rebuild).
+- [ ] **Browser floors:** `minimum_chrome_version` (Chrome) and gecko
+      `strict_min_version` (Firefox) come from `scripts/browser-floors.mjs`. After a
+      pdf.js upgrade, re-check its table — `tests/unit/browser-floors.test.ts` fails
+      until you do.
 
 ## 5. Chrome Web Store Publishing
 - [ ] **Upload Package:** Go to the [Chrome Developer Dashboard](https://chrome.google.com/webstore/devconsole).
-- [ ] **Create/Update Item:** Upload the newly created `.zip` file.
+- [ ] **Create/Update Item:** Upload `dist/release/stapler-<version>-chrome.zip`.
 - [ ] **Update Listing:** Ensure all Store Listing details (description, screenshots, promotional images) are up-to-date (refer to `docs/STORE_LISTING.md`).
 - [ ] **Privacy Policy:** Ensure the Privacy Policy URL is still correct and accessible (or points to the bundled/GitHub version if applicable).
 - [ ] **Submit for Review:** Click "Submit for Review".
@@ -268,10 +282,11 @@ so it gets its own explicit step below rather than being buried inside "run veri
       §3, paying particular attention to file open/save: Firefox has no File System Access
       API, so opening should fall back to `<input type=file>` and saving to a browser
       download, not a picker.
-- [ ] **Zip and submit:** zip the contents of `dist/firefox` and submit at
+- [ ] **Submit:** upload `dist/release/stapler-<version>-firefox.zip` (made by
+      `pnpm package`, §4) at
       [addons.mozilla.org/developers](https://addons.mozilla.org/developers/).
 
 ## 6. Post-Release
 - [ ] **Git Tag:** Create a git tag for the release (e.g., `git tag v1.0.0` and `git push --tags`).
-- [ ] **GitHub Release:** Create a release on GitHub using the tag, copy the changelog notes, and attach the `.zip` file as a release asset.
+- [ ] **GitHub Release:** Create a release on GitHub using the tag, copy the changelog notes, and attach both zips from `dist/release/` and its `SHA256SUMS` as release assets.
 - [ ] **Celebrate:** Grab a coffee! ☕

@@ -2,6 +2,11 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!-- scripts/csp.mjs policy minus the OCR model sources this static page never needs (PLT-4); checked by tests/unit/csp.test.ts. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self' blob: data:; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none';"
+    />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Privacy Policy - Stapler</title>
     <style>
@@ -109,6 +114,13 @@
       <p>
         Stapler does not integrate with any external third-party tracking, advertising, or analytics
         services. It is a standalone tool designed to respect your privacy.
+      </p>
+      <p>
+        Stapler is built on open-source libraries, all bundled into the extension and run on your
+        device. Their licences and notices are listed in
+        <a href="THIRD_PARTY_LICENSES.txt" target="_blank" rel="noopener noreferrer"
+          >THIRD_PARTY_LICENSES.txt</a
+        >.
       </p>
 
       <h2>4. Changes to This Privacy Policy</h2>

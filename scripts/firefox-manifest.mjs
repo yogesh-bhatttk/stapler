@@ -6,17 +6,18 @@
  * Firefox's MV3 support differs from Chrome/Edge's in the ways that matter here:
  *
  * 1. AMO requires an explicit add-on ID (`browser_specific_settings.gecko.id`) and a
- *    minimum Firefox version; Chrome's manifest carries neither.
+ *    minimum Firefox version. Chrome's manifest carries its own floor as
+ *    `minimum_chrome_version`, a Chrome-only key Firefox warns about, so it is
+ *    dropped here.
  * 2. Firefox does not run an MV3 background as `background.service_worker` — it uses
  *    the classic non-persistent event-page shape, `background.scripts` (+
  *    `type: "module"`). The compiled file is identical either way (`background.js`);
- *    only the manifest key pointing at it differs. `background.type: "module"` is
- *    itself only recognized from Firefox 112 onward (AMO's own validator flags this
- *    as a warning, not an error, but below 112 Firefox does not know to load
- *    `background.js` as an ES module at all — since the compiled file uses
- *    `import`/`export`, that is a parse failure, not a degraded feature). Hence
- *    `strict_min_version: '112.0'`, not the '109.0' floor MV3 support alone would
- *    allow — 109 was AMO's validator producing a real bug, not just noise.
+ *    only the manifest key pointing at it differs. The minimum version is not
+ *    MV3's own 109.0, nor the 112.0 `background.type: "module"` needs: it is
+ *    the newest unguarded built-in the bundled pdf.js calls
+ *    (`Map.prototype.getOrInsertComputed`, Firefox 144). Below that Firefox
+ *    installs the add-on and then fails to open any PDF (audit 2026-09-25
+ *    PLT-9). The number and its evidence live in `browser-floors.mjs`.
  * 3. AMO rejects submission outright without `gecko.data_collection_permissions`
  *    (mandatory since Nov 2025). Stapler collects nothing — zero telemetry, zero
  *    accounts, the whole point of the zero-network invariant — so the only honest
@@ -27,15 +28,18 @@
  * manifests.
  */
 
+import { GECKO_STRICT_MIN_VERSION } from './browser-floors.mjs';
+
 /** @param {Record<string, unknown>} manifest */
 export function transformManifestForFirefox(manifest) {
+  const { minimum_chrome_version: _chromeOnly, ...shared } = manifest;
   return {
-    ...manifest,
+    ...shared,
     background: { scripts: ['background.js'], type: 'module' },
     browser_specific_settings: {
       gecko: {
         id: 'stapler-offline-pdf@stapler.app',
-        strict_min_version: '112.0',
+        strict_min_version: GECKO_STRICT_MIN_VERSION,
         data_collection_permissions: { required: ['none'] }
       }
     }

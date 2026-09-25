@@ -39,7 +39,7 @@
           },
           {
             "type": "command",
-            "command": "jq -r '.tool_response.filePath // .tool_input.file_path' | { read -r f; [ -f package.json ] && npx --no-install prettier --ignore-unknown --write \"$f\"; } 2>/dev/null || true",
+            "command": "jq -r '.tool_response.filePath // .tool_input.file_path' | { read -r f; [ -x node_modules/.bin/prettier ] && node_modules/.bin/prettier --ignore-unknown --write \"$f\"; } 2>/dev/null || true",
             "timeout": 30,
             "statusMessage": "Formatting"
           }

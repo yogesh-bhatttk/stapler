@@ -1,17 +1,15 @@
 import { expect, test } from '@playwright/test';
 import { ensureFixture, textPdf } from './fixtures';
-import { confirmExportReviewIfShown, gotoTool, openApp } from './helpers';
+import { gotoTool, openApp } from './helpers';
 import AxeBuilder from '@axe-core/playwright';
 import { TOOLS as TOOL_REGISTRY } from '../../src/core/tools';
 
 /**
- * NFR-01 and NFR-02.
+ * NFR-01 (accessibility) and the functional half of NFR-02.
  *
- * The perf assertions are the *real* budgets from PLAN §5.1. The previous version of
- * this file asserted `tti < 5000` under a comment claiming the budget was 500ms, which
- * is a test that reports success while measuring nothing — worse than no test. Where a
- * budget genuinely cannot be met in headless CI the assertion is marked and explained,
- * never quietly widened.
+ * The wall-clock budgets (PLAN §5.1) live in `perf.spec.ts`, run by the separate,
+ * never-retried `perf` Playwright project (audit 2026-09-25 PLT-18): retrying a
+ * timing assertion until it passes hides exactly the regression it exists to catch.
  */
 
 // Derived from the registry, not hand-maintained: a hardcoded list of 11 tool
@@ -177,77 +175,31 @@ test.describe('accessibility', () => {
     const response = await request.get(new URL(href!, page.url()).toString());
     expect(response.ok()).toBe(true);
   });
+
+  test('the trust panel links to the shipped third-party licence notices', async ({
+    page,
+    request
+  }) => {
+    // Audit 2026-09-25 PLT-12: the Apache/MIT/BSD code in the bundle shipped
+    // without the notices its licences require.
+    await openApp(page);
+    await page.getByRole('button', { name: /Offline, zero network/ }).click();
+    const dialog = page.getByRole('dialog', { name: /Zero network/ });
+    const link = dialog.getByRole('link', { name: /Third-party licenses/i });
+    await expect(link).toBeVisible();
+
+    const href = await link.getAttribute('href');
+    const response = await request.get(new URL(href!, page.url()).toString());
+    expect(response.ok()).toBe(true);
+    const text = await response.text();
+    expect(text).toContain('pdfjs-dist@');
+    expect(text).toMatch(/Apache License/);
+  });
 });
 
-test.describe('performance budgets (PLAN §5.1)', () => {
-  test('the app is interactive within 500ms of navigation', async ({ page }) => {
-    await page.goto('/');
-    await expect(page.getByRole('heading', { name: 'Offline PDF tools' })).toBeVisible();
-    const timing = await page.evaluate(() => {
-      const [nav] = performance.getEntriesByType('navigation') as PerformanceNavigationTiming[];
-      return { interactive: nav.domInteractive - nav.startTime };
-    });
-    expect(timing.interactive).toBeLessThan(500);
-  });
-
-  test('the first thumbnail of a 100-page PDF appears within 1.5s', async ({ page }) => {
-    const file = await ensureFixture('text-100.pdf', () => textPdf(100));
-    await openApp(page);
-
-    await page.locator('input[type="file"]').setInputFiles(file);
-    const started = Date.now();
-    // Wait for a canvas that has actually been painted, not merely mounted.
-    await page.waitForFunction(
-      () => {
-        const canvas = document.querySelector('canvas');
-        return canvas instanceof HTMLCanvasElement && canvas.width > 1;
-      },
-      undefined,
-      { timeout: 20_000 }
-    );
-    expect(Date.now() - started).toBeLessThan(1500);
-  });
-
-  test('all 100 thumbnails of a 100-page PDF render within 6s of scrolling through', async ({
-    page
-  }) => {
-    // The other half of PLAN §5.1's thumbnail budget: not just the first
-    // paint, but scrolling the whole way through a 100-page document. Row
-    // virtualization (DOC-04) means only visible rows are ever mounted, so
-    // this scrolls in steps to actually pass every row through the viewport,
-    // then times how long the *last* page's thumbnail takes to paint —
-    // previously unasserted entirely.
-    const file = await ensureFixture('text-100.pdf', () => textPdf(100));
-    await openApp(page);
-    await page.locator('input[type="file"]').setInputFiles(file);
-    await gotoTool(page, 'organize');
-
-    const grid = page.getByRole('listbox', { name: /Pages of/ });
-    await expect(grid).toBeVisible({ timeout: 30_000 });
-    const scroller = page.locator('[data-testid="pagegrid-scroller"]');
-
-    const started = Date.now();
-    const steps = 10;
-    for (let i = 1; i <= steps; i++) {
-      await scroller.evaluate((el, fraction) => {
-        el.scrollTo(0, el.scrollHeight * fraction);
-      }, i / steps);
-      await page.waitForTimeout(50);
-    }
-
-    const lastPage = grid.getByRole('option', { name: 'Page 100 of 100' });
-    await expect(lastPage).toBeVisible({ timeout: 20_000 });
-    await page.waitForFunction(
-      option => {
-        const canvas = option?.querySelector('canvas');
-        return canvas instanceof HTMLCanvasElement && canvas.width > 1;
-      },
-      await lastPage.elementHandle(),
-      { timeout: 20_000 }
-    );
-    expect(Date.now() - started).toBeLessThan(6000);
-  });
-
+test.describe('virtualization', () => {
+  // Functional, not a timing budget, so it stays in the retried suite; the
+  // wall-clock budgets moved to perf.spec.ts (audit 2026-09-25 PLT-18).
   test('a 100-page document mounts only the visible rows', async ({ page }) => {
     const file = await ensureFixture('text-100.pdf', () => textPdf(100));
     await openApp(page);
@@ -261,145 +213,4 @@ test.describe('performance budgets (PLAN §5.1)', () => {
     expect(mounted).toBeGreaterThan(0);
     expect(mounted).toBeLessThan(60);
   });
-
-  test('NFR-03: processes heavy documents within memory limits', async ({ page }) => {
-    // Generate both heavy and 300-page fixtures
-    const [heavyFile, longFile] = await Promise.all([
-      ensureFixture('heavy.pdf', () => import('./fixtures').then(m => m.heavyPdf())),
-      ensureFixture('text-300.pdf', () => import('./fixtures').then(m => m.textPdf(300)))
-    ]);
-
-    await openApp(page);
-
-    // First, process the heavy 20MB file
-    await page.locator('input[type="file"]').setInputFiles(heavyFile);
-    await gotoTool(page, 'organize');
-    await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
-
-    // Check memory usage after heavy file
-    const mem1 = await page.evaluate(() => (performance as any).memory?.usedJSHeapSize || 0);
-
-    // Close the file
-    await page.getByRole('button', { name: 'Close heavy.pdf' }).click();
-    await page.goto('/#/');
-    await expect(page.locator('input[type="file"]')).toBeVisible();
-
-    // Now process the 300-page file
-    await page.locator('input[type="file"]').setInputFiles(longFile);
-    await gotoTool(page, 'organize');
-    await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
-
-    const mem2 = await page.evaluate(() => (performance as any).memory?.usedJSHeapSize || 0);
-
-    // Close the second file
-    await page.getByRole('button', { name: 'Close text-300.pdf' }).click();
-    await page.goto('/#/');
-    await expect(page.locator('input[type="file"]')).toBeVisible();
-
-    // Now process the third file (heavy again) to satisfy the 3-file sequence AC
-    await page.locator('input[type="file"]').setInputFiles(heavyFile);
-    await gotoTool(page, 'organize');
-    await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
-
-    const scroller = page.locator('[data-testid="pagegrid-scroller"]');
-    if (await scroller.isVisible()) {
-      await scroller.evaluate(e => e.scrollTo(0, e.scrollHeight));
-    }
-    await page.waitForTimeout(1000);
-
-    const mem3 = await page.evaluate(() => (performance as any).memory?.usedJSHeapSize || 0);
-
-    // The ceiling should be generous enough for Chrome in headless, but if the app leaks
-    // offscreen canvases or PDF docs, memory will balloon to 500MB+. We assert < 200MB.
-    // If performance.memory is not supported (Firefox/WebKit), mem will be 0.
-    //
-    // Known limitation, stated rather than glossed: `performance.memory` reports
-    // *this realm's* heap. The render and process workers have their own, and
-    // that is where re-encoded pages and decoded images actually accumulate, so
-    // this asserts the main thread does not balloon — not that the whole app
-    // stays under 200MB. The API that would cover workers,
-    // `performance.measureUserAgentSpecificMemory()`, requires cross-origin
-    // isolation (COOP/COEP), which neither the extension page nor the static web
-    // twin currently sets; adding those headers to satisfy a test would change
-    // what ships. Worker-heap budget therefore remains unverified here.
-    if (mem1 > 0 && mem2 > 0 && mem3 > 0) {
-      expect(mem1).toBeLessThan(200 * 1024 * 1024); // 200MB
-      expect(mem2).toBeLessThan(200 * 1024 * 1024); // 200MB
-      expect(mem3).toBeLessThan(200 * 1024 * 1024); // 200MB
-    }
-  });
-
-  test('merges 10 × 5MB PDFs within 8 seconds', async ({ page }) => {
-    // We reuse the heavyPdf which is approx 5MB.
-    const file = await ensureFixture('heavy.pdf', () =>
-      import('./fixtures').then(m => m.heavyPdf())
-    );
-    // Open one file first so the merge panel has a document to add into, then
-    // add the remaining nine through the real merge flow.
-    const files = Array(10).fill(file);
-    await openApp(page);
-    await page.locator('input[type="file"]').setInputFiles(files[0]);
-    // The app auto-navigates to 'organize' once the import resolves (see
-    // HomeView's `setLocation(toolRoute('organize'))`); switching tools before
-    // that resolves races it and our `gotoTool('merge')` gets clobbered.
-    await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
-    await gotoTool(page, 'merge');
-    await expect(page.getByRole('heading', { name: 'Source files' })).toBeVisible({
-      timeout: 30_000
-    });
-
-    const started = Date.now();
-    // Playwright's headless Chromium auto-cancels a native file-chooser dialog
-    // when nothing is listening for it; `input.click()`'s own `cancel` handler
-    // then removes the dynamically-created `<input>` before a later
-    // `locator('input[type="file"]').last()` can ever find it. Listening for
-    // the `filechooser` event and feeding it directly avoids that race.
-    const filechooserPromise = page.waitForEvent('filechooser');
-    await page.getByRole('button', { name: 'Add PDFs or images' }).click();
-    const filechooser = await filechooserPromise;
-    await filechooser.setFiles(files.slice(1));
-
-    await expect(page.locator('ol').first().locator('li')).toHaveCount(10, { timeout: 30_000 });
-
-    // Set up a download listener.
-    const downloadPromise = page.waitForEvent('download');
-
-    // Start main-thread blocking monitor during the merge
-    await page.evaluate(() => {
-      window.__maxFrameGap = 0;
-      let lastTime = performance.now();
-      const measure = (time: number) => {
-        const gap = time - lastTime;
-        if (gap > window.__maxFrameGap) {
-          window.__maxFrameGap = gap;
-        }
-        lastTime = time;
-        if (!window.__stopMonitor) requestAnimationFrame(measure);
-      };
-      requestAnimationFrame(measure);
-    });
-
-    await page.getByRole('button', { name: 'View changes' }).click();
-    await confirmExportReviewIfShown(page, downloadPromise);
-    await downloadPromise;
-    const elapsed = Date.now() - started;
-
-    // Stop the monitor and read the max gap
-    const maxGap = await page.evaluate(() => {
-      window.__stopMonitor = true;
-      return window.__maxFrameGap;
-    });
-
-    expect(elapsed).toBeLessThan(8000);
-    // Allow a bit of overhead above 50ms, but Playwright + rendering might push this a little.
-    // The budget is 50ms for worker offloading. We check < 70ms to prevent flakiness in CI.
-    expect(maxGap).toBeLessThan(70);
-  });
 });
-
-declare global {
-  interface Window {
-    __maxFrameGap: number;
-    __stopMonitor: boolean;
-  }
-}
