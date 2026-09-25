@@ -69,10 +69,12 @@ describe('session-recovery (DOC-11)', () => {
         { width: 1, height: 1 }
       ]
     });
+    const pages = makePageRefs('src-1', 2);
     const doc: StaplerDoc = {
       id: 'doc-1',
       name: 'a.pdf',
-      pages: makePageRefs('src-1', 2),
+      pages,
+      baseline: pages,
       annotations: [],
       dirty: true
     };
@@ -106,10 +108,12 @@ describe('session-recovery (DOC-11)', () => {
       pageCount: 1,
       pageSizes: [{ width: 1, height: 1 }]
     });
+    const pages = makePageRefs('src-2', 1);
     const doc: StaplerDoc = {
       id: 'doc-2',
       name: 'b.pdf',
-      pages: makePageRefs('src-2', 1),
+      pages,
+      baseline: pages,
       annotations: [],
       dirty: false
     };
@@ -143,10 +147,12 @@ describe('session-recovery (DOC-11)', () => {
       pageCount: 1,
       pageSizes: [{ width: 100, height: 100 }]
     });
+    const pages = makePageRefs('src-5', 1);
     const doc: StaplerDoc = {
       id: 'doc-5',
       name: 'e.pdf',
-      pages: makePageRefs('src-5', 1),
+      pages,
+      baseline: pages,
       annotations: [],
       dirty: false
     };

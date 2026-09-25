@@ -8,6 +8,7 @@
  */
 import { signal } from '@preact/signals';
 import type { PageAlignment } from './page-alignment';
+import { translate } from './i18n';
 import {
   buildDiagnostic,
   fromUnknown,
@@ -32,6 +33,14 @@ export interface Toast {
 
 export const toasts = signal<Toast[]>([]);
 
+/**
+ * At most this many toasts on screen. Danger toasts never time out, so a run of
+ * failures used to stack without limit over the action bar (AUDIT-2026-09-25
+ * UI-17). The oldest go first — non-danger before danger, so an unread error
+ * outlives the info notes around it.
+ */
+export const MAX_VISIBLE_TOASTS = 4;
+
 const DEFAULT_TIMEOUTS: Record<ToastTone, number> = {
   info: 4000,
   success: 4000,
@@ -50,7 +59,12 @@ export function notify(
 ): string {
   const id = crypto.randomUUID();
   const timeout = options.timeout ?? DEFAULT_TIMEOUTS[tone];
-  toasts.value = [...toasts.value, { id, tone, title, ...options, timeout }];
+  const next = [...toasts.value, { id, tone, title, ...options, timeout }];
+  while (next.length > MAX_VISIBLE_TOASTS) {
+    const victim = next.findIndex(t => t.tone !== 'danger' && t.id !== id);
+    next.splice(victim === -1 ? 0 : victim, 1);
+  }
+  toasts.value = next;
   if (timeout > 0) setTimeout(() => dismissToast(id), timeout);
   return id;
 }
@@ -65,9 +79,9 @@ export function notifyError(scope: string, value: unknown): StaplerError {
   if (isCancellation(err)) return err;
   notify(
     err.kind === 'UnsupportedFeature' || err.kind === 'Encrypted' ? 'warning' : 'danger',
-    err.copy.title,
+    translate(err.copy.title),
     {
-      detail: `${err.message} ${err.copy.recovery}`.trim(),
+      detail: `${err.message} ${translate(err.copy.recovery)}`.trim(),
       diagnostic: buildDiagnostic(err)
     }
   );
@@ -77,7 +91,10 @@ export function notifyError(scope: string, value: unknown): StaplerError {
 /** Non-throwing variant for places that only want the copy. */
 export function errorCopy(value: unknown) {
   const err = fromUnknown(value);
-  return { title: err.copy.title, detail: `${err.message} ${err.copy.recovery}`.trim() };
+  return {
+    title: translate(err.copy.title),
+    detail: `${err.message} ${translate(err.copy.recovery)}`.trim()
+  };
 }
 
 /* ------------------------------------------------------------------ *
@@ -100,17 +117,24 @@ function createModalQueue<
 >(current: { value: TRequest | null }) {
   const queue: TRequest[] = [];
 
-  function advance() {
-    queue.shift(); // Remove the completed request
-    current.value = queue[0] ?? null; // Show the next one (if any)
-  }
-
   function enqueue(build: (resolve: (result: TResult) => void) => Omit<TRequest, 'resolve'>) {
     return new Promise<TResult>(resolvePromise => {
+      // RT-15 — a dialog can call `resolve` more than once (an Escape keydown
+      // and the backdrop click in the same frame, a button's click plus the
+      // modal's own onClose). Each extra call used to run `queue.shift()`
+      // again, which removed the *next* caller's request before it was ever
+      // shown — its Promise then never settled. Settle once per request, and
+      // only take a request off the queue if it is still the one at its head.
+      let settled = false;
       const request = {
         ...build(result => {
+          if (settled) return;
+          settled = true;
           resolvePromise(result);
-          advance();
+          const index = queue.indexOf(request);
+          if (index === -1) return;
+          queue.splice(index, 1);
+          if (index === 0) current.value = queue[0] ?? null;
         })
       } as TRequest;
       queue.push(request);
@@ -153,8 +177,8 @@ export function confirmAction(options: {
   return confirmQueue.enqueue(resolve => ({
     title: options.title,
     body: options.body,
-    confirmLabel: options.confirmLabel ?? 'Continue',
-    cancelLabel: options.cancelLabel ?? 'Cancel',
+    confirmLabel: options.confirmLabel ?? translate('Continue'),
+    cancelLabel: options.cancelLabel ?? translate('Cancel'),
     tone: options.tone ?? 'default',
     resolve
   }));

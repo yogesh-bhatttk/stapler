@@ -36,8 +36,10 @@ function fakeOpfsRoot(opts: { failWrite?: boolean } = {}) {
 describe('writeSourceBytes / OPFS quota handling', () => {
   const originalStorage = (navigator as unknown as { storage?: unknown }).storage;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     (navigator as unknown as { storage?: unknown }).storage = undefined;
+    // RT-20 — the storage mode is memoised; each test installs its own root.
+    (await import('../../src/core/opfs')).__resetOpfsProbeForTests();
   });
 
   afterEach(() => {

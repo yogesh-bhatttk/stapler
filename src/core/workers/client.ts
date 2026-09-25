@@ -1,4 +1,4 @@
-import { translate } from '../i18n';
+import { currentLocale, translate, type Locale } from '../i18n';
 /**
  * One typed Comlink client factory, replacing five near-identical modules
  * (`process.ts`, `render.ts`, `redact.ts`, `verify.ts`, `cv.ts`) that differed
@@ -14,6 +14,7 @@ import { translate } from '../i18n';
  */
 import * as Comlink from 'comlink';
 import { notify } from '../notify';
+import { internal } from '../errors';
 
 export interface WorkerClient<T> {
   /**
@@ -32,8 +33,19 @@ export interface WorkerClient<T> {
 }
 
 export interface PinnedClient<T> {
-  /** Runs `fn` against the pinned instance. */
+  /**
+   * Runs `fn` against the pinned instance. Rejects with an internal "worker
+   * crashed" error — immediately, without calling `fn` — once that instance
+   * has died, because a pin cannot move to a different instance: whatever it
+   * was holding open (a pdf.js handle, say) died with the old one.
+   */
   lease<R>(fn: (api: Comlink.Remote<T>) => Promise<R>): Promise<R>;
+  /**
+   * True once the pinned instance has crashed or failed to boot. A cache that
+   * holds pinned clients (`render-cache.ts`) checks this to drop entries that
+   * can never answer again instead of handing them out forever.
+   */
+  readonly dead: boolean;
   /** Releases the pin, allowing the instance to idle out if no other leases remain. */
   release(): void;
 }
@@ -45,6 +57,20 @@ export interface WorkerClientOptions {
   name?: string;
   /** Defaults to `min(4, hardwareConcurrency - 1)`, per F-05. */
   maxSize?: number;
+  /**
+   * AUDIT UI-8: the worker API implements {@link LocaleAware}, and every
+   * instance is told the app locale when it spawns and whenever it changes, so
+   * text the worker generates (converter notes, error details, progress
+   * labels) comes out in the user's language. A lease never reaches a freshly
+   * spawned instance before its dictionary has loaded.
+   */
+  syncLocale?: boolean;
+}
+
+/** What a worker API exposes to take part in {@link WorkerClientOptions.syncLocale}. */
+export interface LocaleAware {
+  /** Loads `locale`'s dictionary in the worker realm and makes it current. */
+  setLocale(locale: Locale): Promise<boolean>;
 }
 
 function defaultPoolSize(): number {
@@ -60,14 +86,80 @@ interface Instance<T> {
   proxy: Comlink.Remote<T>;
   leases: number;
   idleTimer: ReturnType<typeof setTimeout> | null;
+  /** Set by the `error` handler; never cleared — a dead instance stays dead. */
+  dead: boolean;
+  /**
+   * Rejects when the instance dies. Every call runs raced against this.
+   *
+   * RT-1: Comlink's pending-call promises have no reject path at all — they
+   * are `new Promise(resolve)` waiting for a reply message — so terminating
+   * the worker left every in-flight `lease()` pending forever. `useJob`'s
+   * `finally` then never ran, `activeJob` stayed set, and the whole UI
+   * (undo, tab switch, every later job) stayed locked until a reload.
+   */
+  death: Promise<never>;
+  kill: (err: Error) => void;
+  /**
+   * With `syncLocale`, settles once the worker has applied the most recently
+   * sent locale (never rejects: a dictionary that fails to load leaves the
+   * worker on its previous locale, which beats refusing the job). Every call
+   * waits on it, so the first call after a spawn already speaks the user's
+   * language. Null without `syncLocale`.
+   */
+  ready: Promise<void> | null;
+}
+
+/** The error every call on a dead instance rejects with. */
+function workerCrashed(name: string): Error {
+  return internal('The background worker crashed before it could finish.', {
+    worker: name,
+    reason: 'worker crashed'
+  });
+}
+
+/**
+ * Runs `fn` on `inst`, but settles as soon as the instance dies rather than
+ * waiting on a reply that a terminated worker can never send.
+ */
+function raceDeath<T, R>(
+  inst: Instance<T>,
+  name: string,
+  fn: (api: Comlink.Remote<T>) => Promise<R>
+): Promise<R> {
+  if (inst.dead) return Promise.reject(workerCrashed(name));
+  const call = inst.ready ? inst.ready.then(() => fn(inst.proxy)) : fn(inst.proxy);
+  return Promise.race([call, inst.death]);
+}
+
+/**
+ * Queues `locale` for `inst`: sent after any earlier locale message has been
+ * applied, so a quick de → fr → de sequence cannot finish out of order.
+ */
+function sendLocale<T>(inst: Instance<T>, locale: Locale): void {
+  const proxy = inst.proxy as unknown as Comlink.Remote<LocaleAware>;
+  const previous = inst.ready ?? Promise.resolve();
+  inst.ready = previous
+    .then(() => Promise.race([proxy.setLocale(locale), inst.death]))
+    .then(
+      () => undefined,
+      () => undefined
+    );
 }
 
 export function createWorkerClient<T>(
   spawn: () => Worker,
-  { idleMs = 30_000, name = 'worker', maxSize }: WorkerClientOptions = {}
+  { idleMs = 30_000, name = 'worker', maxSize, syncLocale = false }: WorkerClientOptions = {}
 ): WorkerClient<T> {
   const poolMax = Math.max(1, maxSize ?? defaultPoolSize());
   const pool: Instance<T>[] = [];
+
+  if (syncLocale) {
+    // `subscribe` fires once immediately (the pool is still empty then) and
+    // again on every change; each live instance gets the new locale queued.
+    currentLocale.subscribe(locale => {
+      for (const inst of pool) if (!inst.dead) sendLocale(inst, locale);
+    });
+  }
 
   const clearIdle = (inst: Instance<T>) => {
     if (inst.idleTimer !== null) {
@@ -84,6 +176,10 @@ export function createWorkerClient<T>(
 
   const terminateInstance = (inst: Instance<T>) => {
     drop(inst);
+    // Anything still in flight (only possible via `terminate()`) rejects
+    // instead of hanging on a reply that will never come.
+    inst.dead = true;
+    inst.kill(workerCrashed(name));
     inst.proxy[Comlink.releaseProxy]();
     inst.worker.terminate();
   };
@@ -96,15 +192,28 @@ export function createWorkerClient<T>(
 
   const spawnInstance = (): Instance<T> => {
     const worker = spawn();
+    let kill: (err: Error) => void = () => {};
+    const death = new Promise<never>((_, reject) => {
+      kill = reject;
+    });
+    // Nobody may be racing against it when it rejects (an idle instance that
+    // crashes), which must not surface as an unhandled rejection.
+    death.catch(() => {});
     const inst: Instance<T> = {
       worker,
       // Placeholder until Comlink.wrap runs; assigned immediately below, but the
       // error handler needs `inst` to exist first to be able to drop it.
       proxy: null as unknown as Comlink.Remote<T>,
       leases: 0,
-      idleTimer: null
+      idleTimer: null,
+      dead: false,
+      death,
+      kill,
+      ready: null
     };
     worker.addEventListener('error', event => {
+      if (inst.dead) return;
+      inst.dead = true;
       // An instance that failed to boot must not be reused, or every later call
       // leased to it hangs on a dead port.
       //
@@ -113,6 +222,14 @@ export function createWorkerClient<T>(
       // explanation anywhere they could see. A dead worker is not a debug
       // detail — it is the reason their document will not process.
       drop(inst);
+      // Reject every call still in flight on this instance (RT-1) before
+      // tearing it down; each lease's own `finally` then runs normally.
+      inst.kill(workerCrashed(name));
+      try {
+        inst.proxy?.[Comlink.releaseProxy]();
+      } catch {
+        // Releasing a proxy on a dead endpoint can throw; it is being discarded anyway.
+      }
       worker.terminate();
       notify('danger', translate('A background worker stopped unexpectedly.'), {
         detail:
@@ -122,6 +239,7 @@ export function createWorkerClient<T>(
       });
     });
     inst.proxy = Comlink.wrap<T>(worker);
+    if (syncLocale) sendLocale(inst, currentLocale.value);
     pool.push(inst);
     return inst;
   };
@@ -150,7 +268,7 @@ export function createWorkerClient<T>(
       const inst = acquire();
       inst.leases += 1;
       try {
-        return await fn(inst.proxy);
+        return await raceDeath(inst, name, fn);
       } finally {
         inst.leases -= 1;
         scheduleIdle(inst);
@@ -168,9 +286,10 @@ export function createWorkerClient<T>(
           if (released) {
             throw new Error('Cannot lease from a released pinned client');
           }
+          if (inst.dead) throw workerCrashed(name);
           inst.leases += 1;
           try {
-            return await fn(inst.proxy);
+            return await raceDeath(inst, name, fn);
           } finally {
             inst.leases -= 1;
             scheduleIdle(inst);
@@ -187,6 +306,9 @@ export function createWorkerClient<T>(
           inst.leases -= 1;
           scheduleIdle(inst);
           registry?.unregister(pinned);
+        },
+        get dead() {
+          return inst.dead;
         }
       };
       registry?.register(pinned, inst, pinned);

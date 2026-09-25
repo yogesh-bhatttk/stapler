@@ -24,6 +24,7 @@ import { cropBoxes, type CropBox } from '../ui/tools/crop/state';
 import { pageAnnotations, type Annotation } from '../ui/tools/annotate/state';
 import { activeToolId, findTool } from './tools';
 import { activeJob } from './notify';
+import { tKey } from './i18n/key';
 
 const MAX_DEPTH = 50;
 
@@ -90,12 +91,12 @@ function snapshot(): Snapshot {
  * transaction" and are not fit for a user-facing log).
  */
 function currentOperationLabel(): string {
-  return findTool(activeToolId.value ?? undefined)?.title ?? 'Edit';
+  return findTool(activeToolId.value ?? undefined)?.title ?? tKey('Edit');
 }
 
-function push() {
+function push(label?: string) {
   undoStack.push(snapshot());
-  undoLog.push({ label: currentOperationLabel(), timestamp: Date.now() });
+  undoLog.push({ label: label ?? currentOperationLabel(), timestamp: Date.now() });
   if (undoStack.length > MAX_DEPTH) {
     undoStack.shift();
     undoLog.shift();
@@ -118,10 +119,13 @@ function restore(state: Snapshot) {
 /**
  * Records the state *before* a mutation. Call at the top of every store mutator.
  * Inside an open transaction only the first call records, so a drag is one entry.
+ *
+ * `label` overrides the operation-log entry, which otherwise names the active
+ * tool — for mutations that are not a tool's own, like opening a document.
  */
-export function commit(): void {
+export function commit(label?: string): void {
   if (openTransaction !== null) return;
-  push();
+  push(label);
 }
 
 /**
@@ -134,9 +138,9 @@ export function commit(): void {
  * A nested call returns a no-op handle, so a pointer-move handler can call it
  * defensively without splitting the group.
  */
-export function beginTransaction(label: string): { end: () => void } {
+export function beginTransaction(label: string, logLabel?: string): { end: () => void } {
   if (openTransaction !== null) return { end: () => {} };
-  push();
+  push(logLabel);
   openTransaction = label;
   return {
     end: () => {
@@ -216,6 +220,30 @@ export function historySourceRefCount(sourceId: string): number {
     }
   }
   return count;
+}
+
+/**
+ * RT-2 — every source id any undo/redo snapshot can still reach, through a
+ * document's `pages` *or* its `baseline` (the export-review diff and "Discard
+ * all changes" read the baseline of whatever state undo lands on).
+ *
+ * `closeDocument`'s source GC unions this into its liveness set. Before it
+ * did, a redaction (which rewrites a document onto a new source and moves its
+ * baseline along with it) left the old source reachable *only* from the undo
+ * stack — and closing any unrelated tab deleted those bytes, so Ctrl+Z
+ * restored a document with nothing behind it.
+ */
+export function historySourceIds(): Set<string> {
+  const ids = new Set<string>();
+  for (const stack of [undoStack, redoStack]) {
+    for (const state of stack) {
+      for (const doc of state.docs) {
+        for (const page of doc.pages) ids.add(page.sourceDocId);
+        for (const page of doc.baseline ?? []) ids.add(page.sourceDocId);
+      }
+    }
+  }
+  return ids;
 }
 
 // Also false while a job is in flight (§2.2), so both the keyboard shortcut

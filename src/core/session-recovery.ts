@@ -17,8 +17,8 @@
  * to restore the pointers that say which OPFS files matter and in what
  * arrangement; it never touches document bytes directly.
  */
-import { signal } from '@preact/signals';
-import { documents, sources, activeDocId, selectedPageKeys } from './store';
+import { effect, signal } from '@preact/signals';
+import { documents, sources, activeDocId, selectedPageKeys, isSourcePending } from './store';
 import { batch } from '@preact/signals';
 import type { StaplerDoc, SourceDocument } from './store';
 import { cropBoxes } from '../ui/tools/crop/state';
@@ -28,7 +28,7 @@ import type { Annotation } from '../ui/tools/annotate/state';
 import { serializeHistory, restoreHistoryFromRecord, type SerializedHistory } from './history';
 import { readSetting, writeSetting } from './db';
 import { logEvent } from './errors';
-import { sourceBytesExist } from './opfs';
+import { sourceBytesExist, sweepOrphanedSourceBytesIfSoleTab } from './opfs';
 
 const SESSION_KEY = 'session.recovery';
 const SAVE_DEBOUNCE_MS = 500;
@@ -52,6 +52,43 @@ export interface SessionRecord {
  * in and overwrite the record before the user was ever asked about it.
  */
 export const sessionRecoveryChecked = signal(false);
+
+/** True while the "Restore your previous session?" prompt is on screen. */
+export const sessionRecoveryPrompting = signal(false);
+
+/**
+ * RT-14 — resolves once opening files is safe: `'ready'` when the recovery
+ * check has finished, or `'prompting'` as soon as the restore prompt is on
+ * screen (whichever comes first).
+ *
+ * Files opened while the prompt was showing used to be silently discarded
+ * when the user then clicked Restore: `restoreSession` replaces `documents`
+ * and `sources` wholesale, so the new document vanished and its bytes were
+ * orphaned. Import entry points refuse on `'prompting'` and simply wait out
+ * the (normally instant) check otherwise, so a file dropped on a fresh boot
+ * with nothing to restore still opens.
+ */
+export function waitForImportReadiness(): Promise<'ready' | 'prompting'> {
+  return new Promise(resolve => {
+    let done = false;
+    let dispose: (() => void) | null = null;
+    dispose = effect(() => {
+      if (done) return;
+      const outcome = sessionRecoveryChecked.value
+        ? 'ready'
+        : sessionRecoveryPrompting.value
+          ? 'prompting'
+          : null;
+      if (!outcome) return;
+      done = true;
+      resolve(outcome);
+      // The effect runs synchronously once on creation, before `dispose` is
+      // assigned; that case is disposed right after `effect()` returns.
+      dispose?.();
+    });
+    if (done) dispose();
+  });
+}
 
 export async function loadPendingRecovery(): Promise<SessionRecord | null> {
   const record = await readSetting<SessionRecord>(SESSION_KEY);
@@ -137,13 +174,30 @@ export interface RecoveryCheck {
  */
 export async function checkRecovery(record: SessionRecord): Promise<RecoveryCheck | null> {
   const ids = Object.keys(record.sources);
+  // A source is usable only if it is both registered in the record (restore
+  // registers exactly `record.sources`) *and* still has bytes in OPFS.
   const existing = new Set<string>();
   await Promise.all(
     ids.map(async id => {
       if (await sourceBytesExist(id)) existing.add(id);
     })
   );
-  if (existing.size === ids.length) return { record, droppedDocuments: 0 };
+  const pageUsable = (page: { sourceDocId: string }) => existing.has(page.sourceDocId);
+  const docUsable = (doc: StaplerDoc) =>
+    [...doc.pages, ...(doc.baseline ?? doc.pages)].every(pageUsable);
+  // RT-2 — the fast path used to trust the record whenever every id *listed
+  // in* `record.sources` had bytes, without asking whether the pages actually
+  // point at listed ids. A record autosaved after closeDocument had GC'd a
+  // source the undo stack still referenced passed that check, and the broken
+  // document and history were restored as-is. Every page reference — live
+  // documents and every undo/redo snapshot, `pages` and `baseline` — is
+  // checked now.
+  const historyUsable = [...record.history.undoStack, ...record.history.redoStack].every(state =>
+    state.docs.every(docUsable)
+  );
+  if (existing.size === ids.length && historyUsable && record.documents.every(docUsable)) {
+    return { record, droppedDocuments: 0 };
+  }
 
   // A document with even one page whose source is gone is dropped whole:
   // a document silently missing some of its pages is worse than one that
@@ -157,9 +211,7 @@ export async function checkRecovery(record: SessionRecord): Promise<RecoveryChec
   // in baseline, so checking `pages` alone would restore a document that
   // exports fine today but throws the moment its diff (or a discard) tries
   // to read the baseline page whose bytes are already gone.
-  const survivingDocs = record.documents.filter(doc =>
-    [...doc.pages, ...(doc.baseline ?? doc.pages)].every(page => existing.has(page.sourceDocId))
-  );
+  const survivingDocs = record.documents.filter(docUsable);
   const droppedDocuments = record.documents.length - survivingDocs.length;
   if (survivingDocs.length === 0) return null;
 
@@ -210,4 +262,64 @@ export function restoreSession(record: SessionRecord): void {
     pageAnnotations.value = record.pageAnnotations;
   });
   restoreHistoryFromRecord(record.history);
+}
+
+/**
+ * DOC-11 — the startup recovery flow `AppShell` runs once on mount, before the
+ * autosave watcher is allowed to run (reading the record and arming autosave
+ * in the same tick would let the first, empty, pre-restore autosave overwrite
+ * it before the prompt resolves).
+ *
+ * `confirm` shows the "Restore your previous session?" prompt for a validated
+ * record and resolves true for Restore.
+ *
+ *  • RT-23 — whatever happens, this ends with `sessionRecoveryChecked` true:
+ *    it gates autosave for the whole session and (RT-14) every import entry
+ *    point. An exception from a malformed or hand-edited record used to leave
+ *    it false forever — silently disabling both — as an unhandled rejection.
+ *    A record that throws is cleared rather than failing again next launch.
+ *  • RT-14 — `sessionRecoveryPrompting` is true while the prompt is showing,
+ *    so imports refuse instead of opening a file that Restore would discard.
+ *  • RT-4 — once the decision is made, every stored source outside the
+ *    (restored or empty) workspace is swept from OPFS, before imports are
+ *    allowed so nothing new can be caught by it, and only when no other
+ *    Stapler tab is alive (OPFS is shared per origin).
+ */
+export async function runStartupRecovery(
+  confirm: (check: RecoveryCheck) => Promise<boolean>
+): Promise<void> {
+  try {
+    const pending = await loadPendingRecovery();
+    // Confirms the record's sources still have bytes behind them before it is
+    // ever offered — see `checkRecovery`.
+    const checked = pending ? await checkRecovery(pending) : null;
+    if (checked) {
+      sessionRecoveryPrompting.value = true;
+      let restore: boolean;
+      try {
+        restore = await confirm(checked);
+      } finally {
+        sessionRecoveryPrompting.value = false;
+      }
+      if (restore) {
+        restoreSession(checked.record);
+      } else {
+        await clearSession();
+      }
+    } else if (pending) {
+      // Every document in the record was unrecoverable — nothing to offer,
+      // and no stale pointer worth keeping around for next time either.
+      await clearSession();
+    }
+  } catch (err) {
+    logEvent('warn', 'session-recovery', `Recovery check failed: ${String(err)}`);
+    await clearSession().catch(() => {});
+  }
+  try {
+    await sweepOrphanedSourceBytesIfSoleTab(id => id in sources.value || isSourcePending(id));
+  } catch (err) {
+    logEvent('warn', 'opfs', `Sweep failed: ${String(err)}`);
+  } finally {
+    sessionRecoveryChecked.value = true;
+  }
 }

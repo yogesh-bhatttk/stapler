@@ -9,6 +9,8 @@
  * already loaded, and every multi-page loop is a cancellation point.
  */
 import * as Comlink from 'comlink';
+import { loadLocale, translate } from '../i18n';
+import type { LocaleAware } from './client';
 import { openDocument, pdfjsLib } from './pdfjs-setup';
 import { checkpoint, releaseJobHandlesAfterCall, type JobHandle } from './protocol';
 import { corrupt, encrypted, internal } from '../errors';
@@ -28,15 +30,12 @@ import { pageSheet, type PageSheetData } from '../convert/sheets';
 import { pageTextLines, slideRotation, type PageSlideData } from '../convert/slides';
 import { formattedRuns } from '../convert/pdf-runs';
 import { pixelateRects, type BlurStrength } from '../faceblur/blur';
-import {
-  detectFaces,
-  loadFaceModel,
-  type DetectedRegion,
-  type FaceModelWeights
-} from '../faceblur/detect';
+import { detectFaces, loadFaceModel, type DetectedRegion } from '../faceblur/detect';
+import { loadBundledFaceModelWeights } from '../faceblur/model';
 import { cropUnitRect, intersectionOverUnion, matchTemplate } from '../faceblur/logoMatch';
 import { decodeBarcodesFromImage, type DecodedBarcode } from '../barcode';
 import { fillPolygonMask, polygonOverlapsBox, shrinkMask } from '../geometry';
+import { clampRenderScale } from '../render-limits';
 
 export interface DocumentInfo {
   handle: string;
@@ -186,7 +185,7 @@ export interface RedactedImageInspection {
   reason?: string;
 }
 
-export interface RenderJob {
+export interface RenderJob extends LocaleAware {
   loadDocument(bytes: Uint8Array, password?: string): Promise<DocumentInfo>;
   closeDocument(handle: string): Promise<void>;
   /**
@@ -355,14 +354,16 @@ export interface RenderJob {
     requests: { objectNumber: number; rects: UnitRect[] }[]
   ): Promise<RedactedImageResult[]>;
   /**
-   * RED-08 — loads the face-detector weights into this worker, once.
+   * RED-08 — loads the bundled face-detector weights into this worker, once.
    *
-   * Separate from {@link RenderJob.blurPageImages} so 196 KB of weights crosses
-   * the worker boundary a single time per session instead of once per page, and
-   * so the caller can prove ordering: the weights only ever arrive here after
-   * the consent dialog resolved. Idempotent.
+   * The weights are compiled into the bundle (`faceblur/bundledWeights.ts`)
+   * and decoded here, inside the worker, so neither their ~260 KB data URI nor
+   * the decoded shard ever touches the main thread. Separate from
+   * {@link RenderJob.blurPageImages} so they are decoded once per session
+   * instead of once per page, and so a logo-only run never loads them at all.
+   * Idempotent.
    */
-  loadFaceDetector(weights: FaceModelWeights): Promise<void>;
+  loadFaceDetector(): Promise<void>;
   /**
    * RED-08 — the pixels of one image, cropped to a unit-space rect.
    *
@@ -1103,6 +1104,7 @@ function regionLocalPolygon(region: RedactionRegion): { x: number; y: number }[]
 }
 
 const api: RenderJob = {
+  setLocale: loadLocale,
   async loadDocument(bytes, password) {
     // DOC-02: "never load two full copies of the bytes". `bytes` arrives by
     // structured clone across the Comlink boundary — no call site wraps this
@@ -1119,12 +1121,18 @@ const api: RenderJob = {
     try {
       doc = await task.promise;
     } catch (err) {
+      // A rejected task still holds its transport and the worker-side document
+      // (with the file's bytes) until it is destroyed; nothing else ever gets a
+      // handle to it, so it has to happen here (AUDIT-2026-09-25 RT-13).
+      await task.destroy().catch(() => {});
       // Detect-and-explain, never half-process (PLAN §5.2).
       if (err instanceof pdfjsLib.PasswordException) {
-        throw encrypted('The document requires a password to open.');
+        throw encrypted(translate('The document requires a password to open.'));
       }
       if (err instanceof pdfjsLib.InvalidPDFException) {
-        throw corrupt('The file is not a readable PDF — its structure is invalid or truncated.');
+        throw corrupt(
+          translate('The file is not a readable PDF — its structure is invalid or truncated.')
+        );
       }
       throw err;
     }
@@ -1160,16 +1168,33 @@ const api: RenderJob = {
     const found = docs.get(handle);
     if (!found) return;
     docs.delete(handle);
-    await found.doc.cleanup();
-    await found.task.destroy();
+    // `cleanup()` throws "Page N is currently rendering" while a thumbnail is
+    // in flight — common when closing a long document. The handle is already
+    // gone from `docs`, so skipping `destroy()` leaked the whole pdf.js
+    // document and its bytes for the tab's lifetime (AUDIT-2026-09-25 RT-9).
+    // `destroy()` alone releases everything; cleanup is best-effort.
+    try {
+      await found.doc.cleanup();
+    } catch {
+      // Expected mid-render; destroy below still runs.
+    } finally {
+      await found.task.destroy();
+    }
   },
 
   async renderPage(handle, pageIndex, scale, rotationOverride) {
     const page = await entry(handle).doc.getPage(pageIndex + 1);
     try {
-      const viewport = page.getViewport(
-        rotationOverride === undefined ? { scale } : { scale, rotation: rotationOverride }
-      );
+      const at = (s: number) =>
+        page.getViewport(
+          rotationOverride === undefined ? { scale: s } : { scale: s, rotation: rotationOverride }
+        );
+      // RT-10 — never ask for a canvas the browser cannot allocate: past the
+      // ceiling the render came back blank with no error. The caller sees the
+      // reduction as a bitmap smaller than `pageSize × scale`.
+      const unit = at(1);
+      const safe = clampRenderScale(unit.width, unit.height, scale);
+      const viewport = safe.clamped ? at(safe.scale) : at(scale);
       const { canvas, ctx } = offscreen(viewport.width, viewport.height);
       await page.render(renderParams(ctx, viewport)).promise;
       const bitmap = canvas.transferToImageBitmap();
@@ -1238,7 +1263,11 @@ const api: RenderJob = {
     const out: { region: RedactionRegion; residue: RegionPixelResidue }[] = [];
 
     for (let i = 0; i < regions.length; i++) {
-      await checkpoint(job, i / Math.max(1, regions.length), `Checking region ${i + 1}`);
+      await checkpoint(
+        job,
+        i / Math.max(1, regions.length),
+        translate('Checking region {n}', { n: i + 1 })
+      );
       const region = regions[i];
       const page = await doc.getPage(region.pageIndex + 1);
       try {
@@ -1274,7 +1303,10 @@ const api: RenderJob = {
       await checkpoint(
         job,
         done / byPage.size,
-        `Inspecting images on page ${pageIndex + 1} of ${doc.numPages}`
+        translate('Inspecting images on page {page} of {total}', {
+          page: pageIndex + 1,
+          total: doc.numPages
+        })
       );
       done++;
       const page = await doc.getPage(pageIndex + 1);
@@ -1303,9 +1335,10 @@ const api: RenderJob = {
           out.push({
             pageIndex,
             objectNumber: request.objectNumber,
-            reason:
+            reason: translate(
               'pdf.js could not decode this image (JBIG2 and JPEG 2000 images have no decoder ' +
-              'here), so whether its covered pixels were destroyed cannot be checked.'
+                'here), so whether its covered pixels were destroyed cannot be checked.'
+            )
           });
         }
       } finally {
@@ -1408,7 +1441,11 @@ const api: RenderJob = {
     const { doc } = entry(handle);
     const out: PageTextPresence[] = [];
     for (let i = 1; i <= doc.numPages; i++) {
-      await checkpoint(job, (i - 1) / doc.numPages, `Analysing page ${i} of ${doc.numPages}`);
+      await checkpoint(
+        job,
+        (i - 1) / doc.numPages,
+        translate('Analysing page {page} of {total}', { page: i, total: doc.numPages })
+      );
       const page = await doc.getPage(i);
       try {
         const runs = await textRuns(page);
@@ -1432,7 +1469,11 @@ const api: RenderJob = {
     const { doc } = entry(handle);
     const pages: string[] = [];
     for (let i = 1; i <= doc.numPages; i++) {
-      await checkpoint(job, (i - 1) / doc.numPages, `Reading page ${i} of ${doc.numPages}`);
+      await checkpoint(
+        job,
+        (i - 1) / doc.numPages,
+        translate('Reading page {page} of {total}', { page: i, total: doc.numPages })
+      );
       const page = await doc.getPage(i);
       try {
         const textFromRuns = (await textRuns(page)).map(run => run.str).join('');
@@ -1456,7 +1497,11 @@ const api: RenderJob = {
     const regions: TextRegion[] = [];
 
     for (let i = 1; i <= doc.numPages; i++) {
-      await checkpoint(job, (i - 1) / doc.numPages, `Searching page ${i} of ${doc.numPages}`);
+      await checkpoint(
+        job,
+        (i - 1) / doc.numPages,
+        translate('Searching page {page} of {total}', { page: i, total: doc.numPages })
+      );
       const page = await doc.getPage(i);
       try {
         const viewport = page.getViewport({ scale: 1 });
@@ -1531,7 +1576,11 @@ const api: RenderJob = {
     const suggestions: PatternSuggestion[] = [];
 
     for (let i = 1; i <= doc.numPages; i++) {
-      await checkpoint(job, (i - 1) / doc.numPages, `Scanning page ${i} of ${doc.numPages}`);
+      await checkpoint(
+        job,
+        (i - 1) / doc.numPages,
+        translate('Scanning page {page} of {total}', { page: i, total: doc.numPages })
+      );
       const page = await doc.getPage(i);
       try {
         const viewport = page.getViewport({ scale: 1 });
@@ -1556,7 +1605,11 @@ const api: RenderJob = {
     const found: TextRegion[] = [];
 
     for (let i = 1; i <= doc.numPages; i++) {
-      await checkpoint(job, (i - 1) / doc.numPages, `Scanning page ${i} of ${doc.numPages}`);
+      await checkpoint(
+        job,
+        (i - 1) / doc.numPages,
+        translate('Scanning page {page} of {total}', { page: i, total: doc.numPages })
+      );
       const page = await doc.getPage(i);
       try {
         const viewport = page.getViewport({ scale: 1 });
@@ -1612,7 +1665,11 @@ const api: RenderJob = {
     const limit = blankCoverageLimit(threshold);
 
     for (let i = 1; i <= doc.numPages; i++) {
-      await checkpoint(job, (i - 1) / doc.numPages, `Checking page ${i} of ${doc.numPages}`);
+      await checkpoint(
+        job,
+        (i - 1) / doc.numPages,
+        translate('Checking page {page} of {total}', { page: i, total: doc.numPages })
+      );
       const page = await doc.getPage(i);
       try {
         const viewport = page.getViewport({ scale });
@@ -1751,7 +1808,11 @@ const api: RenderJob = {
     try {
       for (let i = 0; i < requests.length; i++) {
         const { pageIndex, objectNumbers } = requests[i];
-        await checkpoint(job, i / requests.length, `Re-encoding images on page ${pageIndex + 1}`);
+        await checkpoint(
+          job,
+          i / requests.length,
+          translate('Re-encoding images on page {page}', { page: pageIndex + 1 })
+        );
         const wanted = new Set(objectNumbers);
         if (wanted.size === 0) continue;
 
@@ -1850,9 +1911,10 @@ const api: RenderJob = {
         if (seen.has(request.objectNumber)) continue;
         results.push({
           objectNumber: request.objectNumber,
-          reason:
+          reason: translate(
             'pdf.js could not decode this image (JBIG2 and JPEG 2000 images have no decoder ' +
-            'here), so its pixels cannot be blacked out.'
+              'here), so its pixels cannot be blacked out.'
+          )
         });
       }
 
@@ -1865,8 +1927,8 @@ const api: RenderJob = {
     }
   },
 
-  async loadFaceDetector(weights) {
-    await loadFaceModel(weights);
+  async loadFaceDetector() {
+    await loadFaceModel(await loadBundledFaceModelWeights());
   },
 
   async extractImageRegion(handle, pageIndex, objectNumber, rect) {
@@ -1904,7 +1966,11 @@ const api: RenderJob = {
         if (!request || seen.has(decoded.objectNumber)) continue;
         seen.add(decoded.objectNumber);
 
-        await checkpoint(job, done / wanted.size, `Looking for faces on page ${pageIndex + 1}`);
+        await checkpoint(
+          job,
+          done / wanted.size,
+          translate('Looking for faces on page {page}', { page: pageIndex + 1 })
+        );
         done += 1;
 
         const regions: DetectedRegion[] = [];
@@ -1969,7 +2035,9 @@ const api: RenderJob = {
         results.push({
           objectNumber: request.objectNumber,
           regions: [],
-          reason: 'This image could not be decoded, so it could not be checked for faces.'
+          reason: translate(
+            'This image could not be decoded, so it could not be checked for faces.'
+          )
         });
       }
 
@@ -1990,7 +2058,7 @@ const api: RenderJob = {
       await checkpoint(
         job,
         i / Math.max(1, regions.length),
-        `Checking region ${i + 1} of ${regions.length}`
+        translate('Checking region {n} of {total}', { n: i + 1, total: regions.length })
       );
       const region = regions[i];
       const page = await doc.getPage(region.pageIndex + 1);

@@ -21,11 +21,18 @@
  * own; recovery only restores the pointers that say which OPFS files matter.
  */
 import { batch, computed, signal } from '@preact/signals';
-import { commit, forgetDocumentInHistory, historySourceRefCount } from './history';
+import {
+  commit,
+  forgetDocumentInHistory,
+  historySourceIds,
+  historySourceRefCount
+} from './history';
 import { normalizeRotation } from './rotation';
 import { pruneRenderHandles } from './render-cache';
 import { deleteSourceBytes, readSourceBytes } from './opfs';
 import { logEvent } from './errors';
+import { notify } from './notify';
+import { translate } from './i18n';
 import { sideBySideSourceId } from '../ui/tools/side-by-side/state';
 import { compareSettings } from '../ui/tools/compare/state';
 import { cropBoxes, type CropBox } from '../ui/tools/crop/state';
@@ -223,6 +230,31 @@ export function registerSource(source: SourceDocument, originalFiles?: File[]): 
   }
 }
 
+/**
+ * RT-5 — sources whose bytes are written and whose registry entry exists, but
+ * that no document references *yet*: an import registers each file as it
+ * finishes, while the caller only adds documents (or pages, or sets the
+ * comparison source) once every file in the batch is done. Without this, a
+ * tab closed mid-import saw those sources as unreferenced and deleted their
+ * bytes, and the documents were then added pointing at nothing.
+ *
+ * Plain data rather than a signal: nothing renders from it, and the only
+ * reader is the GC below. `import.ts` marks and releases entries.
+ */
+const pendingSources = new Set<string>();
+
+export function markSourcePending(sourceId: string): void {
+  pendingSources.add(sourceId);
+}
+
+export function releasePendingSources(sourceIds: Iterable<string>): void {
+  for (const id of sourceIds) pendingSources.delete(id);
+}
+
+export function isSourcePending(sourceId: string): boolean {
+  return pendingSources.has(sourceId);
+}
+
 /* ---------------- source reference counting ---------------- */
 
 /**
@@ -290,7 +322,9 @@ export function releaseSourceIfUnused(sourceId: string): void {
   if (
     sourceRefCount(sourceId) > 0 ||
     sideBySideSourceId.value === sourceId ||
-    compareSettings.value.compareSourceId === sourceId
+    compareSettings.value.compareSourceId === sourceId ||
+    pendingSources.has(sourceId) ||
+    historySourceRefCount(sourceId) > 0
   )
     return;
   if (!(sourceId in sources.value)) return;
@@ -346,7 +380,23 @@ export function makePageRefs(sourceDocId: string, pageCount: number): PageRef[] 
   }));
 }
 
+/** The operation-log entry an open records (see {@link addDocument}). */
+export const OPEN_DOCUMENT_LABEL = 'Open document';
+
+/**
+ * RT-6 — opening a document is an undoable step like any other edit, recorded
+ * *before* the document appears. Every open path used to either wipe the
+ * whole undo/redo history afterwards (`resetHistory()` in the drop-zone path,
+ * losing every other open document's undo) or record nothing at all (Recents,
+ * paste), so the next Ctrl+Z restored the snapshot from before the *previous*
+ * edit — undoing that edit and silently removing the new document in one go.
+ * Now the first Ctrl+Z after an open removes exactly what was opened, Ctrl+Y
+ * brings it back, and no other document's history is touched. RT-2's liveness
+ * still holds: an undone document's sources sit in the redo stack, which
+ * `historySourceIds` counts as live.
+ */
 export function addDocument(doc: Omit<StaplerDoc, 'baseline'>): void {
+  commit(OPEN_DOCUMENT_LABEL);
   batch(() => {
     documents.value = [...documents.value, { ...doc, baseline: doc.pages }];
     activeDocId.value = doc.id;
@@ -372,7 +422,21 @@ export function switchDocument(id: string): void {
  * flip `dirty` or push an undo entry.
  */
 export function refreshBaseline(docId: string, pages: PageRef[]): void {
-  documents.value = documents.value.map(d => (d.id === docId ? { ...d, baseline: pages } : d));
+  documents.value = documents.value.map(d =>
+    d.id === docId
+      ? {
+          ...d,
+          baseline: pages,
+          // RT-17 — what was just written is the document as it stands, so it
+          // no longer has unsaved changes. Before, `dirty` was never cleared:
+          // the dot stayed after a save and closing the tab still asked to
+          // discard, which trains users to click through that prompt. Only
+          // when the saved page list *is* the current one, though — an edit
+          // made while the save was in flight is still unsaved.
+          dirty: d.pages === pages ? false : d.dirty
+        }
+      : d
+  );
 }
 
 export function closeDocument(id: string): void {
@@ -391,6 +455,14 @@ export function closeDocument(id: string): void {
       }
     }
   });
+  // A snapshot that still holds this document would otherwise point at the
+  // source bytes freed below — but only *this* document's entries are
+  // invalid, not the other open documents' undo/redo history, so this trims
+  // just those instead of wiping every open document's history via
+  // resetHistory() (which remains reserved for the workspace actually being
+  // replaced wholesale, e.g. on session load). Done *before* the GC, so the
+  // closed document's own history entries do not keep its bytes alive.
+  forgetDocumentInHistory(id);
   // Drop sources nothing references any more, so closing a tab frees its bytes.
   // ANN-07's side-by-side comparison document, and Compare's own comparison
   // document, are sources that live outside every `StaplerDoc.pages` array —
@@ -402,6 +474,11 @@ export function closeDocument(id: string): void {
   );
   if (sideBySideSourceId.value) stillUsed.add(sideBySideSourceId.value);
   if (compareSettings.value.compareSourceId) stillUsed.add(compareSettings.value.compareSourceId);
+  // RT-2 — every source an undo or redo can land back on is live too, or
+  // Ctrl+Z restores a document whose bytes this loop just deleted.
+  for (const sourceId of historySourceIds()) stillUsed.add(sourceId);
+  // RT-5 — registered by an import still in progress, not yet in any document.
+  for (const sourceId of pendingSources) stillUsed.add(sourceId);
   const kept: Record<string, SourceDocument> = {};
   for (const [key, value] of Object.entries(sources.value)) {
     if (stillUsed.has(key)) {
@@ -419,13 +496,6 @@ export function closeDocument(id: string): void {
   if (closed) {
     pruneOrphanedPageState([...closed.pages, ...(closed.baseline ?? [])].map(p => p.key));
   }
-  // A snapshot that still holds this document would otherwise point at the
-  // source bytes just freed above — but only *this* document's entries are
-  // invalid, not the other open documents' undo/redo history, so this trims
-  // just those instead of wiping every open document's history via
-  // resetHistory() (which remains reserved for the workspace actually being
-  // replaced wholesale, e.g. on session load).
-  forgetDocumentInHistory(id);
 }
 
 /** Applies `mutate` to one document and marks it dirty. */
@@ -447,10 +517,18 @@ export function deletePages(docId: string, pageKeys: Iterable<string>): void {
   const activeKey =
     doc && activeDocId.value === docId ? doc.pages[activePageIndex.value]?.key : undefined;
 
-  // A PDF must have at least one page; deleting every last one closes the
-  // document instead of creating an invalid zero-page PDF.
+  // A PDF must have at least one page, so deleting every last one is refused
+  // (RT-3). It used to close the document instead — directly, bypassing the
+  // unsaved-changes confirmation closing a tab asks for, with no undo entry,
+  // its history forgotten and its bytes deleted: Ctrl+A, Delete destroyed a
+  // document and every edit to it in one keypress, even mid-export. Refusing
+  // is the smallest safe behaviour — nothing is lost, and closing the tab
+  // (which does confirm, and is blocked while a job runs) remains the way to
+  // remove a whole document.
   if (doc && keys.size >= doc.pages.length && doc.pages.every(p => keys.has(p.key))) {
-    closeDocument(docId);
+    notify('warning', translate('A document needs at least one page.'), {
+      detail: translate('To remove the whole document, close its tab instead.')
+    });
     return;
   }
 
@@ -619,7 +697,11 @@ export function rotatePages(docId: string, pageKeys: Iterable<string>, delta: nu
  */
 export function discardPageChanges(docId: string): void {
   commit();
-  mutateDoc(docId, doc => ({ ...doc, pages: doc.baseline }));
+  // Signature, text/date stamps and form fields live on the document itself
+  // (`annotations`), so they revert here with the page list — and, like it,
+  // undoably. The discard dialog always promised annotations were cleared;
+  // these were silently kept (AUDIT-2026-09-25 UI-14).
+  mutateDoc(docId, doc => ({ ...doc, pages: doc.baseline, annotations: [] }));
 }
 
 export function rotatePage(docId: string, pageKey: string, delta: number): void {

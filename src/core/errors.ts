@@ -11,6 +11,8 @@
  * {@link fromUnknown} on the receiving side rather than with `instanceof`.
  */
 
+import { tKey } from './i18n/key';
+
 export type ErrorKind =
   | 'UnsupportedFeature'
   | 'CorruptDocument'
@@ -28,31 +30,34 @@ export interface StaplerErrorCopy {
 
 const COPY: Record<ErrorKind, StaplerErrorCopy> = {
   UnsupportedFeature: {
-    title: 'This PDF uses a feature Stapler cannot process.',
-    recovery: 'The file is untouched. The details below say which feature and what to do instead.'
+    title: tKey('This PDF uses a feature Stapler cannot process.'),
+    recovery: tKey(
+      'The file is untouched. The details below say which feature and what to do instead.'
+    )
   },
   CorruptDocument: {
-    title: 'This file is damaged or incomplete.',
-    recovery: 'Try re-downloading or re-exporting it. Nothing was written.'
+    title: tKey('This file is damaged or incomplete.'),
+    recovery: tKey('Try re-downloading or re-exporting it. Nothing was written.')
   },
   Encrypted: {
-    title: 'This PDF is password-protected.',
-    recovery:
-      'Stapler cannot decrypt files. Open it in a viewer that has the password, save an ' +
-      'unprotected copy, then bring that copy here.'
+    title: tKey('This PDF is password-protected.'),
+    recovery: tKey(
+      'Stapler cannot decrypt files. Open it in a viewer that has the password, save an unprotected copy, then bring that copy here.'
+    )
   },
   OutOfMemory: {
-    title: 'This document is too large to process in one pass.',
-    recovery: 'Split it into smaller files, or close other documents and try again.'
+    title: tKey('This document is too large to process in one pass.'),
+    recovery: tKey('Split it into smaller files, or close other documents and try again.')
   },
   UserCancelled: {
-    title: 'Cancelled.',
-    recovery: 'Nothing was changed.'
+    title: tKey('Cancelled.'),
+    recovery: tKey('Nothing was changed.')
   },
   InternalError: {
-    title: 'Something went wrong inside Stapler.',
-    recovery:
+    title: tKey('Something went wrong inside Stapler.'),
+    recovery: tKey(
       'Your document was not modified. Copy the diagnostic below if you want to file an issue.'
+    )
   }
 };
 

@@ -18,12 +18,26 @@ import type { RenderJob } from './workers/render.worker';
 import { logEvent } from './errors';
 import { readSourceBytes } from './opfs';
 
-/** Bitmaps are GPU-backed; the ceiling is a count because we cannot measure them. */
-const MAX_BITMAPS = 120;
+/**
+ * RT-10 — the cache is budgeted in **bytes**, not entries. It used to hold up
+ * to 120 bitmaps whatever their size, and the single-page and side-by-side
+ * views put their zoomed renders in it too: an A4 page at 400 % on a 2×
+ * display is ~130 MB, so 120 of them was gigabytes and the tab crashed. A
+ * bitmap's footprint is exactly `width × height × 4`, so it can be measured.
+ * The zoomed views no longer cache at all — they render on demand and close
+ * the bitmap once drawn — so what is left here is thumbnail-sized.
+ */
+export const THUMBNAIL_CACHE_BYTES = 192 * 1024 * 1024;
+
+/** Decoded RGBA footprint of a bitmap. */
+export function bitmapBytes(bitmap: { width: number; height: number }): number {
+  return bitmap.width * bitmap.height * 4;
+}
 
 interface CacheEntry {
   bitmap: ImageBitmap;
-  /** Number of live consumers. An entry in use is never evicted. */
+  bytes: number;
+  /** Number of live consumers. An entry in use is never evicted or closed. */
   users: number;
   /**
    * Set by `invalidateSource` when it found this entry still in use: its
@@ -37,27 +51,54 @@ interface CacheEntry {
 
 export class BitmapCache {
   private entries = new Map<string, CacheEntry>();
+  private totalBytes = 0;
 
-  constructor(private readonly capacity = MAX_BITMAPS) {}
+  constructor(private readonly budgetBytes = THUMBNAIL_CACHE_BYTES) {}
 
   get(key: string): ImageBitmap | undefined {
     const entry = this.entries.get(key);
-    if (!entry) return undefined;
+    if (!entry || entry.orphaned) return undefined;
     // Re-insert to mark most-recently-used.
     this.entries.delete(key);
     this.entries.set(key, entry);
     return entry.bitmap;
   }
 
-  set(key: string, bitmap: ImageBitmap): void {
+  /**
+   * Caches `bitmap` under `key` and returns the bitmap the caller should draw.
+   *
+   * Two renders of the same key can race (two tiles for the same page). If
+   * the entry already cached is in use, it is kept and the newcomer is closed
+   * — closing the cached one instead, as this used to, broke the consumer
+   * still painting it. Otherwise the newcomer replaces it. Either way, draw
+   * what this returns, not what was passed in.
+   */
+  set(key: string, bitmap: ImageBitmap): ImageBitmap {
     const existing = this.entries.get(key);
     if (existing) {
-      if (existing.bitmap !== bitmap) existing.bitmap.close();
+      if (existing.bitmap === bitmap) return bitmap;
+      if (existing.users > 0 || existing.orphaned) {
+        if (existing.orphaned) {
+          // Its source was invalidated; it only lingers for its last user.
+          // A fresh bitmap for the key cannot share its entry.
+          return bitmap;
+        }
+        bitmap.close();
+        return existing.bitmap;
+      }
+      existing.bitmap.close();
+      this.totalBytes -= existing.bytes;
       existing.bitmap = bitmap;
-      return;
+      existing.bytes = bitmapBytes(bitmap);
+      this.totalBytes += existing.bytes;
+      this.evictIfNeeded(key);
+      return bitmap;
     }
-    this.evictIfNeeded();
-    this.entries.set(key, { bitmap, users: 0 });
+    const bytes = bitmapBytes(bitmap);
+    this.entries.set(key, { bitmap, bytes, users: 0 });
+    this.totalBytes += bytes;
+    this.evictIfNeeded(key);
+    return bitmap;
   }
 
   /** Marks an entry in use so scrolling back does not evict what is on screen. */
@@ -71,28 +112,29 @@ export class BitmapCache {
     if (!entry || entry.users === 0) return;
     entry.users -= 1;
     if (entry.users === 0 && entry.orphaned) {
-      entry.bitmap.close();
-      this.entries.delete(key);
+      this.remove(key, entry);
+      return;
     }
+    // Something freed up; it may have been all that kept the cache over budget.
+    if (entry.users === 0) this.evictIfNeeded();
   }
 
-  private evictIfNeeded(): void {
-    while (this.entries.size >= this.capacity) {
-      // The Map iterates in insertion order, so the first entry with no active
-      // consumers is the LRU candidate. Scanning with for-of avoids spreading
-      // the entire Map into a temporary array on every eviction.
-      let evicted = false;
-      for (const [key, entry] of this.entries) {
-        if (entry.users === 0) {
-          entry.bitmap.close();
-          this.entries.delete(key);
-          evicted = true;
-          break;
-        }
-      }
-      // Everything on screen at once: growing past the ceiling beats dropping a
-      // bitmap someone is drawing.
-      if (!evicted) return;
+  private remove(key: string, entry: CacheEntry): void {
+    entry.bitmap.close();
+    this.entries.delete(key);
+    this.totalBytes -= entry.bytes;
+  }
+
+  /** Evicts least-recently-used entries nobody is drawing until under budget. */
+  private evictIfNeeded(keep?: string): void {
+    if (this.totalBytes <= this.budgetBytes) return;
+    // The Map iterates in insertion order, so the first unused entries are the
+    // LRU candidates. Entries in use are skipped: growing past the budget
+    // beats closing a bitmap someone is drawing.
+    for (const [key, entry] of this.entries) {
+      if (this.totalBytes <= this.budgetBytes) return;
+      if (key === keep || entry.users > 0) continue;
+      this.remove(key, entry);
     }
   }
 
@@ -107,18 +149,28 @@ export class BitmapCache {
         entry.orphaned = true;
         continue;
       }
-      entry.bitmap.close();
-      this.entries.delete(key);
+      this.remove(key, entry);
     }
   }
 
+  /** Drops every bitmap nobody is drawing; ones in use are closed on release. */
   clear(): void {
-    for (const entry of this.entries.values()) entry.bitmap.close();
-    this.entries.clear();
+    for (const [key, entry] of [...this.entries]) {
+      if (entry.users > 0) {
+        entry.orphaned = true;
+        continue;
+      }
+      this.remove(key, entry);
+    }
   }
 
   get size(): number {
     return this.entries.size;
+  }
+
+  /** Decoded bytes currently held. */
+  get bytes(): number {
+    return this.totalBytes;
   }
 }
 
@@ -136,6 +188,7 @@ export function bitmapKey(sourceId: string, pageIndex: number, scale: number): s
 
 interface HandleEntry {
   promise: Promise<{ handle: string; client: PinnedClient<RenderJob> }>;
+  client: PinnedClient<RenderJob>;
 }
 
 const handles = new Map<string, HandleEntry>();
@@ -148,10 +201,20 @@ export function renderHandleFor(
   sourceId: string
 ): Promise<{ handle: string; client: PinnedClient<RenderJob> }> {
   const existing = handles.get(sourceId);
-  if (existing) return existing.promise;
+  if (existing) {
+    // RT-1: a handle pinned to an instance that has since crashed can never
+    // answer again — its pdf.js document died with the worker. Handing it out
+    // meant every later thumbnail for this source failed (or, before the
+    // client raced calls against instance death, hung) until a reload. Drop it
+    // and reopen on a fresh instance instead; the dead instance needs no close.
+    if (!existing.client.dead) return existing.promise;
+    handles.delete(sourceId);
+    existing.client.release();
+    existing.promise.catch(() => {});
+  }
 
   const client = renderWorker.pin();
-  const promise = readSourceBytes(sourceId)
+  const promise: HandleEntry['promise'] = readSourceBytes(sourceId)
     .then(bytes =>
       client.lease(api => api.loadDocument(bytes)).then(info => ({ handle: info.handle, client }))
     )
@@ -159,11 +222,15 @@ export function renderHandleFor(
       // A failed open must not be cached, or every later thumbnail reuses the
       // rejection and the page stays blank with no way to retry.
       client.release();
-      handles.delete(sourceId);
+      // RT-19: by identity, not by key. If this source was closed and
+      // reopened while this open was still pending, the entry under the key
+      // is the *new* open — deleting it would orphan its pinned client and
+      // pdf.js document where `pruneRenderHandles` can never find them.
+      if (handles.get(sourceId)?.promise === promise) handles.delete(sourceId);
       throw err;
     });
 
-  handles.set(sourceId, { promise });
+  handles.set(sourceId, { promise, client });
   return promise;
 }
 
@@ -172,6 +239,12 @@ export function closeRenderHandle(sourceId: string): void {
   if (!entry) return;
   handles.delete(sourceId);
   thumbnailCache.invalidateSource(sourceId);
+  if (entry.client.dead) {
+    // Nothing to close on a crashed instance; its document is already gone.
+    entry.client.release();
+    entry.promise.catch(() => {});
+    return;
+  }
   entry.promise
     .then(({ handle, client }) => {
       return client.lease(api => api.closeDocument(handle)).finally(() => client.release());

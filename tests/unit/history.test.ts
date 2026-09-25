@@ -36,18 +36,22 @@ function seed(pageCount = 5): StaplerDoc {
   registerSource({
     id: 'src',
     name: 'src.pdf',
-    bytes: new Uint8Array([1]),
     pageCount,
     pageSizes: Array.from({ length: pageCount }, () => ({ width: 595, height: 842 }))
   });
+  const pages = makePageRefs('src', pageCount);
   const doc: StaplerDoc = {
     id: 'doc-1',
     name: 'doc.pdf',
-    pages: makePageRefs('src', pageCount),
+    pages,
+    baseline: pages,
     annotations: [],
     dirty: false
   };
   addDocument(doc);
+  // A fresh workspace: opening is itself an undo step (RT-6), which the
+  // RT-6 tests cover; these tests start from the opened document.
+  resetHistory();
   return doc;
 }
 
