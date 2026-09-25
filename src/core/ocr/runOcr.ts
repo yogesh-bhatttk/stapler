@@ -15,13 +15,19 @@ import * as Comlink from 'comlink';
 import { renderWorker, cvWorker, ocrWorker, processWorker } from '../workers';
 import { createJobHandle, type JobOptions } from '../workers/protocol';
 import { requestOcrConsent } from '../notify';
+import { tPlural, translate } from '../i18n';
 import { cancelled, internal, isCancellation, fromUnknown } from '../errors';
-import { markModelDownloaded } from './modelState';
-import { readModelBytes } from '../opfs';
+import { markModelDownloaded, removeOcrModel } from './modelState';
+import { hasModelBytes, readModelBytes } from '../opfs';
 import { fetchVerifiedModel } from './download';
 import { hasCachedModel, writeCachedModel } from './tesseractCache';
 import { DEFAULT_OCR_LANGUAGE, MODEL_HOST, findLanguage, splitLangCodes } from './model';
-import type { OcrLayerReport, OcrPageLayer } from './types';
+import {
+  OCR_ENGINE_INIT_FAILED,
+  isEngineInitFailure,
+  type OcrLayerReport,
+  type OcrPageLayer
+} from './types';
 
 /**
  * Rasterisation resolution for recognition.
@@ -63,22 +69,27 @@ export interface OcrRunResult extends OcrLayerReport {
 export function modelConsentCopy(missingCodes: string[]): { title: string; body: string } {
   const languages = missingCodes.map(code => {
     const language = findLanguage(code);
-    return { label: language?.label ?? code, size: language?.approxSizeMb ?? 12 };
+    return {
+      label: language ? translate(language.label) : code,
+      size: language?.approxSizeMb ?? 12
+    };
   });
   const label = languages.map(l => l.label).join(' + ');
   const size = languages.reduce((total, l) => total + l.size, 0);
-  const plural = languages.length > 1 ? 's' : '';
+  const count = languages.length;
   return {
-    title: `Download the ${label} OCR language model${plural}?`,
+    title: tPlural('Download the {label} OCR language models?', count, { label }),
     body:
-      `Stapler works entirely offline except for this one file. To read text in a scan it ` +
-      `needs the ${label} recognition model${plural} — about ${size} MB — which ${
-        plural ? 'are' : 'is'
-      } downloaded from ${MODEL_HOST}, the public npm mirror the OCR engine publishes it on.\n\n` +
-      `This happens once. The model${plural} then stay${
-        plural ? '' : 's'
-      } in this browser, and every later OCR run works with no network at all. Your document ` +
-      `is never uploaded: only the model comes down, and nothing goes up.`
+      tPlural(
+        'Stapler works entirely offline except for this one file. To read text in a scan it needs the {label} recognition models — about {size} MB — which are downloaded from {host}, the public npm mirror the OCR engine publishes it on.',
+        count,
+        { label, size, host: MODEL_HOST }
+      ) +
+      '\n\n' +
+      tPlural(
+        'This happens once. The models then stay in this browser, and every later OCR run works with no network at all. Your document is never uploaded: only the model comes down, and nothing goes up.',
+        count
+      )
     // Tone stays 'default': this is a disclosed, reversible download, not a
     // destructive action, and dressing it in danger styling would train users to
     // ignore the styling that does mean danger.
@@ -91,9 +102,16 @@ export function modelConsentCopy(missingCodes: string[]): { title: string; body:
  * know 'download' from 'upload' to decide how it gets the bytes into
  * tesseract's cache (see `runOcr`).
  */
-async function ensureConsent(missingCodes: string[]): Promise<'download' | 'upload' | null> {
+async function ensureConsent(
+  missingCodes: string[],
+  notice?: string
+): Promise<'download' | 'upload' | null> {
   const { title, body } = modelConsentCopy(missingCodes);
-  const result = await requestOcrConsent(missingCodes, title, body);
+  const result = await requestOcrConsent(
+    missingCodes,
+    title,
+    notice ? `${notice}\n\n${body}` : body
+  );
   return result === 'cancel' ? null : result;
 }
 
@@ -125,6 +143,79 @@ async function isModelReady(code: string): Promise<boolean> {
 }
 
 /**
+ * Fetches, verifies and caches every language in `missing`, reporting the
+ * streamed byte progress (CNV-16) as the run's first slice of the bar.
+ */
+async function downloadMissing(missing: string[], options: RunOcrOptions): Promise<void> {
+  // OCR-01 Defects 1 & 3: Stapler fetches and integrity-verifies every
+  // missing language itself (`download.ts`), then seeds tesseract's own
+  // cache directly (`writeCachedModel`) — tesseract's internal loader is
+  // never given the chance to fetch on its own (and, since CNV-2, cannot).
+  // `allSettled` rather than `all`, so every failure is reported together and
+  // no download keeps running unobserved after the first one rejects.
+  const progress = new Map<string, { received: number; total: number }>();
+  const report = () => {
+    let received = 0;
+    let total = 0;
+    for (const entry of progress.values()) {
+      received += entry.received;
+      total += entry.total;
+    }
+    if (total > 0) {
+      options.onProgress?.(
+        Math.min(1, received / total) * 0.1,
+        translate('Downloading the language model ({received} of {total} KB)', {
+          received: Math.round(received / 1024),
+          total: Math.round(total / 1024)
+        })
+      );
+    }
+  };
+  const results = await Promise.allSettled(
+    missing.map(async code => {
+      const verified = await fetchVerifiedModel(code, {
+        signal: options.signal,
+        onProgress: (received, total) => {
+          progress.set(code, { received, total });
+          report();
+        }
+      });
+      await writeCachedModel(code, verified);
+      return code;
+    })
+  );
+  const failures = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+  if (failures.length > 0) {
+    if (failures.some(f => isCancellation(f.reason))) throw cancelled();
+    throw internal(
+      failures
+        .map(f => (f.reason instanceof Error ? f.reason.message : String(f.reason)))
+        .join('; ')
+    );
+  }
+}
+
+/**
+ * Trial-loads `code` in the OCR worker. Returns `null` when the engine started,
+ * otherwise why it could not.
+ */
+async function validateModel(code: string): Promise<string | null> {
+  try {
+    await ocrWorker.lease(api => api.validateModel(code));
+    return null;
+  } catch (err) {
+    const reason = fromUnknown(err).message;
+    if (!isEngineInitFailure(reason)) throw err;
+    return reason.slice(OCR_ENGINE_INIT_FAILED.length).replace(/^:\s*/, '') || reason;
+  }
+}
+
+/** Removes `code`'s model only if it came from an upload (an OPFS copy exists). */
+async function forgetUploadedModel(code: string): Promise<void> {
+  if (await hasModelBytes(code)) await removeOcrModel(code);
+}
+
+/**
  * Recognises `pageIndices` of `bytes` and returns the same document with an
  * invisible text layer added.
  *
@@ -143,7 +234,7 @@ export async function runOcr(
   const pages = (options.pageIndices ?? Array.from({ length: pageCount }, (_, i) => i))
     .filter(index => index >= 0 && index < pageCount)
     .sort((a, b) => a - b);
-  if (pages.length === 0) throw internal('No pages were selected for OCR.');
+  if (pages.length === 0) throw internal(translate('No pages were selected for OCR.'));
 
   const components = splitLangCodes(lang);
   const availability = await Promise.all(
@@ -152,42 +243,20 @@ export async function runOcr(
   const missing = availability.filter(a => !a.already).map(a => a.code);
 
   if (missing.length > 0) {
-    const choice = await ensureConsent(missing);
-    // Nothing has been spawned, opened, or requested at this point. Declining is
-    // a clean no-op by construction, not by cleanup.
-    if (!choice) return null;
+    // A loop only because a rejected upload (CNV-8) puts the same dialog back
+    // in front of the user — every other path leaves it on the first pass.
+    let rejectedUpload: string | undefined;
+    for (;;) {
+      const choice = await ensureConsent(missing, rejectedUpload);
+      // Nothing has been spawned, opened, or requested at this point. Declining
+      // is a clean no-op by construction, not by cleanup.
+      if (!choice) return null;
 
-    if (choice === 'download') {
-      // OCR-01 Defects 1 & 3: Stapler fetches and integrity-verifies every
-      // missing language itself (`download.ts`), then seeds tesseract's own
-      // cache directly (`writeCachedModel`) — tesseract's internal loader is
-      // never given the chance to fetch on its own. That matters for a
-      // combined run especially: each component lives at a different base
-      // URL, and tesseract's own hardcoded default has no version pin at all
-      // (see `model.ts`), so leaving it to fetch a language itself would
-      // silently reintroduce the unpinned-URL problem this fix closes.
-      // `Promise.all` would reject on the *first* failure while the other
-      // downloads kept running unobserved in the background — their eventual
-      // success or failure was invisible, and a combined run reported only
-      // one language's error even when several failed. `allSettled` waits for
-      // every one, then reports every failure together.
-      const results = await Promise.allSettled(
-        missing.map(async code => {
-          const verified = await fetchVerifiedModel(code, options.signal);
-          await writeCachedModel(code, verified);
-          return code;
-        })
-      );
-      const failures = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
-      if (failures.length > 0) {
-        if (failures.some(f => isCancellation(f.reason))) throw cancelled();
-        throw internal(
-          failures
-            .map(f => (f.reason instanceof Error ? f.reason.message : String(f.reason)))
-            .join('; ')
-        );
+      if (choice === 'download') {
+        await downloadMissing(missing, options);
+        break;
       }
-    } else {
+
       // 'upload' is only offered when `missing.length === 1` — one file
       // cannot cover two languages — and the consent dialog's handler has
       // already written the bytes to OPFS before resolving with this choice.
@@ -199,6 +268,21 @@ export async function runOcr(
         );
       }
       await writeCachedModel(code, uploaded);
+
+      // Audit 2026-09-25 CNV-8 — trial-load it before keeping it. A wrong
+      // file (legacy/non-LSTM data, or something that is not a model at all)
+      // used to be kept in OPFS and re-seeded before every run, with the
+      // dialog never shown again to replace it.
+      options.onProgress?.(0, translate('Checking the uploaded language model'));
+      const problem = await validateModel(code);
+      if (!problem) break;
+      await removeOcrModel(code);
+      // Said inside the re-shown dialog itself rather than in a toast, which
+      // would sit on top of the dialog's own buttons.
+      rejectedUpload = translate(
+        'That file is not a usable OCR language model — the OCR engine could not load it ({problem}), so it was not kept. Choose the {label} "best_int" LSTM .traineddata file, or download the model instead.',
+        { problem, label: translate(findLanguage(code)?.label ?? code) }
+      );
     }
   }
 
@@ -228,7 +312,10 @@ export async function runOcr(
         // instead of sitting still for thirty seconds.
         const base = i / pages.length;
         const span = 1 / pages.length;
-        options.onProgress?.(base, `Reading page ${pageIndex + 1} of ${pageCount}`);
+        options.onProgress?.(
+          base,
+          translate('Reading page {page} of {total}', { page: pageIndex + 1, total: pageCount })
+        );
 
         try {
           const rawBitmap = await client.lease(api =>
@@ -251,7 +338,11 @@ export async function runOcr(
                 onProgress: (fraction, label) =>
                   options.onProgress?.(
                     fraction === null ? base : base + fraction * cleanupSpan,
-                    `${label} — page ${pageIndex + 1} of ${pageCount}`
+                    translate('{label} — page {page} of {total}', {
+                      label,
+                      page: pageIndex + 1,
+                      total: pageCount
+                    })
                   )
               })
             )
@@ -276,7 +367,11 @@ export async function runOcr(
                     // `fraction` is per-phase, so it is scaled into this page's
                     // slice rather than replacing the document-wide number.
                     fraction === null ? recognizeBase : recognizeBase + fraction * recognizeSpan,
-                    `${label} — page ${pageIndex + 1} of ${pageCount}`
+                    translate('{label} — page {page} of {total}', {
+                      label,
+                      page: pageIndex + 1,
+                      total: pageCount
+                    })
                   )
               })
             )
@@ -291,7 +386,23 @@ export async function runOcr(
           });
         } catch (err) {
           if (isCancellation(err)) throw err;
-          skippedPages.push({ pageIndex, reason: fromUnknown(err).message });
+          const reason = fromUnknown(err).message;
+          // Audit 2026-09-25 CNV-2 — an engine that cannot load the model
+          // cannot read *any* page, so this is fatal for the run, not a
+          // per-page skip. (Skipping used to lead straight into tesseract's
+          // silent CDN fallback on the next page.) An uploaded copy is
+          // removed so the next run asks again instead of re-seeding it.
+          if (isEngineInitFailure(reason)) {
+            await Promise.all(components.map(forgetUploadedModel));
+            throw internal(
+              translate(
+                'OCR stopped: {reason}. Nothing was changed. If you uploaded this model, it has been removed — run OCR again to download it or upload a different file.',
+                { reason }
+              ),
+              { lang }
+            );
+          }
+          skippedPages.push({ pageIndex, reason });
         }
       }
     } finally {
@@ -313,6 +424,6 @@ export async function runOcr(
   // consent *and* success, never intent.
   await Promise.all(missing.map(code => markModelDownloaded(code)));
 
-  options.onProgress?.(1, 'Done');
+  options.onProgress?.(1, translate('Done'));
   return { ...written, downloadedModel: missing.length > 0, skippedPages };
 }

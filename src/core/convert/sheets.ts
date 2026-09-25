@@ -25,6 +25,7 @@
 
 import { layoutLines, type TextRun } from '../text-layout';
 import { findTableRegions } from './table-regions';
+import { tKey, tPlural } from '../i18n';
 import { MAX_CELL_CHARS, uniqueSheetNames, type XlsxSheet } from './xlsx-writer';
 // §4 — the same limit `xlsx-reader.ts` already enforces on the read direction,
 // chosen there because Excel's real column cap is 16,384 (XFD) and a detected
@@ -77,14 +78,16 @@ export interface WorkbookPlan {
  * arrives at this tool with a file it cannot help with. Saying "0 sheets" and
  * writing a file would be the silent failure; naming OCR is the useful answer.
  */
-export const NO_TEXT_LAYER_MESSAGE =
+export const NO_TEXT_LAYER_MESSAGE = tKey(
   'This PDF has no selectable text, so there is nothing to put in a spreadsheet. It is most ' +
-  'likely a scan — run the OCR tool on it first, then convert the result.';
+    'likely a scan — run the OCR tool on it first, then convert the result.'
+);
 
 /** Why a workbook with every sheet excluded by the caller's option is refused. */
-export const EMPTY_WORKBOOK_MESSAGE =
+export const EMPTY_WORKBOOK_MESSAGE = tKey(
   'No table was detected in this PDF, and page text is switched off — so there would be nothing ' +
-  'in the spreadsheet. Turn "Include page text" back on to export the text instead.';
+    'in the spreadsheet. Turn "Include page text" back on to export the text instead.'
+);
 
 /** How much of a row the preview shows before eliding it. */
 const PREVIEW_TEXT_LIMIT = 160;
@@ -185,8 +188,12 @@ export function planWorkbook(
 
     if (!includePageText) {
       skipped.push(
-        `Page ${human}: ${page.textLines.length} line(s) of text outside a table were left out ` +
-          'because "Include page text" is off.'
+        tPlural(
+          'Page {page}: {count} line(s) of text outside a table were left out ' +
+            'because "Include page text" is off.',
+          page.textLines.length,
+          { page: human }
+        )
       );
       continue;
     }
@@ -209,14 +216,21 @@ export function planWorkbook(
     // Excel's own cap, not ours. Saying nothing would be a silent edit of the
     // user's content, which is the one thing this codebase never does.
     skipped.push(
-      `${truncatedCells} cell(s) were longer than Excel's ${MAX_CELL_CHARS}-character limit and ` +
-        'were truncated to fit.'
+      tPlural(
+        "{count} cell(s) were longer than Excel's {limit}-character limit and " +
+          'were truncated to fit.',
+        truncatedCells,
+        { limit: MAX_CELL_CHARS }
+      )
     );
   }
   if (columnCappedTables > 0) {
     skipped.push(
-      `${columnCappedTables} table(s) had more than ${MAX_SHEET_COLUMNS} columns; only the first ` +
-        `${MAX_SHEET_COLUMNS} were kept.`
+      tPlural(
+        '{count} table(s) had more than {max} columns; only the first {max} were kept.',
+        columnCappedTables,
+        { max: MAX_SHEET_COLUMNS }
+      )
     );
   }
 

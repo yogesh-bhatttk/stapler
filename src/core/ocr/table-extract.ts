@@ -200,11 +200,31 @@ export function extractTableFromPage(pageTextItems: TableTextItem[]): TableGridD
   };
 }
 
+/** A cell that is only a number (optionally signed, grouped, or a percentage). */
+const PLAIN_NUMBER = /^[-+]?[\d.,\s]*\d[\d.,\s]*%?$/;
+
+/**
+ * Neutralises spreadsheet formula injection (AUDIT-2026-09-25 CONV-7).
+ *
+ * The table text comes from the PDF, i.e. from whoever wrote the document; the
+ * person at risk is whoever opens the export. A cell starting with `=`, `+`,
+ * `-`, `@`, TAB or CR runs as a formula in Excel, LibreOffice and Sheets —
+ * `=HYPERLINK(…)` exfiltration, DDE. A leading apostrophe makes it literal
+ * text (OWASP's guidance). Plain numbers such as `-12.5` are left alone, so a
+ * financial table's negative values stay numeric.
+ */
+export function neutralizeFormula(cell: string): string {
+  if (!/^[=+\-@\t\r]/.test(cell)) return cell;
+  if (PLAIN_NUMBER.test(cell)) return cell;
+  return `'${cell}`;
+}
+
 export function exportTableToCsv(grid: TableGridData): string {
   return grid.rows
     .map(row =>
       row
-        .map(cell => {
+        .map(raw => {
+          const cell = neutralizeFormula(raw);
           if (
             cell.includes(',') ||
             cell.includes('"') ||
@@ -222,7 +242,11 @@ export function exportTableToCsv(grid: TableGridData): string {
 
 export function exportTableToTsv(grid: TableGridData): string {
   return grid.rows
-    .map(row => row.map(cell => cell.replace(/\t/g, ' ').replace(/[\r\n]+/g, ' ')).join('\t'))
+    .map(row =>
+      row
+        .map(cell => neutralizeFormula(cell.replace(/\t/g, ' ').replace(/[\r\n]+/g, ' ')))
+        .join('\t')
+    )
     .join('\n');
 }
 

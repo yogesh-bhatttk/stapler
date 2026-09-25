@@ -17,6 +17,9 @@
  * Uses the generic `settings` store from F-06; no schema change.
  */
 import { readSetting, writeSetting } from '../db';
+import { deleteModelBytes, hasModelBytes } from '../opfs';
+import { deleteCachedModel, hasCachedModel } from './tesseractCache';
+import { OCR_LANGUAGES, splitLangCodes } from './model';
 
 const KEY_PREFIX = 'ocr.modelDownloaded.';
 
@@ -36,4 +39,34 @@ export async function markModelDownloaded(lang: string): Promise<void> {
 /** Test and "reset my data" seam. */
 export async function forgetModel(lang: string): Promise<void> {
   await writeSetting(key(lang), false);
+}
+
+/** Every individual language code the catalogue can ever store a model for. */
+function componentCodes(): string[] {
+  return [...new Set(OCR_LANGUAGES.flatMap(lang => splitLangCodes(lang.code)))];
+}
+
+/**
+ * Removes every trace of `lang`'s model — tesseract's cached copy, an uploaded
+ * copy in OPFS, and the "downloaded with consent" flag — so the next OCR run
+ * in that language asks again (audit 2026-09-25 CNV-8).
+ */
+export async function removeOcrModel(lang: string): Promise<void> {
+  await deleteCachedModel(lang).catch(() => {});
+  await deleteModelBytes(lang);
+  await forgetModel(lang);
+}
+
+/** The component language codes that currently have model bytes stored locally. */
+export async function listStoredOcrModels(): Promise<string[]> {
+  const stored: string[] = [];
+  for (const code of componentCodes()) {
+    if ((await hasCachedModel(code)) || (await hasModelBytes(code))) stored.push(code);
+  }
+  return stored;
+}
+
+/** "Remove downloaded models" — every stored OCR model, downloaded or uploaded. */
+export async function removeAllOcrModels(): Promise<void> {
+  for (const code of componentCodes()) await removeOcrModel(code);
 }

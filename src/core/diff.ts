@@ -6,79 +6,176 @@ export interface DiffChunk {
 }
 
 /**
- * The LCS table below is `(n+1)×(m+1)` numbers — quadratic in word count. Two
- * 50,000-word documents would be a ~2.5-billion-cell array, well past what any
- * tab can allocate. Past this many words on either side, `diffText` falls back
- * to `coarseDiff`, a linear scan that only distinguishes "byte-identical" runs
- * from "differs somewhere in this stretch" rather than word-precise LCS.
+ * Word diff (CONV-14): Myers' O((N+M)·D) algorithm over interned word ids in
+ * typed arrays, run in the `cv` worker (`workers/cv.worker.ts`) by both the
+ * Compare view and the text-diff export — never on the main thread.
+ *
+ * It replaced an `(n+1)×(m+1)` LCS table of JS numbers: about 217 ms and
+ * 132 MB on the main thread per Compare page switch at the old 4,000-word cap.
+ * Myers' cost grows with the number of *differences* D, not the product of the
+ * lengths, so near-identical pages of any length are cheap.
+ *
+ * Bounds: past {@link MAX_DIFF_WORDS} words on either side, or once D would
+ * exceed the budget below, `diffText` falls back to {@link coarseDiff} — a
+ * linear scan that reports the differing middle as one delete run and one
+ * insert run. It is coarser, but it cannot stall or run out of memory.
  */
-const MAX_LCS_WORDS = 4000;
+export const MAX_DIFF_WORDS = 200_000;
 
+/** Upper bound on D (edit distance, in words) the precise diff will search. */
+export const MAX_DIFF_EDITS = 2_500;
 /**
- * A basic word-based diff using Longest Common Subsequence.
+ * Upper bound on (N+M)·D work. Keeps the worst case around a second even for
+ * two 100k-word documents, by lowering the D cap as the inputs grow.
  */
+const MAX_DIFF_WORK = 200_000_000;
+
 export function diffText(oldText: string, newText: string): DiffChunk[] {
   const oldWords = oldText.split(/\s+/).filter(w => w.length > 0);
   const newWords = newText.split(/\s+/).filter(w => w.length > 0);
 
-  if (oldWords.length > MAX_LCS_WORDS || newWords.length > MAX_LCS_WORDS) {
+  if (oldWords.length > MAX_DIFF_WORDS || newWords.length > MAX_DIFF_WORDS) {
     return coarseDiff(oldWords, newWords);
   }
 
+  // Common prefix and suffix are equal runs whatever happens in between, and
+  // trimming them first keeps the search to the region that actually differs.
   const n = oldWords.length;
   const m = newWords.length;
-
-  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
-
-  for (let i = 1; i <= n; i++) {
-    for (let j = 1; j <= m; j++) {
-      if (oldWords[i - 1] === newWords[j - 1]) {
-        dp[i][j] = dp[i - 1][j - 1] + 1;
-      } else {
-        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
-      }
-    }
+  let start = 0;
+  while (start < n && start < m && oldWords[start] === newWords[start]) start++;
+  let endOld = n;
+  let endNew = m;
+  while (endOld > start && endNew > start && oldWords[endOld - 1] === newWords[endNew - 1]) {
+    endOld--;
+    endNew--;
   }
+
+  const ids = new Map<string, number>();
+  const intern = (words: string[], from: number, to: number) => {
+    const out = new Int32Array(to - from);
+    for (let i = from; i < to; i++) {
+      let id = ids.get(words[i]);
+      if (id === undefined) {
+        id = ids.size;
+        ids.set(words[i], id);
+      }
+      out[i - from] = id;
+    }
+    return out;
+  };
+  const a = intern(oldWords, start, endOld);
+  const b = intern(newWords, start, endNew);
+
+  const size = a.length + b.length;
+  const maxD = Math.min(MAX_DIFF_EDITS, size, Math.floor(MAX_DIFF_WORK / Math.max(1, size)));
+  const middle = myers(a, b, maxD);
+  if (!middle) return coarseDiff(oldWords, newWords);
 
   const result: DiffChunk[] = [];
-  let i = n,
-    j = m;
-
-  while (i > 0 && j > 0) {
-    if (oldWords[i - 1] === newWords[j - 1]) {
-      result.push({ op: 'equal', text: oldWords[i - 1] });
-      i--;
-      j--;
-    } else if (dp[i - 1][j] >= dp[i][j - 1]) {
-      result.push({ op: 'delete', text: oldWords[i - 1] });
-      i--;
+  for (let i = 0; i < start; i++) result.push({ op: 'equal', text: oldWords[i] });
+  // Within each run of changes, insertions are listed before deletions — the
+  // order the previous LCS implementation produced, which the export's
+  // rendering and its tests were written against.
+  let inserts: DiffChunk[] = [];
+  let deletes: DiffChunk[] = [];
+  const flush = () => {
+    for (const c of inserts) result.push(c);
+    for (const c of deletes) result.push(c);
+    inserts = [];
+    deletes = [];
+  };
+  for (const [op, index] of middle) {
+    if (op === 'equal') {
+      flush();
+      result.push({ op, text: oldWords[start + index] });
+    } else if (op === 'insert') {
+      inserts.push({ op, text: newWords[start + index] });
     } else {
-      result.push({ op: 'insert', text: newWords[j - 1] });
-      j--;
+      deletes.push({ op, text: oldWords[start + index] });
     }
   }
-
-  while (i > 0) {
-    result.push({ op: 'delete', text: oldWords[i - 1] });
-    i--;
-  }
-
-  while (j > 0) {
-    result.push({ op: 'insert', text: newWords[j - 1] });
-    j--;
-  }
-
-  return result.reverse();
+  flush();
+  for (let i = endOld; i < n; i++) result.push({ op: 'equal', text: oldWords[i] });
+  return result;
 }
 
 /**
- * Linear-time, linear-memory fallback for documents too large to LCS-diff.
- * Trims the matching prefix and suffix, then reports the entire differing
- * middle as one deleted run followed by one inserted run — coarser than the
- * word-level LCS (it won't find matches *inside* the changed region), but it
- * can't OOM or stall the main thread on any input size.
+ * Myers' greedy forward search with a snapshot of the V array per D step
+ * (O(D²) memory, bounded by `maxD`), then a backtrack. Returns the edit script
+ * as [op, index] pairs — the index into `a` for equal/delete, into `b` for
+ * insert — or null when the edit distance exceeds `maxD`.
  */
-function coarseDiff(oldWords: string[], newWords: string[]): DiffChunk[] {
+function myers(a: Int32Array, b: Int32Array, maxD: number): [DiffOp, number][] | null {
+  const n = a.length;
+  const m = b.length;
+  if (n === 0 && m === 0) return [];
+  const offset = maxD + 1;
+  const v = new Int32Array(2 * maxD + 3);
+  const trace: Int32Array[] = [];
+  let found = -1;
+
+  search: for (let d = 0; d <= maxD; d++) {
+    // Snapshot of k ∈ [-(d+1), d+1] as it stood after step d-1.
+    trace.push(v.slice(offset - d - 1, offset + d + 2));
+    for (let k = -d; k <= d; k += 2) {
+      let x =
+        k === -d || (k !== d && v[offset + k - 1] < v[offset + k + 1])
+          ? v[offset + k + 1]
+          : v[offset + k - 1] + 1;
+      let y = x - k;
+      while (x < n && y < m && a[x] === b[y]) {
+        x++;
+        y++;
+      }
+      v[offset + k] = x;
+      if (x >= n && y >= m) {
+        found = d;
+        break search;
+      }
+    }
+  }
+  if (found < 0) return null;
+
+  const script: [DiffOp, number][] = [];
+  let x = n;
+  let y = m;
+  for (let d = found; d > 0; d--) {
+    const prev = trace[d];
+    const at = (k: number) => prev[k + d + 1];
+    const k = x - y;
+    const prevK = k === -d || (k !== d && at(k - 1) < at(k + 1)) ? k + 1 : k - 1;
+    const prevX = at(prevK);
+    const prevY = prevX - prevK;
+    while (x > prevX && y > prevY) {
+      x--;
+      y--;
+      script.push(['equal', x]);
+    }
+    if (x === prevX) {
+      y--;
+      script.push(['insert', y]);
+    } else {
+      x--;
+      script.push(['delete', x]);
+    }
+  }
+  while (x > 0 && y > 0) {
+    x--;
+    y--;
+    script.push(['equal', x]);
+  }
+  return script.reverse();
+}
+
+/**
+ * Linear-time, linear-memory fallback for documents too large or too different
+ * to diff precisely. Trims the matching prefix and suffix, then reports the
+ * entire differing middle as one inserted run followed by one deleted run —
+ * coarser (it won't find matches *inside* the changed region), but it can't
+ * OOM or stall on any input size.
+ */
+export function coarseDiff(oldWords: string[], newWords: string[]): DiffChunk[] {
   const n = oldWords.length;
   const m = newWords.length;
 
@@ -94,8 +191,8 @@ function coarseDiff(oldWords: string[], newWords: string[]): DiffChunk[] {
 
   const result: DiffChunk[] = [];
   for (let i = 0; i < start; i++) result.push({ op: 'equal', text: oldWords[i] });
-  for (let i = start; i < endOld; i++) result.push({ op: 'delete', text: oldWords[i] });
   for (let j = start; j < endNew; j++) result.push({ op: 'insert', text: newWords[j] });
+  for (let i = start; i < endOld; i++) result.push({ op: 'delete', text: oldWords[i] });
   for (let i = endOld; i < n; i++) result.push({ op: 'equal', text: oldWords[i] });
   return result;
 }

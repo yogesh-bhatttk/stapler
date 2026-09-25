@@ -10,8 +10,130 @@ import {
 } from 'pdf-lib';
 import { marked } from 'marked';
 import { SUMMARY_ACCENT_RGB } from './doc-colors';
+import { unsupported } from './errors';
+import { tKey, tPlural, translate } from './i18n';
+import { checkpoint, type JobHandle } from './workers/protocol';
 
 const LINK_COLOR = rgb(...SUMMARY_ACCENT_RGB);
+
+/**
+ * Largest Markdown source converted (CONV-12). Far past any hand-written
+ * document; it bounds the time the synchronous lexer can hold the shared
+ * process worker for.
+ */
+export const MAX_MARKDOWN_CHARS = 1_000_000;
+
+export const MARKDOWN_TOO_LARGE_MESSAGE = tKey(
+  'This Markdown is too long to convert in one go (the limit is 1,000,000 characters). ' +
+    'Split it into smaller documents.'
+);
+
+export const MARKDOWN_TOO_NESTED_MESSAGE = tKey(
+  'This Markdown is nested too deeply to convert (for example thousands of ">" quote levels ' +
+    'or list levels). Flatten the nesting and try again.'
+);
+
+/**
+ * Most emphasis delimiters (`*`, `_`, `~`) one paragraph, heading or cell may
+ * hand to marked's inline lexer (CONV-12). Its delimiter matching is quadratic
+ * in the number of *unmatched* delimiters in one inline run: `'*a '` × 10,000
+ * (30 KB) took 11.6 s, × 20,000 took 47 s, and a synchronous lexer call can
+ * neither be cancelled nor yield. 500 is ~30 ms in the worst case and far more
+ * emphasis than any real paragraph carries; past it, that one block's
+ * delimiters are escaped and drawn as the literal characters they are.
+ */
+export const MAX_INLINE_EMPHASIS_DELIMITERS = 500;
+
+export function literalEmphasisNote(count: number): string {
+  return tPlural(
+    '{count} paragraphs had more than ' +
+      '{max} emphasis markers (*, _ or ~), so ' +
+      'their emphasis was shown as plain characters instead of being ' +
+      'interpreted.',
+    count,
+    { max: MAX_INLINE_EMPHASIS_DELIMITERS }
+  );
+}
+
+function countEmphasisDelimiters(src: string): number {
+  let n = 0;
+  for (let i = 0; i < src.length; i++) {
+    const c = src.charCodeAt(i);
+    if (c === 42 /* * */ || c === 95 /* _ */ || c === 126 /* ~ */) n++;
+  }
+  return n;
+}
+
+/** How often (ms) a long conversion checks for cancel and reports progress. */
+const CHECKPOINT_INTERVAL_MS = 100;
+
+/**
+ * `marked.lexer`, split into its two phases so the slow one is interruptible:
+ * the block pass runs once, then each queued inline run is lexed separately,
+ * with a cancellation/progress checkpoint between runs and the pathological
+ * emphasis guard above applied per run. Same order and same result as
+ * `Lexer.lex` otherwise (marked 18: `blockTokens`, then the inline queue).
+ */
+async function lexMarkdown(
+  markdown: string,
+  job: JobHandle | undefined,
+  counts: { literalEmphasis: number }
+): Promise<ReturnType<typeof marked.lexer>> {
+  const lexer = new marked.Lexer();
+  const src = markdown.replace(/\r\n|\r/g, '\n');
+  lexer.blockTokens(src, lexer.tokens);
+  const queue = lexer.inlineQueue;
+  let last = Date.now();
+  for (let i = 0; i < queue.length; i++) {
+    if (Date.now() - last >= CHECKPOINT_INTERVAL_MS) {
+      await checkpoint(job, 0.1 + 0.4 * (i / queue.length), translate('Reading the Markdown'));
+      last = Date.now();
+    }
+    let inline = queue[i].src;
+    if (countEmphasisDelimiters(inline) > MAX_INLINE_EMPHASIS_DELIMITERS) {
+      inline = inline.replace(/[*_~]/g, '\\$&');
+      counts.literalEmphasis += 1;
+    }
+    lexer.inlineTokens(inline, queue[i].tokens);
+  }
+  lexer.inlineQueue = [];
+  return lexer.tokens;
+}
+
+/** URI schemes a link annotation may carry (CONV-11). */
+const SAFE_LINK_PROTOCOLS = new Set(['http:', 'https:', 'mailto:']);
+
+/**
+ * A link target as it can safely go into a PDF `/URI`, or `null` to drop it.
+ *
+ * `PDFString.of` writes each UTF-16 code unit as a byte, so a non-ASCII URL
+ * came out as mojibake (`https://例え.jp/パス` → `https://H.jp/Ñ¹`). `URL`'s
+ * serialisation is pure ASCII — punycoded host, percent-encoded path — which is
+ * exactly what the PDF spec asks a `/URI` to be. Only http(s) and mailto are
+ * kept: `javascript:` and `file:` were written verbatim before, and a relative
+ * link has nothing to resolve against in a standalone PDF.
+ */
+export function safeLinkUri(href: string | undefined): string | null {
+  if (!href) return null;
+  let url: URL;
+  try {
+    url = new URL(href.trim());
+  } catch {
+    return null;
+  }
+  if (!SAFE_LINK_PROTOCOLS.has(url.protocol)) return null;
+  return url.href;
+}
+
+/** The note for links {@link safeLinkUri} refused, or null when there were none. */
+export function droppedLinksNote(count: number): string | null {
+  if (count === 0) return null;
+  return tPlural(
+    '{count} links were kept as plain text only, because only ' +
+      'web (http/https) and email (mailto) links are made clickable in the PDF.',
+    count
+  );
+}
 
 const MARGIN = 50;
 const PAGE_WIDTH = 595.28; // A4
@@ -56,21 +178,27 @@ interface InlineToken {
  * text — CNV-05 never asked for styled inline runs, only for links to survive
  * as real links instead of literal `[text](url)` syntax).
  */
-function flattenInlineTokens(tokens: InlineToken[] | undefined, fallbackText: string): InlineRun[] {
+function flattenInlineTokens(
+  tokens: InlineToken[] | undefined,
+  fallbackText: string,
+  counts?: { omittedImages: number }
+): InlineRun[] {
   if (!tokens || tokens.length === 0) return fallbackText ? [{ text: fallbackText }] : [];
   const runs: InlineRun[] = [];
   for (const tok of tokens) {
     if (tok.type === 'link') {
-      const linkText = flattenInlineTokens(tok.tokens, tok.text ?? '')
+      const linkText = flattenInlineTokens(tok.tokens, tok.text ?? '', counts)
         .map(r => r.text)
         .join('');
       if (linkText) runs.push({ text: linkText, href: tok.href });
     } else if (tok.type === 'image') {
-      // No raster support here; keep the alt text so the reference isn't lost.
+      // No raster support here; keep the alt text so the reference isn't lost,
+      // and count it so the omission is reported rather than silent.
+      if (counts) counts.omittedImages += 1;
       if (tok.text) runs.push({ text: tok.text });
     } else if (tok.tokens) {
       // strong/em/del/... — recurse and drop the formatting itself.
-      runs.push(...flattenInlineTokens(tok.tokens, tok.text ?? ''));
+      runs.push(...flattenInlineTokens(tok.tokens, tok.text ?? '', counts));
     } else if (tok.type === 'br') {
       runs.push({ text: ' ' });
     } else if (tok.text || tok.raw) {
@@ -201,7 +329,11 @@ export function addLinkAnnotation(
   page: PDFPage,
   rect: [number, number, number, number],
   url: string
-): void {
+): boolean {
+  // Every link goes through the scheme allow-list and ASCII normalisation
+  // here, so neither caller can forget it (CONV-11). `false` = not added.
+  const uri = safeLinkUri(url);
+  if (uri === null) return false;
   const context = page.doc.context;
   const annot = context.obj({
     Type: 'Annot',
@@ -211,7 +343,7 @@ export function addLinkAnnotation(
     A: {
       Type: 'Action',
       S: 'URI',
-      URI: PDFString.of(url)
+      URI: PDFString.of(uri)
     }
   });
   const ref = context.register(annot) as PDFRef;
@@ -226,6 +358,7 @@ export function addLinkAnnotation(
       return context.obj([ref]);
     })()
   );
+  return true;
 }
 
 /** A rendered markdown document, plus whether anything had to be substituted. */
@@ -237,10 +370,44 @@ export interface MarkdownPdfResult {
    * worker cannot report each other's substitutions — see {@link SubstitutionTally}.
    */
   hadUnsupportedCharacters: boolean;
+  /**
+   * Things the user should know that did not stop the export: links drawn as
+   * plain text (CONV-11), images reduced to their alt text (CONV-12).
+   */
+  notes: string[];
 }
 
-export async function markdownToPdfBytes(markdown: string): Promise<MarkdownPdfResult> {
+/**
+ * Markdown → PDF bytes. `job` (optional) gets determinate progress and is
+ * checked for cancellation between inline runs while lexing and between
+ * blocks while drawing (CONV-12).
+ */
+export async function markdownToPdfBytes(
+  markdown: string,
+  job?: JobHandle
+): Promise<MarkdownPdfResult> {
+  if (markdown.length > MAX_MARKDOWN_CHARS)
+    throw unsupported(translate(MARKDOWN_TOO_LARGE_MESSAGE));
+  try {
+    return await renderMarkdown(markdown, job);
+  } catch (err) {
+    // marked's lexer and the inline flattener both recurse per nesting level,
+    // so 5,000 `>` overflow the stack. That surfaced as a raw "Maximum call
+    // stack size exceeded"; it is a property of the input, so say so (CONV-12).
+    if (err instanceof RangeError && /call stack/i.test(err.message)) {
+      throw unsupported(translate(MARKDOWN_TOO_NESTED_MESSAGE));
+    }
+    throw err;
+  }
+}
+
+async function renderMarkdown(
+  markdown: string,
+  job: JobHandle | undefined
+): Promise<MarkdownPdfResult> {
+  await checkpoint(job, 0, translate('Reading the Markdown'));
   const tally = newSubstitutionTally();
+  const counts = { droppedLinks: 0, omittedImages: 0, literalEmphasis: 0 };
   const doc = await PDFDocument.create();
   const fontNormal = await doc.embedFont(StandardFonts.Helvetica);
   const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
@@ -285,8 +452,8 @@ export async function markdownToPdfBytes(markdown: string): Promise<MarkdownPdfR
         i++;
         if (i < words.length && words[i].href === href) cursorX += spaceWidth;
       }
-      if (href) {
-        addLinkAnnotation(page, [groupStartX, y - 2, cursorX, y + size], href);
+      if (href && !addLinkAnnotation(page, [groupStartX, y - 2, cursorX, y + size], href)) {
+        counts.droppedLinks += 1;
       }
       if (i < words.length) cursorX += spaceWidth;
     }
@@ -312,7 +479,7 @@ export async function markdownToPdfBytes(markdown: string): Promise<MarkdownPdfR
     return wordWrapPlain(clean, font, size, maxWidth);
   };
 
-  const tokens = marked.lexer(markdown) as unknown as (InlineToken & {
+  const tokens = (await lexMarkdown(markdown, job, counts)) as unknown as (InlineToken & {
     type: string;
     depth?: number;
     ordered?: boolean;
@@ -321,14 +488,29 @@ export async function markdownToPdfBytes(markdown: string): Promise<MarkdownPdfR
     rows?: { tokens?: InlineToken[]; text: string }[][];
   })[];
 
-  for (const token of tokens) {
+  await checkpoint(job, 0.5, translate('Laying out the PDF'));
+  let lastCheck = Date.now();
+  for (let t = 0; t < tokens.length; t++) {
+    const token = tokens[t];
+    if (Date.now() - lastCheck >= CHECKPOINT_INTERVAL_MS) {
+      await checkpoint(job, 0.5 + 0.4 * (t / tokens.length), translate('Laying out the PDF'));
+      lastCheck = Date.now();
+    }
     if (token.type === 'heading') {
       advanceY(10);
       const size = token.depth === 1 ? 24 : token.depth === 2 ? 18 : 14;
-      drawInlineWrapped(flattenInlineTokens(token.tokens, token.text ?? ''), state.fontBold, size);
+      drawInlineWrapped(
+        flattenInlineTokens(token.tokens, token.text ?? '', counts),
+        state.fontBold,
+        size
+      );
       advanceY(5);
     } else if (token.type === 'paragraph') {
-      drawInlineWrapped(flattenInlineTokens(token.tokens, token.text ?? ''), state.fontNormal, 12);
+      drawInlineWrapped(
+        flattenInlineTokens(token.tokens, token.text ?? '', counts),
+        state.fontNormal,
+        12
+      );
       advanceY(8);
     } else if (token.type === 'space') {
       // Ignored
@@ -336,7 +518,7 @@ export async function markdownToPdfBytes(markdown: string): Promise<MarkdownPdfR
       const isOrdered = token.ordered;
       (token.items ?? []).forEach((item, index) => {
         const bullet = isOrdered ? `${index + 1}. ` : '- ';
-        const runs = flattenInlineTokens(item.tokens, item.text ?? '');
+        const runs = flattenInlineTokens(item.tokens, item.text ?? '', counts);
         if (runs.length > 0) runs[0] = { ...runs[0], text: bullet + runs[0].text };
         else runs.push({ text: bullet });
         drawInlineWrapped(runs, state.fontNormal, 12, 15);
@@ -363,7 +545,7 @@ export async function markdownToPdfBytes(markdown: string): Promise<MarkdownPdfR
       const drawRow = (row: { tokens?: InlineToken[]; text: string }[], isHeader: boolean) => {
         const font = isHeader ? state.fontBold : state.fontNormal;
         const cellLines = row.map(cell => {
-          const plain = flattenInlineTokens(cell.tokens, cell.text ?? '')
+          const plain = flattenInlineTokens(cell.tokens, cell.text ?? '', counts)
             .map(r => r.text)
             .join('');
           return wrapCellLines(plain, font, 10, colWidth - cellPadding * 2);
@@ -429,7 +611,23 @@ export async function markdownToPdfBytes(markdown: string): Promise<MarkdownPdfR
     }
   }
 
-  return { bytes: await doc.save(), hadUnsupportedCharacters: tally.substituted };
+  const notes: string[] = [];
+  const linkNote = droppedLinksNote(counts.droppedLinks);
+  if (linkNote) notes.push(linkNote);
+  if (counts.omittedImages > 0) {
+    notes.push(
+      tPlural(
+        '{count} images were left out ' +
+          '(Markdown images are not embedded); the alt text is shown in their place.',
+        counts.omittedImages
+      )
+    );
+  }
+  if (counts.literalEmphasis > 0) notes.push(literalEmphasisNote(counts.literalEmphasis));
+  await checkpoint(job, 0.9, translate('Saving the PDF'));
+  const bytes = await doc.save();
+  await checkpoint(job, 1, translate('Done'));
+  return { bytes, hadUnsupportedCharacters: tally.substituted, notes };
 }
 
 /** The original flat-string word-wrap, kept for table cells and code lines. */

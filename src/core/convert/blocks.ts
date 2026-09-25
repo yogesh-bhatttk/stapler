@@ -26,6 +26,7 @@
 
 import { layoutLines, type TextRun } from '../text-layout';
 import { findTableRegions } from './table-regions';
+import { tPlural, translate } from '../i18n';
 // Type-only: `process.worker.ts` calls `Comlink.expose` at import time, so this
 // must never become a runtime import.
 import type { ExtractedImageEntry } from '../workers/process.worker';
@@ -244,10 +245,14 @@ export function attachImageBlocks(
   let count = 0;
 
   for (const entry of entries) {
-    const where = `Page ${entry.pageIndex + 1}`;
+    const page = entry.pageIndex + 1;
 
     if (entry.status === 'skipped' || !entry.fileName) {
-      skipped.push(`${where}: ${entry.note ?? 'an image could not be read and was left out.'}`);
+      skipped.push(
+        entry.note !== undefined
+          ? translate('Page {page}: {reason}', { page, reason: entry.note })
+          : translate('Page {page}: an image could not be read and was left out.', { page })
+      );
       continue;
     }
 
@@ -258,8 +263,11 @@ export function attachImageBlocks(
       // decoding a format pdf.js itself often cannot decode.
       const ext = entry.fileName.replace(/^.*\./, '');
       skipped.push(
-        `${where}: an image in ${ext} format cannot be embedded in a Word document. It was ` +
-          'left out; the PDF still has it.'
+        translate(
+          'Page {page}: an image in {ext} format cannot be embedded in a Word document. It was ' +
+            'left out; the PDF still has it.',
+          { page, ext }
+        )
       );
       continue;
     }
@@ -267,15 +275,17 @@ export function attachImageBlocks(
     const data = files[entry.fileName];
     const size = fitImage(entry.width, entry.height);
     if (!data || data.length === 0 || !size) {
-      skipped.push(`${where}: an image could not be read and was left out.`);
+      skipped.push(
+        translate('Page {page}: an image could not be read and was left out.', { page })
+      );
       continue;
     }
 
-    const page = byPage.get(entry.pageIndex);
+    const target = byPage.get(entry.pageIndex);
     // An image on a page the caller did not ask to convert is not an error.
-    if (!page) continue;
+    if (!target) continue;
 
-    page.blocks.push({
+    target.blocks.push({
       kind: 'image',
       data,
       format,
@@ -289,8 +299,11 @@ export function attachImageBlocks(
       // The colour image is embedded; its transparency is a separate PDF object
       // that neither a JPEG nor this writer carries across.
       skipped.push(
-        `${where}: an image's transparency mask was not carried into Word, so it appears ` +
-          'fully opaque.'
+        translate(
+          "Page {page}: an image's transparency mask was not carried into Word, so it appears " +
+            'fully opaque.',
+          { page }
+        )
       );
     }
   }
@@ -336,6 +349,16 @@ function elide(text: string): string {
     : `${text.slice(0, PREVIEW_TEXT_LIMIT - 1).trimEnd()}…`;
 }
 
+/** `Table, 4 rows × 3 columns: <first row>` — the preview line for a table block. */
+function tableSummary(rows: readonly string[][], columns: number): string {
+  const size = tPlural('Table, {count} rows × {columns}', rows.length, {
+    columns: tPlural('{count} columns', columns)
+  });
+  return rows[0]
+    ? translate('{table}: {firstRow}', { table: size, firstRow: elide(rows[0].join(' | ')) })
+    : size;
+}
+
 /** Describes the model that was just written, block by block, in output order. */
 export function previewOutline(pages: readonly DocxPage[]): DocxPreviewItem[] {
   const out: DocxPreviewItem[] = [];
@@ -365,10 +388,7 @@ export function previewOutline(pages: readonly DocxPage[]): DocxPreviewItem[] {
             // The first row is shown because a mis-clustered table is almost
             // always visibly wrong in its header, which is the whole point of
             // making the preview mandatory.
-            text:
-              `Table, ${block.rows.length} row${block.rows.length === 1 ? '' : 's'} × ` +
-              `${columns} column${columns === 1 ? '' : 's'}` +
-              (block.rows[0] ? `: ${elide(block.rows[0].join(' | '))}` : '')
+            text: tableSummary(block.rows, columns)
           });
           break;
         }
@@ -376,7 +396,10 @@ export function previewOutline(pages: readonly DocxPage[]): DocxPreviewItem[] {
           out.push({
             pageIndex: page.pageIndex,
             kind: 'image',
-            text: `Image, ${block.width} × ${block.height} px as placed`
+            text: translate('Image, {width} × {height} px as placed', {
+              width: block.width,
+              height: block.height
+            })
           });
           break;
       }

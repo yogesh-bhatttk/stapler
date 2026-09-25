@@ -37,6 +37,7 @@ import QRCode from 'qrcode';
 import JsBarcode from 'jsbarcode';
 import { encodePng } from './png';
 import { internal } from './errors';
+import { translate } from './i18n';
 
 export type BarcodeKind = 'qr' | 'code128';
 
@@ -70,7 +71,7 @@ function fillRect(
 
 /** OPS-18 — encodes `text` as a QR raster, ready to embed and stamp onto a page. */
 export function generateQrRaster(text: string): BarcodeRaster {
-  if (!text.trim()) throw internal('There is no text to encode.');
+  if (!text.trim()) throw internal(translate('There is no text to encode.'));
   let qr: ReturnType<typeof QRCode.create>;
   try {
     qr = QRCode.create(text, { errorCorrectionLevel: 'M' });
@@ -80,7 +81,9 @@ export function generateQrRaster(text: string): BarcodeRaster {
     // surfaced with a clear, actionable message instead of that library
     // internal reaching the user as-is.
     throw internal(
-      `This text is too long to encode as a QR code: ${err instanceof Error ? err.message : String(err)}`
+      translate('This text is too long to encode as a QR code: {message}', {
+        message: err instanceof Error ? err.message : String(err)
+      })
     );
   }
   const size = qr.modules.size;
@@ -132,11 +135,11 @@ type JsBarcodeObjectTarget = (
  * doc comment above for why this is not rasterised the way QR is.
  */
 export function encodeCode128Bars(text: string): string {
-  if (!text.trim()) throw internal('There is no text to encode.');
+  if (!text.trim()) throw internal(translate('There is no text to encode.'));
   const target: { encodings?: { data: string }[] } = {};
   (JsBarcode as unknown as JsBarcodeObjectTarget)(target, text, { format: 'CODE128' });
   const encoding = target.encodings?.[0];
-  if (!encoding) throw internal('Could not encode this text as a CODE128 barcode.');
+  if (!encoding) throw internal(translate('Could not encode this text as a CODE128 barcode.'));
   return encoding.data;
 }
 

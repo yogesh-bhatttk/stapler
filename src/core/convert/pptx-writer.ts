@@ -55,8 +55,10 @@
  */
 
 import { unsupported } from '../errors';
+import { tKey, translate } from '../i18n';
 import { checkpoint, type JobHandle } from '../workers/protocol';
 import { isRtlRunGroup } from './text-direction';
+import { stripInvalidXmlChars as xmlSafe } from './xml-chars';
 import type { PlannedSlide, SlidePlan } from './slides';
 // Type-only, and therefore erased: this file's single *runtime* reference to
 // `pptxgenjs` is the `await import(...)` below, which is what keeps the library
@@ -75,8 +77,9 @@ const POINTS_PER_INCH = 72;
 const MIN_EXTENT_INCHES = 0.02;
 
 /** Why a deck with no slides is refused rather than written. */
-export const NO_SLIDES_MESSAGE =
-  'There are no pages to convert, so there would be no slides. Nothing was written.';
+export const NO_SLIDES_MESSAGE = tKey(
+  'There are no pages to convert, so there would be no slides. Nothing was written.'
+);
 
 function inches(points: number): number {
   // Six decimals is ~0.9 EMU, well below PowerPoint's own resolution, and keeps
@@ -126,15 +129,18 @@ export async function buildPptx(
   options: PptxBuildOptions,
   job?: JobHandle
 ): Promise<Uint8Array> {
-  if (plan.slides.length === 0) throw unsupported(NO_SLIDES_MESSAGE);
+  if (plan.slides.length === 0) throw unsupported(translate(NO_SLIDES_MESSAGE));
 
-  await checkpoint(job, 0, 'Loading the PowerPoint writer');
+  await checkpoint(job, 0, translate('Loading the PowerPoint writer'));
   // The only reference to `pptxgenjs` in the whole source tree, and it is
   // dynamic — see the module comment.
   const { default: PptxGenJS } = await import('pptxgenjs');
 
   const deck = new PptxGenJS();
-  deck.title = options.title;
+  // pptxgenjs escapes `& < >` but not the control characters XML 1.0
+  // forbids; one of those in any part makes PowerPoint demand a repair that can
+  // drop content (CONV-3). Title, alt text and every run go through `xmlSafe`.
+  deck.title = xmlSafe(options.title);
   // One custom layout at the source page's own size, rather than one of
   // PowerPoint's 4:3 / 16:9 presets: a letter-sized page force-fitted to 16:9
   // would letterbox every slide in the deck, which is the opposite of "a
@@ -162,12 +168,12 @@ export async function buildPptx(
     await checkpoint(
       job,
       i / plan.slides.length,
-      `Writing slide ${i + 1} of ${plan.slides.length}`
+      translate('Writing slide {n} of {total}', { n: i + 1, total: plan.slides.length })
     );
     addSlide(deck, planned, options.images, encoded);
   }
 
-  await checkpoint(job, 0.85, 'Packaging the presentation');
+  await checkpoint(job, 0.85, translate('Packaging the presentation'));
   // `uint8array` rather than `arraybuffer`: JSZip supports both, and this is the
   // shape the Comlink transfer and `platform.saveFileAs` both want.
   //
@@ -184,14 +190,16 @@ export async function buildPptx(
     // Defensive: a library change that started returning a Blob here would
     // otherwise reach `saveFileAs` as an unwritable value.
     throw unsupported(
-      'The PowerPoint writer returned an unexpected result, so nothing was written. Your PDF is ' +
-        'untouched.'
+      translate(
+        'The PowerPoint writer returned an unexpected result, so nothing was written. Your PDF is ' +
+          'untouched.'
+      )
     );
   }
 
-  await checkpoint(job, 0.95, 'Removing duplicated images');
+  await checkpoint(job, 0.95, translate('Removing duplicated images'));
   const deduped = await dedupeMediaParts(written);
-  await checkpoint(job, 1, 'Packaging the presentation');
+  await checkpoint(job, 1, translate('Packaging the presentation'));
   return deduped;
 }
 
@@ -328,7 +336,7 @@ function addSlide(
       w: extent(image.width),
       h: extent(image.height),
       ...(image.rotate ? { rotate: image.rotate } : {}),
-      altText: image.altText
+      altText: xmlSafe(image.altText)
     });
   }
 
@@ -355,7 +363,7 @@ function addSlide(
     const rtlMode = isRtlRunGroup(box.runs.map(run => run.text));
     slide.addText(
       box.runs.map(run => ({
-        text: run.text,
+        text: xmlSafe(run.text),
         options: { bold: run.bold, italic: run.italic, ...(rtlMode ? { rtlMode: true } : {}) }
       })),
       {

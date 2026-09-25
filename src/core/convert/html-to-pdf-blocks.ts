@@ -33,6 +33,7 @@
 // Type-only: `blocks.ts` pulls in `text-layout` and OCR-03's table clustering at
 // runtime, and neither is wanted in the process worker just to name a run type.
 import type { DocxRun } from './blocks';
+import { tKey, translate } from '../i18n';
 
 /**
  * A run of text with the attributes this engine can actually draw.
@@ -419,10 +420,14 @@ export const MAX_LIST_DEPTH = 8;
  * and said so". Silently returning early instead (which is what this used to do)
  * deleted every item below level 8 with nothing anywhere to say so.
  */
-export const DEEP_LIST_NOTE =
-  `A list nested more than ${MAX_LIST_DEPTH} levels deep was flattened: items below level ` +
-  `${MAX_LIST_DEPTH} are drawn at level ${MAX_LIST_DEPTH}. All of their text is in the PDF — ` +
-  'only the extra indentation is not.';
+export const DEEP_LIST_NOTE_KEY = tKey(
+  'A list nested more than {depth} levels deep was flattened: items below level ' +
+    '{depth} are drawn at level {depth}. All of their text is in the PDF — ' +
+    'only the extra indentation is not.'
+);
+
+/** {@link DEEP_LIST_NOTE_KEY} in English with the depth filled in; the note itself is translated. */
+export const DEEP_LIST_NOTE = DEEP_LIST_NOTE_KEY.replace(/\{depth\}/g, String(MAX_LIST_DEPTH));
 
 /**
  * Collapses whitespace, merges adjacent runs that share a style, and trims the
@@ -490,15 +495,17 @@ function imageFormat(mime: string): PdfImageFormat | null {
 
 function describeImageRefusal(src: string, mime: string | null): string {
   if (mime === null) {
-    return (
+    return translate(
       'An image was left out: it is not stored inside the document as data ' +
-      `(${src.slice(0, 40)}…), and this converter never fetches anything.`
+        '({source}…), and this converter never fetches anything.',
+      { source: src.slice(0, 40) }
     );
   }
   const kind = mime.replace(/^image\//, '').toUpperCase();
-  return (
-    `An image in ${kind} format was left out: a PDF can embed PNG and JPEG directly, and ` +
-    're-encoding anything else would mean decoding a format this build carries no decoder for.'
+  return translate(
+    'An image in {format} format was left out: a PDF can embed PNG and JPEG directly, and ' +
+      're-encoding anything else would mean decoding a format this build carries no decoder for.',
+    { format: kind }
   );
 }
 
@@ -593,7 +600,7 @@ function cellRuns(cell: ElementNode, notes: string[]): StyledRun[] {
   if (paragraphs.length === 0) {
     const { runs, images } = inlineContent(cell.children, { bold: false, italic: false }, notes);
     if (images.length > 0) {
-      notes.push('An image inside a table cell was left out: cells hold text only.');
+      notes.push(translate('An image inside a table cell was left out: cells hold text only.'));
     }
     return runs;
   }
@@ -605,7 +612,7 @@ function cellRuns(cell: ElementNode, notes: string[]): StyledRun[] {
       notes
     );
     if (images.length > 0) {
-      notes.push('An image inside a table cell was left out: cells hold text only.');
+      notes.push(translate('An image inside a table cell was left out: cells hold text only.'));
     }
     if (runs.length === 0) continue;
     if (collected.length > 0) collected.push({ text: ' ', bold: false, italic: false });
@@ -646,7 +653,7 @@ function listBlocks(node: ElementNode, depth: number, notes: string[]): LayoutBl
     // reachable one, since Word offers nine list levels to this engine's eight.
     const innerDepth = Math.min(depth + 1, MAX_LIST_DEPTH - 1);
     if (nested.length > 0 && innerDepth === depth && !notes.includes(DEEP_LIST_NOTE)) {
-      notes.push(DEEP_LIST_NOTE);
+      notes.push(translate(DEEP_LIST_NOTE_KEY, { depth: MAX_LIST_DEPTH }));
     }
     for (const inner of nested) blocks.push(...listBlocks(inner, innerDepth, notes));
   }

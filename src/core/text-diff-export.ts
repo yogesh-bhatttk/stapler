@@ -1,9 +1,10 @@
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
-import { diffText, type DiffChunk } from './diff';
+import type { DiffChunk } from './diff';
 import { internal } from './errors';
-import { renderWorker } from './workers';
+import { cvWorker, renderWorker } from './workers';
 import { type StaplerDoc } from './store';
 import { composeDocument } from './operations';
+import { newSubstitutionTally, sanitizeWinAnsiText } from './markdown-to-pdf';
 import {
   DOC_PAGE_RGB,
   DOC_REDACT_RGB,
@@ -101,7 +102,29 @@ function wrapTokens(
   return lines;
 }
 
-export async function exportTextDiff(docA: StaplerDoc, docB: StaplerDoc): Promise<Uint8Array> {
+/** The warning raised when the report had to substitute characters (CONV-13). */
+export const TEXT_DIFF_SUBSTITUTION_WARNING =
+  'Some characters in these documents (for example CJK, Cyrillic, Arabic or Hebrew) cannot be ' +
+  'drawn with the report\'s built-in Latin font and were replaced with "?". Check the affected ' +
+  'passages against the documents themselves.';
+
+export interface ExportTextDiffOptions {
+  /**
+   * Called once when the report substituted any character. pdf-lib's standard
+   * fonts silently turn every non-WinAnsi code point into "?" and never throw,
+   * so without this a diff of two Cyrillic PDFs was a page of "????" with
+   * insert/delete highlights and nothing said (CONV-13).
+   */
+  onWarning?: (message: string) => void;
+}
+
+export async function exportTextDiff(
+  docA: StaplerDoc,
+  docB: StaplerDoc,
+  options: ExportTextDiffOptions = {}
+): Promise<Uint8Array> {
+  const tally = newSubstitutionTally();
+  const safe = (text: string) => sanitizeWinAnsiText(text, tally);
   const pdfDoc = await PDFDocument.create();
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const boldFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
@@ -144,7 +167,12 @@ export async function exportTextDiff(docA: StaplerDoc, docB: StaplerDoc): Promis
         fullCompareText += (await api.extractText(handleB, i, 'text')) + '\n\n';
       }
 
-      const chunks = diffText(fullBaseText, fullCompareText);
+      // Sanitised before diffing and measuring, so the widths the wrap uses are
+      // the widths of the glyphs actually drawn.
+      // CONV-14: in the cv worker — a whole-document diff is the largest case.
+      const chunks = await cvWorker.lease(worker =>
+        worker.diffText(safe(fullBaseText), safe(fullCompareText))
+      );
       const diffLines = wrapTokens(chunks, font);
 
       const lineYStart = PAGE_HEIGHT - PAGE_MARGIN - HEADER_SIZE - 22;
@@ -156,7 +184,7 @@ export async function exportTextDiff(docA: StaplerDoc, docB: StaplerDoc): Promis
       while (currentLineIdx < diffLines.length || pageNum === 1) {
         const page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
         const title = `Text Diff - Page ${pageNum}`;
-        const compareLabel = `${docA.name} vs ${docB.name}`;
+        const compareLabel = safe(`${docA.name} vs ${docB.name}`);
 
         page.drawText(title, {
           x: PAGE_MARGIN,
@@ -215,5 +243,6 @@ export async function exportTextDiff(docA: StaplerDoc, docB: StaplerDoc): Promis
     }
   });
 
+  if (tally.substituted) options.onWarning?.(TEXT_DIFF_SUBSTITUTION_WARNING);
   return pdfDoc.save();
 }

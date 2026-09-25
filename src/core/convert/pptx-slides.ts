@@ -54,6 +54,8 @@
  */
 
 import { unsupported } from '../errors';
+import { tKey } from '../i18n/key';
+import { tPlural, translate } from '../i18n';
 import { checkpoint, subJob, type JobHandle } from '../workers/protocol';
 import {
   readPptx,
@@ -129,11 +131,12 @@ const INDENT_PER_LEVEL = 18;
  * Messages
  * ------------------------------------------------------------------ */
 
-export const PPTX_EMPTY_DECK_MESSAGE =
+export const PPTX_EMPTY_DECK_MESSAGE = tKey(
   'Nothing in this presentation could be drawn onto a page: every slide came back with no text, ' +
-  'no picture and no table. That usually means its text lives in placeholders inherited from a ' +
-  'slide layout or master, which this converter does not read. Nothing was written, and your ' +
-  '.pptx is untouched.';
+    'no picture and no table. That usually means its text lives in placeholders inherited from a ' +
+    'slide layout or master, which this converter does not read. Nothing was written, and your ' +
+    '.pptx is untouched.'
+);
 
 /**
  * The same refusal, when the converter already knows a *better* reason.
@@ -149,11 +152,12 @@ export const PPTX_EMPTY_DECK_MESSAGE =
  * are none.
  */
 export function blankDeckMessage(reasons: readonly string[]): string {
-  if (reasons.length === 0) return PPTX_EMPTY_DECK_MESSAGE;
-  return (
+  if (reasons.length === 0) return translate(PPTX_EMPTY_DECK_MESSAGE);
+  return translate(
     'Nothing in this presentation could be drawn onto a page, and the reason is not that its ' +
-    `text lives in a slide layout: ${reasons.join(' ')} Nothing was written, and your .pptx is ` +
-    'untouched.'
+      'text lives in a slide layout: {reasons} Nothing was written, and your .pptx is ' +
+      'untouched.',
+    { reasons: reasons.join(' ') }
   );
 }
 
@@ -166,85 +170,123 @@ export function blankDeckMessage(reasons: readonly string[]): string {
  * the ticket's own requirement — transitions, animations and speaker notes are
  * out of scope, and out of scope has to be *said*, not left to be discovered.
  */
-export const PPT_LIMITATIONS: readonly string[] = [
-  'Transitions, animations and speaker notes are not reproduced. They are out of scope for ' +
-    'this converter, not dropped by accident — a PDF page has no notion of any of them.',
-  'Slide layouts and masters are not read. Text typed into a placeholder is converted; a title ' +
-    'or footer that only the layout supplies is not, and a slide made entirely of those comes ' +
-    'out blank. A placeholder that also takes its *box* from the layout is drawn from its ' +
-    'corner across the rest of the slide, so its text is all present but wraps differently.',
-  'Fonts are substituted. Everything is drawn in Helvetica at the size the deck stated, so line ' +
-    'widths differ from PowerPoint’s and a line can overrun the box it was measured for.',
-  'A run that states no size is drawn at ' +
-    `${DEFAULT_FONT_POINTS}pt, PowerPoint’s default body size. The real size would come from ` +
-    'the layout’s list style, which is not read.',
-  'All text is black. Run colours, highlights and theme colours are not read, so white text on ' +
-    'a dark shape arrives as black text.',
-  'Shape fills, outlines, shadows and slide backgrounds are not drawn — only text, pictures and ' +
-    'table grids. A coloured banner behind a title is absent.',
-  'Rotated and flipped shapes are drawn upright and unflipped, at their stated position and ' +
-    'size. A flipped *group* also mirrors where its children sit, and that part is honoured — ' +
-    'they are drawn at their mirrored positions. A rotated group is not: its children are drawn ' +
-    'where the group’s unrotated rectangle puts them, which can be well away from where ' +
-    'PowerPoint shows them. Every one of these is counted and reported with the conversion.',
-  'Charts and SmartArt are not drawn. The text in their own parts — a chart’s title, series ' +
-    'names and category labels; a diagram’s node text — is read and drawn as plain text where ' +
-    'the frame sits, with no axes, bars, connectors or layout. An embedded object (a spreadsheet, ' +
-    'an equation) contributes nothing at all. Each frame is named, per slide, in the ' +
-    'conversion’s own report.',
-  'Numbered bullets lose their numbers (PowerPoint stores the numbering scheme, not the ' +
-    'numbers). Literal bullet characters are kept.',
-  'Video, audio, hyperlinks, comments and slide numbers that come from a placeholder are not ' +
-    'carried across.'
+export const PPT_LIMITATION_KEYS: readonly string[] = [
+  tKey(
+    'Transitions, animations and speaker notes are not reproduced. They are out of scope for ' +
+      'this converter, not dropped by accident — a PDF page has no notion of any of them.'
+  ),
+  tKey(
+    'Slide layouts and masters are not read. Text typed into a placeholder is converted; a title ' +
+      'or footer that only the layout supplies is not, and a slide made entirely of those comes ' +
+      'out blank. A placeholder that also takes its *box* from the layout is drawn from its ' +
+      'corner across the rest of the slide, so its text is all present but wraps differently.'
+  ),
+  tKey(
+    'Fonts are substituted. Everything is drawn in Helvetica at the size the deck stated, so line ' +
+      'widths differ from PowerPoint’s and a line can overrun the box it was measured for.'
+  ),
+  tKey(
+    'A run that states no size is drawn at ' +
+      '{points}pt, PowerPoint’s default body size. The real size would come from ' +
+      'the layout’s list style, which is not read.'
+  ),
+  tKey(
+    'All text is black. Run colours, highlights and theme colours are not read, so white text on ' +
+      'a dark shape arrives as black text.'
+  ),
+  tKey(
+    'Shape fills, outlines, shadows and slide backgrounds are not drawn — only text, pictures and ' +
+      'table grids. A coloured banner behind a title is absent.'
+  ),
+  tKey(
+    'Rotated and flipped shapes are drawn upright and unflipped, at their stated position and ' +
+      'size. A flipped *group* also mirrors where its children sit, and that part is honoured — ' +
+      'they are drawn at their mirrored positions. A rotated group is not: its children are drawn ' +
+      'where the group’s unrotated rectangle puts them, which can be well away from where ' +
+      'PowerPoint shows them. Every one of these is counted and reported with the conversion.'
+  ),
+  tKey(
+    'Charts and SmartArt are not drawn. The text in their own parts — a chart’s title, series ' +
+      'names and category labels; a diagram’s node text — is read and drawn as plain text where ' +
+      'the frame sits, with no axes, bars, connectors or layout. An embedded object (a spreadsheet, ' +
+      'an equation) contributes nothing at all. Each frame is named, per slide, in the ' +
+      'conversion’s own report.'
+  ),
+  tKey(
+    'Numbered bullets lose their numbers (PowerPoint stores the numbering scheme, not the ' +
+      'numbers). Literal bullet characters are kept.'
+  ),
+  tKey(
+    'Video, audio, hyperlinks, comments and slide numbers that come from a placeholder are not ' +
+      'carried across.'
+  )
 ];
+
+/** Values for the `{placeholders}` in {@link PPT_LIMITATION_KEYS}. */
+export const PPT_LIMITATION_PARAMS = { points: DEFAULT_FONT_POINTS } as const;
+
+/** {@link PPT_LIMITATION_KEYS} in English, placeholders filled in. */
+export const PPT_LIMITATIONS: readonly string[] = PPT_LIMITATION_KEYS.map(key =>
+  key.replace('{points}', String(DEFAULT_FONT_POINTS))
+);
 
 /* ------------------------------------------------------------------ *
  * Notes
  * ------------------------------------------------------------------ */
 
 export function slideCapNote(total: number): string {
-  return (
-    `This presentation has ${total} slides and the first ${MAX_SLIDES} were converted. Slides ` +
-    `${MAX_SLIDES + 1}–${total} are not in the PDF.`
+  return translate(
+    'This presentation has {total} slides and the first {max} were converted. Slides ' +
+      '{first}–{total} are not in the PDF.',
+    { total, max: MAX_SLIDES, first: MAX_SLIDES + 1 }
   );
 }
 
 export function slideSizeNote(): string {
-  return (
+  return translate(
     'This presentation does not state a slide size, so the pages are ' +
-    `${DEFAULT_SLIDE_POINTS.width / 72} × ${DEFAULT_SLIDE_POINTS.height / 72} inches — ` +
-    'PowerPoint’s own default. Everything on each slide is drawn at the position the file ' +
-    'states for it, so a shape outside that rectangle will be off the page.'
+      '{width} × {height} inches — ' +
+      'PowerPoint’s own default. Everything on each slide is drawn at the position the file ' +
+      'states for it, so a shape outside that rectangle will be off the page.',
+    {
+      width: DEFAULT_SLIDE_POINTS.width / 72,
+      height: DEFAULT_SLIDE_POINTS.height / 72
+    }
   );
 }
 
 export function itemCapNote(slideNumber: number, dropped: number): string {
-  return (
-    `Slide ${slideNumber} has more than ${MAX_ITEMS_PER_SLIDE} shapes; ${dropped} of them ` +
-    `${dropped === 1 ? 'is' : 'are'} not in the PDF.`
+  return tPlural(
+    'Slide {slide} has more than {max} shapes; {count} of them are not in the PDF.',
+    dropped,
+    { slide: slideNumber, max: MAX_ITEMS_PER_SLIDE }
   );
 }
 
 export function defaultSizeNote(count: number): string {
-  return (
-    `${count} text run${count === 1 ? '' : 's'} state no font size, so ${count === 1 ? 'it was' : 'they were'} ` +
-    `drawn at ${DEFAULT_FONT_POINTS}pt. The real size lives in a slide layout, which is not read.`
+  return tPlural(
+    '{count} text runs state no font size, so they were ' +
+      'drawn at {points}pt. The real size lives in a slide layout, which is not read.',
+    count,
+    { points: DEFAULT_FONT_POINTS }
   );
 }
 
 export function unpositionedNote(count: number): string {
-  return (
-    `${count} shape${count === 1 ? '' : 's'} state no size of ${count === 1 ? 'its' : 'their'} ` +
-    'own — their box comes from the slide layout, which is not read — so they were drawn from ' +
-    'their stated corner across the rest of the slide. Their text is all present; its wrapping ' +
-    'and its position are approximate.'
+  return tPlural(
+    '{count} shapes state no size of their ' +
+      'own — their box comes from the slide layout, which is not read — so they were drawn from ' +
+      'their stated corner across the rest of the slide. Their text is all present; its wrapping ' +
+      'and its position are approximate.',
+    count
   );
 }
 
 export function rotatedNote(count: number): string {
-  return (
-    `${count} shape${count === 1 ? '' : 's'} ${count === 1 ? 'is' : 'are'} rotated or flipped in ` +
-    'the deck and were drawn upright at the same position and size.'
+  return tPlural(
+    '{count} shapes are rotated or flipped in ' +
+      'the deck and were drawn upright at the same position and size.',
+    count
   );
 }
 
@@ -260,22 +302,15 @@ export function rotatedNote(count: number): string {
  * would be false for these.
  */
 export function rotatedGroupNote(count: number): string {
-  return (
-    `${count} shape${count === 1 ? '' : 's'} sit${count === 1 ? 's' : ''} inside a rotated group. ` +
-    'The group’s rotation was not applied, so ' +
-    `${count === 1 ? 'it is' : 'they are'} drawn where the group’s unrotated rectangle puts ` +
-    `${count === 1 ? 'it' : 'them'} — which can be well away from where PowerPoint shows ` +
-    `${count === 1 ? 'it' : 'them'}.`
+  return tPlural(
+    '{count} shapes sit inside a rotated group. ' +
+      'The group’s rotation was not applied, so ' +
+      'they are drawn where the group’s unrotated rectangle puts ' +
+      'them — which can be well away from where PowerPoint shows ' +
+      'them.',
+    count
   );
 }
-
-/** What to call a graphic frame in a note the user reads. */
-const GRAPHIC_NAMES: Record<PptxGraphicKind, string> = {
-  chart: 'a chart',
-  diagram: 'a SmartArt diagram',
-  ole: 'an embedded object',
-  unknown: 'an embedded graphic'
-};
 
 /** One chart, diagram or embedded object, and what became of its content. */
 export interface GraphicFrameReport {
@@ -288,6 +323,82 @@ export interface GraphicFrameReport {
 }
 
 /**
+ * The note for a frame none of whose text could be read, one whole sentence
+ * per kind of frame (AUDIT UI-8: the kind used to be a noun spliced into a
+ * shared sentence, which no other language can inflect).
+ */
+function unreadGraphicNote(kind: PptxGraphicKind, slide: number): string {
+  switch (kind) {
+    case 'chart':
+      return translate(
+        'Slide {slide} holds a chart, which is not drawn: no shape, axis or connector of it is ' +
+          'in the PDF, and no text could be read out of its own part either, so nothing on the ' +
+          'page stands for it.',
+        { slide }
+      );
+    case 'diagram':
+      return translate(
+        'Slide {slide} holds a SmartArt diagram, which is not drawn: no shape, axis or ' +
+          'connector of it is in the PDF, and no text could be read out of its own part either, ' +
+          'so nothing on the page stands for it.',
+        { slide }
+      );
+    case 'ole':
+      return translate(
+        'Slide {slide} holds an embedded object, which is not drawn: no shape, axis or ' +
+          'connector of it is in the PDF, and no text could be read out of its own part either, ' +
+          'so nothing on the page stands for it.',
+        { slide }
+      );
+    default:
+      return translate(
+        'Slide {slide} holds an embedded graphic, which is not drawn: no shape, axis or ' +
+          'connector of it is in the PDF, and no text could be read out of its own part either, ' +
+          'so nothing on the page stands for it.',
+        { slide }
+      );
+  }
+}
+
+/** The note for a frame whose labels were drawn as plain text, per kind of frame. */
+function readGraphicNote(kind: PptxGraphicKind, slide: number, labels: number): string {
+  switch (kind) {
+    case 'chart':
+      return tPlural(
+        'Slide {slide} holds a chart, which is not drawn. Its text ({count} labels: title, ' +
+          'series and category names) was drawn as plain text where the frame sits, with no ' +
+          'axes, bars or connectors.',
+        labels,
+        { slide }
+      );
+    case 'diagram':
+      return tPlural(
+        'Slide {slide} holds a SmartArt diagram, which is not drawn. Its text ({count} labels: ' +
+          'title, series and category names) was drawn as plain text where the frame sits, with ' +
+          'no axes, bars or connectors.',
+        labels,
+        { slide }
+      );
+    case 'ole':
+      return tPlural(
+        'Slide {slide} holds an embedded object, which is not drawn. Its text ({count} labels: ' +
+          'title, series and category names) was drawn as plain text where the frame sits, with ' +
+          'no axes, bars or connectors.',
+        labels,
+        { slide }
+      );
+    default:
+      return tPlural(
+        'Slide {slide} holds an embedded graphic, which is not drawn. Its text ({count} labels: ' +
+          'title, series and category names) was drawn as plain text where the frame sits, with ' +
+          'no axes, bars or connectors.',
+        labels,
+        { slide }
+      );
+  }
+}
+
+/**
  * A note per graphic frame, naming the slide it was on.
  *
  * Per frame rather than aggregated, because "a chart was left out" is only
@@ -296,32 +407,19 @@ export interface GraphicFrameReport {
  * preview said the slide's content was fully captured when none of it was.
  */
 export function graphicFrameNote(report: GraphicFrameReport): string {
-  const name = GRAPHIC_NAMES[report.kind];
-  const head = `Slide ${report.slideNumber} holds ${name}, which is not drawn`;
-  if (report.extracted === 0) {
-    return (
-      `${head}: no shape, axis or connector of it is in the PDF, and no text could be read out ` +
-      'of its own part either, so nothing on the page stands for it.'
-    );
-  }
-  const dropped =
-    report.dropped > 0
-      ? ` ${report.dropped} further label${report.dropped === 1 ? '' : 's'} ` +
-        `${report.dropped === 1 ? 'was' : 'were'} left out.`
-      : '';
-  return (
-    `${head}. Its text (${report.extracted} label${report.extracted === 1 ? '' : 's'}: title, ` +
-    'series and category names) was drawn as plain text where the frame sits, with no axes, ' +
-    `bars or connectors.${dropped}`
-  );
+  if (report.extracted === 0) return unreadGraphicNote(report.kind, report.slideNumber);
+  const drawn = readGraphicNote(report.kind, report.slideNumber, report.extracted);
+  if (report.dropped === 0) return drawn;
+  return `${drawn} ${tPlural('{count} further labels were left out.', report.dropped)}`;
 }
 
 /** A table drawn as an empty grid, which is a page that looks like a mistake. */
 export function emptyTableNote(slideNumber: number): string {
-  return (
-    `Slide ${slideNumber} holds a table whose cells are all empty. The grid was drawn, but it ` +
-    'carries no text — PowerPoint may be filling it from a layout, which this converter does ' +
-    'not read.'
+  return translate(
+    'Slide {slide} holds a table whose cells are all empty. The grid was drawn, but it ' +
+      'carries no text — PowerPoint may be filling it from a layout, which this converter does ' +
+      'not read.',
+    { slide: slideNumber }
   );
 }
 
@@ -331,9 +429,10 @@ export function emptyTableNote(slideNumber: number): string {
  * A `core/` constant for the same reason {@link PPT_LIMITATIONS} is: the panel
  * and the converter cannot then describe the same page differently.
  */
-export const BLANK_SLIDE_LABEL =
+export const BLANK_SLIDE_LABEL = tKey(
   'appears blank — nothing could be drawn for it (its content may be inherited from a slide ' +
-  'layout, which this converter does not read)';
+    'layout, which this converter does not read)'
+);
 
 /**
  * The slides that will be blank pages, named.
@@ -347,38 +446,47 @@ export const BLANK_SLIDE_LABEL =
  * "left out" list, and the marker on the row itself.
  */
 export function blankSlidesNote(slideNumbers: readonly number[]): string {
-  const list = slideNumbers.join(', ').replace(/, (\d+)$/, ' and $1');
-  const one = slideNumbers.length === 1;
-  return (
-    `Slide${one ? '' : 's'} ${list} ${one ? 'will be a blank page' : 'will be blank pages'}: ` +
-    `nothing on ${one ? 'it' : 'them'} could be drawn. A slide whose text lives only in a ` +
-    'placeholder inherited from a slide layout or master comes out empty, because layouts and ' +
-    'masters are not read.'
+  const list =
+    slideNumbers.length > 1
+      ? translate('{first} and {last}', {
+          first: slideNumbers.slice(0, -1).join(', '),
+          last: slideNumbers[slideNumbers.length - 1]
+        })
+      : slideNumbers.join(', ');
+  return tPlural(
+    'Slides {list} will be blank pages: ' +
+      'nothing on them could be drawn. A slide whose text lives only in a ' +
+      'placeholder inherited from a slide layout or master comes out empty, because layouts and ' +
+      'masters are not read.',
+    slideNumbers.length,
+    { list }
   );
 }
 
 export function unsupportedImageNote(formats: readonly string[]): string {
-  return (
-    `${formats.length} picture${formats.length === 1 ? '' : 's'} ` +
-    `(${[...new Set(formats)].join(', ')}) ${formats.length === 1 ? 'was' : 'were'} left out: a ` +
-    'PDF can embed PNG and JPEG directly, and re-encoding anything else would mean decoding a ' +
-    'format this build carries no decoder for.'
+  return tPlural(
+    '{count} pictures ({formats}) were left out: a ' +
+      'PDF can embed PNG and JPEG directly, and re-encoding anything else would mean decoding a ' +
+      'format this build carries no decoder for.',
+    formats.length,
+    { formats: [...new Set(formats)].join(', ') }
   );
 }
 
 export function missingImageNote(count: number): string {
-  return (
-    `${count} picture${count === 1 ? '' : 's'} ${count === 1 ? 'is' : 'are'} referenced by a ` +
-    'slide but not present in the package, so nothing was drawn for ' +
-    `${count === 1 ? 'it' : 'them'}.`
+  return tPlural(
+    '{count} pictures are referenced by a ' +
+      'slide but not present in the package, so nothing was drawn for ' +
+      'them.',
+    count
   );
 }
 
 export function autoNumberedNote(count: number): string {
-  return (
-    `${count} numbered bullet${count === 1 ? '' : 's'} lost ` +
-    `${count === 1 ? 'its number' : 'their numbers'}: PowerPoint stores the numbering scheme ` +
-    'rather than the numbers, and computing them would mean guessing where each list restarts.'
+  return tPlural(
+    '{count} numbered bullets lost their numbers: PowerPoint stores the numbering scheme ' +
+      'rather than the numbers, and computing them would mean guessing where each list restarts.',
+    count
   );
 }
 
@@ -430,7 +538,7 @@ export function imageFormatOf(part: string): PdfImageFormat | null {
 /** What to call a media part this converter cannot embed, for the note. */
 function describeFormat(part: string): string {
   const match = /\.([a-z0-9]+)$/i.exec(part);
-  return match ? match[1].toUpperCase() : 'unknown format';
+  return match ? match[1].toUpperCase() : translate('unknown format');
 }
 
 /** A counter bag threaded through the walk, so every note can state a number. */
@@ -830,13 +938,13 @@ export async function readPptxAsBlocks(
   bytes: Uint8Array,
   job?: JobHandle
 ): Promise<PptxBlocksResult> {
-  await checkpoint(job, 0, 'Reading the presentation');
+  await checkpoint(job, 0, translate('Reading the presentation'));
   // The parse is where a large deck spends its time, so the job goes *into* the
   // reader's own per-slide loop; 0–0.85 of this phase is that loop, and the
   // mapping below is the rest.
   const deck = await readPptx(bytes, { includeMediaBytes: true, job: subJob(job, 0, 0.85) });
-  await checkpoint(job, 0.85, `Laying out ${deck.slides.length} slide(s)`);
+  await checkpoint(job, 0.85, tPlural('Laying out {count} slides', deck.slides.length));
   const result = deckToBlocks(deck);
-  await checkpoint(job, 1, 'Reading the presentation');
+  await checkpoint(job, 1, translate('Reading the presentation'));
   return result;
 }

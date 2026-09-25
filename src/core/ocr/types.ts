@@ -69,3 +69,17 @@ export interface OcrLayerReport {
    */
   pagesReplaced: number;
 }
+
+/**
+ * Audit 2026-09-25 CNV-2 — the prefix the OCR worker puts on every error that
+ * comes from starting the engine (loading the model into tesseract) rather
+ * than from reading a page. Comlink carries only an error's `message` and
+ * `name` across the worker boundary, so the prefix is how `runOcr.ts` tells a
+ * run-fatal "the model cannot be loaded" apart from a per-page failure.
+ */
+export const OCR_ENGINE_INIT_FAILED = 'The OCR engine could not load the language model';
+
+/** True when `message` came from a failed engine start (see above). */
+export function isEngineInitFailure(message: string): boolean {
+  return message.startsWith(OCR_ENGINE_INIT_FAILED);
+}

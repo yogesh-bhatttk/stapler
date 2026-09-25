@@ -41,9 +41,11 @@
  * a warm engine, which is why it is a last resort rather than the normal path.
  */
 import * as Comlink from 'comlink';
+import { loadLocale, translate } from '../i18n';
+import type { LocaleAware } from './client';
 import { checkpoint, releaseJobHandlesAfterCall, type JobHandle } from './protocol';
 import { cancelled as cancelledError, internal } from '../errors';
-import type { OcrPageResult, OcrWord } from '../ocr/types';
+import { OCR_ENGINE_INIT_FAILED, type OcrPageResult, type OcrWord } from '../ocr/types';
 // Type-only, so it is erased: the runtime import stays dynamic (see the header).
 import type * as Tesseract from 'tesseract.js';
 
@@ -66,7 +68,14 @@ export interface RecognizeOptions {
   lang: string;
 }
 
-export interface OCRJob {
+export interface OCRJob extends LocaleAware {
+  /**
+   * Audit 2026-09-25 CNV-8 — a trial engine init against whatever is in
+   * tesseract's cache for `lang`, then an immediate terminate. Used to reject
+   * an uploaded model that is not a usable LSTM `.traineddata` *before* it is
+   * kept. Rejects with an {@link OCR_ENGINE_INIT_FAILED}-prefixed error.
+   */
+  validateModel(lang: string): Promise<void>;
   recognizePage(
     bitmap: ImageBitmap,
     options: RecognizeOptions,
@@ -76,11 +85,11 @@ export interface OCRJob {
 
 /** tesseract's `logger` statuses, mapped onto labels a user can read. */
 function progressLabel(status: string): string {
-  if (status.includes('traineddata')) return 'Downloading the language model';
-  if (status.includes('core')) return 'Starting the OCR engine';
-  if (status.includes('initializ')) return 'Preparing the OCR engine';
-  if (status.includes('recognizing')) return 'Reading the page';
-  return 'Running OCR';
+  if (status.includes('traineddata')) return translate('Downloading the language model');
+  if (status.includes('core')) return translate('Starting the OCR engine');
+  if (status.includes('initializ')) return translate('Preparing the OCR engine');
+  if (status.includes('recognizing')) return translate('Reading the page');
+  return translate('Running OCR');
 }
 
 /**
@@ -151,20 +160,108 @@ function cancellationWatch(job: JobHandle | undefined, intervalMs = 150) {
   return { promise, stop };
 }
 
+/**
+ * Audit 2026-09-25 CNV-2 — a `langPath` that cannot reach the network.
+ *
+ * With no `langPath`, a cache miss inside tesseract.js falls back to its own
+ * hard-coded jsDelivr URL — unpinned, unverified, and never disclosed. An
+ * unknown URL scheme makes `fetch()` reject immediately with no request at
+ * all, so a cache miss fails closed instead. Combined with
+ * `cacheMethod: 'readOnly'` (tesseract never writes to, and never *deletes
+ * from*, its cache — the default deletes the model when init fails, which was
+ * what turned one bad upload into a silent download on the next page), the
+ * only bytes this engine can ever load are ones `runOcr.ts` put in the cache
+ * itself after a verified download or a validated upload.
+ */
+export const NO_NETWORK_LANG_PATH = 'stapler-offline-cache-only:';
+
+type Tess = typeof import('tesseract.js');
+
+async function startEngine(
+  tess: Tess,
+  lang: string,
+  logger?: (message: Tesseract.LoggerMessage) => void
+): Promise<Tesseract.Worker> {
+  // tesseract.js 7.0.0's `createWorker` only rejects its promise when the
+  // *script load* fails. When loading the language or `TessBaseAPI.Init`
+  // fails, it swallows the rejection, leaves the promise pending forever, and
+  // — with no `errorHandler` — rethrows inside its `onmessage`, an uncaught
+  // error that surfaces on this worker as an `error` event (the pool then
+  // drops the whole OCR worker: "A background worker stopped unexpectedly").
+  // So an `errorHandler` turns that into a real rejection raced against the
+  // creation, and the nested engine worker — which the stuck promise would
+  // otherwise leak, WASM heap and all — is captured as it is spawned (the
+  // spawn happens synchronously inside the `createWorker` call) so it can be
+  // terminated on that path.
+  let failInit: (reason: unknown) => void = () => {};
+  const initFailed = new Promise<never>((_resolve, reject) => {
+    failInit = reject;
+  });
+  const spawned: Worker[] = [];
+  const NativeWorker = self.Worker;
+  self.Worker = class CapturedWorker extends NativeWorker {
+    constructor(url: string | URL, options?: WorkerOptions) {
+      super(url, options);
+      spawned.push(this);
+    }
+  };
+  let creating: Promise<Tesseract.Worker>;
+  try {
+    creating = tess.createWorker(lang, tess.OEM.LSTM_ONLY, {
+      workerPath: WORKER_PATH,
+      corePath: CORE_PATH,
+      langPath: NO_NETWORK_LANG_PATH,
+      cacheMethod: 'readOnly',
+      // tesseract.js defaults to spawning its worker from a `blob:` URL that
+      // does nothing but `importScripts(workerPath)` — a level of
+      // indirection meant to dodge CORS on a cross-origin `workerPath` in a
+      // plain website. Inside a Chrome extension, a `blob:`-sourced worker
+      // is refused permission to `importScripts` an extension-hosted file
+      // at all ("Failed to execute 'importScripts' ... failed to load"),
+      // even though `WORKER_PATH` is same-origin and `script-src 'self'`
+      // already allows it directly. Disabling the wrapper makes tesseract
+      // spawn `new Worker(WORKER_PATH)` itself, with no blob in between.
+      workerBlobURL: false,
+      errorHandler: (data: unknown) => failInit(data),
+      ...(logger ? { logger } : {})
+    });
+  } finally {
+    self.Worker = NativeWorker;
+  }
+  try {
+    return await Promise.race([creating, initFailed]);
+  } catch (err) {
+    for (const worker of spawned) worker.terminate();
+    // tesseract rejects with a bare string or an Error depending on where
+    // init failed; either way the message is carried, prefixed, so the caller
+    // can tell "the engine could not load this model" (fatal for the whole
+    // run) from "this one page could not be read" (skip it).
+    const detail = err instanceof Error ? err.message : String(err);
+    throw internal(`${OCR_ENGINE_INIT_FAILED}: ${detail}`, { lang });
+  }
+}
+
 const api: OCRJob = {
+  setLocale: loadLocale,
+  async validateModel(lang) {
+    const tess = await import('tesseract.js');
+    const engine = await startEngine(tess, lang);
+    await engine.terminate().catch(() => {});
+  },
+
   async recognizePage(bitmap, options, job) {
-    await checkpoint(job, 0, 'Starting the OCR engine');
+    await checkpoint(job, 0, translate('Starting the OCR engine'));
 
     // tesseract's browser `loadImage` accepts an OffscreenCanvas natively; an
     // ImageBitmap is what the render worker hands us, so it is drawn into one
     // here rather than round-tripped through a blob on the main thread.
     const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
     const ctx = canvas.getContext('2d');
-    if (!ctx) throw internal('Could not create a canvas for OCR.');
+    if (!ctx) throw internal(translate('Could not create a canvas for OCR.'));
     ctx.drawImage(bitmap, 0, 0);
     bitmap.close();
 
-    const { createWorker, OEM } = await import('tesseract.js');
+    const tess = await import('tesseract.js');
 
     const watch = cancellationWatch(job);
     let engine: Tesseract.Worker | null = null;
@@ -174,30 +271,15 @@ const api: OCRJob = {
       // `{ code, data }` objects must never be built here. Every component of
       // `options.lang` is guaranteed to already be in tesseract's own cache by
       // the time this worker is spawned (`runOcr.ts` seeds it, from a verified
-      // download or an uploaded copy, before ever leasing this worker), so no
-      // `langPath` is supplied either: the normal cache-hit path in tesseract's
-      // own loader is what actually serves the bytes, with no fetch involved.
-      engine = await createWorker(options.lang, OEM.LSTM_ONLY, {
-        workerPath: WORKER_PATH,
-        corePath: CORE_PATH,
-        // tesseract.js defaults to spawning its worker from a `blob:` URL that
-        // does nothing but `importScripts(workerPath)` — a level of
-        // indirection meant to dodge CORS on a cross-origin `workerPath` in a
-        // plain website. Inside a Chrome extension, a `blob:`-sourced worker
-        // is refused permission to `importScripts` an extension-hosted file
-        // at all ("Failed to execute 'importScripts' ... failed to load"),
-        // even though `WORKER_PATH` is same-origin and `script-src 'self'`
-        // already allows it directly. Disabling the wrapper makes tesseract
-        // spawn `new Worker(WORKER_PATH)` itself, with no blob in between.
-        workerBlobURL: false,
-        logger: message => {
-          // `progress` is 0..1 per phase, not across the whole run; the caller
-          // scales it into the document-wide fraction it is reporting.
-          void job?.progress(
-            typeof message.progress === 'number' ? message.progress : null,
-            progressLabel(message.status ?? '')
-          );
-        }
+      // download or a validated upload, before ever leasing this worker); a
+      // miss fails closed (`NO_NETWORK_LANG_PATH`), it never fetches.
+      engine = await startEngine(tess, options.lang, message => {
+        // `progress` is 0..1 per phase, not across the whole run; the caller
+        // scales it into the document-wide fraction it is reporting.
+        void job?.progress(
+          typeof message.progress === 'number' ? message.progress : null,
+          progressLabel(message.status ?? '')
+        );
       });
 
       const recognition = engine.recognize(canvas, {}, { blocks: true, text: true });

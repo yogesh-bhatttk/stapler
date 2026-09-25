@@ -6,8 +6,19 @@
  * `imageOrientation: 'from-image'` applies EXIF rotation — the acceptance
  * criterion that a sideways photo must not stay sideways.
  */
-import { cancelled, corrupt, isCancellation } from './errors';
+import {
+  cancelled,
+  corrupt,
+  fromUnknown,
+  isCancellation,
+  type StaplerError,
+  unsupported
+} from './errors';
 import { DOC_PAGE_WHITE } from './doc-colors';
+import { translate } from './i18n';
+import type { RasterKind } from './raster-decode';
+
+export type { RasterKind };
 
 const SUPPORTED = new Set([
   'image/png',
@@ -37,7 +48,7 @@ export function isSupportedImage(file: File): boolean {
 export async function bitmapToJpeg(bitmap: ImageBitmap, quality = 0.9): Promise<Uint8Array> {
   const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
   const ctx = canvas.getContext('2d');
-  if (!ctx) throw corrupt('A 2D canvas context was unavailable for image conversion.');
+  if (!ctx) throw corrupt(translate('A 2D canvas context was unavailable for image conversion.'));
 
   ctx.fillStyle = DOC_PAGE_WHITE;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -47,94 +58,301 @@ export async function bitmapToJpeg(bitmap: ImageBitmap, quality = 0.9): Promise<
   return new Uint8Array(await blob.arrayBuffer());
 }
 
-export async function imageFileToJpegs(
+/**
+ * The same flattening as {@link bitmapToJpeg}, encoded as PNG — the lossless
+ * path for the "100% (Lossless)" import option (CONV-10). It used to be a
+ * quality-1.0 JPEG, which is still DCT: text edges ring and colours shift.
+ * The white matte is kept for the same reason as the JPEG path.
+ */
+export async function bitmapToPng(bitmap: ImageBitmap): Promise<Uint8Array> {
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw corrupt(translate('A 2D canvas context was unavailable for image conversion.'));
+
+  ctx.fillStyle = DOC_PAGE_WHITE;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(bitmap, 0, 0);
+
+  const blob = await canvas.convertToBlob({ type: 'image/png' });
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+/** What {@link readJpegInfo} learns from a JPEG's markers without decoding it. */
+export interface JpegInfo {
+  width: number;
+  height: number;
+  /** Sample precision in bits (8 for every ordinary JPEG). */
+  precision: number;
+  components: number;
+  /** EXIF orientation 1–8; 1 when the file has no EXIF orientation tag. */
+  orientation: number;
+}
+
+/**
+ * Walks a JPEG's marker segments up to the first frame header. Returns null for
+ * anything that is not a well-formed JPEG up to that point.
+ */
+export function readJpegInfo(bytes: Uint8Array): JpegInfo | null {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+  let orientation = 1;
+  let p = 2;
+  while (p + 4 <= bytes.length) {
+    if (bytes[p] !== 0xff) return null;
+    const marker = bytes[p + 1];
+    // Fill bytes and standalone markers carry no length.
+    if (marker === 0xff) {
+      p += 1;
+      continue;
+    }
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      p += 2;
+      continue;
+    }
+    const length = (bytes[p + 2] << 8) | bytes[p + 3];
+    if (length < 2 || p + 2 + length > bytes.length) return null;
+    const seg = p + 4;
+    if (marker === 0xe1 && length >= 16) {
+      orientation = exifOrientation(bytes, seg, p + 2 + length) ?? orientation;
+    }
+    // SOF0–SOF15, except DHT (C4), JPG (C8) and DAC (CC).
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      if (length < 8) return null;
+      return {
+        precision: bytes[seg],
+        height: (bytes[seg + 1] << 8) | bytes[seg + 2],
+        width: (bytes[seg + 3] << 8) | bytes[seg + 4],
+        components: bytes[seg + 5],
+        orientation
+      };
+    }
+    if (marker === 0xda || marker === 0xd9) return null; // scan before any frame header
+    p += 2 + length;
+  }
+  return null;
+}
+
+/** The orientation tag (0x0112) of an APP1 "Exif" segment, if it has one. */
+function exifOrientation(b: Uint8Array, start: number, end: number): number | null {
+  // "Exif\0\0" then a TIFF header.
+  if (
+    b[start] !== 0x45 ||
+    b[start + 1] !== 0x78 ||
+    b[start + 2] !== 0x69 ||
+    b[start + 3] !== 0x66
+  ) {
+    return null;
+  }
+  const tiff = start + 6;
+  if (tiff + 8 > end) return null;
+  const little = b[tiff] === 0x49 && b[tiff + 1] === 0x49;
+  if (!little && !(b[tiff] === 0x4d && b[tiff + 1] === 0x4d)) return null;
+  const u16 = (o: number) => (little ? b[o] | (b[o + 1] << 8) : (b[o] << 8) | b[o + 1]);
+  const u32 = (o: number) =>
+    little
+      ? (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0
+      : ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0;
+  const ifd = tiff + u32(tiff + 4);
+  if (ifd + 2 > end) return null;
+  const count = u16(ifd);
+  for (let i = 0; i < count; i++) {
+    const entry = ifd + 2 + i * 12;
+    if (entry + 12 > end) return null;
+    if (u16(entry) === 0x0112) {
+      const value = u16(entry + 8);
+      return value >= 1 && value <= 8 ? value : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * True when a JPEG's own bytes can go straight into the PDF (`embedJpg`) and
+ * look exactly as the browser would draw them: upright (no EXIF rotation to
+ * apply — pdf-lib ignores EXIF, so a rotated photo must still be re-encoded),
+ * 8-bit, and grey or RGB. CMYK is excluded because pdf-lib assumes Adobe's
+ * inverted CMYK, which not every producer writes. (CONV-10)
+ */
+export function canEmbedJpegAsIs(bytes: Uint8Array): boolean {
+  const info = readJpegInfo(bytes);
+  return (
+    info !== null &&
+    info.orientation === 1 &&
+    info.precision === 8 &&
+    (info.components === 1 || info.components === 3) &&
+    info.width > 0 &&
+    info.height > 0
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * HEIC and TIFF (CONV-1, CONV-16)
+ * ------------------------------------------------------------------ */
+
+/** Base wait for one HEIC/TIFF decode, plus a per-megabyte allowance, capped. */
+const RASTER_TIMEOUT_BASE_MS = 20_000;
+const RASTER_TIMEOUT_PER_MB_MS = 2_000;
+const RASTER_TIMEOUT_MAX_MS = 120_000;
+
+export function heicTimeoutMs(byteLength: number): number {
+  return Math.min(
+    RASTER_TIMEOUT_MAX_MS,
+    RASTER_TIMEOUT_BASE_MS + Math.ceil(byteLength / (1024 * 1024)) * RASTER_TIMEOUT_PER_MB_MS
+  );
+}
+
+/** Which worker decoder a file needs, or null for one the browser decodes itself. */
+export function rasterKindOf(file: File): RasterKind | null {
+  const name = file.name.toLowerCase();
+  if (name.endsWith('.heic') || file.type === 'image/heic') return 'heic';
+  if (name.endsWith('.tiff') || name.endsWith('.tif') || file.type === 'image/tiff') return 'tiff';
+  return null;
+}
+
+export interface RasterDecodeOptions {
+  signal?: AbortSignal;
+  /** Overrides {@link heicTimeoutMs}; for tests. */
+  timeoutMs?: number;
+  onProgress?: (fraction: number | null, label: string) => void;
+}
+
+/**
+ * Decodes a HEIC or TIFF in the image worker (`workers/image.worker.ts`) and
+ * returns what `imagesToPdf` embeds: JPEG at `quality`, or PNG when
+ * `quality >= 1`.
+ *
+ * The decoders are synchronous inside the worker, so cancel and the size-scaled
+ * timeout *terminate* it — the decode really stops, and the next import gets a
+ * fresh worker. Before CONV-1 a cancelled or hung HEIC decode (heic2any) was
+ * only abandoned and kept running; TIFF decoded on the main thread.
+ */
+export async function decodeRasterInWorker(
+  file: File,
+  kind: RasterKind,
+  quality: number,
+  options: RasterDecodeOptions = {}
+): Promise<Uint8Array[]> {
+  const { signal } = options;
+  if (signal?.aborted) throw cancelled();
+  const [{ imageWorker }, { createJobHandle }, Comlink] = await Promise.all([
+    import('./workers'),
+    import('./workers/protocol'),
+    import('comlink')
+  ]);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (signal?.aborted) throw cancelled();
+
+  const timeoutMs = options.timeoutMs ?? heicTimeoutMs(file.size);
+  const label = kind === 'heic' ? 'HEIC' : 'TIFF';
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  let stopped: StaplerError | undefined;
+  const guard = new Promise<never>((_, reject) => {
+    const stop = (err: StaplerError) => {
+      if (stopped) return;
+      stopped = err;
+      reject(err);
+      // Every Stapler decode is one WASM/JS call that cannot be interrupted;
+      // terminating the (single-instance) pool is what actually stops it.
+      imageWorker.terminate();
+    };
+    timer = setTimeout(
+      () =>
+        stop(
+          unsupported(
+            translate(
+              'Decoding {name} did not finish within {seconds} seconds, ' +
+                'so it was stopped. The {kind} file may be damaged or unusually large — convert it ' +
+                'to JPEG or PNG and import that instead.',
+              { name: file.name, seconds: Math.round(timeoutMs / 1000), kind: label }
+            ),
+            { reason: 'timeout', timeoutMs }
+          )
+        ),
+      timeoutMs
+    );
+    onAbort = () => stop(cancelled());
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+  guard.catch(() => {});
+
+  const job = createJobHandle({ signal, onProgress: options.onProgress });
+  try {
+    return await Promise.race([
+      imageWorker.lease(api =>
+        api.decodeToPdfImages(
+          kind,
+          Comlink.transfer(bytes, [bytes.buffer as ArrayBuffer]),
+          quality,
+          file.name,
+          job
+        )
+      ),
+      guard
+    ]);
+  } catch (err) {
+    // The lease rejects with "worker crashed" once `stop` terminated it; the
+    // reason it was stopped is the real error.
+    if (stopped) throw stopped;
+    if (isCancellation(err)) throw cancelled();
+    const e = fromUnknown(err);
+    if (e.kind === 'UnsupportedFeature' || e.kind === 'CorruptDocument') throw e;
+    throw corrupt(
+      translate('Failed to decode {kind} file {name}: {message}', {
+        kind: label,
+        name: file.name,
+        message: e.message
+      })
+    );
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+/**
+ * Decodes an image file into bytes `imagesToPdf` can embed: JPEG, or PNG on
+ * the lossless path.
+ *
+ * HEIC and TIFF decode in the image worker ({@link decodeRasterInWorker}).
+ * PNG/JPEG/WebP/GIF go through `createImageBitmap`, which decodes off the main
+ * thread already and applies EXIF orientation.
+ *
+ * At `quality >= 1` ("100% (Lossless)") nothing lossy happens (CONV-10): an
+ * upright 8-bit grey/RGB JPEG is passed through byte for byte, and everything
+ * else — PNG, WebP, GIF, TIFF, HEIC, or a JPEG whose EXIF rotation has to be
+ * applied — is decoded (with orientation) and written as PNG. Below 1 the
+ * image is re-encoded as JPEG at that quality, as before.
+ */
+export async function imageFileToPdfImages(
   file: File,
   quality = 0.9,
   signal?: AbortSignal
 ): Promise<Uint8Array[]> {
-  let sourceBlobs: Blob[] = [file];
+  const lossless = quality >= 1;
+  const kind = rasterKindOf(file);
+  if (kind) return decodeRasterInWorker(file, kind, quality, { signal });
 
-  if (file.name.toLowerCase().endsWith('.heic') || file.type === 'image/heic') {
-    try {
-      // `heic2any` takes no signal of its own — a single HEIC decode cannot
-      // be interrupted mid-call — but checking right after it resolves still
-      // stops a batch from starting the next file's (potentially just as
-      // slow) decode once cancel has been requested.
-      const heic2any = (await import('heic2any')).default;
-      const result = await heic2any({ blob: file, toType: 'image/png' });
-      if (signal?.aborted) throw cancelled();
-      sourceBlobs = Array.isArray(result) ? result : [result];
-    } catch (err) {
-      if (isCancellation(err)) throw err;
-      throw corrupt(
-        `Failed to decode HEIC file ${file.name}: ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
-  } else if (
-    file.name.toLowerCase().endsWith('.tiff') ||
-    file.name.toLowerCase().endsWith('.tif') ||
-    file.type === 'image/tiff'
-  ) {
-    try {
-      const UTIF = await import('utif');
-      const buffer = await file.arrayBuffer();
-      const ifds = UTIF.decode(buffer);
-      const blobs: Blob[] = [];
-      for (const ifd of ifds) {
-        // A multi-page TIFF (the 30-second case this exists for) decodes one
-        // page at a time here — checked per page instead of only once for
-        // the whole file, so cancelling actually takes effect partway
-        // through instead of only between whole files.
-        if (signal?.aborted) throw cancelled();
-        UTIF.decodeImage(buffer, ifd);
-        const rgba = UTIF.toRGBA8(ifd);
-
-        const width = ifd.width;
-        const height = ifd.height;
-        const canvas = new OffscreenCanvas(width, height);
-        const ctx = canvas.getContext('2d');
-        if (!ctx) throw new Error('No 2d context for TIFF conversion');
-
-        const imageData = new ImageData(new Uint8ClampedArray(rgba.buffer), width, height);
-        ctx.putImageData(imageData, 0, 0);
-
-        blobs.push(await canvas.convertToBlob({ type: 'image/png' }));
-        // Each iteration's canvas becomes unreachable once the loop moves on,
-        // but its GPU-backed 2D backing store is not guaranteed to be freed
-        // the moment it does — a 20-page/25MP TIFF could otherwise hold many
-        // full-size backing stores alive at once waiting on GC. Zeroing the
-        // dimensions forces an immediate release (same fix as `diff-preview.ts`).
-        canvas.width = 0;
-        canvas.height = 0;
-      }
-      sourceBlobs = blobs;
-    } catch (err) {
-      if (isCancellation(err)) throw err;
-      throw corrupt(
-        `Failed to decode TIFF file ${file.name}: ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
+  if (signal?.aborted) throw cancelled();
+  if (lossless) {
+    const original = new Uint8Array(await file.arrayBuffer());
+    if (canEmbedJpegAsIs(original)) return [original];
   }
-
-  const jpegs: Uint8Array[] = [];
-  for (const blob of sourceBlobs) {
-    if (signal?.aborted) throw cancelled();
-    let bitmap: ImageBitmap;
-    try {
-      bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' });
-    } catch (err) {
-      throw corrupt(
-        `${file.name} could not be decoded as an image: ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
-
-    try {
-      jpegs.push(await bitmapToJpeg(bitmap, quality));
-    } finally {
-      bitmap.close();
-    }
+  let bitmap: ImageBitmap;
+  try {
+    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  } catch (err) {
+    throw corrupt(
+      translate('{name} could not be decoded as an image: {message}', {
+        name: file.name,
+        message: err instanceof Error ? err.message : String(err)
+      })
+    );
   }
-  return jpegs;
+  try {
+    return [lossless ? await bitmapToPng(bitmap) : await bitmapToJpeg(bitmap, quality)];
+  } finally {
+    bitmap.close();
+  }
 }
 
 /**

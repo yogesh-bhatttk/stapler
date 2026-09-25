@@ -1,7 +1,17 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { PDFDocument, PDFArray, PDFName } from 'pdf-lib';
 
+/** Swappable per test: what each side's page text extracts as. */
+const texts = vi.hoisted(() => ({ base: 'hello world', compare: 'hello brave new world' }));
+
 vi.mock('../../src/core/workers', () => ({
+  // CONV-14: the diff runs in the cv worker; here, the real implementation.
+  cvWorker: {
+    lease: async (fn: (api: unknown) => Promise<unknown>) => {
+      const { diffText } = await import('../../src/core/diff');
+      return fn({ diffText });
+    }
+  },
   renderWorker: {
     lease: vi.fn(async (fn: (api: any) => Promise<unknown>) =>
       fn({
@@ -9,7 +19,7 @@ vi.mock('../../src/core/workers', () => ({
           handle: bytes[0] === 1 ? 'base-handle' : 'compare-handle'
         })),
         extractText: vi.fn(async (handle: string) =>
-          handle === 'base-handle' ? 'hello world' : 'hello brave new world'
+          handle === 'base-handle' ? texts.base : texts.compare
         ),
         closeDocument: vi.fn(async () => {})
       })
@@ -65,6 +75,8 @@ function decodeHexLiterals(content: string): string {
 
 describe('exportTextDiff', () => {
   beforeEach(async () => {
+    texts.base = 'hello world';
+    texts.compare = 'hello brave new world';
     sources.value = {
       base: {
         id: 'base',
@@ -84,17 +96,21 @@ describe('exportTextDiff', () => {
   });
 
   it('embeds the text diff chunks into a PDF report', async () => {
+    const docAPages = [{ key: 'a1', sourceDocId: 'base', sourceIndex: 0, rotation: 0 }];
     const docA = {
       id: 'doc-a',
       name: 'base.pdf',
-      pages: [{ key: 'a1', sourceDocId: 'base', sourceIndex: 0, rotation: 0 }],
+      pages: docAPages,
+      baseline: docAPages,
       annotations: [],
       dirty: false
     };
+    const docBPages = [{ key: 'b1', sourceDocId: 'compare', sourceIndex: 0, rotation: 0 }];
     const docB = {
       id: 'doc-b',
       name: 'compare.pdf',
-      pages: [{ key: 'b1', sourceDocId: 'compare', sourceIndex: 0, rotation: 0 }],
+      pages: docBPages,
+      baseline: docBPages,
       annotations: [],
       dirty: false
     };
@@ -108,5 +124,31 @@ describe('exportTextDiff', () => {
     expect(content).toContain('brave');
     expect(content).toContain('new');
     expect(content).toContain('world');
+  });
+
+  it('warns (CONV-13) when non-Latin text had to be replaced, and only then', async () => {
+    const doc = (id: string, name: string, src: string) => {
+      const pages = [{ key: id, sourceDocId: src, sourceIndex: 0, rotation: 0 }];
+      return { id, name, pages, baseline: pages, annotations: [], dirty: false };
+    };
+    const clean: string[] = [];
+    await exportTextDiff(doc('a', 'base.pdf', 'base'), doc('b', 'compare.pdf', 'compare'), {
+      onWarning: m => clean.push(m)
+    });
+    expect(clean).toEqual([]);
+
+    texts.base = '\u041f\u0440\u0438\u0432\u0435\u0442 world';
+    texts.compare = '\u041f\u0440\u0438\u0432\u0435\u0442 brave world';
+    const warnings: string[] = [];
+    const bytes = await exportTextDiff(
+      doc('a', '\u65e5\u672c.pdf', 'base'),
+      doc('b', 'compare.pdf', 'compare'),
+      { onWarning: m => warnings.push(m) }
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/replaced with "\?"/);
+    const content = await decodeContentText(await PDFDocument.load(bytes), 0);
+    expect(content).toContain('??????');
+    expect(content).toContain('brave');
   });
 });

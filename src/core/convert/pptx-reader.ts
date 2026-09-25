@@ -93,8 +93,20 @@
  * {@link childElements}, which counts depth.
  */
 
-import { corrupt, unsupported } from '../errors';
+import { corrupt, StaplerError, unsupported } from '../errors';
 import { checkpoint, type JobHandle } from '../workers/protocol';
+import { inflateZipVetted, readZipDirectory } from './zip-guard';
+import { tKey, translate } from '../i18n';
+
+/** Largest single XML part the reader will inflate (CONV-4/CONV-5). */
+export const MAX_XML_PART_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Deepest group nesting the shape walk follows. Each level rescans its own body
+ * a constant number of times, so the walk is O(size × depth); real decks nest a
+ * handful of levels, and a crafted one with thousands would be quadratic.
+ */
+export const MAX_GROUP_DEPTH = 64;
 
 /** One run of text, with the three properties a `<a:rPr>` states outright. */
 export interface PptxTextRun {
@@ -248,21 +260,32 @@ export interface PptxDeck {
   slides: PptxSlide[];
 }
 
-export const NOT_A_ZIP_MESSAGE =
+export const NOT_A_ZIP_MESSAGE = tKey(
   'This file is not a PowerPoint presentation — a `.pptx` is a ZIP package, and this file does ' +
-  'not start like one. Nothing was read.';
+    'not start like one. Nothing was read.'
+);
 
-export const OLE2_MESSAGE =
+export const OLE2_MESSAGE = tKey(
   'This looks like a legacy `.ppt` file, or a password-protected `.pptx` (both are stored in an ' +
-  'OLE container rather than a ZIP). Open it in PowerPoint and save it as an unprotected ' +
-  '`.pptx`, then try again.';
+    'OLE container rather than a ZIP). Open it in PowerPoint and save it as an unprotected ' +
+    '`.pptx`, then try again.'
+);
 
-export const NOT_A_PRESENTATION_MESSAGE =
-  'This ZIP is not a PowerPoint package: it has no `ppt/presentation.xml`. Nothing was read.';
+export const NOT_A_PRESENTATION_MESSAGE = tKey(
+  'This ZIP is not a PowerPoint package: it has no `ppt/presentation.xml`. Nothing was read.'
+);
 
-export const NO_SLIDES_MESSAGE = 'This presentation lists no slides, so there is nothing to read.';
+export const NO_SLIDES_MESSAGE = tKey(
+  'This presentation lists no slides, so there is nothing to read.'
+);
 
-export const EMPTY_FILE_MESSAGE = 'The file is empty, so there is nothing to read.';
+export const EMPTY_FILE_MESSAGE = tKey('The file is empty, so there is nothing to read.');
+
+/** {@link NOT_A_ZIP_MESSAGE} for a file that starts like a ZIP but whose container will not open. */
+export const UNOPENABLE_ZIP_MESSAGE = tKey(
+  'This file is not a PowerPoint presentation — a `.pptx` is a ZIP package, and this file could ' +
+    'not be opened. Nothing was read.'
+);
 
 /** `PK\x03\x04`, and the two variants an empty or spanned archive starts with. */
 function isZip(bytes: Uint8Array): boolean {
@@ -330,32 +353,98 @@ function numericAttribute(tag: string, name: string): number {
  */
 function textContent(raw: string): string {
   if (!raw.includes('<![CDATA[')) return decodeXmlText(raw);
-  const pattern = /<!\[CDATA\[([\s\S]*?)\]\]>/g;
+  // indexOf, not a lazy `[\s\S]*?` regex: with many openers and no `]]>` the
+  // regex rescans to the end from every opener, which is quadratic (CONV-4).
   let out = '';
   let index = 0;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(raw)) !== null) {
-    out += decodeXmlText(raw.slice(index, match.index)) + match[1];
-    index = pattern.lastIndex;
+  for (;;) {
+    const start = raw.indexOf('<![CDATA[', index);
+    if (start < 0) break;
+    const end = raw.indexOf(']]>', start + 9);
+    if (end < 0) break;
+    out += decodeXmlText(raw.slice(index, start)) + raw.slice(start + 9, end);
+    index = end + 3;
   }
   return out + decodeXmlText(raw.slice(index));
 }
 
+function isXmlSpace(code: number): boolean {
+  return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d;
+}
+
+/**
+ * The bodies of every `<name …>…</name>` in `xml`, in document order, each
+ * closed at the first `</name>` after it — the semantics of the lazy regex
+ * `<name(?:\s[^>]*)?>([\s\S]*?)</name>` this replaced, in one linear pass.
+ *
+ * The regex was quadratic (CONV-4): with many `<a:t>` openers and no closer,
+ * every opener rescanned the rest of the part looking for one, and a 1.4 KB
+ * deflated slide pinned the convert worker for 29 s. Here every `indexOf`
+ * starts where the previous one stopped, and a missing `>` or closer ends the
+ * scan outright — none can exist further on either. Self-closed elements carry
+ * no text and are skipped, as the regex skipped them.
+ */
+export function elementBodies(xml: string, name: string, limit = Infinity): string[] {
+  const out: string[] = [];
+  const opener = `<${name}`;
+  const closer = `</${name}>`;
+  let pos = 0;
+  while (out.length < limit) {
+    const start = xml.indexOf(opener, pos);
+    if (start < 0) break;
+    const after = start + opener.length;
+    const next = xml.charCodeAt(after);
+    // The name must end here: `<a:p` is also the start of `<a:pPr`.
+    if (next !== 0x3e /* > */ && next !== 0x2f /* / */ && !isXmlSpace(next)) {
+      pos = after;
+      continue;
+    }
+    const gt = xml.indexOf('>', after);
+    if (gt < 0) break;
+    if (xml.charCodeAt(gt - 1) === 0x2f /* / */) {
+      pos = gt + 1;
+      continue;
+    }
+    const end = xml.indexOf(closer, gt + 1);
+    if (end < 0) break;
+    out.push(xml.slice(gt + 1, end));
+    pos = end + closer.length;
+  }
+  return out;
+}
+
 /** Every `<a:t>` in `xml`, decoded, in document order. */
 function textRuns(xml: string): string[] {
-  return [...xml.matchAll(/<a:t(?:\s[^>]*)?>([\s\S]*?)<\/a:t>/g)].map(match =>
-    textContent(match[1])
-  );
+  return elementBodies(xml, 'a:t').map(textContent);
 }
 
 /** Runs grouped by the `<a:p>` they sit in. Empty paragraphs are dropped. */
 function paragraphs(xml: string): string[] {
   const out: string[] = [];
-  for (const match of xml.matchAll(/<a:p(?:\s[^>]*)?>([\s\S]*?)<\/a:p>/g)) {
-    const joined = textRuns(match[1]).join('');
+  for (const body of elementBodies(xml, 'a:p')) {
+    const joined = textRuns(body).join('');
     if (joined.trim().length > 0) out.push(joined);
   }
   return out;
+}
+
+/**
+ * `xml` with every terminated comment removed, in one pass. An unterminated
+ * `<!--` is left in place (as the regex it replaced left it): nothing after it
+ * can close it, so the scan stops there.
+ */
+function stripComments(xml: string): string {
+  let out = '';
+  let pos = 0;
+  for (;;) {
+    const start = xml.indexOf('<!--', pos);
+    if (start < 0) break;
+    const end = xml.indexOf('-->', start + 4);
+    if (end < 0) break;
+    out += xml.slice(pos, start);
+    pos = end + 3;
+  }
+  return pos === 0 ? xml : out + xml.slice(pos);
 }
 
 /* ------------------------------------------------------------------ *
@@ -378,7 +467,11 @@ interface XmlElement {
  * and this scanner is called recursively.
  */
 function tagPattern(): RegExp {
-  return /<(\/?)([a-zA-Z][\w:.-]*)((?:"[^"]*"|'[^']*'|[^>"'])*?)(\/?)>/g;
+  // `<` is excluded inside the tag (it is illegal in an attribute value in
+  // well-formed XML). That is what keeps this linear on hostile input: a
+  // candidate tag with no `>` now fails at the next `<` — where the next
+  // attempt starts — instead of rescanning to the end of the part (CONV-4).
+  return /<(\/?)([a-zA-Z][\w:.-]*)((?:"[^"<]*"|'[^'<]*'|[^<>"'])*?)(\/?)>/g;
 }
 
 /**
@@ -392,17 +485,44 @@ function tagPattern(): RegExp {
 function opaqueRanges(xml: string): Array<[number, number]> {
   if (!xml.includes('<!')) return [];
   const ranges: Array<[number, number]> = [];
-  for (const match of xml.matchAll(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g)) {
-    if (match.index === undefined) continue;
-    ranges.push([match.index, match.index + match[0].length]);
+  // The leftmost-match semantics of `/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g`,
+  // without its quadratic rescan when openers have no terminator (CONV-4). The
+  // next opener of each kind is cached, so neither is searched for twice over
+  // the same stretch; an unterminated opener means no later one of that kind
+  // can terminate either, so that kind is finished.
+  let nextComment = xml.indexOf('<!--');
+  let nextCdata = xml.indexOf('<![CDATA[');
+  while (nextComment >= 0 || nextCdata >= 0) {
+    const isComment = nextCdata < 0 || (nextComment >= 0 && nextComment < nextCdata);
+    const start = isComment ? nextComment : nextCdata;
+    const terminator = isComment ? '-->' : ']]>';
+    const end = xml.indexOf(terminator, start + (isComment ? 4 : 9));
+    if (end < 0) {
+      if (isComment) nextComment = -1;
+      else nextCdata = -1;
+      continue;
+    }
+    const pos = end + terminator.length;
+    ranges.push([start, pos]);
+    if (nextComment >= 0 && nextComment < pos) nextComment = xml.indexOf('<!--', pos);
+    if (nextCdata >= 0 && nextCdata < pos) nextCdata = xml.indexOf('<![CDATA[', pos);
   }
   return ranges;
 }
 
+/**
+ * Binary search over the (sorted, disjoint) ranges. The linear walk this
+ * replaced made the element scan O(tags × comments) (CONV-4).
+ */
 function isInside(ranges: ReadonlyArray<[number, number]>, index: number): boolean {
-  for (const [start, end] of ranges) {
-    if (index >= start && index < end) return true;
-    if (index < start) return false; // ranges are in document order
+  let lo = 0;
+  let hi = ranges.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    const [start, end] = ranges[mid];
+    if (index < start) hi = mid - 1;
+    else if (index >= end) lo = mid + 1;
+    else return true;
   }
   return false;
 }
@@ -803,10 +923,8 @@ export function graphicPartText(xml: string): { runs: string[]; dropped: number 
     all.push(value);
   };
   for (const run of textRuns(xml)) push(run);
-  for (const cache of xml.matchAll(/<c:strCache>([\s\S]*?)<\/c:strCache>/g)) {
-    for (const value of cache[1].matchAll(/<c:v(?:\s[^>]*)?>([\s\S]*?)<\/c:v>/g)) {
-      push(decodeXmlText(value[1]));
-    }
+  for (const cache of elementBodies(xml, 'c:strCache')) {
+    for (const value of elementBodies(cache, 'c:v')) push(decodeXmlText(value));
   }
   return {
     runs: all.slice(0, MAX_GRAPHIC_TEXT_RUNS),
@@ -840,17 +958,26 @@ const SHAPE_ELEMENTS = new Set(['p:sp', 'p:pic', 'p:graphicFrame', 'p:grpSp']);
 function shapesOf(slideXml: string): PptxShape[] {
   // A comment can legally hold anything, including something that looks like an
   // element, and an unbalanced one inside it would desynchronise the scan.
-  const xml = slideXml.includes('<!--') ? slideXml.replace(/<!--[\s\S]*?-->/g, '') : slideXml;
+  const xml = slideXml.includes('<!--') ? stripComments(slideXml) : slideXml;
   // The shape tree, when the part has one. Scoping to it keeps `<p:bg>` and the
   // slide's own `<p:nvGrpSpPr>` out, and costs nothing when it is absent.
   const tree = firstChild(xml, 'p:spTree');
   const out: PptxShape[] = [];
 
-  const walk = (body: string, group: GroupTransform, grouped: boolean) => {
+  const walk = (body: string, group: GroupTransform, grouped: boolean, depth = 0) => {
+    if (depth > MAX_GROUP_DEPTH) {
+      throw unsupported(
+        translate(
+          'This slide nests groups more than {depth} levels deep, which no real deck does. ' +
+            'Nothing was read.',
+          { depth: MAX_GROUP_DEPTH }
+        )
+      );
+    }
     for (const element of childElements(body, SHAPE_ELEMENTS)) {
       if (element.name === 'p:grpSp') {
         const groupProperties = firstChild(element.body, 'p:grpSpPr');
-        walk(element.body, composeGroup(group, groupProperties?.body ?? ''), true);
+        walk(element.body, composeGroup(group, groupProperties?.body ?? ''), true, depth + 1);
         continue;
       }
 
@@ -858,7 +985,7 @@ function shapesOf(slideXml: string): PptxShape[] {
       const flags = grouped ? { grouped: true as const } : {};
 
       if (element.name === 'p:pic') {
-        const blip = /<a:blip\b[^>]*\/?>/.exec(element.body);
+        const blip = /<a:blip\b[^<>]*>/.exec(element.body);
         out.push({
           kind: 'picture',
           ...geometry,
@@ -918,7 +1045,7 @@ function shapesOf(slideXml: string): PptxShape[] {
 /** `Id` → `Target`, from one `_rels` part. */
 function relationships(xml: string): Map<string, string> {
   const out = new Map<string, string>();
-  for (const match of xml.matchAll(/<Relationship\b[^>]*\/?>/g)) {
+  for (const match of xml.matchAll(/<Relationship\b[^<>]*>/g)) {
     const id = attribute(match[0], 'Id');
     const target = attribute(match[0], 'Target');
     if (id && target) out.set(id, target);
@@ -978,28 +1105,66 @@ export async function readPptx(
   bytes: Uint8Array,
   options: PptxReadOptions = {}
 ): Promise<PptxDeck> {
-  if (bytes.length === 0) throw corrupt(EMPTY_FILE_MESSAGE);
-  if (isOle2(bytes)) throw unsupported(OLE2_MESSAGE);
-  if (!isZip(bytes)) throw corrupt(NOT_A_ZIP_MESSAGE);
+  if (bytes.length === 0) throw corrupt(translate(EMPTY_FILE_MESSAGE));
+  if (isOle2(bytes)) throw unsupported(translate(OLE2_MESSAGE));
+  if (!isZip(bytes)) throw corrupt(translate(NOT_A_ZIP_MESSAGE));
 
-  const { unzipSync, strFromU8 } = await import('fflate');
-  let files: Record<string, Uint8Array>;
+  const { strFromU8 } = await import('fflate');
+  // CONV-5. Media is inflated only when the caller asked for its bytes; the
+  // XML and relationship parts always are. The budget is checked against the
+  // central directory over exactly the entries that will be inflated, before
+  // anything is — and each entry is then inflated into a buffer bounded by its
+  // declared size and refused if it holds more, so a lying directory can
+  // neither allocate past what was checked nor be silently truncated.
+  const wanted = (name: string) =>
+    !name.startsWith('ppt/media/') || options.includeMediaBytes === true;
+  /** Declared uncompressed size of every entry, inflated or not. */
+  const declaredSizes = new Map<string, number>();
+  let files: Record<string, Uint8Array> | null;
   try {
-    files = unzipSync(bytes);
+    for (const entry of readZipDirectory(bytes)?.entries ?? []) {
+      declaredSizes.set(entry.name, entry.uncompressedSize);
+    }
+    files = inflateZipVetted(bytes, 'presentation', {
+      include: wanted,
+      inspect: entry => {
+        // One XML part larger than any real slide is refused outright: the
+        // element scans are linear now, but a part this size is not a slide.
+        if (entry.name.endsWith('.xml') && entry.uncompressedSize > MAX_XML_PART_BYTES) {
+          throw unsupported(
+            translate(
+              'This presentation has a part ({name}) of {size} MB, larger than the {limit} MB ' +
+                'any real slide needs. Nothing was read.',
+              {
+                name: entry.name,
+                size: Math.round(entry.uncompressedSize / 1024 / 1024),
+                limit: MAX_XML_PART_BYTES / 1024 / 1024
+              }
+            )
+          );
+        }
+      }
+    });
   } catch (err) {
+    if (err instanceof StaplerError) throw err;
     throw corrupt(
-      `${NOT_A_ZIP_MESSAGE.replace('does not start like one', 'could not be opened')} (${
-        err instanceof Error ? err.message : String(err)
-      })`
+      translate(
+        'This file is not a PowerPoint presentation — a `.pptx` is a ZIP package, and this file ' +
+          'could not be opened. Nothing was read. ({message})',
+        { message: err instanceof Error ? err.message : String(err) }
+      )
     );
+  }
+  if (!files) {
+    throw corrupt(translate(UNOPENABLE_ZIP_MESSAGE));
   }
 
   const presentationPart = 'ppt/presentation.xml';
   const presentation = files[presentationPart];
-  if (!presentation) throw unsupported(NOT_A_PRESENTATION_MESSAGE);
+  if (!presentation) throw unsupported(translate(NOT_A_PRESENTATION_MESSAGE));
   const presentationXml = strFromU8(presentation);
 
-  const sldSz = /<p:sldSz\b[^>]*\/?>/.exec(presentationXml);
+  const sldSz = /<p:sldSz\b[^<>]*>/.exec(presentationXml);
   const slideWidth = sldSz ? numericAttribute(sldSz[0], 'cx') : 0;
   const slideHeight = sldSz ? numericAttribute(sldSz[0], 'cy') : 0;
 
@@ -1007,13 +1172,13 @@ export async function readPptx(
   const rels = presentationRels ? relationships(strFromU8(presentationRels)) : new Map();
 
   const slides: PptxSlide[] = [];
-  const idList = /<p:sldIdLst>([\s\S]*?)<\/p:sldIdLst>/.exec(presentationXml);
-  const listed = [...(idList?.[1] ?? '').matchAll(/<p:sldId\b[^>]*\/?>/g)];
+  const idList = elementBodies(presentationXml, 'p:sldIdLst', 1)[0];
+  const listed = [...(idList ?? '').matchAll(/<p:sldId\b[^<>]*>/g)];
   for (const match of listed) {
     await checkpoint(
       options.job,
       slides.length / Math.max(1, listed.length),
-      `Reading slide ${slides.length + 1} of ${listed.length}`
+      translate('Reading slide {n} of {total}', { n: slides.length + 1, total: listed.length })
     );
     const relId = attribute(match[0], 'r:id');
     const target = relId ? rels.get(relId) : undefined;
@@ -1024,8 +1189,16 @@ export async function readPptx(
     // against page N+1 and fail somewhere far from the cause.
     if (!target) {
       throw corrupt(
-        `This presentation lists a slide whose relationship (${relId ?? 'with no r:id'}) is not ` +
-          'declared, so it is incomplete. Nothing was read.'
+        relId
+          ? translate(
+              'This presentation lists a slide whose relationship ({id}) is not ' +
+                'declared, so it is incomplete. Nothing was read.',
+              { id: relId }
+            )
+          : translate(
+              'This presentation lists a slide whose relationship (with no r:id) is not ' +
+                'declared, so it is incomplete. Nothing was read.'
+            )
       );
     }
     const part = resolvePart(presentationPart, target);
@@ -1035,8 +1208,11 @@ export async function readPptx(
     // PowerPoint would offer to repair.
     if (!slideBytes) {
       throw corrupt(
-        `This presentation lists a slide (${part}) that is not in the package, so it is ` +
-          'incomplete. Nothing was read.'
+        translate(
+          'This presentation lists a slide ({part}) that is not in the package, so it is ' +
+            'incomplete. Nothing was read.',
+          { part }
+        )
       );
     }
     const xml = strFromU8(slideBytes);
@@ -1052,7 +1228,7 @@ export async function readPptx(
       media.push({
         relationshipId: id,
         part: mediaPart,
-        byteLength: content?.length ?? 0,
+        byteLength: content?.length ?? declaredSizes.get(mediaPart) ?? 0,
         // The same `Uint8Array` instance for every slide that references the
         // part, because it is the one `unzipSync` produced — so a logo on forty
         // slides is one copy here, and the converter that embeds it can
@@ -1100,10 +1276,10 @@ export async function readPptx(
     });
   }
 
-  if (slides.length === 0) throw unsupported(NO_SLIDES_MESSAGE);
+  if (slides.length === 0) throw unsupported(translate(NO_SLIDES_MESSAGE));
 
   const core = files['docProps/core.xml'];
-  const title = core ? /<dc:title>([\s\S]*?)<\/dc:title>/.exec(strFromU8(core))?.[1] : undefined;
+  const title = core ? elementBodies(strFromU8(core), 'dc:title', 1)[0] : undefined;
 
   return {
     slideWidth,

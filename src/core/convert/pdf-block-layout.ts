@@ -24,8 +24,10 @@
 import { PDFDocument, PDFFont, PDFImage, PDFPage, StandardFonts, rgb } from 'pdf-lib';
 import { DOC_HAIRLINE_RGB, SUMMARY_ACCENT_RGB } from '../doc-colors';
 import { corrupt } from '../errors';
+import { tPlural, translate } from '../i18n';
 import {
   addLinkAnnotation,
+  droppedLinksNote,
   newSubstitutionTally,
   sanitizeWinAnsiText,
   type SubstitutionTally
@@ -288,8 +290,10 @@ export function clampPageBox(
     Number.isFinite(box.width) && box.width > 0 && Number.isFinite(box.height) && box.height > 0;
   if (!usable) {
     notes.push(
-      'The document did not state a usable page size, so the pages are ' +
-        `${Math.round(fallback[0])} × ${Math.round(fallback[1])} pt.`
+      translate(
+        'The document did not state a usable page size, so the pages are {width} × {height} pt.',
+        { width: Math.round(fallback[0]), height: Math.round(fallback[1]) }
+      )
     );
     return [fallback[0], fallback[1]];
   }
@@ -297,9 +301,17 @@ export function clampPageBox(
   const height = Math.min(MAX_PAGE_POINTS, Math.max(MIN_PAGE_POINTS, box.height));
   if (Math.abs(width - box.width) > 0.01 || Math.abs(height - box.height) > 0.01) {
     notes.push(
-      `The document states a page of ${Math.round(box.width)} × ${Math.round(box.height)} pt, ` +
-        `which is outside what a PDF page may be; it was clamped to ${Math.round(width)} × ` +
-        `${Math.round(height)} pt and the content scaled to fit.`
+      translate(
+        'The document states a page of {width} × {height} pt, ' +
+          'which is outside what a PDF page may be; it was clamped to {clampedWidth} × ' +
+          '{clampedHeight} pt and the content scaled to fit.',
+        {
+          width: Math.round(box.width),
+          height: Math.round(box.height),
+          clampedWidth: Math.round(width),
+          clampedHeight: Math.round(height)
+        }
+      )
     );
   }
   return [width, height];
@@ -326,17 +338,22 @@ export async function layoutBlocksToPdf(
     // conditions — an empty file, and a `.docx` with no `word/document.xml`
     // ("there is nothing to convert") — so the two agree.
     throw corrupt(
-      'This document produced no text or images to convert, so no PDF was written. It may be ' +
-        'empty, or hold only content this converter cannot read (text boxes, shapes or SmartArt).'
+      translate(
+        'This document produced no text or images to convert, so no PDF was written. It may be ' +
+          'empty, or hold only content this converter cannot read (text boxes, shapes or ' +
+          'SmartArt).'
+      )
     );
   }
 
-  await checkpoint(job, 0, 'Laying out the PDF');
+  await checkpoint(job, 0, translate('Laying out the PDF'));
   // Call-local, so a second conversion on this same pooled worker cannot reset
   // it mid-layout and have this document reported as substitution-free.
   const tally = newSubstitutionTally();
 
   const notes: string[] = [];
+  /** Links `addLinkAnnotation` refused (unsafe scheme or unparseable) — CONV-11. */
+  let droppedLinks = 0;
   const named = PAGE_SIZES[options.pageSize] ?? PAGE_SIZES.a4;
   const [pageWidth, pageHeight] = options.pageBox
     ? clampPageBox(options.pageBox, named, notes)
@@ -402,8 +419,11 @@ export async function layoutBlocksToPdf(
         cursor += piece.width;
         index += 1;
       }
-      if (href) {
-        addLinkAnnotation(page, [groupStart, baseline - 2, cursor, baseline + size], href);
+      if (
+        href &&
+        !addLinkAnnotation(page, [groupStart, baseline - 2, cursor, baseline + size], href)
+      ) {
+        droppedLinks += 1;
       }
     }
   };
@@ -563,9 +583,11 @@ export async function layoutBlocksToPdf(
       return embedded;
     } catch (err) {
       notes.push(
-        `An image could not be embedded and was left out (${
-          err instanceof Error ? err.message : 'unreadable image data'
-        }).`
+        err instanceof Error
+          ? translate('An image could not be embedded and was left out ({message}).', {
+              message: err.message
+            })
+          : translate('An image could not be embedded and was left out (unreadable image data).')
       );
       return null;
     }
@@ -624,7 +646,11 @@ export async function layoutBlocksToPdf(
     let overflowing = 0;
 
     if (!(block.width > 0) || !(block.height > 0)) {
-      notes.push(`${block.label} states no size, so it was drawn as an empty page.`);
+      notes.push(
+        translate('{label} states no size, so it was drawn as an empty page.', {
+          label: block.label
+        })
+      );
       y = MARGIN;
       pageUsed = true;
       return { pageIndex: at, images, overflowing };
@@ -763,7 +789,7 @@ export async function layoutBlocksToPdf(
     await checkpoint(
       job,
       (index / blocks.length) * 0.9,
-      `Laying out block ${index + 1} of ${blocks.length}`
+      translate('Laying out block {n} of {total}', { n: index + 1, total: blocks.length })
     );
 
     switch (block.kind) {
@@ -860,13 +886,19 @@ export async function layoutBlocksToPdf(
     // it, and the fonts here are not the fonts the deck asked for — which is
     // the usual reason a box that fitted in PowerPoint does not fit here.
     notes.push(
-      `${overflowingBoxes} text box${overflowingBoxes === 1 ? '' : 'es'} hold more text than ` +
-        'the original sized them for, because this converter draws with its own fonts. All of ' +
-        'that text is in the PDF, but it overruns its box and may overlap what is below it.'
+      tPlural(
+        '{count} text boxes hold more text than ' +
+          'the original sized them for, because this converter draws with its own fonts. All of ' +
+          'that text is in the PDF, but it overruns its box and may overlap what is below it.',
+        overflowingBoxes
+      )
     );
   }
 
-  await checkpoint(job, 0.95, 'Saving the PDF');
+  const linkNote = droppedLinksNote(droppedLinks);
+  if (linkNote) notes.push(linkNote);
+
+  await checkpoint(job, 0.95, translate('Saving the PDF'));
   const bytes = await doc.save();
 
   return {

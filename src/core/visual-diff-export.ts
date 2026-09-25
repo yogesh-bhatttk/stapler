@@ -5,6 +5,7 @@ import { type StaplerDoc } from './store';
 import { composeDocument } from './operations';
 import { renderWorker } from './workers';
 import { internal } from './errors';
+import { translate } from './i18n';
 
 export interface PageDiffResult {
   pageIndex: number;
@@ -37,7 +38,7 @@ export async function exportVisualDiff(
   const totalPages = Math.max(pageCountA, pageCountB);
 
   if (totalPages === 0) {
-    throw internal('There are no pages to export.');
+    throw internal(translate('There are no pages to export.'));
   }
 
   // Compose documents to include user edits (reorder, rotation, annotations, etc.)
@@ -123,9 +124,10 @@ export async function exportVisualDiff(
         });
       } catch (error) {
         throw internal(
-          `Could not render page ${i + 1} for visual-diff export: ${
-            error instanceof Error ? error.message : String(error)
-          }`
+          translate('Could not render page {page} for visual-diff export: {message}', {
+            page: i + 1,
+            message: error instanceof Error ? error.message : String(error)
+          })
         );
       }
     }

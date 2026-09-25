@@ -89,3 +89,24 @@ export async function writeCachedModel(lang: string, bytes: Uint8Array): Promise
     db.close();
   }
 }
+
+/**
+ * Removes `lang`'s bytes from tesseract's cache. The OCR worker runs tesseract
+ * with `cacheMethod: 'readOnly'` (audit 2026-09-25 CNV-2), so tesseract itself
+ * never deletes a bad entry any more — this is the one place that does, when a
+ * model fails its trial init or the user removes their downloaded models.
+ */
+export async function deleteCachedModel(lang: string): Promise<void> {
+  if (typeof indexedDB === 'undefined') return;
+  const db = await openDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      tx.objectStore(STORE_NAME).delete(cacheKey(lang));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}

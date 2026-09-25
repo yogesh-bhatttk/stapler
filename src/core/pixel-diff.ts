@@ -1,6 +1,8 @@
+import { translate } from './i18n';
+
 export function pixelDiff(img1: ImageData, img2: ImageData, sensitivity: number): ImageData {
   if (img1.width !== img2.width || img1.height !== img2.height) {
-    throw new Error('Cannot compare images with different dimensions.');
+    throw new Error(translate('Cannot compare images with different dimensions.'));
   }
   const width = img1.width;
   const height = img1.height;

@@ -33,6 +33,9 @@ import { corrupt, fromUnknown, unsupported } from '../errors';
 import { checkpoint, type JobHandle } from '../workers/protocol';
 import type { LayoutBlock, StyledRun } from './html-to-pdf-blocks';
 import { columnRef } from './column-ref';
+import { tKey } from '../i18n/key';
+import { tPlural, translate } from '../i18n';
+import { inflateZipVetted, repackStored } from './zip-guard';
 
 /** `PK\x03\x04` — the local file header every ZIP, and so every `.xlsx`, opens with. */
 const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04];
@@ -44,27 +47,32 @@ const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04];
  */
 const OLE2_MAGIC = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
 
-export const XLSX_EMPTY_MESSAGE = 'This file is empty, so there is nothing to convert.';
+export const XLSX_EMPTY_MESSAGE = tKey('This file is empty, so there is nothing to convert.');
 
-export const XLSX_LEGACY_MESSAGE =
+export const XLSX_LEGACY_MESSAGE = tKey(
   'This is a legacy Excel .xls file, or a password-protected .xlsx. Neither can be read here — ' +
-  'open it in Excel or LibreOffice and save it as an unprotected .xlsx first.';
+    'open it in Excel or LibreOffice and save it as an unprotected .xlsx first.'
+);
 
-export const XLSX_NOT_A_ZIP_MESSAGE =
+export const XLSX_NOT_A_ZIP_MESSAGE = tKey(
   'This file is not a readable .xlsx: its ZIP container could not be opened. The original file ' +
-  'is untouched — nothing was converted.';
+    'is untouched — nothing was converted.'
+);
 
-export const XLSX_NOT_A_WORKBOOK_MESSAGE =
+export const XLSX_NOT_A_WORKBOOK_MESSAGE = tKey(
   'This file is a ZIP, but not an Excel workbook — it holds no spreadsheet part. A .docx or ' +
-  '.pptx renamed to .xlsx lands here. The original file is untouched.';
+    '.pptx renamed to .xlsx lands here. The original file is untouched.'
+);
 
-export const XLSX_NO_SHEETS_MESSAGE =
+export const XLSX_NO_SHEETS_MESSAGE = tKey(
   'This workbook contains no sheets, so there is nothing to convert. The original file is ' +
-  'untouched.';
+    'untouched.'
+);
 
-export const XLSX_ALL_SHEETS_HIDDEN_MESSAGE =
+export const XLSX_ALL_SHEETS_HIDDEN_MESSAGE = tKey(
   'Every sheet in this workbook is hidden. Hidden sheets are left out of the PDF on purpose — ' +
-  'unhide at least one sheet in Excel and convert again. Nothing was written.';
+    'unhide at least one sheet in Excel and convert again. Nothing was written.'
+);
 
 /**
  * The two things one sheet's section can say when there is no grid to draw, and
@@ -151,52 +159,61 @@ export const MAX_CELL_CHARS = 500;
  * ------------------------------------------------------------------ */
 
 export function sheetCapNote(total: number): string {
-  return (
-    `This workbook has ${total} sheets and the first ${MAX_SHEETS} were converted. Sheets ` +
-    `${MAX_SHEETS + 1}–${total} are not in the PDF.`
+  return translate(
+    'This workbook has {total} sheets and the first {max} were converted. Sheets ' +
+      '{first}–{total} are not in the PDF.',
+    { total, max: MAX_SHEETS, first: MAX_SHEETS + 1 }
   );
 }
 
 export function rowCapNote(sheet: string, total: number): string {
-  return (
-    `Sheet "${sheet}" has ${total} rows with content and the first ${MAX_SHEET_ROWS} were ` +
-    `converted. Rows ${MAX_SHEET_ROWS + 1}–${total} are not in the PDF.`
+  return translate(
+    'Sheet "{sheet}" has {total} rows with content and the first {max} were ' +
+      'converted. Rows {first}–{total} are not in the PDF.',
+    { sheet, total, max: MAX_SHEET_ROWS, first: MAX_SHEET_ROWS + 1 }
   );
 }
 
 export function columnCapNote(sheet: string, total: number): string {
-  return (
-    `Sheet "${sheet}" has ${total} columns with content and the first ${MAX_SHEET_COLUMNS} were ` +
-    `converted. The remaining ${total - MAX_SHEET_COLUMNS} are not in the PDF.`
+  return translate(
+    'Sheet "{sheet}" has {total} columns with content and the first {max} were ' +
+      'converted. The remaining {rest} are not in the PDF.',
+    { sheet, total, max: MAX_SHEET_COLUMNS, rest: total - MAX_SHEET_COLUMNS }
   );
 }
 
 export function hiddenSheetsNote(names: readonly string[]): string {
-  return (
-    `${names.length} hidden sheet${names.length === 1 ? '' : 's'} ` +
-    `(${names.join(', ')}) ${names.length === 1 ? 'was' : 'were'} left out, the same way Excel ` +
-    'itself does not print them.'
+  return tPlural(
+    '{count} hidden sheets ({names}) were left out, the same way Excel ' +
+      'itself does not print them.',
+    names.length,
+    { names: names.join(', ') }
   );
 }
 
 export function hiddenRowsNote(sheet: string, count: number): string {
-  return (
-    `${count} hidden row${count === 1 ? '' : 's'} in sheet "${sheet}" ${count === 1 ? 'was' : 'were'} ` +
-    'left out, the same way Excel itself does not print them.'
+  return tPlural(
+    '{count} hidden rows in sheet "{sheet}" were ' +
+      'left out, the same way Excel itself does not print them.',
+    count,
+    { sheet }
   );
 }
 
 export function hiddenColumnsNote(sheet: string, count: number): string {
-  return (
-    `${count} hidden column${count === 1 ? '' : 's'} in sheet "${sheet}" ` +
-    `${count === 1 ? 'was' : 'were'} left out, the same way Excel itself does not print them.`
+  return tPlural(
+    '{count} hidden columns in sheet "{sheet}" ' +
+      'were left out, the same way Excel itself does not print them.',
+    count,
+    { sheet }
   );
 }
 
 export function truncatedCellsNote(count: number): string {
-  return (
-    `${count} cell${count === 1 ? '' : 's'} held more than ${MAX_CELL_CHARS} characters and ` +
-    `${count === 1 ? 'was' : 'were'} shortened with an ellipsis.`
+  return tPlural(
+    '{count} cells held more than {max} characters and ' + 'were shortened with an ellipsis.',
+    count,
+    { max: MAX_CELL_CHARS }
   );
 }
 
@@ -209,10 +226,11 @@ export function truncatedCellsNote(count: number): string {
  * note tells whoever is deciding whether to save it.
  */
 export function unreadableSheetNote(name: string): string {
-  return (
-    `Sheet "${name}" could not be read — its worksheet data is damaged or in a form this ` +
-    'converter cannot parse, so the sheet is in the PDF as a note saying so and nothing else. ' +
-    'It is not an empty sheet. Open the file in Excel or LibreOffice to check what it holds.'
+  return translate(
+    'Sheet "{name}" could not be read — its worksheet data is damaged or in a form this ' +
+      'converter cannot parse, so the sheet is in the PDF as a note saying so and nothing else. ' +
+      'It is not an empty sheet. Open the file in Excel or LibreOffice to check what it holds.',
+    { name }
   );
 }
 
@@ -227,20 +245,22 @@ export function unreadableSheetNote(name: string): string {
  * grid twice under the same heading with the other sheet's rows nowhere in it.
  */
 export function duplicateSheetNamesNote(names: readonly string[]): string {
-  return (
-    `This workbook declares more than one sheet called ${names.map(n => `"${n}"`).join(', ')}. ` +
-    'A workbook cannot legally do that, and only one sheet of each name can be read — the ' +
-    'sections under a repeated name show the same grid, and the other sheet of that name is ' +
-    'not in the PDF. Rename the sheets in Excel or LibreOffice and convert again.'
+  return translate(
+    'This workbook declares more than one sheet called {names}. ' +
+      'A workbook cannot legally do that, and only one sheet of each name can be read — the ' +
+      'sections under a repeated name show the same grid, and the other sheet of that name is ' +
+      'not in the PDF. Rename the sheets in Excel or LibreOffice and convert again.',
+    { names: names.map(n => `"${n}"`).join(', ') }
   );
 }
 
 export function uncachedFormulaNote(count: number): string {
-  return (
-    `${count} formula cell${count === 1 ? '' : 's'} carried no cached result, so there is ` +
-    `nothing to draw for ${count === 1 ? 'it' : 'them'}. Excel stores the last computed value ` +
-    'alongside each formula; a file written by a tool that does not, or one saved before it ' +
-    'recalculated, leaves the cell blank. Nothing is calculated here.'
+  return tPlural(
+    '{count} formula cells carried no cached result, so there is ' +
+      'nothing to draw for them. Excel stores the last computed value ' +
+      'alongside each formula; a file written by a tool that does not, or one saved before it ' +
+      'recalculated, leaves the cell blank. Nothing is calculated here.',
+    count
   );
 }
 
@@ -252,29 +272,64 @@ export function uncachedFormulaNote(count: number): string {
  * because two of the items are decisions this module makes (hidden content,
  * caps) rather than facts about the layout engine.
  */
-export const EXCEL_LIMITATIONS: readonly string[] = [
-  'A cell shows its computed value, exactly as Excel last displayed it — number and date ' +
-    'formats are preserved. Formulas themselves are not converted, and nothing is recalculated.',
-  'Hidden sheets, hidden rows and hidden columns are left out, the same way Excel itself does ' +
-    'not print them. The conversion says how many, by name for sheets.',
-  'Cell fonts, colours, fills, borders and alignment are not reproduced: every grid is drawn ' +
-    'in one size with a hairline border. Cell text is preserved, its styling is not.',
-  'Merged cells are drawn as the grid beneath them — the value appears in the first cell of the ' +
-    'merge and the rest are blank. No value is lost, the merge is.',
-  'Charts, images, pivot tables, shapes, comments and conditional formatting are not carried ' +
-    'across at all.',
-  'Column widths are approximated from the workbook, then scaled to the page — they will not ' +
-    'match Excel’s own layout. A sheet too wide for the page continues as a second band of ' +
-    'columns lower down rather than losing them.',
-  'Text is drawn in Helvetica. Characters outside the Latin-1 set (CJK, Cyrillic, most Arabic ' +
-    'and Hebrew) are replaced with "?", and the conversion says so when it happens.',
-  `At most ${MAX_SHEETS} sheets, ${MAX_SHEET_ROWS} rows and ${MAX_SHEET_COLUMNS} columns per ` +
-    'sheet are drawn. Anything past that is reported as left out, never dropped quietly.',
-  `A cell longer than ${MAX_CELL_CHARS} characters is shortened with an ellipsis, because a row ` +
-    'several pages tall would run off the bottom of the page instead. The conversion says how ' +
-    'many cells that happened to.',
-  'A grid split across pages does not repeat its header row.'
+export const EXCEL_LIMITATION_KEYS: readonly string[] = [
+  tKey(
+    'A cell shows its computed value, exactly as Excel last displayed it — number and date ' +
+      'formats are preserved. Formulas themselves are not converted, and nothing is recalculated.'
+  ),
+  tKey(
+    'Hidden sheets, hidden rows and hidden columns are left out, the same way Excel itself does ' +
+      'not print them. The conversion says how many, by name for sheets.'
+  ),
+  tKey(
+    'Cell fonts, colours, fills, borders and alignment are not reproduced: every grid is drawn ' +
+      'in one size with a hairline border. Cell text is preserved, its styling is not.'
+  ),
+  tKey(
+    'Merged cells are drawn as the grid beneath them — the value appears in the first cell of the ' +
+      'merge and the rest are blank. No value is lost, the merge is.'
+  ),
+  tKey(
+    'Charts, images, pivot tables, shapes, comments and conditional formatting are not carried ' +
+      'across at all.'
+  ),
+  tKey(
+    'Column widths are approximated from the workbook, then scaled to the page — they will not ' +
+      'match Excel’s own layout. A sheet too wide for the page continues as a second band of ' +
+      'columns lower down rather than losing them.'
+  ),
+  tKey(
+    'Text is drawn in Helvetica. Characters outside the Latin-1 set (CJK, Cyrillic, most Arabic ' +
+      'and Hebrew) are replaced with "?", and the conversion says so when it happens.'
+  ),
+  tKey(
+    'At most {sheets} sheets, {rows} rows and {columns} columns per ' +
+      'sheet are drawn. Anything past that is reported as left out, never dropped quietly.'
+  ),
+  tKey(
+    'A cell longer than {chars} characters is shortened with an ellipsis, because a row ' +
+      'several pages tall would run off the bottom of the page instead. The conversion says how ' +
+      'many cells that happened to.'
+  ),
+  tKey('A grid split across pages does not repeat its header row.')
 ];
+
+/** Values for the `{placeholders}` in {@link EXCEL_LIMITATION_KEYS}. */
+export const EXCEL_LIMITATION_PARAMS = {
+  sheets: MAX_SHEETS,
+  rows: MAX_SHEET_ROWS,
+  columns: MAX_SHEET_COLUMNS,
+  chars: MAX_CELL_CHARS
+} as const;
+
+/** {@link EXCEL_LIMITATION_KEYS} in English, placeholders filled in. */
+export const EXCEL_LIMITATIONS: readonly string[] = EXCEL_LIMITATION_KEYS.map(key =>
+  key.replace(/\{(\w+)\}/g, (match, name: string) =>
+    name in EXCEL_LIMITATION_PARAMS
+      ? String(EXCEL_LIMITATION_PARAMS[name as keyof typeof EXCEL_LIMITATION_PARAMS])
+      : match
+  )
+);
 
 /* ------------------------------------------------------------------ *
  * Result shape
@@ -420,6 +475,10 @@ function errorCellText(cell: SheetCell): string {
  */
 export function cellText(cell: SheetCell | undefined): string {
   if (!cell || cell.t === 'z') return '';
+  // A formula typed as an error but with no value at all is a formula with no
+  // cached result, not an error to print: SheetJS 0.20 writes (and reads back)
+  // an uncalculated formula as `<c t="e"><f>…</f></c>` with no `<v>`.
+  if (cell.t === 'e' && cell.f !== undefined && cell.v === undefined && !cell.w) return '';
   if (cell.t === 'e') return errorCellText(cell);
   if (typeof cell.w === 'string' && cell.w.length > 0) return cell.w;
   const value = cell.v;
@@ -696,11 +755,13 @@ export function worksheetPartState(
 export function translateSheetJsError(err: unknown, zip: ZipEvidence = 'unknown'): Error {
   const message = fromUnknown(err).message;
 
-  if (/encryption|encrypted|password/i.test(message)) return unsupported(XLSX_LEGACY_MESSAGE);
+  if (/encryption|encrypted|password/i.test(message))
+    return unsupported(translate(XLSX_LEGACY_MESSAGE));
 
   // The one container complaint a successful probe does not contradict: the probe
   // inflates nothing, so it never meets the compression method SheetJS refused.
-  if (/Unsupported ZIP Compression/i.test(message)) return corrupt(XLSX_NOT_A_ZIP_MESSAGE);
+  if (/Unsupported ZIP Compression/i.test(message))
+    return corrupt(translate(XLSX_NOT_A_ZIP_MESSAGE));
 
   const containerBlamed =
     /Unsupported ZIP|End of data reached|end of central directory|Corrupted zip|invalid zip/i.test(
@@ -712,10 +773,12 @@ export function translateSheetJsError(err: unknown, zip: ZipEvidence = 'unknown'
     );
 
   if (notAWorkbook || (containerBlamed && zip === 'opened')) {
-    return corrupt(XLSX_NOT_A_WORKBOOK_MESSAGE);
+    return corrupt(translate(XLSX_NOT_A_WORKBOOK_MESSAGE));
   }
-  if (containerBlamed) return corrupt(XLSX_NOT_A_ZIP_MESSAGE);
-  return corrupt(`This .xlsx could not be read, so nothing was converted (${message}).`);
+  if (containerBlamed) return corrupt(translate(XLSX_NOT_A_ZIP_MESSAGE));
+  return corrupt(
+    translate('This .xlsx could not be read, so nothing was converted ({message}).', { message })
+  );
 }
 
 /* ------------------------------------------------------------------ *
@@ -733,20 +796,27 @@ export async function readXlsxAsBlocks(
   bytes: Uint8Array,
   job?: JobHandle
 ): Promise<XlsxBlocksResult> {
-  await checkpoint(job, 0, 'Reading the workbook');
+  await checkpoint(job, 0, translate('Reading the workbook'));
 
-  if (bytes.length === 0) throw corrupt(XLSX_EMPTY_MESSAGE);
-  if (startsWith(bytes, OLE2_MAGIC)) throw unsupported(XLSX_LEGACY_MESSAGE);
+  if (bytes.length === 0) throw corrupt(translate(XLSX_EMPTY_MESSAGE));
+  if (startsWith(bytes, OLE2_MAGIC)) throw unsupported(translate(XLSX_LEGACY_MESSAGE));
   // Not a courtesy check — see the module comment: `XLSX.read` answers binary
   // garbage with a plausible-looking one-sheet workbook rather than an error.
-  if (!startsWith(bytes, ZIP_MAGIC)) throw corrupt(XLSX_NOT_A_ZIP_MESSAGE);
+  if (!startsWith(bytes, ZIP_MAGIC)) throw corrupt(translate(XLSX_NOT_A_ZIP_MESSAGE));
+  // SheetJS inflates every entry the archive lists, and does not bound that by
+  // the declared size. So it is never handed the original archive: the entries
+  // are inflated here, each checked against the budget and its declared size,
+  // and re-packed stored (CONV-5).
+  const vetted = inflateZipVetted(bytes, 'workbook');
+  if (!vetted) throw corrupt(translate(XLSX_NOT_A_ZIP_MESSAGE));
+  const packed = repackStored(vetted);
 
   const XLSX = await import('xlsx');
-  await checkpoint(job, 0.15, 'Reading the workbook');
+  await checkpoint(job, 0.15, translate('Reading the workbook'));
 
   let workbook;
   try {
-    workbook = XLSX.read(bytes, {
+    workbook = XLSX.read(packed, {
       type: 'array',
       // `cellDates` + `cellNF` + `cellText` are what make `w` — the string Excel
       // itself last displayed — available per cell, which is the whole of this
@@ -773,7 +843,7 @@ export async function readXlsxAsBlocks(
   // empty parses cleanly and yields exactly this. SheetJS's *writer* refuses to
   // produce one ("Workbook is empty"), which is why the test for this message has
   // to hand-build the package.
-  if (names.length === 0) throw corrupt(XLSX_NO_SHEETS_MESSAGE);
+  if (names.length === 0) throw corrupt(translate(XLSX_NO_SHEETS_MESSAGE));
 
   const notes: string[] = [];
 
@@ -803,7 +873,7 @@ export async function readXlsxAsBlocks(
     else hiddenNames.push(name);
   });
   if (hiddenNames.length > 0) notes.push(hiddenSheetsNote(hiddenNames));
-  if (visible.length === 0) throw unsupported(XLSX_ALL_SHEETS_HIDDEN_MESSAGE);
+  if (visible.length === 0) throw unsupported(translate(XLSX_ALL_SHEETS_HIDDEN_MESSAGE));
 
   const selected = visible.slice(0, MAX_SHEETS);
   if (visible.length > MAX_SHEETS) notes.push(sheetCapNote(visible.length));
@@ -858,7 +928,7 @@ export async function readXlsxAsBlocks(
     await checkpoint(
       job,
       0.15 + (position / selected.length) * 0.8,
-      `Reading sheet ${position + 1} of ${selected.length}`
+      translate('Reading sheet {n} of {total}', { n: position + 1, total: selected.length })
     );
 
     const sheet = workbook.Sheets[name];
@@ -923,8 +993,8 @@ export async function readXlsxAsBlocks(
       // the identical `{}` whether the sheet is blank or its worksheet part never
       // parsed (see `XLSX_SHEET_UNREADABLE_TEXT`). So it is settled against the
       // bytes: "empty" requires finding an intact worksheet part.
-      relTargets ??= workbookRelTargets(bytes);
-      const state = worksheetPartState(bytes, relTargets, sheetIndex, props[sheetIndex]?.id);
+      relTargets ??= workbookRelTargets(packed);
+      const state = worksheetPartState(packed, relTargets, sheetIndex, props[sheetIndex]?.id);
       noGrid(name, state === 'unreadable' ? 'unreadable' : 'empty');
       continue;
     }
@@ -1055,7 +1125,7 @@ export async function readXlsxAsBlocks(
   if (truncatedCells > 0) notes.push(truncatedCellsNote(truncatedCells));
   if (uncachedFormulas > 0) notes.push(uncachedFormulaNote(uncachedFormulas));
 
-  await checkpoint(job, 0.98, 'Reading the workbook');
+  await checkpoint(job, 0.98, translate('Reading the workbook'));
 
   const title = workbook.Props?.Title;
   return {

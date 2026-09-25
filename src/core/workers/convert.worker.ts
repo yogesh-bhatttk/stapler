@@ -33,6 +33,8 @@
  * the Office-format libraries live, one lazy chunk each.
  */
 import * as Comlink from 'comlink';
+import { loadLocale, tPlural, translate } from '../i18n';
+import type { LocaleAware } from './client';
 import { buildDocx } from '../convert/docx-writer';
 import {
   attachImageBlocks,
@@ -140,7 +142,7 @@ export interface PptxBuildResult {
   outline: PptxPreviewItem[];
 }
 
-export interface ConvertJob {
+export interface ConvertJob extends LocaleAware {
   /**
    * CNV-09 — reads a `.docx` and returns the generalized block model.
    *
@@ -278,21 +280,28 @@ async function openImageArchive(
     const { unzipSync } = await import('fflate');
     return { files: unzipSync(archive) };
   } catch (err) {
+    const message = fromUnknown(err).message;
     return {
       files: {},
       failure:
-        `No images were ${kind}: their archive could not be read ` +
-        `(${fromUnknown(err).message}).`
+        kind === 'embedded'
+          ? translate('No images were embedded: their archive could not be read ({message}).', {
+              message
+            })
+          : translate('No images were placed: their archive could not be read ({message}).', {
+              message
+            })
     };
   }
 }
 
 export const convertWorkerImpl: ConvertJob = {
+  setLocale: loadLocale,
   async docxToBlocks(bytes, job) {
     const { html, messages } = await readDocxAsHtml(bytes, job);
-    await checkpoint(job, 0.6, 'Reading the document structure');
+    await checkpoint(job, 0.6, translate('Reading the document structure'));
     const { blocks, notes } = parseHtmlBlocks(html);
-    await checkpoint(job, 0.95, 'Reading the document structure');
+    await checkpoint(job, 0.95, translate('Reading the document structure'));
 
     // Image bytes are transferred rather than cloned on the way out — they came
     // straight out of a base64 decode here and nothing in this worker reads them
@@ -307,7 +316,7 @@ export const convertWorkerImpl: ConvertJob = {
 
   async xlsxToBlocks(bytes, job) {
     const { blocks, notes, sheets, title } = await readXlsxAsBlocks(bytes, job);
-    await checkpoint(job, 1, 'Reading the workbook');
+    await checkpoint(job, 1, translate('Reading the workbook'));
     // Nothing to transfer: a spreadsheet's blocks are headings, paragraphs and
     // grids of strings — there is no image buffer in the model, so a transfer
     // list would be empty and the structured clone is the whole cost.
@@ -343,7 +352,7 @@ export const convertWorkerImpl: ConvertJob = {
     let imageCount = 0;
 
     if (imageArchive && imageEntries.length > 0) {
-      await checkpoint(job, 0, 'Reading the embedded images');
+      await checkpoint(job, 0, translate('Reading the embedded images'));
       const { files, failure } = await openImageArchive(imageArchive, 'embedded');
       if (failure) skipped.push(failure);
       imageCount = attachImageBlocks(model.pages, imageEntries, files, skipped);
@@ -357,7 +366,7 @@ export const convertWorkerImpl: ConvertJob = {
   },
 
   async buildXlsx(pages, options, job) {
-    await checkpoint(job, 0.1, 'Planning the workbook');
+    await checkpoint(job, 0.1, translate('Planning the workbook'));
     const plan = planWorkbook(pages, options.includePageText);
 
     if (plan.sheets.length === 0) {
@@ -365,10 +374,10 @@ export const convertWorkerImpl: ConvertJob = {
       // option, since a document with no text at all is refused earlier, in
       // `operations.ts`, before this worker is leased. Writing a workbook with
       // no sheets would produce a file Excel offers to repair.
-      throw unsupported(EMPTY_WORKBOOK_MESSAGE);
+      throw unsupported(translate(EMPTY_WORKBOOK_MESSAGE));
     }
 
-    await checkpoint(job, 0.4, 'Writing the spreadsheet');
+    await checkpoint(job, 0.4, translate('Writing the spreadsheet'));
     // `planWorkbook` has already shortened anything over Excel's cell limit and
     // counted it into `plan.skipped`, so this never fires today. It is wired up
     // anyway: the writer enforces the limit itself, and a shortened cell it had
@@ -379,11 +388,15 @@ export const convertWorkerImpl: ConvertJob = {
       title: options.title,
       onTruncatedCells: cells =>
         skipped.push(
-          `${cells} cell(s) were longer than Excel's ${MAX_CELL_CHARS}-character limit and were ` +
-            'truncated to fit.'
+          tPlural(
+            "{count} cells were longer than Excel's {max}-character limit and were " +
+              'truncated to fit.',
+            cells,
+            { max: MAX_CELL_CHARS }
+          )
         )
     });
-    await checkpoint(job, 1, 'Writing the spreadsheet');
+    await checkpoint(job, 1, translate('Writing the spreadsheet'));
 
     // The outline is derived from the very plan the file was written from, so
     // the preview and the bytes cannot describe different workbooks.
@@ -407,13 +420,13 @@ export const convertWorkerImpl: ConvertJob = {
     // exactly the >50ms main-thread work the NFRs forbid.
     let files: Record<string, Uint8Array> = {};
     if (input.includeImages && imageArchive && imageArchive.length > 0) {
-      await checkpoint(job, 0, 'Reading the embedded images');
+      await checkpoint(job, 0, translate('Reading the embedded images'));
       const opened = await openImageArchive(imageArchive, 'placed');
       files = opened.files;
       if (opened.failure) notes.push(opened.failure);
     }
 
-    await checkpoint(job, 0.1, 'Planning the slides');
+    await checkpoint(job, 0.1, translate('Planning the slides'));
     const plan = planSlides(pages, {
       includeText: input.includeText,
       includeImages: input.includeImages,
@@ -433,7 +446,7 @@ export const convertWorkerImpl: ConvertJob = {
       // Refused *before* any bytes exist. A deck of blank slides is a file the
       // user has to diagnose; naming OCR and the two options is the useful
       // answer, and it is the same policy CNV-10 applies to a scan.
-      throw unsupported(EMPTY_DECK_MESSAGE);
+      throw unsupported(translate(EMPTY_DECK_MESSAGE));
     }
 
     const bytes = await buildPptxFile(
