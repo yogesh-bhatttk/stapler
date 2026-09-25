@@ -1,4 +1,5 @@
 import { unsupported } from '../errors';
+import { translate } from '../i18n';
 import { polygonContainsBox, polygonOverlapsBox, type Point } from '../geometry';
 
 export type TokenType =
@@ -173,9 +174,11 @@ export function parseContentStream(tokens: Token[]): Statement[] {
       // would produce a "verified" redaction that actually removed nothing.
       if (op === 'ID') {
         throw unsupported(
-          'This page contains inline images (the PDF ID operator), which cannot be ' +
-            'safely removed by operator-level redaction. Open the file in a PDF editor ' +
-            'that supports inline-image redaction, or rasterise the page first.'
+          translate(
+            'This page contains inline images (the PDF ID operator), which cannot be ' +
+              'safely removed by operator-level redaction. Open the file in a PDF editor ' +
+              'that supports inline-image redaction, or rasterise the page first.'
+          )
         );
       }
     } else {
@@ -1374,10 +1377,12 @@ export function filterContentStream(
             // is strictly narrower than before — and it never leaves marked
             // content in the file.
             throw unsupported(
-              'A redaction mark falls across an image (or a nested form) that is drawn from ' +
-                'inside a Form XObject. Stapler can filter text and vectors inside a form, but ' +
-                'not remove an image through one. Nothing was changed — your original document ' +
-                'is untouched. Cover the whole form with the mark, or rasterise the page first.'
+              translate(
+                'A redaction mark falls across an image (or a nested form) that is drawn from ' +
+                  'inside a Form XObject. Stapler can filter text and vectors inside a form, but ' +
+                  'not remove an image through one. Nothing was changed — your original document ' +
+                  'is untouched. Cover the whole form with the mark, or rasterise the page first.'
+              )
             );
           }
 
@@ -1399,26 +1404,31 @@ export function filterContentStream(
           continue;
         } else {
           throw unsupported(
-            (box
-              ? 'A redaction mark only partly covers a Form XObject whose content Stapler ' +
-                'could not read'
-              : 'A redaction mark overlaps a Form XObject that declares no /BBox and whose ' +
-                'content Stapler could not read') +
-              ' — so what the mark covers inside it cannot be determined. Removing the whole ' +
-              'form would delete content outside the marked region. Nothing was changed — your ' +
-              'original document is untouched.'
+            box
+              ? translate(
+                  'A redaction mark only partly covers a Form XObject whose content Stapler ' +
+                    'could not read — so what the mark covers inside it cannot be determined. ' +
+                    'Removing the whole form would delete content outside the marked region. ' +
+                    'Nothing was changed — your original document is untouched.'
+                )
+              : translate(
+                  'A redaction mark overlaps a Form XObject that declares no /BBox and whose ' +
+                    'content Stapler could not read — so what the mark covers inside it cannot ' +
+                    'be determined. Removing the whole form would delete content outside the ' +
+                    'marked region. Nothing was changed — your original document is untouched.'
+                )
           );
         }
       } else {
-        // Images occupy the unit square in their own space.
-        const p1 = transformPoint(state.ctm, 0, 0);
-        const p2 = transformPoint(state.ctm, 1, 1);
-        const box: Rect = {
-          x: Math.min(p1.x, p2.x),
-          y: Math.min(p1.y, p2.y),
-          width: Math.abs(p2.x - p1.x),
-          height: Math.abs(p2.y - p1.y)
-        };
+        // Images occupy the unit square in their own space. All four corners
+        // are transformed, as `formBoxOf` does: two diagonal corners give a
+        // sliver for a rotated CTM (zero width at 45°), so a mark over part of
+        // the image touched neither path and only an overlay was drawn over
+        // intact pixels (AUDIT-2026-09-25 PDF-4). The axis-aligned bounds of
+        // the true quad are conservative for "covers" — a rectangle mark
+        // contains the quad iff it contains its bounds, and a polygon mark
+        // containing the bounds contains the quad.
+        const box = formBoxOf(state.ctm, [0, 0, 1, 1]);
 
         // An Image XObject is only safe to drop wholesale when a single
         // redaction rectangle fully contains it — then nothing the user kept is
@@ -1440,12 +1450,19 @@ export function filterContentStream(
           const unitRects: RedactionArea[] = [];
           for (const r of redactionBoxes) {
             if (!areaTouches(r, box)) continue;
-            const unit = redactionAreaInUnitSpace(state.ctm, r);
             // A singular CTM cannot be inverted, so the covered area is
             // unknowable. Cover the whole image rather than none of it: the
             // placement is degenerate, and an image squashed to a line carries
             // no detail worth preserving.
-            unitRects.push(unit ?? { x: 0, y: 0, width: 1, height: 1 });
+            if (!invertMatrix(state.ctm)) {
+              unitRects.push({ x: 0, y: 0, width: 1, height: 1 });
+              continue;
+            }
+            // The bounds of a rotated quad include corners the image does not
+            // occupy; mapped into unit space, a mark that only meets those
+            // corners misses the unit square and is correctly skipped.
+            const unit = redactionAreaInUnitSpace(state.ctm, r);
+            if (unit) unitRects.push(unit);
           }
           if (unitRects.length > 0) {
             partialImageCoverage.push({ name: xObjectName, rects: unitRects });
@@ -1490,6 +1507,9 @@ const TEXT_OPERATORS = new Set([
   '"'
 ]);
 
+/** Text-state operators whose values outlive the text object that sets them. */
+const PERSISTENT_TEXT_STATE = new Set(['Tc', 'Tw', 'Tz', 'TL', 'Tf', 'Tr', 'Ts']);
+
 export interface StripTextObjectsResult {
   filtered: Statement[];
   /** Number of `BT`...`ET` spans removed. */
@@ -1533,7 +1553,20 @@ export interface StripTextObjectsResult {
  * reason.
  */
 export function stripTextObjects(statements: Statement[]): StripTextObjectsResult {
-  const filtered: Statement[] = [];
+  const out: Statement[] = [];
+  // Text state left behind by removed spans, re-emitted (text-state operators
+  // are legal outside a text object) just before the next statement that is
+  // kept — so a run of removed OCR words costs one set of state operators, not
+  // one per word. Nothing is emitted after the last statement: no later
+  // operator in this stream could read it.
+  const pendingState = new Map<string, Statement>();
+  const filtered = {
+    push(statement: Statement) {
+      for (const pending of pendingState.values()) out.push(pending);
+      pendingState.clear();
+      out.push(statement);
+    }
+  };
   let removed = 0;
   let i = 0;
 
@@ -1572,7 +1605,15 @@ export function stripTextObjects(statements: Statement[]): StripTextObjectsResul
     let j = i + 1;
     let safe = true;
     let trAfter: string | null = currentTr;
-    let invisible = currentTr === '3';
+    // PDF-16: the span is removable only if *every* show operator in it runs
+    // under Tr 3. A span that switches back to a visible mode part-way (or
+    // shows before switching to 3) draws visible text, and removing it would
+    // be silent content loss.
+    let sawShow = false;
+    let everyShowInvisible = true;
+    // Text-state values persist past ET (PDF 32000 9.3.1), so a removed span
+    // that set one must leave it set for whatever follows.
+    const lastState = new Map<string, Statement>();
     while (j < statements.length) {
       const inner = statements[j];
       const innerOp = String.fromCharCode(...inner.operator.bytes);
@@ -1580,10 +1621,15 @@ export function stripTextObjects(statements: Statement[]): StripTextObjectsResul
       if (!TEXT_OPERATORS.has(innerOp)) safe = false;
       if (innerOp === 'Tr' && inner.operands.length === 1) {
         trAfter = String.fromCharCode(...inner.operands[0].bytes);
-        if (trAfter === '3') invisible = true;
+      }
+      if (PERSISTENT_TEXT_STATE.has(innerOp)) lastState.set(innerOp, inner);
+      if (innerOp === 'Tj' || innerOp === 'TJ' || innerOp === "'" || innerOp === '"') {
+        sawShow = true;
+        if (trAfter !== '3') everyShowInvisible = false;
       }
       j++;
     }
+    const invisible = sawShow ? everyShowInvisible : currentTr === '3' || trAfter === '3';
 
     if (j >= statements.length || !safe) {
       for (let k = i; k <= Math.min(j, statements.length - 1); k++) filtered.push(statements[k]);
@@ -1603,13 +1649,18 @@ export function stripTextObjects(statements: Statement[]): StripTextObjectsResul
     }
 
     // Every statement from BT through ET (inclusive) is a text operator, and
-    // the span explicitly rendered invisibly.
+    // everything it shows is rendered invisibly. Re-emit the text state it
+    // leaves behind (legal outside a text object) so later text is unchanged.
+    for (const [key, statement] of lastState) {
+      pendingState.delete(key);
+      pendingState.set(key, statement);
+    }
     removed++;
     i = j + 1;
     currentTr = trAfter;
   }
 
-  return { filtered, removed };
+  return { filtered: out, removed };
 }
 
 /**

@@ -61,6 +61,7 @@ import {
 } from '../ui/tools/watermark/state';
 import type { WatermarkData } from './workers/process.worker';
 import { internal, unsupported, cancelled, isCancellation, fromUnknown } from './errors';
+import { translate } from './i18n';
 import { hasXfaMarker, xfaConvertMessage } from './pdf/xfa';
 import type { DocxModel, DocxPage, DocxPreviewItem } from './convert/blocks';
 import {
@@ -133,6 +134,23 @@ function toWatermarkData(settings: WatermarkSettings): WatermarkData {
  * Use this only on bytes that came out of a worker one line earlier and die at
  * this call.
  */
+/**
+ * Hands a `{ sourceId: bytes }` record to a worker without copying it.
+ *
+ * `Comlink.transfer` registers a transfer list only for the exact object it is
+ * given, and Comlink looks transfer lists up for top-level call arguments only.
+ * Wrapping each value inside the record (what compose and split did) therefore
+ * transferred nothing: every source was structured-cloned on the main thread —
+ * about 50 ms blocked for a 10 × 5 MB merge (AUDIT-2026-09-25 PLT-18 perf
+ * budget). The record itself carries the list here. Safe because
+ * `bytesForPages` reads a fresh buffer per source that no one else holds.
+ */
+function transferSourceBytes(bytes: Record<string, Uint8Array>): Record<string, Uint8Array> {
+  const buffers = new Set<ArrayBuffer>();
+  for (const buf of Object.values(bytes)) buffers.add(buf.buffer as ArrayBuffer);
+  return Comlink.transfer(bytes, [...buffers]);
+}
+
 function handOver(bytes: Uint8Array): Uint8Array {
   return Comlink.transfer(bytes, [bytes.buffer as ArrayBuffer]);
 }
@@ -260,10 +278,7 @@ export async function composeDocument(
     ...p,
     cropBox: request.cropBoxes?.[p.key]
   }));
-  const bytes = await bytesForPages(request.pages);
-  for (const [id, buf] of Object.entries(bytes)) {
-    bytes[id] = Comlink.transfer(buf, [buf.buffer as ArrayBuffer]);
-  }
+  const bytes = transferSourceBytes(await bytesForPages(request.pages));
 
   return processWorker.lease(api =>
     api.compose(
@@ -307,10 +322,7 @@ export async function splitDocument(request: SplitRequest, options: JobOptions =
     ...p,
     cropBox: request.cropBoxes?.[p.key]
   }));
-  const bytes = await bytesForPages(request.pages);
-  for (const [id, buf] of Object.entries(bytes)) {
-    bytes[id] = Comlink.transfer(buf, [buf.buffer as ArrayBuffer]);
-  }
+  const bytes = transferSourceBytes(await bytesForPages(request.pages));
 
   return processWorker.lease(api =>
     api.composeSplit(
@@ -1285,6 +1297,15 @@ async function verifyRedaction(
   // the whole-document check below untouched.
   const offPageText = await processWorker.lease(api => api.collectOffPageText(output));
 
+  // M7 — what an extraction tool sees rather than what a viewer reaches: every
+  // string and decoded text-bearing stream in the file (an orphan page's
+  // content, a stale appearance stream, an outline title), and any page
+  // dictionary that exists outside the page tree. Either finding fails the
+  // redaction, whatever the rendered page looks like.
+  const searchTerms = regions.map(r => r.text).filter((t): t is string => !!t && !!t.trim());
+  const residual = await processWorker.lease(api => api.scanResidualText(output, searchTerms));
+  const residualFound = new Set(residual.found.map(t => t.toLowerCase()));
+
   // Which images the *output* still draws under a mark, and which of their pixels
   // the mark covers — the same plan the redaction worked from, recomputed against
   // what was actually written. A throw here is a refusal to answer, so it is
@@ -1369,11 +1390,36 @@ async function verifyRedaction(
       }
 
       return regionChecks.map(({ region, foundText }, index) => {
+        if (residual.orphanPages > 0) {
+          return {
+            region,
+            pass: false,
+            detail: translate(
+              'The output still contains {count} page object(s) outside its page tree, which can carry the original, unredacted content. The redaction is unproven.',
+              { count: residual.orphanPages }
+            )
+          };
+        }
+
+        if (region.text && residualFound.has(region.text.toLowerCase())) {
+          return {
+            region,
+            pass: false,
+            detail: translate(
+              'The text "{text}" is still present inside the file\'s data, even though no page shows it.',
+              { text: region.text }
+            )
+          };
+        }
+
         if (foundText.trim().length > 0) {
           return {
             region,
             pass: false,
-            detail: `The redacted region on page ${region.pageIndex + 1} still contains extractable text: "${foundText}".`
+            detail: translate(
+              'The redacted region on page {page} still contains extractable text: "{text}".',
+              { page: region.pageIndex + 1, text: foundText }
+            )
           };
         }
 
@@ -1381,7 +1427,9 @@ async function verifyRedaction(
           return {
             region,
             pass: false,
-            detail: `The text "${region.text}" is still present elsewhere in the document.`
+            detail: translate('The text "{text}" is still present elsewhere in the document.', {
+              text: region.text
+            })
           };
         }
 
@@ -1389,9 +1437,10 @@ async function verifyRedaction(
           return {
             region,
             pass: false,
-            detail:
-              `The redacted region on page ${region.pageIndex + 1} carries no extractable text, but it ` +
-              `could not be rendered to check its pixels, so the redaction is unproven. ${pixelError ?? ''}`.trim()
+            detail: translate(
+              'The redacted region on page {page} carries no extractable text, but it could not be rendered to check its pixels, so the redaction is unproven. {error}',
+              { page: region.pageIndex + 1, error: pixelError ?? '' }
+            ).trim()
           };
         }
 
@@ -1402,9 +1451,10 @@ async function verifyRedaction(
           return {
             region,
             pass: false,
-            detail:
-              `The pixel check returned no result for the region on page ${region.pageIndex + 1}, ` +
-              'so the redaction is unproven.'
+            detail: translate(
+              'The pixel check returned no result for the region on page {page}, so the redaction is unproven.',
+              { page: region.pageIndex + 1 }
+            )
           };
         }
 
@@ -1413,7 +1463,13 @@ async function verifyRedaction(
           return {
             region,
             pass: false,
-            detail: `The redacted region on page ${region.pageIndex + 1} does not render blank: ${residueDetail}`
+            detail: translate(
+              'The redacted region on page {page} does not render blank: {reason}',
+              {
+                page: region.pageIndex + 1,
+                reason: residueDetail
+              }
+            )
           };
         }
 
@@ -1425,7 +1481,10 @@ async function verifyRedaction(
           return {
             region,
             pass: false,
-            detail: `The redaction on page ${region.pageIndex + 1} is not proven: ${imageDetail}`
+            detail: translate('The redaction on page {page} is not proven: {reason}', {
+              page: region.pageIndex + 1,
+              reason: imageDetail
+            })
           };
         }
 
@@ -1433,8 +1492,14 @@ async function verifyRedaction(
           region,
           pass: true,
           detail: region.text
-            ? `"${region.text}" is absent, the redacted region is geometrically clear, it renders as solid fill, and any image underneath it has had its covered pixels destroyed.`
-            : `The redacted region on page ${region.pageIndex + 1} is geometrically clear, renders as solid fill, and any image underneath it has had its covered pixels destroyed.`
+            ? translate(
+                '"{text}" is absent, the redacted region is geometrically clear, it renders as solid fill, and any image underneath it has had its covered pixels destroyed.',
+                { text: region.text }
+              )
+            : translate(
+                'The redacted region on page {page} is geometrically clear, renders as solid fill, and any image underneath it has had its covered pixels destroyed.',
+                { page: region.pageIndex + 1 }
+              )
         };
       });
     } finally {
@@ -2062,7 +2127,7 @@ export async function convertPdfToXlsx(
   });
 
   if (jobOptions.signal?.aborted) throw cancelled();
-  if (hasNoText(pages)) throw unsupported(NO_TEXT_LAYER_MESSAGE);
+  if (hasNoText(pages)) throw unsupported(translate(NO_TEXT_LAYER_MESSAGE));
 
   const built = await convertWorker.lease(api =>
     api.buildXlsx(

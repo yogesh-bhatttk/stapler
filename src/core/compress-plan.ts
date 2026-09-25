@@ -11,6 +11,7 @@
  */
 import type { ImageFacts, PageImageInventory } from './workers/process.worker';
 import type { PageTextPresence } from './workers/render.worker';
+import { translate } from './i18n';
 
 export type PageRoute = 'raster' | 'surgical' | 'already-optimized' | 'skip';
 
@@ -152,7 +153,11 @@ function imageIsSafe(image: ImageFacts): ImageSafety {
   // list exists to keep it out of.
   const undecodable = (image.filters ?? [image.filter]).find(name => UNDECODABLE_FILTERS.has(name));
   if (undecodable) {
-    return blocked(`${undecodable} image (decoder output cannot be re-encoded safely)`);
+    return blocked(
+      translate('{filter} image (decoder output cannot be re-encoded safely)', {
+        filter: undecodable
+      })
+    );
   }
   // The same test, applied to the image's *mask*. An `/SMask` (or a stencil
   // `/Mask`) is a separate stream with its own `/Filter` chain, and nothing
@@ -165,20 +170,31 @@ function imageIsSafe(image: ImageFacts): ImageSafety {
   const undecodableMask = (image.maskFilters ?? []).find(name => UNDECODABLE_FILTERS.has(name));
   if (undecodableMask) {
     return blocked(
-      `${undecodableMask} soft mask (the mask's own stream cannot be decoded, so the image it masks cannot be re-encoded)`
+      translate(
+        "{filter} soft mask (the mask's own stream cannot be decoded, so the image it masks cannot be re-encoded)",
+        { filter: undecodableMask }
+      )
     );
   }
   if (UNSAFE_COLOR_SPACES.has(image.colorSpace)) {
-    return blocked(`${image.colorSpace} image (re-encoding would flatten a named ink to RGB)`);
+    return blocked(
+      translate('{colorSpace} image (re-encoding would flatten a named ink to RGB)', {
+        colorSpace: image.colorSpace
+      })
+    );
   }
   if (image.isImageMask) {
-    return blocked('Stencil mask (a 1-bit shape, not a picture — JPEG cannot carry it)');
+    return blocked(translate('Stencil mask (a 1-bit shape, not a picture — JPEG cannot carry it)'));
   }
   if (image.maskKind === 'colorKey') {
-    return blocked('Colour-key masked image (transparency defined by exact pixel values)');
+    return blocked(
+      translate('Colour-key masked image (transparency defined by exact pixel values)')
+    );
   }
   if (image.maskKind === 'preblended') {
-    return blocked('Pre-blended soft mask (/Matte), where colour and mask cannot be separated');
+    return blocked(
+      translate('Pre-blended soft mask (/Matte), where colour and mask cannot be separated')
+    );
   }
 
   if (image.bitsPerComponent < 8) {
@@ -194,7 +210,7 @@ function imageIsSafe(image: ImageFacts): ImageSafety {
     return {
       surgical: false,
       raster: true,
-      reason: `${image.bitsPerComponent}-bit image`
+      reason: translate('{bits}-bit image', { bits: image.bitsPerComponent })
     };
   }
   return { surgical: true, raster: true };

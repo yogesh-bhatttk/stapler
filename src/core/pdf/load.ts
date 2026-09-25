@@ -28,6 +28,7 @@
  */
 import { PDFDict, PDFDocument, PDFName, PDFNumber, PDFRef } from 'pdf-lib';
 import { corrupt, encrypted } from '../errors';
+import { translate } from '../i18n';
 
 /**
  * The `/P` bits (Table 22) that actually deny a user something, as a mask.
@@ -197,13 +198,15 @@ async function loadInternal(
         return { doc: decrypted, restrictions: probe.flags, restrictionsUnknown: probe.unknown };
       } catch {
         // The empty password didn't open it either — a real password is required.
-        throw encrypted('The document is encrypted, so its contents cannot be rewritten.');
+        throw encrypted(
+          translate('The document is encrypted, so its contents cannot be rewritten.')
+        );
       }
     }
-    throw corrupt(`The PDF could not be parsed: ${message}`);
+    throw corrupt(translate('The PDF could not be parsed: {message}', { message }));
   }
   if (doc.isEncrypted && !allowEncrypted) {
-    throw encrypted('The document is encrypted, so its contents cannot be rewritten.');
+    throw encrypted(translate('The document is encrypted, so its contents cannot be rewritten.'));
   }
   if (!wantRestrictions || !doc.isEncrypted) {
     return { doc, restrictions: null, restrictionsUnknown: false };

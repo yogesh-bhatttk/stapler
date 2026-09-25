@@ -20,6 +20,8 @@
  * typing. This module deliberately errs toward the first.
  */
 import { PDFDict, PDFName, type PDFDocument } from 'pdf-lib';
+import { tKey } from '../i18n/key';
+import { translate } from '../i18n';
 
 /** The `/XFA` key as bytes; comparing bytes avoids any text-decoding decisions. */
 const XFA_KEY = [0x2f, 0x58, 0x46, 0x41]; // "/XFA"
@@ -76,10 +78,11 @@ export function hasXfaMarker(bytes: Uint8Array): boolean {
 }
 
 /** The one message the whole product uses for an XFA form, so it never drifts. */
-export const XFA_MESSAGE =
+export const XFA_MESSAGE = tKey(
   'This is an XFA form. Its fields live in an XML payload that Stapler cannot fill, ' +
-  'and writing to the AcroForm shadow fields would leave the document inconsistent. ' +
-  'Use the stamp tools to place text and signatures on top instead.';
+    'and writing to the AcroForm shadow fields would leave the document inconsistent. ' +
+    'Use the stamp tools to place text and signatures on top instead.'
+);
 
 /**
  * Combines the raw-byte evidence with whatever a parser reported. Either being
@@ -139,13 +142,33 @@ export function documentHasXfa(doc: PDFDocument): boolean {
 export type XfaConvertTarget = 'Word document' | 'Excel workbook' | 'PowerPoint presentation';
 
 export function xfaConvertMessage(target: XfaConvertTarget): string {
-  return (
-    'This is an XFA form. What it shows on screen is generated from an XML payload, not ' +
-    `from the page content Stapler can read, so a converted ${target} would contain ` +
-    'the dead AcroForm shadow layer — usually a "open this in Adobe Reader" placeholder — ' +
-    'rather than the form. Nothing was converted. Print or export the form to a flat PDF ' +
-    'from a viewer that renders XFA, then convert that.'
-  );
+  // One whole sentence per target, so no translation has to splice in an English noun.
+  switch (target) {
+    case 'Word document':
+      return translate(
+        'This is an XFA form. What it shows on screen is generated from an XML payload, not ' +
+          'from the page content Stapler can read, so a converted Word document would contain ' +
+          'the dead AcroForm shadow layer — usually a "open this in Adobe Reader" placeholder — ' +
+          'rather than the form. Nothing was converted. Print or export the form to a flat PDF ' +
+          'from a viewer that renders XFA, then convert that.'
+      );
+    case 'Excel workbook':
+      return translate(
+        'This is an XFA form. What it shows on screen is generated from an XML payload, not ' +
+          'from the page content Stapler can read, so a converted Excel workbook would contain ' +
+          'the dead AcroForm shadow layer — usually a "open this in Adobe Reader" placeholder — ' +
+          'rather than the form. Nothing was converted. Print or export the form to a flat PDF ' +
+          'from a viewer that renders XFA, then convert that.'
+      );
+    case 'PowerPoint presentation':
+      return translate(
+        'This is an XFA form. What it shows on screen is generated from an XML payload, not ' +
+          'from the page content Stapler can read, so a converted PowerPoint presentation ' +
+          'would contain the dead AcroForm shadow layer — usually a "open this in Adobe ' +
+          'Reader" placeholder — rather than the form. Nothing was converted. Print or export ' +
+          'the form to a flat PDF from a viewer that renders XFA, then convert that.'
+      );
+  }
 }
 
 /**
@@ -157,8 +180,9 @@ export function xfaConvertMessage(target: XfaConvertTarget): string {
  * the payload behind. The output opens, looks right, and has a dead form — the
  * exact shape of silent corruption this product refuses to ship.
  */
-export const XFA_COMPOSE_MESSAGE =
+export const XFA_COMPOSE_MESSAGE = tKey(
   'This is an XFA form. Its fields live in an XML payload that cannot survive being ' +
-  'rebuilt page by page, so merging, splitting, organising or watermarking it would ' +
-  'produce a document whose form no longer works. Nothing was changed. Sign and Annotate ' +
-  'can still stamp text and signatures on top, which flattens the form deliberately.';
+    'rebuilt page by page, so merging, splitting, organising or watermarking it would ' +
+    'produce a document whose form no longer works. Nothing was changed. Sign and Annotate ' +
+    'can still stamp text and signatures on top, which flattens the form deliberately.'
+);

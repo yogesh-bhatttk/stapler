@@ -33,6 +33,7 @@ import {
   PDFString
 } from 'pdf-lib';
 import { encrypted, internal } from '../errors';
+import { translate } from '../i18n';
 import { checkpoint, type JobHandle } from '../workers/protocol';
 
 export interface ProtectionSettings {
@@ -192,7 +193,9 @@ export function permissionOnlyPlan(permissions: number): EncryptionPlan {
 
 function subtle(): SubtleCrypto {
   const api = globalThis.crypto?.subtle;
-  if (!api) throw internal('WebCrypto is unavailable, so this document cannot be encrypted.');
+  if (!api) {
+    throw internal(translate('WebCrypto is unavailable, so this document cannot be encrypted.'));
+  }
   return api;
 }
 
@@ -418,7 +421,7 @@ export async function encryptPdf(
   job?: JobHandle
 ): Promise<Uint8Array> {
   if (!settings.userPassword) {
-    throw internal('A password is required before a document can be protected.');
+    throw internal(translate('A password is required before a document can be protected.'));
   }
   return encryptWithPlan(
     bytes,
@@ -455,7 +458,7 @@ export async function encryptWithPlan(
     const message = err instanceof Error ? err.message : String(err);
     if (/encrypt/i.test(message)) {
       throw encrypted(
-        'This document is already password-protected, so Stapler will not re-encrypt it.'
+        translate('This document is already password-protected, so Stapler will not re-encrypt it.')
       );
     }
     throw err;
@@ -483,7 +486,11 @@ export async function encryptWithPlan(
       (i % ENCRYPT_CHECKPOINT_OBJECTS === 0 ||
         performance.now() - lastCheck >= ENCRYPT_CHECKPOINT_MS)
     ) {
-      await checkpoint(job, i / objects.length, `Encrypting object ${i} of ${objects.length}`);
+      await checkpoint(
+        job,
+        i / objects.length,
+        translate('Encrypting object {current} of {total}', { current: i, total: objects.length })
+      );
       lastCheck = performance.now();
     }
 
