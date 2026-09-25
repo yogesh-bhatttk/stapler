@@ -278,16 +278,17 @@ These are hard constraints, enforced by tests, not aspirations:
 3. No permissions in `manifest.json` at v1.0. Any later addition must go in
    `optional_permissions` behind explicit user opt-in, to preserve the clean install prompt.
 4. Document bytes never leave a worker except to the user's chosen save location.
-5. Exactly two model downloads are exceptions, each fetched once on explicit user action,
-   cached forever, clearly disclosed, and shipped behind a "download once" confirmation
-   that names the host and the size:
-   - the OCR language model (OCR-01, `src/core/ocr/`);
-   - the face-detector weights for on-device face blur (RED-08, `src/core/faceblur/`).
-
-   Both are *weights only*. The engines that run them (tesseract's WASM core, the tfjs
-   runtime and face-api's own JS) are bundled, because item 2 forbids remote code no
-   matter what the user consents to. No other fetch of any kind is permitted, and the
-   invariant hook enforces that by carving out only these two directories.
+5. Exactly one model download is an exception, fetched once on explicit user action,
+   cached, clearly disclosed, integrity-pinned (SHA-256), and shipped behind a
+   "download once" confirmation that names the host and the size: the OCR language
+   model (OCR-01, `src/core/ocr/model.ts` + `download.ts`). It is *weights only* — the
+   engine that runs it (tesseract's WASM core) is bundled, because item 2 forbids remote
+   code no matter what the user consents to. RED-08's face-detector weights were once a
+   second exception; they ship inside `@vladmandic/face-api` and are now bundled too
+   (audit 2026-09-25 CNV-6 / PLT-8). No other fetch of any kind is permitted: the
+   invariant guards and ESLint exempt only those two OCR files, and the CSP
+   (`scripts/csp.mjs`, extension manifest and web `<meta>`) allows only the pinned
+   model paths in `connect-src`.
 
 ### 5.5 Legal / claims discipline
 
@@ -328,7 +329,7 @@ CJK text, RTL text, rotated pages, mixed page sizes.
 1. **Chrome Web Store** — name carries most of store search weight, so keywords go in the
    title, not just the description. Screenshot 1 is the scan-cleanup before/after.
 2. **Edge Add-ons + Firefox AMO** — same MV3 codebase, near-zero extra work.
-3. **Website twin** — identical bundle on Cloudflare Pages with per-tool landing pages
+3. **Website twin** — identical bundle on Cloudflare Pages (planned; currently deployed to GitHub Pages, which cannot set response headers, so the CSP ships as a `<meta>` tag injected at build time) with per-tool landing pages
    (`/merge-pdf`, `/compress-pdf`, `/sign-pdf`, …). Each is a separate SEO door into the
    same code at zero marginal cost, and funnels installs.
 4. **i18n** — 10 locales of JSON strings is the largest single install multiplier

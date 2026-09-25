@@ -15,11 +15,13 @@ These are the product, not preferences. A `PostToolUse` hook
 (`.claude/hooks/check-invariants.mjs`) enforces all four on every write.
 
 1. **Zero network at runtime.** No `fetch`, no XHR, no WebSocket, no CDN import, no webfont,
-   no telemetry, ever. There are exactly two exceptions, both a model download made once on
-   explicit user confirmation from a pinned URL, and both confined to their own directory:
-   the OCR language model in `src/core/ocr/` (OCR-01), and the face-detector weights in
-   `src/core/faceblur/` (RED-08). The inference *engines* for both are bundled, never
-   fetched — remote code is forbidden outright, whatever the user consents to.
+   no telemetry, ever. There is exactly one exception: the OCR language model (OCR-01),
+   downloaded once on explicit user confirmation from a pinned, SHA-256-verified URL, and
+   confined to `src/core/ocr/model.ts` + `download.ts`. The face-detector weights (RED-08)
+   are bundled, not downloaded. Inference engines are always bundled — remote code is
+   forbidden outright, whatever the user consents to. The CSP generated from
+   `scripts/csp.mjs` (extension manifest and the web build's `<meta>`) is the runtime
+   backstop: `default-src 'self'`, and `connect-src` allows only the pinned OCR paths.
 2. **Zero permissions, on every build.** `manifest.json` ships with empty `permissions`
    and no `host_permissions` or content scripts, so Chrome's install dialog shows no
    warning — and this is not relaxed for Firefox either: `service-worker.ts` finds its
@@ -35,7 +37,7 @@ These are the product, not preferences. A `PostToolUse` hook
 ## Conventions
 
 - TypeScript strict. No `any` without a comment justifying it.
-- Heavy work goes in a worker (`src/workers/`), never on the main thread. Budget: no task
+- Heavy work goes in a worker (`src/core/workers/`), never on the main thread. Budget: no task
   blocks the main thread for >50ms.
 - Every long operation is cancellable via `AbortSignal` and reports determinate progress.
 - Never silently corrupt a document. On unrecoverable error, return the original bytes and
@@ -47,8 +49,9 @@ These are the product, not preferences. A `PostToolUse` hook
 
 ## Commands
 
-`pnpm` is the intended package manager but only `npm` is installed here — either
-`npm i -g pnpm` or substitute `npm run`.
+Use `pnpm` (11.x is installed). `npm run` / `npx` fail with `EBADDEVENGINES` because
+`package.json` pins pnpm via `devEngines`; if pnpm is unavailable, call
+`node_modules/.bin/<tool>` directly.
 
 ```
 pnpm dev          # HMR dev server for editor.html

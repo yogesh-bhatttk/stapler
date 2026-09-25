@@ -6,20 +6,23 @@
 
 ## Features
 
-- **Merge PDFs:** Combine multiple PDFs into a single document, reordering pages as needed.
-- **Split PDFs:** Extract specific pages or divide a document into multiple parts.
-- **Compress PDFs:** Reduce file size for easier sharing without significant quality loss.
-- **Sign PDFs:** Add your signature to documents locally.
-- **Redact PDFs:** Securely blackout sensitive information from your documents.
-- **Offline First:** Once installed, Stapler runs entirely in your browser using WebAssembly. No internet connection is required.
+38 tools, all running locally in one page:
+
+- **Organize:** merge, reorder, rotate, duplicate, delete, insert, split & extract, remove blank pages, N-up & booklet.
+- **Optimize:** compress (with a target-size mode) and scan cleanup (de-warp, despeckle, contrast).
+- **Document:** crop, watermark / header & footer / Bates numbering, bookmarks, normalize page sizes, sign & fill forms, redact (text, images, form values and metadata — verified in the saved bytes), metadata inspector and scrubber, alt-text editor, annotate, compare, OCR text layer, table extraction.
+- **Convert:** PDF ↔ images, Markdown → PDF, and best-effort (beta) PDF ↔ Word, Excel and PowerPoint.
+- **Automation:** batch-process a whole folder with saved recipes.
 
 ## Privacy Guarantee
 
 Your files never leave your device. All processing is done locally. We do not collect, store, or transmit your documents or any personal data.
 
+There is exactly one exception to "no network", and it is opt-in: **OCR** needs a language model (about 12 MB) that is not bundled. The first time you run OCR in a language, Stapler asks before downloading it once from a pinned URL, checks its SHA-256 hash, and caches it on your device. You can also load the model from a file instead. Nothing about your documents is ever sent.
+
 For more details, please see our [Privacy Policy](public/privacy.html).
 
-**Verify it yourself** rather than take our word for it: open DevTools' Network tab, clear it, and use any tool — no request to any server appears, only local files. The same check can be verified by running the test suite (`pnpm run verify`, which includes the zero-network E2E assertion in `tests/e2e/zero-network.spec.ts`).
+**Verify it yourself** rather than take our word for it: open DevTools' Network tab, clear it, and use any tool other than a first OCR run — no request to any server appears. The same check runs in the test suite (`pnpm run verify`, which includes the zero-network E2E assertion in `tests/e2e/zero-network.spec.ts`).
 
 ## Installation
 
@@ -49,12 +52,12 @@ For more details, please see our [Privacy Policy](public/privacy.html).
    ```bash
    pnpm run build:ext
    ```
-   This will generate a `dist` folder.
+   This generates the unpacked extension in `dist/ext`.
 
 5. **Load as an unpacked extension:**
    - Open Chrome and navigate to `chrome://extensions/`.
    - Enable "Developer mode" in the top right corner.
-   - Click "Load unpacked" and select the `dist` directory generated in the previous step.
+   - Click "Load unpacked" and select the `dist/ext` directory generated in the previous step.
 
 ## Development Commands
 
