@@ -1,4 +1,4 @@
-import { translate } from '../../../core/i18n';
+import { tPlural, translate, useTranslation } from '../../../core/i18n';
 /**
  * Text and Markdown extraction (CNV-04), with an automatic OCR fallback.
  *
@@ -38,7 +38,6 @@ import { Field, RadioGroup, Select, TextArea } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
 import { extractSettings, extractedText } from './state';
 import { useJob } from '../../useJob';
-import { useTranslation } from '../../../core/i18n';
 import type { JobOptions } from '../../../core/workers/protocol';
 
 export function ExtractPanel() {
@@ -62,7 +61,7 @@ export function ExtractPanel() {
   /** Runs OCR and re-extracts from its result. `job` already owns the slot. */
   const extractViaOcr = async (job: JobOptions) => {
     const bytes = await currentDocumentBytes(job);
-    job.onProgress?.(0, 'Running OCR');
+    job.onProgress?.(0, translate('Running OCR'));
     const ocrResult = await runOcr(bytes, doc.pages.length, {
       ...job,
       lang: settings.lang,
@@ -74,9 +73,11 @@ export function ExtractPanel() {
     if (ocrResult && ocrResult.wordsAdded > 0) {
       extractedText.value = await extractDocumentText(ocrResult.bytes, indices, settings.mode, job);
       notify('success', translate('Read this page with OCR.'), {
-        detail:
-          `${ocrResult.wordsAdded} word${ocrResult.wordsAdded === 1 ? '' : 's'} recognised. ` +
-          'OCR output can contain mistakes a real text layer would not — check anything important.'
+        detail: tPlural(
+          '{count} words recognised. OCR output can contain mistakes a real text layer would ' +
+            'not — check anything important.',
+          ocrResult.wordsAdded
+        )
       });
       return;
     }
@@ -84,15 +85,16 @@ export function ExtractPanel() {
     if (ocrResult) {
       extractedText.value = '';
       notify('warning', translate('No extractable text on these pages.'), {
-        detail:
+        detail: translate(
           'OCR found nothing either. A blank, very low-resolution, or heavily skewed scan is ' +
-          'the usual cause — try Scan cleanup first.'
+            'the usual cause — try Scan cleanup first.'
+        )
       });
     }
   };
 
   const extract = () =>
-    run({ label: 'Extracting text', scope: 'extract' }, async (job: JobOptions) => {
+    run({ label: translate('Extracting text'), scope: 'extract' }, async (job: JobOptions) => {
       const bytes = await currentDocumentBytes(job);
       const direct = await extractDocumentText(bytes, indices, settings.mode, job);
       if (direct.trim()) {
@@ -110,7 +112,8 @@ export function ExtractPanel() {
       await extractViaOcr(job);
     });
 
-  const retryWithOcr = () => run({ label: 'Running OCR', scope: 'extract' }, extractViaOcr);
+  const retryWithOcr = () =>
+    run({ label: translate('Running OCR'), scope: 'extract' }, extractViaOcr);
 
   const download = async () => {
     const bytes = new TextEncoder().encode(text);
@@ -126,8 +129,8 @@ export function ExtractPanel() {
         value={settings.mode}
         onChange={mode => update({ mode })}
         options={[
-          { value: 'text', label: 'Plain text' },
-          { value: 'markdown', label: 'Markdown', hint: 'Promotes larger type to headings' }
+          { value: 'text', label: t('Plain text') },
+          { value: 'markdown', label: 'Markdown', hint: t('Promotes larger type to headings') }
         ]}
       />
 
@@ -147,8 +150,8 @@ export function ExtractPanel() {
 
       <p className={panelStyles.description}>
         {selected.size > 0
-          ? `${selected.size} selected page(s).`
-          : `All ${doc.pages.length} pages.`}
+          ? tPlural('{count} selected pages.', selected.size)
+          : tPlural('All {count} pages.', doc.pages.length)}
       </p>
 
       <p className={panelStyles.description}>

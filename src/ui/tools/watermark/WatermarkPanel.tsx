@@ -1,4 +1,3 @@
-import { translate } from '../../../core/i18n';
 import {
   batesSettings,
   watermarkSettings,
@@ -15,24 +14,24 @@ import { Field, SegmentedControl } from '../../components/Field';
 import { Button } from '../../components/Button';
 import { notifyError } from '../../../core/notify';
 import styles from './WatermarkPanel.module.css';
-import { useTranslation } from '../../../core/i18n';
+import { tKey, useTranslation } from '../../../core/i18n';
 
 const POSITIONS: { value: WatermarkPosition; label: string }[] = [
-  { value: 'top-left', label: 'Top Left' },
-  { value: 'top-center', label: 'Top Center' },
-  { value: 'top-right', label: 'Top Right' },
-  { value: 'center-left', label: 'Center Left' },
-  { value: 'center', label: 'Center' },
-  { value: 'center-right', label: 'Center Right' },
-  { value: 'bottom-left', label: 'Bottom Left' },
-  { value: 'bottom-center', label: 'Bottom Center' },
-  { value: 'bottom-right', label: 'Bottom Right' }
+  { value: 'top-left', label: tKey('Top Left') },
+  { value: 'top-center', label: tKey('Top Center') },
+  { value: 'top-right', label: tKey('Top Right') },
+  { value: 'center-left', label: tKey('Center Left') },
+  { value: 'center', label: tKey('Center') },
+  { value: 'center-right', label: tKey('Center Right') },
+  { value: 'bottom-left', label: tKey('Bottom Left') },
+  { value: 'bottom-center', label: tKey('Bottom Center') },
+  { value: 'bottom-right', label: tKey('Bottom Right') }
 ];
 
 const ALIGN_OPTIONS: { value: HeaderFooterAlign; label: string }[] = [
-  { value: 'left', label: 'Left' },
-  { value: 'center', label: 'Center' },
-  { value: 'right', label: 'Right' }
+  { value: 'left', label: tKey('Left') },
+  { value: 'center', label: tKey('Center') },
+  { value: 'right', label: tKey('Right') }
 ];
 
 export function WatermarkPanel() {
@@ -75,8 +74,8 @@ export function WatermarkPanel() {
         name="watermark-kind"
         value={settings.kind}
         options={[
-          { value: 'text', label: 'Text' },
-          { value: 'image', label: 'Image' }
+          { value: 'text', label: t('Text') },
+          { value: 'image', label: t('Image') }
         ]}
         onChange={kind => update({ kind })}
       />
@@ -94,7 +93,10 @@ export function WatermarkPanel() {
                 className={styles.input}
               />
               <div className={styles.hint}>
-                {t('Use')} {'{n}'} {t('for page number,')} {'{total}'} {t('for total pages.')}
+                {t('Use {pageToken} for page number, {totalToken} for total pages.', {
+                  pageToken: '{n}',
+                  totalToken: '{total}'
+                })}
               </div>
             </>
           )}
@@ -107,7 +109,7 @@ export function WatermarkPanel() {
                 id={id}
                 type="file"
                 accept="image/png,image/jpeg"
-                aria-label={translate('Watermark image file')}
+                aria-label={t('Watermark image file')}
                 className={styles.input}
                 onChange={e => {
                   const file = (e.currentTarget as HTMLInputElement).files?.[0] ?? null;
@@ -131,7 +133,11 @@ export function WatermarkPanel() {
       )}
 
       {settings.kind === 'image' && (
-        <Field label={`Size (${Math.round(settings.imageScale * 100)}% of page width)`}>
+        <Field
+          label={t('Size ({value}% of page width)', {
+            value: Math.round(settings.imageScale * 100)
+          })}
+        >
           {id => (
             <input
               id={id}
@@ -157,7 +163,7 @@ export function WatermarkPanel() {
           >
             {POSITIONS.map(p => (
               <option key={p.value} value={p.value}>
-                {p.label}
+                {t(p.label)}
               </option>
             ))}
           </select>
@@ -193,7 +199,7 @@ export function WatermarkPanel() {
         </Field>
       )}
 
-      <Field label={`Opacity (${Math.round(settings.opacity * 100)}%)`}>
+      <Field label={t('Opacity ({value}%)', { value: Math.round(settings.opacity * 100) })}>
         {id => (
           <input
             id={id}
@@ -208,7 +214,7 @@ export function WatermarkPanel() {
         )}
       </Field>
 
-      <Field label={`Rotation (${settings.rotation}°)`}>
+      <Field label={t('Rotation ({value}°)', { value: settings.rotation })}>
         {id => (
           <input
             id={id}
@@ -225,7 +231,7 @@ export function WatermarkPanel() {
 
       {settings.kind === 'text' && (
         <>
-          <Field label={`Font Size (${settings.fontSize}px)`}>
+          <Field label={t('Font Size ({value}px)', { value: settings.fontSize })}>
             {id => (
               <input
                 id={id}
@@ -333,16 +339,14 @@ export function WatermarkPanel() {
               >
                 {POSITIONS.map(p => (
                   <option key={p.value} value={p.value}>
-                    {p.label}
+                    {t(p.label)}
                   </option>
                 ))}
               </select>
             )}
           </Field>
 
-          <p className={styles.hint}>
-            {t('First page')}: {batesLabel(bates, 0)}
-          </p>
+          <p className={styles.hint}>{t('First page: {label}', { label: batesLabel(bates, 0) })}</p>
         </>
       )}
 
@@ -365,8 +369,8 @@ export function WatermarkPanel() {
             name="barcode-kind"
             value={barcodeStamp.kind}
             options={[
-              { value: 'qr', label: 'QR code' },
-              { value: 'code128', label: 'Barcode (CODE128)' }
+              { value: 'qr', label: t('QR code') },
+              { value: 'code128', label: t('Barcode (CODE128)') }
             ]}
             onChange={kind => updateBarcodeStamp({ kind: kind as BarcodeKind })}
           />
@@ -396,7 +400,7 @@ export function WatermarkPanel() {
               >
                 {POSITIONS.map(p => (
                   <option key={p.value} value={p.value}>
-                    {p.label}
+                    {t(p.label)}
                   </option>
                 ))}
               </select>
@@ -423,10 +427,9 @@ export function WatermarkPanel() {
       <h2 className={styles.sectionHeading}>{t('Header & footer')}</h2>
       <p className={styles.hint}>
         {t(
-          'A fixed, unrotated line printed in the page margin — distinct from the watermark stamp above. Use'
+          'A fixed, unrotated line printed in the page margin — distinct from the watermark stamp above. Use {pageToken} for page number, {totalToken} for total pages.',
+          { pageToken: '{n}', totalToken: '{total}' }
         )}
-        {'{n}'} {t('for page number,')}
-        {'{total}'} {t('for total pages.')}
       </p>
 
       <Field label={t('Header text')}>
@@ -447,7 +450,7 @@ export function WatermarkPanel() {
           legend={t('Header alignment')}
           name="header-align"
           value={headerFooter.headerAlign}
-          options={ALIGN_OPTIONS}
+          options={ALIGN_OPTIONS.map(option => ({ ...option, label: t(option.label) }))}
           onChange={headerAlign => updateHeaderFooter({ headerAlign })}
         />
       )}
@@ -470,7 +473,7 @@ export function WatermarkPanel() {
           legend={t('Footer alignment')}
           name="footer-align"
           value={headerFooter.footerAlign}
-          options={ALIGN_OPTIONS}
+          options={ALIGN_OPTIONS.map(option => ({ ...option, label: t(option.label) }))}
           onChange={footerAlign => updateHeaderFooter({ footerAlign })}
         />
       )}

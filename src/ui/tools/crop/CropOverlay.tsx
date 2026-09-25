@@ -1,9 +1,10 @@
-import { useRef, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import type { PageRef } from '../../../core/store';
 import { activeDoc, activePageIndex } from '../../../core/store';
 import { commit, beginTransaction } from '../../../core/history';
 import { cropBoxes, cropSettings, pagesForScope, type CropBox } from './state';
 import styles from './CropOverlay.module.css';
+import { useTranslation } from '../../../core/i18n';
 
 export interface CropOverlayProps {
   page: PageRef;
@@ -81,9 +82,15 @@ function applyBox(pageKey: string, box: CropBox | null) {
 }
 
 export function CropOverlay({ page, width, height }: CropOverlayProps) {
+  const t = useTranslation();
   const layerRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [dragging, setDragging] = useState(false);
+  // The drag in progress, ended on unmount: a page change by shortcut or a tab
+  // switch mid-drag used to leave window listeners attached and the history
+  // transaction open — undo blocked until a stray pointerup (AUDIT UI-26).
+  const dragEnd = useRef<(() => void) | null>(null);
+  useEffect(() => () => dragEnd.current?.(), []);
 
   const box = cropBoxes.value[page.key];
 
@@ -126,12 +133,14 @@ export function CropOverlay({ page, width, height }: CropOverlayProps) {
       applyBox(page.key, apply(base, dx, dy));
     };
     const end = () => {
+      dragEnd.current = null;
       setDragging(false);
       tx.end();
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', end);
       window.removeEventListener('pointercancel', end);
     };
+    dragEnd.current = end;
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', end);
     window.addEventListener('pointercancel', end);
@@ -248,7 +257,7 @@ export function CropOverlay({ page, width, height }: CropOverlayProps) {
             role={box ? 'group' : undefined}
             aria-label={
               box
-                ? 'Crop box. Arrow keys move it; Control plus arrows resizes; Delete resets it.'
+                ? t('Crop box. Arrow keys move it; Control plus arrows resizes; Delete resets it.')
                 : undefined
             }
             onKeyDown={onKeyDown}

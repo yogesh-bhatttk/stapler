@@ -24,40 +24,43 @@ export const ShortcutModal = forwardRef<HTMLDivElement, { onClose: () => void }>
 
     const groups = [
       {
-        title: 'Global',
+        title: t('Global'),
         rows: [
-          ['Command palette', formatBinding(getEffectiveBinding('palette')) || `${MOD} K`],
-          ['Keyboard shortcuts', formatBinding(getEffectiveBinding('shortcuts')) || '?'],
-          ['Switch theme', 'From the palette']
+          [t('Command palette'), formatBinding(getEffectiveBinding('palette')) || `${MOD} K`],
+          [t('Keyboard shortcuts'), formatBinding(getEffectiveBinding('shortcuts')) || '?'],
+          [t('Switch theme'), t('From the palette')]
         ]
       },
       {
-        title: 'Document',
+        title: t('Document'),
         rows: [
-          ['Undo', formatBinding(getEffectiveBinding('undo')) || `${MOD} Z`],
-          ['Redo', formatBinding(getEffectiveBinding('redo')) || `${IS_APPLE ? '⇧⌘Z' : 'Ctrl Y'}`],
-          ['Select all pages', formatBinding(getEffectiveBinding('selectAll')) || `${MOD} A`]
+          [t('Undo'), formatBinding(getEffectiveBinding('undo')) || `${MOD} Z`],
+          [
+            t('Redo'),
+            formatBinding(getEffectiveBinding('redo')) || `${IS_APPLE ? '⇧⌘Z' : 'Ctrl Y'}`
+          ],
+          [t('Select all pages'), formatBinding(getEffectiveBinding('selectAll')) || `${MOD} A`]
         ]
       },
       {
-        title: 'Page grid',
+        title: t('Page grid'),
         rows: [
-          ['Move focus', '← → ↑ ↓'],
-          ['First / last page', 'Home / End'],
-          ['Select focused page', 'Space'],
-          ['Extend selection', 'Shift Space'],
-          ['Reorder page', `${ALT} + arrows`],
-          ['Rotate page', formatBinding(getEffectiveBinding('rotatePage')) || 'R'],
-          ['Delete page', formatBinding(getEffectiveBinding('deletePage')) || 'Delete']
+          [t('Move focus'), '← → ↑ ↓'],
+          [t('First / last page'), 'Home / End'],
+          [t('Select focused page'), 'Space'],
+          [t('Extend selection'), 'Shift Space'],
+          [t('Reorder page'), t('{alt} + arrows', { alt: ALT })],
+          [t('Rotate page'), formatBinding(getEffectiveBinding('rotatePage')) || 'R'],
+          [t('Delete page'), formatBinding(getEffectiveBinding('deletePage')) || 'Delete']
         ]
       },
       {
-        title: 'Stamps and regions',
+        title: t('Stamps and regions'),
         rows: [
-          ['Nudge a stamp', 'Arrow keys'],
-          ['Nudge further', 'Shift + arrows'],
-          ['Remove a stamp', 'Delete'],
-          ['Move a scan corner', 'Arrow keys on the handle']
+          [t('Nudge a stamp'), t('Arrow keys')],
+          [t('Nudge further'), t('Shift + arrows')],
+          [t('Remove a stamp'), 'Delete'],
+          [t('Move a scan corner'), t('Arrow keys on the handle')]
         ]
       }
     ];

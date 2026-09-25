@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   activeDocId,
+  addAnnotation,
   addDocument,
   documents,
   makePageRefs,
@@ -10,8 +11,8 @@ import {
   type StaplerDoc
 } from '../../src/core/store';
 import { confirmRequest } from '../../src/core/notify';
-import { confirmAndDiscardAllChanges } from '../../src/ui/discardAllChanges';
-import { resetHistory } from '../../src/core/history';
+import { confirmAndDiscardAllChanges, hasAnythingToDiscard } from '../../src/ui/discardAllChanges';
+import { resetHistory, undo } from '../../src/core/history';
 
 function seed(): StaplerDoc {
   registerSource({
@@ -23,10 +24,12 @@ function seed(): StaplerDoc {
       { width: 1, height: 1 }
     ]
   });
+  const pages = makePageRefs('src-1', 2);
   const doc: StaplerDoc = {
     id: 'doc-1',
     name: 'a.pdf',
-    pages: makePageRefs('src-1', 2),
+    pages,
+    baseline: pages,
     annotations: [],
     dirty: false
   };
@@ -83,5 +86,30 @@ describe('confirmAndDiscardAllChanges re-entrancy', () => {
     confirmRequest.value?.resolve(true);
     expect(await second).toBe(true);
     expect(documents.value[0].pages[1].rotation).toBe(0);
+  });
+});
+
+describe('discard all changes covers Sign stamps and form fields (UI-14)', () => {
+  it('offers the action for stamps alone, and clears them undoably', async () => {
+    const doc = seed();
+    addAnnotation(doc.id, {
+      id: 'sig-1',
+      pageKey: doc.pages[0].key,
+      type: 'signature',
+      x: 0.1,
+      y: 0.1,
+      width: 0.2,
+      height: 0.1,
+      data: 'sig'
+    });
+    expect(hasAnythingToDiscard(documents.value[0])).toBe(true);
+
+    const done = confirmAndDiscardAllChanges(documents.value[0]);
+    confirmRequest.value?.resolve(true);
+    expect(await done).toBe(true);
+    expect(documents.value[0].annotations).toEqual([]);
+
+    undo();
+    expect(documents.value[0].annotations.map(a => a.id)).toEqual(['sig-1']);
   });
 });

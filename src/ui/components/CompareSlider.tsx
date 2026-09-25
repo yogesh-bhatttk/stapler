@@ -1,6 +1,7 @@
 import { useState, useRef } from 'preact/hooks';
 import { forwardRef } from 'preact/compat';
 import { mergeRefs } from './mergeRefs';
+import { translate } from '../../core/i18n';
 import styles from './CompareSlider.module.css';
 
 interface CompareSliderProps {
@@ -11,7 +12,7 @@ interface CompareSliderProps {
 }
 
 export const CompareSlider = forwardRef<HTMLDivElement, CompareSliderProps>(function CompareSlider(
-  { before, after, label = 'Compare before and after' },
+  { before, after, label = translate('Compare before and after') },
   ref
 ) {
   const [position, setPosition] = useState(50);
@@ -79,7 +80,9 @@ export const CompareSlider = forwardRef<HTMLDivElement, CompareSliderProps>(func
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={Math.round(position)}
-        aria-valuetext={`${Math.round(position)}% after image visible`}
+        aria-valuetext={translate('{percent}% after image visible', {
+          percent: Math.round(position)
+        })}
         onKeyDown={onKeyDown}
       >
         <div className={styles.handle}>

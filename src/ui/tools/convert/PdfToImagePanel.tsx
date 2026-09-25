@@ -5,13 +5,13 @@ import { activeDoc, selectedPageKeys } from '../../../core/store';
 import { Field, RadioGroup, Select } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
 import { pdfToImageSettings } from '../state';
-import { useTranslation } from '../../../core/i18n';
+import { tKey, tPlural, useTranslation } from '../../../core/i18n';
 
 const DPI_OPTIONS = [
-  { value: 72, label: '72 DPI — screen' },
-  { value: 150, label: '150 DPI — general' },
-  { value: 300, label: '300 DPI — print' },
-  { value: 600, label: '600 DPI — archival' }
+  { value: 72, label: tKey('72 DPI — screen') },
+  { value: 150, label: tKey('150 DPI — general') },
+  { value: 300, label: tKey('300 DPI — print') },
+  { value: 600, label: tKey('600 DPI — archival') }
 ] as const;
 
 export function PdfToImagePanel() {
@@ -32,8 +32,8 @@ export function PdfToImagePanel() {
         value={settings.format}
         onChange={format => (pdfToImageSettings.value = { ...settings, format })}
         options={[
-          { value: 'jpeg', label: 'JPEG', hint: 'Smaller; best for scans and photos' },
-          { value: 'png', label: 'PNG', hint: 'Lossless; best for text and diagrams' }
+          { value: 'jpeg', label: 'JPEG', hint: t('Smaller; best for scans and photos') },
+          { value: 'png', label: 'PNG', hint: t('Lossless; best for text and diagrams') }
         ]}
       />
 
@@ -42,16 +42,18 @@ export function PdfToImagePanel() {
           <Select
             id={id}
             value={settings.dpi}
-            options={DPI_OPTIONS}
+            options={DPI_OPTIONS.map(option => ({ ...option, label: t(option.label) }))}
             onChange={dpi => (pdfToImageSettings.value = { ...settings, dpi })}
           />
         )}
       </Field>
 
       <p className={panelStyles.description}>
-        {pageCount} {t('page(s) →')}
-        {settings.format === 'jpeg' ? 'JPG' : 'PNG'} {t('in a ZIP.')}
-        {first && ` About ${Math.round((595 * settings.dpi) / 72)}px wide.`}
+        {tPlural('{count} pages → {format} in a ZIP.', pageCount, {
+          format: settings.format === 'jpeg' ? 'JPG' : 'PNG'
+        })}
+        {first &&
+          ` ${t('About {width}px wide.', { width: Math.round((595 * settings.dpi) / 72) })}`}
       </p>
       {settings.dpi >= 600 && (
         <p className={panelStyles.note}>

@@ -158,15 +158,7 @@ async function rotatedSource(width: number, height: number, rotation: number): P
 const RAW_W = 400;
 const RAW_H = 800;
 
-function onlyPage(
-  pages: {
-    key: string;
-    sourceDocId: string;
-    sourceIndex: number;
-    rotation: number;
-    cropBox?: unknown;
-  }[]
-) {
+function onlyPage(pages: PageSource[]): PageSource[] {
   return pages;
 }
 

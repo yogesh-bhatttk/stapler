@@ -108,3 +108,26 @@ export async function commitAndRead(page: Page, label: string | RegExp) {
   expect(location).toBeTruthy();
   return new Uint8Array(readFileSync(location!));
 }
+
+/**
+ * Dismisses every toast on screen, so none sits over the action bar.
+ *
+ * Clicking "the" dismiss button assumed exactly one toast; an earlier info note
+ * still showing (a faster run, or one more notice) made that a strict-mode
+ * violation.
+ */
+export async function dismissToasts(page: Page) {
+  const dismiss = page.getByRole('button', { name: 'Dismiss notification' });
+  for (let i = 0; i < 10 && (await dismiss.count()) > 0; i++) {
+    await dismiss.first().click();
+  }
+}
+
+/**
+ * Waits until the single-page view has drawn the current page. Until then a
+ * cover (UI-16) sits over the page and its tool overlay, so a drag started
+ * earlier marks nothing — by design, since it would be against a blank image.
+ */
+export async function waitForPageRendered(page: Page) {
+  await expect(page.getByText('Loading page…')).toHaveCount(0, { timeout: 30_000 });
+}

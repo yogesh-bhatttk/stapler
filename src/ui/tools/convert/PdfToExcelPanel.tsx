@@ -17,7 +17,7 @@ import { useEffect } from 'preact/hooks';
 import { activeDoc } from '../../../core/store';
 import { historyVersion } from '../../../core/history';
 import { convertPdfToXlsx, currentDocumentBytes } from '../../../core/operations';
-import { translate, useTranslation } from '../../../core/i18n';
+import { tPlural, translate, useTranslation } from '../../../core/i18n';
 import { notify } from '../../../core/notify';
 import { formatBytes } from '../../components/Feedback';
 import { Badge } from '../../components/Badge';
@@ -55,7 +55,7 @@ export function PdfToExcelPanel() {
   if (!doc) return null;
 
   const handlePreview = () => {
-    run({ label: 'Converting to Excel', scope: 'convert.pdf-to-excel' }, async job => {
+    run({ label: translate('Converting to Excel'), scope: 'convert.pdf-to-excel' }, async job => {
       // Captured before the bytes are read, so an edit made *during* the
       // conversion still invalidates its result.
       const revision = historyVersion.value;
@@ -68,13 +68,15 @@ export function PdfToExcelPanel() {
       setPdfToExcelPreview(result, doc.id, revision);
       notify(
         'success',
-        translate('Built {sheets} sheet(s) from {pages} page(s). Review the preview, then save.', {
-          sheets: result.sheetCount,
-          pages: result.pageCount
+        translate('Built {sheets} from {pages}. Review the preview, then save.', {
+          sheets: tPlural('{count} sheets', result.sheetCount),
+          pages: tPlural('{count} pages', result.pageCount)
         }),
         {
-          detail:
-            `${formatBytes(result.bytes.byteLength)} · ` + `${result.tableCount} detected table(s)`
+          detail: translate('{size} · {tables}', {
+            size: formatBytes(result.bytes.byteLength),
+            tables: tPlural('{count} detected tables', result.tableCount)
+          })
         }
       );
     });
@@ -155,9 +157,10 @@ export function PdfToExcelPanel() {
       {preview ? (
         <div className={panelStyles.section}>
           <p className="text-small" style={{ margin: '0 0 var(--space-xs)', fontWeight: 600 }}>
-            {t('Preview')} · {preview.sheetCount}{' '}
-            {preview.sheetCount === 1 ? t('sheet') : t('sheets')} · {preview.tableCount}{' '}
-            {preview.tableCount === 1 ? t('detected table') : t('detected tables')}
+            {t('Preview · {sheets} · {tables}', {
+              sheets: tPlural('{count} sheets', preview.sheetCount),
+              tables: tPlural('{count} detected tables', preview.tableCount)
+            })}
           </p>
 
           <ol
@@ -185,8 +188,10 @@ export function PdfToExcelPanel() {
                   }}
                   title={item.text}
                 >
-                  {item.rowCount} {item.rowCount === 1 ? t('row') : t('rows')} × {item.columnCount}{' '}
-                  {item.columnCount === 1 ? t('column') : t('columns')}
+                  {t('{rows} × {columns}', {
+                    rows: tPlural('{count} rows', item.rowCount),
+                    columns: tPlural('{count} columns', item.columnCount)
+                  })}
                   {item.text ? ` · ${item.text}` : ''}
                 </span>
               </li>

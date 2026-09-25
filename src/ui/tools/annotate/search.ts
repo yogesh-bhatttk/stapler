@@ -1,4 +1,4 @@
-import { translate } from '../../../core/i18n';
+import { tPlural, translate } from '../../../core/i18n';
 import { commit } from '../../../core/history';
 import { currentDocumentBytes, findTextRegions } from '../../../core/operations';
 import { displayedAspectRatio } from '../../../core/rotation';
@@ -70,11 +70,16 @@ export async function searchAndHighlightMatches(
 
   commit();
   addAnnotations(highlights);
-  notify('info', translate('Highlighted {count} match(es).', { count: highlights.length }), {
+  notify('info', tPlural('Highlighted {count} matches.', highlights.length), {
     detail:
       unplaced > 0
-        ? `${unplaced} match(es) fell outside this document's pages and were not highlighted. Undo removes the whole search.`
-        : 'Undo removes the whole search in one step; each highlight is an ordinary annotation you can move or delete.'
+        ? tPlural(
+            "{count} matches fell outside this document's pages and were not highlighted. Undo removes the whole search.",
+            unplaced
+          )
+        : translate(
+            'Undo removes the whole search in one step; each highlight is an ordinary annotation you can move or delete.'
+          )
   });
 
   return { applied: true, matches: highlights.length, unplaced };

@@ -20,7 +20,7 @@ import { activeDoc } from '../../../core/store';
 import { historyVersion } from '../../../core/history';
 import { convertPdfToPptx, currentDocumentBytes } from '../../../core/operations';
 import { PPTX_LIMITATIONS } from '../../../core/convert/slides';
-import { translate, useTranslation } from '../../../core/i18n';
+import { tPlural, translate, useTranslation } from '../../../core/i18n';
 import { notify } from '../../../core/notify';
 import { formatBytes } from '../../components/Feedback';
 import { Badge } from '../../components/Badge';
@@ -64,30 +64,35 @@ export function PdfToPptPanel() {
   if (!doc) return null;
 
   const handlePreview = () => {
-    run({ label: 'Converting to PowerPoint', scope: 'convert.pdf-to-ppt' }, async job => {
-      // Captured before the bytes are read, so an edit made *during* the
-      // conversion still invalidates its result.
-      const revision = historyVersion.value;
-      const bytes = await currentDocumentBytes(job);
-      const result = await convertPdfToPptx(
-        bytes,
-        { ...pdfToPptOptions.value, documentName: doc.name },
-        job
-      );
-      setPdfToPptPreview(result, doc.id, revision);
-      notify(
-        'success',
-        translate('Built {slides} slide(s) from {pages} page(s). Review the preview, then save.', {
-          slides: result.slideCount,
-          pages: result.pageCount
-        }),
-        {
-          detail:
-            `${formatBytes(result.bytes.byteLength)} · ${result.textBoxCount} text box(es) · ` +
-            `${result.imageCount} image(s)`
-        }
-      );
-    });
+    run(
+      { label: translate('Converting to PowerPoint'), scope: 'convert.pdf-to-ppt' },
+      async job => {
+        // Captured before the bytes are read, so an edit made *during* the
+        // conversion still invalidates its result.
+        const revision = historyVersion.value;
+        const bytes = await currentDocumentBytes(job);
+        const result = await convertPdfToPptx(
+          bytes,
+          { ...pdfToPptOptions.value, documentName: doc.name },
+          job
+        );
+        setPdfToPptPreview(result, doc.id, revision);
+        notify(
+          'success',
+          translate('Built {slides} from {pages}. Review the preview, then save.', {
+            slides: tPlural('{count} slides', result.slideCount),
+            pages: tPlural('{count} pages', result.pageCount)
+          }),
+          {
+            detail: translate('{size} · {textBoxes} · {images}', {
+              size: formatBytes(result.bytes.byteLength),
+              textBoxes: tPlural('{count} text boxes', result.textBoxCount),
+              images: tPlural('{count} images', result.imageCount)
+            })
+          }
+        );
+      }
+    );
   };
 
   return (
@@ -187,10 +192,16 @@ export function PdfToPptPanel() {
       {preview ? (
         <div className={panelStyles.section}>
           <p className="text-small" style={{ margin: '0 0 var(--space-xs)', fontWeight: 600 }}>
-            {t('Preview')} · {preview.slideCount}{' '}
-            {preview.slideCount === 1 ? t('slide') : t('slides')} · {preview.textBoxCount}{' '}
-            {preview.textBoxCount === 1 ? t('text box') : t('text boxes')}
-            {preview.imageCount > 0 ? ` · ${preview.imageCount} ${t('images')}` : ''}
+            {preview.imageCount > 0
+              ? t('Preview · {slides} · {textBoxes} · {images}', {
+                  slides: tPlural('{count} slides', preview.slideCount),
+                  textBoxes: tPlural('{count} text boxes', preview.textBoxCount),
+                  images: tPlural('{count} images', preview.imageCount)
+                })
+              : t('Preview · {slides} · {textBoxes}', {
+                  slides: tPlural('{count} slides', preview.slideCount),
+                  textBoxes: tPlural('{count} text boxes', preview.textBoxCount)
+                })}
           </p>
           <p className={panelStyles.note} style={{ margin: '0 0 var(--space-xs)' }}>
             {t('Slide size: {width} × {height} in', {
@@ -214,17 +225,18 @@ export function PdfToPptPanel() {
                     fontVariantNumeric: 'tabular-nums'
                   }}
                 >
-                  {t('Slide')} {item.slideNumber} · p{item.pageIndex + 1}
+                  {t('Slide {slide} · p{page}', {
+                    slide: item.slideNumber,
+                    page: item.pageIndex + 1
+                  })}
                 </span>
                 <span
                   className={panelStyles.listRowText}
                   style={{ color: 'var(--ink-muted)' }}
                   title={item.text}
                 >
-                  {item.textBoxCount} {item.textBoxCount === 1 ? t('text box') : t('text boxes')}
-                  {item.imageCount > 0
-                    ? ` · ${item.imageCount} ${item.imageCount === 1 ? t('image') : t('images')}`
-                    : ''}
+                  {tPlural('{count} text boxes', item.textBoxCount)}
+                  {item.imageCount > 0 ? ` · ${tPlural('{count} images', item.imageCount)}` : ''}
                   {item.text ? ` · ${item.text}` : ` · ${t('nothing was placed on this slide')}`}
                 </span>
               </li>

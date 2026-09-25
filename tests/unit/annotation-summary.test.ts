@@ -8,15 +8,17 @@ import {
 import type { StaplerDoc } from '../../src/core/store';
 
 describe('ANN-04: Export annotation summary', () => {
+  const dummyPages = [
+    { key: 'page-key-1', sourceDocId: 'src-1', sourceIndex: 0, rotation: 0 },
+    { key: 'page-key-2', sourceDocId: 'src-1', sourceIndex: 1, rotation: 0 },
+    { key: 'page-key-3', sourceDocId: 'src-1', sourceIndex: 2, rotation: 0 }
+  ];
   const dummyDoc: StaplerDoc = {
     id: 'doc-1',
     name: 'test-contract.pdf',
     dirty: false,
-    pages: [
-      { key: 'page-key-1', sourceDocId: 'src-1', sourceIndex: 0, rotation: 0 },
-      { key: 'page-key-2', sourceDocId: 'src-1', sourceIndex: 1, rotation: 0 },
-      { key: 'page-key-3', sourceDocId: 'src-1', sourceIndex: 2, rotation: 0 }
-    ],
+    pages: dummyPages,
+    baseline: dummyPages,
     annotations: []
   };
 

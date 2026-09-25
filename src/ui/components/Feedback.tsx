@@ -37,7 +37,7 @@ function ToastCard({ toast }: { toast: Toast }) {
               variant="tertiary"
               onClick={() => navigator.clipboard.writeText(toast.diagnostic ?? '')}
             >
-              Copy diagnostic
+              {translate('Copy diagnostic')}
             </Button>
           </div>
         )}
@@ -148,7 +148,7 @@ export const SizeDelta = forwardRef<HTMLSpanElement, { before: number; after: nu
         <span aria-hidden="true">→</span>
         <span>{formatBytes(after)}</span>
         <span className={meaningful ? styles.deltaGain : styles.deltaNone}>
-          {meaningful ? `−${Math.round(fraction * 100)}%` : 'no reduction'}
+          {meaningful ? `−${Math.round(fraction * 100)}%` : translate('no reduction')}
         </span>
       </span>
     );

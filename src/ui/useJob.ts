@@ -9,7 +9,8 @@
  */
 import { useCallback, useEffect, useRef } from 'preact/hooks';
 import { activeJob } from '../core/notify';
-import { notifyError } from '../core/notify';
+import { notify, notifyError } from '../core/notify';
+import { translate } from '../core/i18n';
 import { isCancellation } from '../core/errors';
 import type { JobOptions } from '../core/workers/protocol';
 
@@ -58,7 +59,16 @@ export function useJob() {
       // action bar disables its button as the primary defence, and this is the
       // backstop for every other panel's secondary actions (Analyse, Scan, Detect
       // headings, …) that don't have their own busy-check against another job.
-      if (controllerRef.current || activeJob.value !== null) return undefined;
+      if (controllerRef.current || activeJob.value !== null) {
+        // Refused out loud. A silent `undefined` meant a click (or, for Merge,
+        // a whole file pick) vanished with no explanation (AUDIT-2026-09-25 UI-20).
+        notify('info', translate('Finish or cancel the current operation first.'), {
+          detail: activeJob.value
+            ? translate('"{label}" is still running.', { label: activeJob.value.label })
+            : undefined
+        });
+        return undefined;
+      }
 
       const controller = new AbortController();
       controllerRef.current = controller;

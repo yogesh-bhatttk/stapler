@@ -7,25 +7,25 @@ import { forwardRef } from 'preact/compat';
 import { Button } from './Button';
 import { Modal } from './Modal';
 import styles from './InfoModals.module.css';
-import { useTranslation } from '../../core/i18n';
+import { tKey, useTranslation } from '../../core/i18n';
 
 const POINTS = [
   {
     icon: Shield,
-    title: 'Nothing leaves your device',
-    body:
-      'No uploads, no account, no telemetry. Open DevTools and watch the Network tab if you ' +
-      'would rather check than take our word for it.'
+    title: tKey('Nothing leaves your device'),
+    body: tKey(
+      'No uploads, no account, no telemetry. Open DevTools and watch the Network tab if you would rather check than take our word for it.'
+    )
   },
   {
     icon: Layers,
-    title: 'Merge, split, sign, compress, redact',
-    body: 'No file-size cap, no daily limit, no watermark on anything you export.'
+    title: tKey('Merge, split, sign, compress, redact'),
+    body: tKey('No file-size cap, no daily limit, no watermark on anything you export.')
   },
   {
     icon: Zap,
-    title: 'Heavy work stays off the main thread',
-    body: 'Long operations report progress and can be cancelled at any point.'
+    title: tKey('Heavy work stays off the main thread'),
+    body: tKey('Long operations report progress and can be cancelled at any point.')
   }
 ];
 
@@ -51,8 +51,8 @@ export const WelcomeModal = forwardRef<HTMLDivElement, { onClose: () => void }>(
                 <point.icon size={22} aria-hidden="true" />
               </span>
               <div>
-                <h3 className={styles.pointTitle}>{point.title}</h3>
-                <p className={styles.pointBody}>{point.body}</p>
+                <h3 className={styles.pointTitle}>{t(point.title)}</h3>
+                <p className={styles.pointBody}>{t(point.body)}</p>
               </div>
             </div>
           ))}

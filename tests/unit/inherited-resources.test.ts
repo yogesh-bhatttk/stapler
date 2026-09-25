@@ -68,3 +68,47 @@ describe('pageXObjectDictOf resolves inherited /Resources (RED-02/RED-08 shared 
     expect(requests.length).toBeGreaterThan(0);
   });
 });
+
+describe('planPageImages lists images inside Form XObjects (AUDIT-2026-09-25 PDF-14)', () => {
+  it('lists a page whose only image is wrapped in a form, instead of "no images"', async () => {
+    const { processWorkerImpl } = await import('../../src/core/workers/process.worker');
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([200, 200]);
+    const png = await doc.embedPng(
+      Uint8Array.from(
+        atob(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+        ),
+        c => c.charCodeAt(0)
+      )
+    );
+    // The shape Word/Quartz write: the photo lives in a form's own resources,
+    // and the page only draws the form (nested one level further for good
+    // measure).
+    const ctx = doc.context;
+    const inner = ctx.flateStream('q 100 0 0 100 0 0 cm /Im0 Do Q', {
+      Type: 'XObject',
+      Subtype: 'Form',
+      BBox: [0, 0, 200, 200],
+      Resources: ctx.obj({ XObject: ctx.obj({ Im0: png.ref }) })
+    });
+    const outer = ctx.flateStream('/Fx1 Do', {
+      Type: 'XObject',
+      Subtype: 'Form',
+      BBox: [0, 0, 200, 200],
+      Resources: ctx.obj({ XObject: ctx.obj({ Fx1: ctx.register(inner) }) })
+    });
+    page.node.Resources()!.set(PDFName.of('XObject'), ctx.obj({ Fx0: ctx.register(outer) }));
+    page.node.set(PDFName.of('Contents'), ctx.register(ctx.flateStream('/Fx0 Do')));
+    const second = doc.addPage([200, 200]);
+    second.drawText('no pictures here');
+
+    const plan = await processWorkerImpl.planPageImages(await doc.save());
+    // Listed for blurring by object number (it has no page-level name), not
+    // merely flagged as "not checked" as before blurring inside forms existed.
+    expect(plan.images).toEqual([
+      { pageIndex: 0, name: 'Im0', objectNumber: png.ref.objectNumber, inForm: true }
+    ]);
+    expect(plan.formImagePages).toEqual([]);
+  });
+});

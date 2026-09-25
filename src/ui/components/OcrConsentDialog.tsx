@@ -1,12 +1,14 @@
 import { forwardRef, useRef, useState } from 'preact/compat';
 import { ocrConsentRequest } from '../../core/notify';
 import { writeModelBytes } from '../../core/opfs';
-import { notifyError, notify } from '../../core/notify';
+import { notifyError } from '../../core/notify';
 import { Button } from './Button';
 import { Modal } from './Modal';
+import { useTranslation } from '../../core/i18n';
 
 export const OcrConsentDialog = forwardRef<HTMLDivElement, Record<string, never>>(
   function OcrConsentDialog(_props, ref) {
+    const t = useTranslation();
     const request = ocrConsentRequest.value;
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [uploading, setUploading] = useState(false);
@@ -37,9 +39,13 @@ export const OcrConsentDialog = forwardRef<HTMLDivElement, Record<string, never>
         }
 
         await writeModelBytes(request.langs[0], bytes);
-        notify('success', 'Model uploaded', {
-          detail: 'The offline language model was saved successfully.'
-        });
+        // No "saved" toast: `runOcr` trial-loads the file in the OCR engine
+        // first (its progress label says so) and discards it, re-showing this
+        // dialog with the reason, if it will not load (audit 2026-09-25 CNV-8).
+        // This component instance survives into a re-shown dialog, so its
+        // busy state and file input must be reset for a second attempt.
+        setUploading(false);
+        (e.target as HTMLInputElement).value = '';
         request.resolve('upload');
       } catch (err) {
         notifyError('Upload Model', err);
@@ -60,12 +66,12 @@ export const OcrConsentDialog = forwardRef<HTMLDivElement, Record<string, never>
               onClick={() => request.resolve('cancel')}
               disabled={uploading}
             >
-              Cancel
+              {t('Cancel')}
             </Button>
             <div style={{ flex: 1 }} />
             {allowUpload && (
               <Button variant="secondary" onClick={handleUploadClick} disabled={uploading}>
-                {uploading ? 'Uploading...' : 'Upload offline model'}
+                {uploading ? t('Uploading...') : t('Upload offline model')}
               </Button>
             )}
             <Button
@@ -73,7 +79,7 @@ export const OcrConsentDialog = forwardRef<HTMLDivElement, Record<string, never>
               onClick={() => request.resolve('download')}
               disabled={uploading}
             >
-              Download and run OCR
+              {t('Download and run OCR')}
             </Button>
           </>
         }

@@ -7,10 +7,11 @@ import { historyVersion, operationLog } from '../../../core/history';
 import { platform } from '../../../platform/current';
 import { Button } from '../../components/Button';
 import { panelStyles } from '../../shell/panelStyles';
-import { useTranslation } from '../../../core/i18n';
+import { translate, useTranslation } from '../../../core/i18n';
 
 function formatEntry(entry: { label: string; timestamp: number }): string {
-  return `${new Date(entry.timestamp).toLocaleString()}  —  ${entry.label}`;
+  // `label` is a tool title stored as its English key (`tKey`), translated here.
+  return `${new Date(entry.timestamp).toLocaleString()}  —  ${translate(entry.label)}`;
 }
 
 export function HistoryPanel() {
@@ -21,7 +22,8 @@ export function HistoryPanel() {
   const log = operationLog();
 
   const handleExport = async () => {
-    const lines = log.length > 0 ? log.map(formatEntry) : ['No operations recorded this session.'];
+    const lines =
+      log.length > 0 ? log.map(formatEntry) : [t('No operations recorded this session.')];
     const bytes = new TextEncoder().encode(lines.join('\n'));
     await platform.saveFileAs(bytes, 'stapler-edit-history.txt');
   };
@@ -43,7 +45,7 @@ export function HistoryPanel() {
           <ol className={panelStyles.list} aria-label={t('Operation log')}>
             {log.map((entry, i) => (
               <li key={i} className={panelStyles.listRow}>
-                <span className={panelStyles.listRowText}>{entry.label}</span>
+                <span className={panelStyles.listRowText}>{t(entry.label)}</span>
                 <span>{new Date(entry.timestamp).toLocaleTimeString()}</span>
               </li>
             ))}

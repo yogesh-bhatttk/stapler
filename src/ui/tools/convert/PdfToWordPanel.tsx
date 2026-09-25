@@ -12,7 +12,7 @@ import { useEffect } from 'preact/hooks';
 import { activeDoc } from '../../../core/store';
 import { historyVersion } from '../../../core/history';
 import { convertPdfToDocx, currentDocumentBytes } from '../../../core/operations';
-import { translate, useTranslation } from '../../../core/i18n';
+import { tKey, tPlural, translate, useTranslation } from '../../../core/i18n';
 import { notify } from '../../../core/notify';
 import { formatBytes } from '../../components/Feedback';
 import { Badge } from '../../components/Badge';
@@ -30,10 +30,10 @@ import {
 
 /** What each block kind is called in the preview's left-hand gutter. */
 const KIND_LABEL: Record<string, string> = {
-  heading: 'Heading',
-  paragraph: 'Paragraph',
-  table: 'Table',
-  image: 'Image'
+  heading: tKey('Heading'),
+  paragraph: tKey('Paragraph'),
+  table: tKey('Table'),
+  image: tKey('Image')
 };
 
 export function PdfToWordPanel() {
@@ -59,7 +59,7 @@ export function PdfToWordPanel() {
   if (!doc) return null;
 
   const handlePreview = () => {
-    run({ label: 'Converting to Word', scope: 'convert.pdf-to-word' }, async job => {
+    run({ label: translate('Converting to Word'), scope: 'convert.pdf-to-word' }, async job => {
       // Captured before the bytes are read, so an edit made *during* the
       // conversion still invalidates its result.
       const revision = historyVersion.value;
@@ -72,10 +72,15 @@ export function PdfToWordPanel() {
       setPdfToWordPreview(result, doc.id, revision);
       notify(
         'success',
-        translate('Converted {pages} page(s). Review the preview, then save.', {
-          pages: result.pageCount
+        translate('Converted {pages}. Review the preview, then save.', {
+          pages: tPlural('{count} pages', result.pageCount)
         }),
-        { detail: `${formatBytes(result.bytes.byteLength)} · ${result.outline.length} blocks` }
+        {
+          detail: translate('{size} · {blocks}', {
+            size: formatBytes(result.bytes.byteLength),
+            blocks: tPlural('{count} blocks', result.outline.length)
+          })
+        }
       );
     });
   };
@@ -140,9 +145,16 @@ export function PdfToWordPanel() {
       {preview ? (
         <div className={panelStyles.section}>
           <p className="text-small" style={{ margin: '0 0 var(--space-xs)', fontWeight: 600 }}>
-            {t('Preview')} · {preview.pageCount} {preview.pageCount === 1 ? t('page') : t('pages')}{' '}
-            · {preview.outline.length} {t('blocks')}
-            {preview.imageCount > 0 ? ` · ${preview.imageCount} ${t('images')}` : ''}
+            {preview.imageCount > 0
+              ? t('Preview · {pages} · {blocks} · {images}', {
+                  pages: tPlural('{count} pages', preview.pageCount),
+                  blocks: tPlural('{count} blocks', preview.outline.length),
+                  images: tPlural('{count} images', preview.imageCount)
+                })
+              : t('Preview · {pages} · {blocks}', {
+                  pages: tPlural('{count} pages', preview.pageCount),
+                  blocks: tPlural('{count} blocks', preview.outline.length)
+                })}
           </p>
 
           <ol
@@ -160,10 +172,15 @@ export function PdfToWordPanel() {
                     fontVariantNumeric: 'tabular-nums'
                   }}
                 >
-                  p{item.pageIndex + 1} ·{' '}
-                  {item.kind === 'heading'
-                    ? `H${item.level ?? 2}`
-                    : (KIND_LABEL[item.kind] ?? item.kind)}
+                  {t('p{page} · {kind}', {
+                    page: item.pageIndex + 1,
+                    kind:
+                      item.kind === 'heading'
+                        ? `H${item.level ?? 2}`
+                        : KIND_LABEL[item.kind]
+                          ? t(KIND_LABEL[item.kind])
+                          : item.kind
+                  })}
                 </span>
                 <span
                   className={panelStyles.listRowText}

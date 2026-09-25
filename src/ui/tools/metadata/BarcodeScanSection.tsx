@@ -23,7 +23,7 @@ import { platform } from '../../../platform/current';
 import { Button } from '../../components/Button';
 import { panelStyles } from '../../shell/panelStyles';
 import { useJob } from '../../useJob';
-import { useTranslation } from '../../../core/i18n';
+import { translate, useTranslation } from '../../../core/i18n';
 
 export function BarcodeScanSection() {
   const t = useTranslation();
@@ -39,12 +39,15 @@ export function BarcodeScanSection() {
   const scan = async () => {
     setBusy(true);
     try {
-      await run({ label: 'Scanning for barcodes', scope: 'barcodes.scan' }, async job => {
-        const bytes = await currentDocumentBytes(job);
-        const pageIndices = doc.pages.map((_, index) => index);
-        const scanned = await scanDocumentBarcodes(bytes, pageIndices, job);
-        setResults(scanned.filter(page => page.barcodes.length > 0 || page.reason));
-      });
+      await run(
+        { label: translate('Scanning for barcodes'), scope: 'barcodes.scan' },
+        async job => {
+          const bytes = await currentDocumentBytes(job);
+          const pageIndices = doc.pages.map((_, index) => index);
+          const scanned = await scanDocumentBarcodes(bytes, pageIndices, job);
+          setResults(scanned.filter(page => page.barcodes.length > 0 || page.reason));
+        }
+      );
     } finally {
       setBusy(false);
     }
@@ -95,8 +98,7 @@ export function BarcodeScanSection() {
                 ? [
                     <li className={panelStyles.listRow} key={`${page.pageIndex}-reason`}>
                       <span className={panelStyles.listRowText} title={page.reason}>
-                        {t('Page {page}', { page: page.pageIndex + 1 })} —{' '}
-                        {t('could not be checked')}
+                        {t('Page {page} — could not be checked', { page: page.pageIndex + 1 })}
                       </span>
                     </li>
                   ]

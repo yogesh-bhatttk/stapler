@@ -323,11 +323,13 @@ async function convert(
     documentName
   }: { includePageText?: boolean; documentName?: string } = {}
 ) {
+  // A `null` (indeterminate) report is recorded as NaN so it fails every
+  // determinate-progress assertion below rather than being silently dropped.
   const progress: number[] = [];
   const result = await convertPdfToXlsx(
     bytes,
     { includePageText, documentName },
-    { onProgress: fraction => progress.push(fraction) }
+    { onProgress: fraction => progress.push(fraction ?? NaN) }
   );
   return { ...result, progress };
 }
@@ -1003,10 +1005,12 @@ describe('CNV-10 — the mandatory-preview gate', () => {
     const store = await import('../../src/core/store');
 
     const pageKey = 'page-1';
+    const docPages = [{ key: pageKey, sourceDocId: 'src-1', sourceIndex: 0, rotation: 0 }];
     const doc = {
       id: 'doc-xlsx-edit',
       name: 'edited.pdf',
-      pages: [{ key: pageKey, sourceDocId: 'src-1', sourceIndex: 0, rotation: 0 }],
+      pages: docPages,
+      baseline: docPages,
       annotations: [],
       dirty: false
     };

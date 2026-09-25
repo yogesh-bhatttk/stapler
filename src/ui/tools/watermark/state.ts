@@ -1,5 +1,6 @@
 import { signal } from '@preact/signals';
 import { DOC_SIGNATURE_STROKE } from '../../../core/doc-colors';
+import { translate } from '../../../core/i18n';
 
 export type WatermarkPosition =
   | 'top-left'
@@ -208,7 +209,7 @@ export async function readWatermarkImage(file: File): Promise<WatermarkImage> {
   const bytes = new Uint8Array(await file.arrayBuffer());
   const format = sniffImageFormat(bytes);
   if (!format) {
-    throw new Error('Choose a PNG or JPEG image.');
+    throw new Error(translate('Choose a PNG or JPEG image.'));
   }
 
   const bitmap = await createImageBitmap(new Blob([bytes]));

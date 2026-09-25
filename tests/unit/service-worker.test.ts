@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 /**
- * `runtime.getContexts` only exists in Firefox 127+ (our manifest's
- * `strict_min_version` is 109.0), so the service worker must not assume it is
- * present. Before this test existed, an older Firefox threw inside
+ * `runtime.getContexts` only exists in Firefox 127+. The manifests' floors
+ * are now above that (`scripts/browser-floors.mjs`), but a sideloaded install
+ * on an older browser ignores them, so the service worker must not assume it
+ * is present. Before this test existed, an older Firefox threw inside
  * `openEditor()`, was swallowed by the top-level `.catch`, and the toolbar
  * button silently did nothing.
  *

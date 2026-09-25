@@ -24,11 +24,13 @@ Object.defineProperty(globalThis, 'localStorage', {
   }
 });
 
-const planCompression = vi.fn(async () => ({ alreadyOptimized: true }));
+const planCompression = vi.fn<(...args: unknown[]) => Promise<{ alreadyOptimized: boolean }>>(
+  async () => ({ alreadyOptimized: true })
+);
 const compressDocument = vi.fn(async (bytes: Uint8Array) => ({ bytes, keptOriginal: false }));
 
 vi.mock('../../src/core/operations', () => ({
-  planCompression: (...args: unknown[]) => planCompression(...(args as [])),
+  planCompression: (...args: unknown[]) => planCompression(...args),
   compressDocument: (...args: unknown[]) => compressDocument(...(args as unknown as [Uint8Array]))
 }));
 
@@ -58,7 +60,9 @@ const scrubMetadata = vi.fn(async (bytes: Uint8Array) => new Uint8Array([...byte
  * proves the real flags survive a real export; what is in question here is
  * only whether the batch runner asks for them at all, and for which files.
  */
-const restrictDocument = vi.fn(async (bytes: Uint8Array) => new Uint8Array([...bytes, 0xee]));
+const restrictDocument = vi.fn<(bytes: Uint8Array, ...rest: unknown[]) => Promise<Uint8Array>>(
+  async bytes => new Uint8Array([...bytes, 0xee])
+);
 
 vi.mock('../../src/core/workers', () => ({
   processWorker: {
@@ -84,7 +88,7 @@ vi.mock('../../src/core/workers', () => ({
         readMetadata: (...args: unknown[]) => readMetadata(...(args as [Uint8Array])),
         scrubMetadata: (...args: unknown[]) => scrubMetadata(...(args as [Uint8Array])),
         restrictDocument: (...args: unknown[]) =>
-          restrictDocument(...(args as unknown as [Uint8Array]))
+          restrictDocument(...(args as [Uint8Array, ...unknown[]]))
       })
   },
   // §1.8's validation gate pins a render-worker client to parse each file before

@@ -15,15 +15,14 @@
  * that component is shared by five other tools (sign, redact, crop, annotate,
  * watermark) with its own internal, uncontrolled zoom state, and threading a
  * second, externally-controlled zoom mode through it risked all five for the
- * sake of this one new consumer. This duplicates its rendering approach
- * (`renderHandleFor`/`bitmapKey`/`thumbnailCache`) rather than its code.
+ * sake of this one new consumer. Rendering itself is shared, through
+ * `usePageRender`.
  */
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useRef } from 'preact/hooks';
 import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-preact';
 import { sources, type PageRef } from '../../../core/store';
 import { normalizeRotation } from '../../../core/rotation';
-import { bitmapKey, renderHandleFor, thumbnailCache } from '../../../core/render-cache';
-import { isCancellation, logEvent } from '../../../core/errors';
+import { usePageRender } from '../../shell/usePageRender';
 import { Button } from '../../components/Button';
 import { IconButton } from '../../components/IconButton';
 import { useTranslation } from '../../../core/i18n';
@@ -43,55 +42,18 @@ interface PaneProps {
 function Pane({ label, page, zoom, stageRef, onScroll }: PaneProps) {
   const t = useTranslation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [size, setSize] = useState({ width: 0, height: 0 });
   const source = page ? sources.value[page.sourceDocId] : undefined;
   const pageSize = source?.pageSizes[page?.sourceIndex ?? 0];
-
-  useEffect(() => {
-    if (!page || !source || !pageSize) return;
-    let cancelled = false;
-    const scale = Number(
-      (zoom * Math.min(2, typeof devicePixelRatio === 'number' ? devicePixelRatio : 1)).toFixed(2)
-    );
-    const key = bitmapKey(source.id, page.sourceIndex, scale);
-
-    const draw = (bitmap: ImageBitmap) => {
-      const canvas = canvasRef.current;
-      if (cancelled || !canvas) return;
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
-      canvas.getContext('2d')?.drawImage(bitmap, 0, 0);
-      setSize({ width: pageSize.width * zoom, height: pageSize.height * zoom });
-    };
-
-    const cached = thumbnailCache.get(key);
-    if (cached) {
-      draw(cached);
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    void (async () => {
-      try {
-        const { handle, client } = await renderHandleFor(source.id);
-        if (cancelled) return;
-        const bitmap = await client.lease(api => api.renderPage(handle, page.sourceIndex, scale));
-        if (cancelled) {
-          bitmap.close();
-          return;
-        }
-        thumbnailCache.set(key, bitmap);
-        draw(bitmap);
-      } catch (err) {
-        if (!cancelled && !isCancellation(err)) logEvent('warn', 'side-by-side', String(err));
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [page, source, pageSize, zoom]);
+  // RT-10 / UI-16 — shared with `SinglePageView`: on-demand renders (never
+  // cached), a pixel ceiling, and no stale pixels while a page loads.
+  const { state, reduced, size } = usePageRender(
+    canvasRef,
+    page,
+    source,
+    pageSize,
+    zoom,
+    'side-by-side'
+  );
 
   if (!page || !pageSize) {
     return (
@@ -130,8 +92,23 @@ function Pane({ label, page, zoom, stageRef, onScroll }: PaneProps) {
             transform: `translate(-50%, -50%) rotate(${rotation}deg)`
           }}
         >
-          <canvas ref={canvasRef} className={styles.canvas} aria-label={`${label}, page`} />
+          <canvas
+            ref={canvasRef}
+            className={styles.canvas}
+            aria-label={t('{name}, page', { name: label })}
+          />
         </div>
+        {state !== 'ready' && (
+          <div
+            className={`${styles.status} ${state === 'failed' ? styles.statusFailed : ''}`}
+            role="status"
+          >
+            {state === 'failed' ? t('This page could not be displayed.') : t('Loading page…')}
+          </div>
+        )}
+        {reduced && state === 'ready' && (
+          <span className={styles.reduced}>{t('Reduced detail')}</span>
+        )}
       </div>
     </div>
   );

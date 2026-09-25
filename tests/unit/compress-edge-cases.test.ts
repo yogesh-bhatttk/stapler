@@ -20,7 +20,19 @@
  *    the failure as permission to skip the never-grow check for that image.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { PDFArray, PDFDict, PDFDocument, PDFName, PDFRawStream, PDFRef, PDFStream } from 'pdf-lib';
+import {
+  PDFArray,
+  PDFDict,
+  PDFDocument,
+  PDFName,
+  PDFRawStream,
+  PDFRef,
+  PDFStream,
+  type PDFContext
+} from 'pdf-lib';
+
+/** pdf-lib's `LiteralObject` (the dict shape `context.stream` takes), which it does not export. */
+type StreamDict = NonNullable<Parameters<PDFContext['stream']>[1]>;
 
 vi.mock('comlink', () => ({
   expose: vi.fn(),
@@ -113,7 +125,7 @@ interface ImageSpec {
   /** A `/SMask` or stencil `/Mask` stream, with its own filter chain. */
   mask?: { key: 'SMask' | 'Mask'; filter?: string | string[] };
   /** Extra dict entries, e.g. a marker the §2.10 spy recognises. */
-  extra?: Record<string, unknown>;
+  extra?: StreamDict;
 }
 
 /**
@@ -130,7 +142,7 @@ async function docWithImages(specs: ImageSpec[], pageCount = 1, contentPadding =
   const refs: PDFRef[] = [];
 
   for (const spec of specs) {
-    const dict: Record<string, unknown> = {
+    const dict: StreamDict = {
       Type: 'XObject',
       Subtype: 'Image',
       Width: spec.width ?? IMAGE_WIDTH,
@@ -142,7 +154,7 @@ async function docWithImages(specs: ImageSpec[], pageCount = 1, contentPadding =
     if (spec.filter) dict.Filter = spec.filter;
 
     if (spec.mask) {
-      const maskDict: Record<string, unknown> = {
+      const maskDict: StreamDict = {
         Type: 'XObject',
         Subtype: 'Image',
         Width: spec.width ?? IMAGE_WIDTH,

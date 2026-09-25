@@ -439,10 +439,16 @@ describe('CNV-09 — DOCX to PDF round trip', () => {
     // reset on entry, so a Markdown export starting inside this layout's `await`
     // decided what this document reported. Both answers must be the call's own.
     const asciiBlocks: LayoutBlock[] = [
-      { kind: 'paragraph', runs: [{ text: 'Plain ASCII, nothing exotic.' }] }
+      {
+        kind: 'paragraph',
+        runs: [{ text: 'Plain ASCII, nothing exotic.', bold: false, italic: false }]
+      }
     ];
     const cjkBlocks: LayoutBlock[] = [
-      { kind: 'paragraph', runs: [{ text: '\u65e5\u672c\u8a9e \u4e2d\u6587' }] }
+      {
+        kind: 'paragraph',
+        runs: [{ text: '\u65e5\u672c\u8a9e \u4e2d\u6587', bold: false, italic: false }]
+      }
     ];
 
     const [ascii, cjkMarkdown] = await Promise.all([

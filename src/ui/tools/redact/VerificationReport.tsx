@@ -21,7 +21,7 @@ import { Button } from '../../components/Button';
 import { panelStyles } from '../../shell/panelStyles';
 import { redactionReport } from './state';
 import styles from './VerificationReport.module.css';
-import { translate, useTranslation } from '../../../core/i18n';
+import { tPlural, translate, useTranslation } from '../../../core/i18n';
 import { notify } from '../../../core/notify';
 import type { RegionVerdict } from '../../../core/operations';
 
@@ -97,11 +97,12 @@ export function VerificationReport() {
       <h2 className={panelStyles.title}>{t('Verification')}</h2>
       <p className={report.verified ? styles.pass : styles.fail}>
         {report.verified
-          ? t('All {count} region(s) verified.', { count: report.verdicts.length })
-          : t('{failed} of {count} region(s) could not be verified — nothing was saved.', {
-              failed,
-              count: report.verdicts.length
-            })}
+          ? tPlural('All {count} regions verified.', report.verdicts.length)
+          : tPlural(
+              '{failed} of {count} regions could not be verified — nothing was saved.',
+              report.verdicts.length,
+              { failed }
+            )}
       </p>
 
       <table className={styles.table}>

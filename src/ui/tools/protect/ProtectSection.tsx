@@ -96,7 +96,7 @@ export function ProtectSection() {
 
           {issue ? (
             <p className={panelStyles.note} role="alert">
-              {t(issue)} {t('Exporting is blocked until this is fixed.')}
+              {t('{issue} Exporting is blocked until this is fixed.', { issue: t(issue) })}
             </p>
           ) : (
             <p className={`${panelStyles.note} ${panelStyles.noteInfo}`}>

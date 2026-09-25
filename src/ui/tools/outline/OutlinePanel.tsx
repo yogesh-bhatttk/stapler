@@ -22,7 +22,7 @@ import { confirmAction, notify } from '../../../core/notify';
 import { IconButton } from '../../components/IconButton';
 import { Button } from '../../components/Button';
 import { panelStyles } from '../../shell/panelStyles';
-import { useTranslation } from '../../../core/i18n';
+import { tPlural, translate, useTranslation } from '../../../core/i18n';
 import { useJob } from '../../useJob';
 import styles from './OutlinePanel.module.css';
 import { useDocumentOutline } from './useOutline';
@@ -69,7 +69,7 @@ export function OutlinePanel() {
    * reach `/Outlines`, same as every other edit in this editor.
    */
   const detectHeadings = () =>
-    run({ label: 'Scanning for headings', scope: 'outline.detect' }, async job => {
+    run({ label: translate('Scanning for headings'), scope: 'outline.detect' }, async job => {
       if (
         tree.length > 0 &&
         !(await confirmAction({
@@ -87,14 +87,14 @@ export function OutlinePanel() {
       const candidates = await proposeOutlineFromHeadings(bytes, doc.pages.length, job);
       if (candidates.length === 0) {
         notify('info', t('No heading-sized text was found.'), {
-          detail: 'Headings are detected by font size standing out from the body text.'
+          detail: translate('Headings are detected by font size standing out from the body text.')
         });
         return;
       }
       const pageKeys = doc.pages.map(page => page.key);
       editTree(() => entriesFromHeadingCandidates(candidates, pageKeys));
-      notify('success', t('Found {count} heading(s).', { count: countCandidates(candidates) }), {
-        detail: 'Review the outline below, then export to save it.'
+      notify('success', tPlural('Found {count} headings.', countCandidates(candidates)), {
+        detail: translate('Review the outline below, then export to save it.')
       });
     });
 
@@ -114,7 +114,7 @@ export function OutlinePanel() {
           );
         }}
       >
-        {t('Add bookmark for page')} {currentIndex + 1}
+        {t('Add bookmark for page {n}', { n: currentIndex + 1 })}
       </Button>
 
       <Button variant="secondary" icon={Wand2} onClick={detectHeadings} disabled={isRunning()}>
@@ -140,7 +140,7 @@ export function OutlinePanel() {
                 className={styles.title}
                 type="text"
                 value={entry.title}
-                aria-label={`${t('Bookmark title')}, ${t('level')} ${depth + 1}`}
+                aria-label={t('Bookmark title, level {level}', { level: depth + 1 })}
                 onInput={event => {
                   const title = (event.target as HTMLInputElement).value;
                   editTree(current => renameEntry(current, entry.id, title));
@@ -148,7 +148,7 @@ export function OutlinePanel() {
               />
               <div className={styles.controls}>
                 <span className={styles.page}>
-                  {pageNumber === null ? t('No page') : `${t('Page')} ${pageNumber}`}
+                  {pageNumber === null ? t('No page') : t('Page {n}', { n: pageNumber })}
                 </span>
                 <Button
                   size="compact"
@@ -158,12 +158,12 @@ export function OutlinePanel() {
                     editTree(current => setEntryPage(current, entry.id, currentPage.key));
                   }}
                 >
-                  {t('Use page')} {currentIndex + 1}
+                  {t('Use page {n}', { n: currentIndex + 1 })}
                 </Button>
                 <IconButton
                   icon={ChevronUp}
                   size="compact"
-                  aria-label={`${t('Move up')}: ${entry.title}`}
+                  aria-label={t('Move up: {title}', { title: entry.title })}
                   onClick={() => {
                     editTree(current => moveEntry(current, entry.id, 'up'));
                   }}
@@ -171,7 +171,7 @@ export function OutlinePanel() {
                 <IconButton
                   icon={ChevronDown}
                   size="compact"
-                  aria-label={`${t('Move down')}: ${entry.title}`}
+                  aria-label={t('Move down: {title}', { title: entry.title })}
                   onClick={() => {
                     editTree(current => moveEntry(current, entry.id, 'down'));
                   }}
@@ -179,7 +179,7 @@ export function OutlinePanel() {
                 <IconButton
                   icon={ListIndentIncrease}
                   size="compact"
-                  aria-label={`${t('Indent')}: ${entry.title}`}
+                  aria-label={t('Indent: {title}', { title: entry.title })}
                   onClick={() => {
                     editTree(current => indentEntry(current, entry.id));
                   }}
@@ -187,7 +187,7 @@ export function OutlinePanel() {
                 <IconButton
                   icon={ListIndentDecrease}
                   size="compact"
-                  aria-label={`${t('Outdent')}: ${entry.title}`}
+                  aria-label={t('Outdent: {title}', { title: entry.title })}
                   onClick={() => {
                     editTree(current => outdentEntry(current, entry.id));
                   }}
@@ -195,7 +195,7 @@ export function OutlinePanel() {
                 <IconButton
                   icon={Trash2}
                   size="compact"
-                  aria-label={`${t('Delete bookmark')}: ${entry.title}`}
+                  aria-label={t('Delete bookmark: {title}', { title: entry.title })}
                   onClick={() => {
                     editTree(current => deleteEntry(current, entry.id));
                   }}

@@ -501,3 +501,86 @@ describe('stripTextObjects', () => {
     expect(result.text).toContain('/Im0 Do');
   });
 });
+
+/**
+ * AUDIT-2026-09-25 PDF-16 — a span is removable only when *every* show in it
+ * is invisible, and removing it must not change the text state later text
+ * inherits.
+ */
+describe('stripTextObjects keeps visible text in a mixed span (PDF-16)', () => {
+  const strip = (source: string) => {
+    const statements = parseContentStream(tokenizeContentStream(enc(source)));
+    const result = stripTextObjects(statements);
+    return { ...result, text: new TextDecoder().decode(serializeStatements(result.filtered)) };
+  };
+
+  it('leaves a span alone when it switches back to a visible mode part-way', () => {
+    const result = strip('BT /F1 12 Tf 3 Tr (ocr) Tj 0 Tr (Visible) Tj ET\n');
+    expect(result.removed).toBe(0);
+    expect(result.text).toContain('(Visible)');
+  });
+
+  it('leaves a span alone when it shows visible text before switching to Tr 3', () => {
+    const result = strip('BT /F1 12 Tf (Visible) Tj 3 Tr (ocr) Tj ET\n');
+    expect(result.removed).toBe(0);
+    expect(result.text).toContain('(Visible)');
+  });
+
+  it('keeps the state a removed span leaves behind for the text after it', () => {
+    // The later span relies on the Tr 3 and font the removed span set. Without
+    // re-emitting them, "(shown)" would lose its font and the next span's Tr
+    // would be judged from the wrong running value.
+    const inherits = strip('BT 3 Tr /F1 9 Tf (ocr) Tj ET\nBT (later) Tj ET\n');
+    expect(inherits.removed).toBe(2);
+    const visible = strip('BT 3 Tr /F1 9 Tf (ocr) Tj ET\nBT 0 Tr (shown) Tj ET\n');
+    expect(visible.removed).toBe(1);
+    expect(visible.text.replace(/\s+/g, ' ').trim()).toBe('3 Tr /F1 9 Tf BT 0 Tr (shown) Tj ET');
+  });
+});
+
+/**
+ * AUDIT-2026-09-25 PDF-4 — a rotated image's box is its four transformed
+ * corners, not two. Based on the audit's probe p4.
+ */
+describe('rotated image placements under a mark (PDF-4)', () => {
+  const c = Math.cos(Math.PI / 4) * 100;
+  const s = Math.sin(Math.PI / 4) * 100;
+  // A 100×100 image rotated 45° about (300,300): a diamond with corners
+  // (300,300), (370.7,370.7), (300,441.4), (229.3,370.7).
+  const source = `q ${c} ${s} ${-s} ${c} 300 300 cm /Im1 Do Q`;
+  const run = (mark: Rect) =>
+    filterContentStream(
+      parseContentStream(tokenizeContentStream(enc(source))),
+      [mark],
+      undefined,
+      () => ({ subtype: 'Image' }) as never
+    );
+
+  it('reports a mark over part of the diamond as partial coverage (was: nothing)', () => {
+    const result = run({ x: 230, y: 360, width: 30, height: 20 });
+    expect(result.strippedXObjectNames).toEqual([]);
+    expect(result.partialImageCoverage).toHaveLength(1);
+    expect(result.partialImageCoverage[0].name).toBe('Im1');
+    const [rect] = result.partialImageCoverage[0].rects;
+    // In unit space the covered area sits near the image's (0,1) corner,
+    // which is where the diamond's left corner comes from.
+    expect(rect.x).toBeLessThan(0.3);
+    expect(rect.y + rect.height).toBeGreaterThan(0.7);
+  });
+
+  it('strips the image only when the mark covers the whole diamond', () => {
+    const whole = run({ x: 220, y: 290, width: 160, height: 160 });
+    expect(whole.strippedXObjectNames).toEqual(['Im1']);
+    // Covers the old two-corner sliver (x=300, y 300..441) but not the diamond:
+    // stripping here would have deleted image content the user never marked.
+    const sliver = run({ x: 290, y: 295, width: 20, height: 150 });
+    expect(sliver.strippedXObjectNames).toEqual([]);
+    expect(sliver.partialImageCoverage).toHaveLength(1);
+  });
+
+  it('ignores a mark inside the bounding box but outside the diamond', () => {
+    const result = run({ x: 232, y: 302, width: 10, height: 10 });
+    expect(result.strippedXObjectNames).toEqual([]);
+    expect(result.partialImageCoverage).toEqual([]);
+  });
+});

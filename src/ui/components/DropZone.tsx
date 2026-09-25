@@ -10,6 +10,7 @@ import { PDF_AND_IMAGES, acceptToInputAccept, type OpenedFile } from '../../plat
 import { SUPPORTED_FORMATS } from '../../core/import';
 import { importFilesAsDocuments, pickAndImportFiles } from '../../core/open-document';
 import { ProgressBar } from './Feedback';
+import { JobStatusRow } from './JobStatusRow';
 import { useImageImportOptions } from '../useImageImportOptions';
 import styles from './DropZone.module.css';
 
@@ -41,7 +42,7 @@ export const DropZone = forwardRef<HTMLLabelElement, DropZoneProps>(function Dro
       requestImageOptions: requestOptions,
       onImportStart: () => {
         setState('busy');
-        setProgress({ label: 'Reading files', value: null });
+        setProgress({ label: translate('Reading files'), value: null });
       },
       onProgress: (value, label) => setProgress({ label, value })
     });
@@ -57,7 +58,7 @@ export const DropZone = forwardRef<HTMLLabelElement, DropZoneProps>(function Dro
       requestImageOptions: requestOptions,
       onImportStart: () => {
         setState('busy');
-        setProgress({ label: 'Reading files', value: null });
+        setProgress({ label: translate('Reading files'), value: null });
       },
       onProgress: (value, label) => setProgress({ label, value })
     });
@@ -131,16 +132,21 @@ export const DropZone = forwardRef<HTMLLabelElement, DropZoneProps>(function Dro
         ) : (
           <>
             <span className={styles.title}>
-              {state === 'reject' ? 'Only PDFs and images' : 'Drop PDFs or images here'}
+              {state === 'reject'
+                ? translate('Only PDFs and images')
+                : translate('Drop PDFs or images here')}
             </span>
             <span className={styles.hint}>
               {state === 'reject'
-                ? `${SUPPORTED_FORMATS} are supported.`
-                : 'or choose files — nothing is uploaded'}
+                ? translate('{formats} are supported.', { formats: SUPPORTED_FORMATS })
+                : translate('or choose files — nothing is uploaded')}
             </span>
           </>
         )}
       </label>
+      {/* RT-7 — outside the <label>, whose click opens the file picker. The
+          label already shows the progress, so this row is only the Cancel. */}
+      {state === 'busy' && <JobStatusRow showProgress={false} />}
       {node}
     </>
   );

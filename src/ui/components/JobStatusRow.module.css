@@ -1,0 +1,12 @@
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+  width: 100%;
+}
+
+.progress {
+  flex: 1;
+  min-width: 0;
+}

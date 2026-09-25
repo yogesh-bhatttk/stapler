@@ -12,7 +12,7 @@ import { Button } from '../../components/Button';
 import { Field } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
 import { useJob } from '../../useJob';
-import { useTranslation } from '../../../core/i18n';
+import { translate, useTranslation } from '../../../core/i18n';
 import { CONTACT_SHEET_COL_OPTIONS, contactSheetColumns } from './state';
 
 export function ContactSheetPanel() {
@@ -24,7 +24,7 @@ export function ContactSheetPanel() {
   if (!doc) return null;
 
   const handleExport = () =>
-    run({ label: 'Exporting contact sheet', scope: 'contact-sheet' }, async job => {
+    run({ label: translate('Exporting contact sheet'), scope: 'contact-sheet' }, async job => {
       const bytes = await currentDocumentBytes(job);
       const outBytes = await exportContactSheet(doc.id, bytes, cols, job);
       const stem = doc.name.replace(/\.[^.]+$/, '');

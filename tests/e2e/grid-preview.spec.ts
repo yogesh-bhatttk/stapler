@@ -9,7 +9,7 @@
 import { expect, test } from '@playwright/test';
 import path from 'node:path';
 import { FIXTURES_DIR } from './fixtures';
-import { openApp, gotoTool, importFile } from './helpers';
+import { gotoTool, importFile, openApp, waitForPageRendered } from './helpers';
 
 test.describe('watermark/crop preview on the page grid', () => {
   test('a staged watermark and crop box are still visible after switching to Organize', async ({
@@ -26,6 +26,7 @@ test.describe('watermark/crop preview on the page grid', () => {
     await expect(cropCanvas).toBeVisible();
     const box = await cropCanvas.boundingBox();
     if (!box) throw new Error('crop canvas has no bounding box');
+    await waitForPageRendered(page);
     await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.2);
     await page.mouse.down();
     await page.mouse.move(box.x + box.width * 0.8, box.y + box.height * 0.8, { steps: 5 });

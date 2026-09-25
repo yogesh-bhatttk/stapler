@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PDFDocument, PDFArray, PDFName, PDFString, PDFDict, PDFNumber, degrees } from 'pdf-lib';
+import type { PDFObject, PDFRef } from 'pdf-lib';
 
 /**
  * Reads a PDF text object's value without going through pdf-lib's field
@@ -467,7 +468,7 @@ describe('applyRedactions: Form XObject text (RED-02 gap)', () => {
 
 describe('imageInventory: colour-space detection through indirection (CMP-01 gap)', () => {
   /** A 1x1 raw image stream carrying whatever /ColorSpace value the caller wants. */
-  function addImage(doc: PDFDocument, colorSpace: unknown) {
+  function addImage(doc: PDFDocument, colorSpace: PDFObject) {
     const page = doc.addPage([200, 200]);
     const img = doc.context.stream(new Uint8Array([0xfa, 0xce, 0xfe]), {
       Type: 'XObject',
@@ -1245,7 +1246,7 @@ describe('applyNUp layout', () => {
       pages,
       sources,
       [],
-      null,
+      undefined,
       undefined,
       null,
       { layout: '2-up', margin: 10, gutter: 10, drawBorders: true },
@@ -1280,7 +1281,7 @@ describe('applyNUp layout', () => {
       pages,
       sources,
       [],
-      null,
+      undefined,
       undefined,
       null,
       { layout: 'booklet', margin: 0, gutter: 0, drawBorders: false },
@@ -1314,7 +1315,7 @@ describe('applyNUp layout', () => {
       [{ key: 'p1', sourceDocId: 'doc1', sourceIndex: 0, rotation: 0 }],
       { doc1: rotatedBytes },
       [],
-      null,
+      undefined,
       undefined,
       null,
       { layout: '2-up', margin: 0, gutter: 0, drawBorders: false },
@@ -1384,7 +1385,7 @@ describe('stamp placement on a rotated page (SGN-02)', () => {
           rotation: 0
         }
       ],
-      null,
+      undefined,
       undefined,
       null,
       null,
@@ -1452,7 +1453,7 @@ describe('AcroForm fill survives compose (SGN-03)', () => {
       pages,
       { doc1: bytes },
       [],
-      null,
+      undefined,
       undefined,
       null,
       null,
@@ -1779,11 +1780,15 @@ describe('CMP-03: resamples SMask when base image is downscaled', () => {
     });
     const smaskRef = doc.context.register(smaskStream);
 
-    const baseStream = doc.context.stream(new Uint8Array([0, 0, 0]), {
+    // A real 64x64 RGB raster (12 KB stored): large enough that the 288-byte
+    // replacement JPEG clears CMP-04's never-grow gate. A 3-byte stream made the
+    // replacement "bigger", so it was skipped and the assertions below ran
+    // against the untouched original.
+    const baseStream = doc.context.stream(new Uint8Array(64 * 64 * 3), {
       Type: 'XObject',
       Subtype: 'Image',
-      Width: 4,
-      Height: 4,
+      Width: 64,
+      Height: 64,
       ColorSpace: 'DeviceRGB',
       BitsPerComponent: 8,
       SMask: smaskRef
@@ -1820,10 +1825,13 @@ describe('CMP-03: resamples SMask when base image is downscaled', () => {
     const xobjs = outDoc.getPage(0).node.Resources()?.lookup(PDFName.of('XObject'), PDFDict);
     const newBaseRef = xobjs!.get(PDFName.of('Im0'));
     const newBase = outDoc.context.lookup(newBaseRef, PDFStream);
+    // The base really was replaced — otherwise the mask trivially stays 2x2.
+    expect(result.keptOriginal).toBe(false);
+    expect(newBase.dict.get(PDFName.of('Filter'))?.toString()).toBe('/DCTDecode');
     const newSmaskRef = newBase.dict.get(PDFName.of('SMask'));
 
     expect(newSmaskRef).toBeInstanceOf(PDFRef);
-    const newSmask = outDoc.context.lookup(newSmaskRef as InstanceType<typeof PDFRef>, PDFStream);
+    const newSmask = outDoc.context.lookup(newSmaskRef as PDFRef, PDFStream);
     // Still the original 2x2 mask, byte for byte — not resampled up to 10x210.
     expect(newSmask.dict.get(PDFName.of('Width'))?.toString()).toBe('2');
     expect(newSmask.dict.get(PDFName.of('Height'))?.toString()).toBe('2');
@@ -1844,11 +1852,15 @@ describe('CMP-03: resamples SMask when base image is downscaled', () => {
       doc.context.obj({ OCGs: [ocgRef], D: { ON: [ocgRef] } })
     );
 
-    const baseStream = doc.context.stream(new Uint8Array([0, 0, 0]), {
+    // A real 64x64 RGB raster (12 KB stored): large enough that the 288-byte
+    // replacement JPEG clears CMP-04's never-grow gate. A 3-byte stream made the
+    // replacement "bigger", so it was skipped and the assertions below ran
+    // against the untouched original.
+    const baseStream = doc.context.stream(new Uint8Array(64 * 64 * 3), {
       Type: 'XObject',
       Subtype: 'Image',
-      Width: 4,
-      Height: 4,
+      Width: 64,
+      Height: 64,
       ColorSpace: 'DeviceRGB',
       BitsPerComponent: 8,
       OC: ocgRef,
@@ -1869,13 +1881,22 @@ describe('CMP-03: resamples SMask when base image is downscaled', () => {
     const result = await processWorkerImpl.rebuildCompressed(
       bytes,
       [],
-      { 0: { Im0: { jpeg, width: 10, height: 210 } } },
+      // Keyed by page index, then by the image's object number — not by its
+      // resource name, which would match nothing and leave the original image
+      // (and so its /OC and /StructParent) in place, passing vacuously.
+      { 0: { [baseRef.objectNumber]: { jpeg, width: 10, height: 210 } } },
       silentJob
     );
 
     const outDoc = await PDFDocument.load(result.bytes);
     const xobjs = outDoc.getPage(0).node.Resources()?.lookup(PDFName.of('XObject'), PDFDict);
     const newBase = outDoc.context.lookup(xobjs!.get(PDFName.of('Im0')), PDFStream);
+
+    // The image really was replaced by the re-encoded JPEG …
+    expect(result.keptOriginal).toBe(false);
+    expect(newBase.dict.get(PDFName.of('Filter'))?.toString()).toBe('/DCTDecode');
+    expect(newBase.dict.get(PDFName.of('Width'))?.toString()).toBe('10');
+    // … and still carries the original's optional-content and structure links.
 
     expect(newBase.dict.get(PDFName.of('OC'))).toBeDefined();
     expect((newBase.dict.get(PDFName.of('StructParent')) as PDFNumber).asNumber()).toBe(7);
@@ -1891,7 +1912,9 @@ describe('imagesToPdf options (CNV-01)', () => {
     const bytes = await processWorkerImpl.imagesToPdf([jpeg], {
       pageSize: 'a4',
       orientation: 'portrait',
-      margin: 20
+      margin: 20,
+      // Required by the options type; only the caller's JPEG encode reads it.
+      quality: 0.9
     });
 
     const doc = await PDFDocument.load(bytes);
@@ -1910,7 +1933,9 @@ describe('imagesToPdf options (CNV-01)', () => {
     const bytes = await processWorkerImpl.imagesToPdf([jpeg], {
       pageSize: 'letter',
       orientation: 'landscape',
-      margin: 0
+      margin: 0,
+      // Required by the options type; only the caller's JPEG encode reads it.
+      quality: 0.9
     });
 
     const doc = await PDFDocument.load(bytes);
@@ -1935,7 +1960,7 @@ describe('flattenDocument (SGN-05)', () => {
       [{ key: 'p0', sourceDocId: 'doc1', sourceIndex: 0, rotation: 0 }],
       { doc1: bytes },
       [],
-      null,
+      undefined,
       undefined,
       null,
       null,

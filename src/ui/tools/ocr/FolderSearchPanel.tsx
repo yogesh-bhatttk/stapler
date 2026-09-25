@@ -4,10 +4,11 @@
  * Allows folder selection, displays indexing progress bar, search input field,
  * and search result list with snippet matching, page number attribution, and jump-to-page.
  */
-import { useRef, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
+import { Button } from '../../components/Button';
 import { Field, TextInput } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
-import { useTranslation } from '../../../core/i18n';
+import { tPlural, useTranslation } from '../../../core/i18n';
 import { showDirectoryPicker } from '../../../platform/fsa';
 import {
   indexDirectory,
@@ -15,8 +16,13 @@ import {
   type FolderIndexStats,
   type SearchResultItem
 } from '../../../core/ocr/folder-index';
-import { activeDoc, activePageIndex, addDocument, makePageRefs } from '../../../core/store';
+import { activePageIndex, documents, switchDocument } from '../../../core/store';
+import { importFilesAsDocuments } from '../../../core/open-document';
+import { notifyError } from '../../../core/notify';
 import type { FsaDirectoryHandle } from '../../../platform/fsa';
+
+/** Folder-relative path → the document it was opened as, so a second result doesn't open it twice. */
+const openedFromFolder = new Map<string, string>();
 
 export function FolderSearchPanel() {
   const t = useTranslation();
@@ -41,20 +47,28 @@ export function FolderSearchPanel() {
       const handle = await showDirectoryPicker({ mode: 'read' });
       if (handle) {
         setDirHandle(handle);
-        setStatusText('Folder selected: ' + handle.name);
+        setStatusText(t('Folder selected: {name}', { name: handle.name }));
       }
     } catch {
       // User cancelled picker
     }
   };
 
+  // Indexing a large folder takes minutes. It had no way to stop, and kept
+  // running (and calling setState) after the panel unmounted (AUDIT UI-24).
+  const indexController = useRef<AbortController | null>(null);
+  useEffect(() => () => indexController.current?.abort(), []);
+
   const handleStartIndexing = async () => {
-    if (!dirHandle) return;
+    if (!dirHandle || indexController.current) return;
+    const controller = new AbortController();
+    indexController.current = controller;
     setIndexing(true);
     setProgress(0);
-    setStatusText('Starting index...');
+    setStatusText(t('Starting index...'));
     try {
       const resStats = await indexDirectory(dirHandle, {
+        signal: controller.signal,
         onProgress: (p, label) => {
           setProgress(Math.round(p * 100));
           setStatusText(label);
@@ -65,8 +79,17 @@ export function FolderSearchPanel() {
         await handleSearch(query);
       }
     } catch (err) {
-      setStatusText('Indexing error: ' + (err instanceof Error ? err.message : String(err)));
+      if (controller.signal.aborted) {
+        setStatusText(t('Indexing cancelled.'));
+      } else {
+        setStatusText(
+          t('Indexing error: {message}', {
+            message: err instanceof Error ? err.message : String(err)
+          })
+        );
+      }
     } finally {
+      indexController.current = null;
       setIndexing(false);
     }
   };
@@ -94,28 +117,33 @@ export function FolderSearchPanel() {
   };
 
   const handleJumpToPage = async (item: SearchResultItem) => {
-    const currentDoc = activeDoc.value;
-    if (currentDoc && (currentDoc.name === item.fileName || currentDoc.id === item.fileId)) {
-      activePageIndex.value = item.pageIndex;
-      return;
-    }
+    const jump = (docId: string) => {
+      const doc = documents.value.find(d => d.id === docId);
+      if (!doc) return false;
+      switchDocument(docId);
+      activePageIndex.value = Math.max(0, Math.min(item.pageIndex, doc.pages.length - 1));
+      return true;
+    };
 
-    if (item.handle) {
-      try {
-        await item.handle.getFile();
-        addDocument({
-          id: crypto.randomUUID(),
-          name: item.fileName,
-          pages: makePageRefs(crypto.randomUUID(), 1),
-          annotations: [],
-          dirty: false
-        });
-        activePageIndex.value = item.pageIndex;
-      } catch {
-        activePageIndex.value = item.pageIndex;
-      }
-    } else {
-      activePageIndex.value = item.pageIndex;
+    // Matched by the result's folder-relative path, never by file name: two
+    // files called `report.pdf` in different subfolders are different files.
+    const openedAs = openedFromFolder.get(item.fileId);
+    if (openedAs && jump(openedAs)) return;
+    if (!item.handle) return;
+
+    // Imported for real. This used to add a one-page document whose page
+    // pointed at a random, never-registered source id — a tab that never
+    // rendered and failed on export (AUDIT-2026-09-25 UI-4).
+    try {
+      const file = await item.handle.getFile();
+      const before = new Set(documents.value.map(d => d.id));
+      await importFilesAsDocuments([file], { requestImageOptions: async () => undefined });
+      const added = documents.value.find(d => !before.has(d.id));
+      if (!added) return;
+      openedFromFolder.set(item.fileId, added.id);
+      jump(added.id);
+    } catch (err) {
+      notifyError('ocr.folder-search', err);
     }
   };
 
@@ -161,6 +189,15 @@ export function FolderSearchPanel() {
             {indexing ? t('Indexing...') : t('Index PDFs')}
           </button>
         )}
+        {indexing && (
+          <Button
+            variant="secondary"
+            size="compact"
+            onClick={() => indexController.current?.abort()}
+          >
+            {t('Cancel')}
+          </Button>
+        )}
       </div>
 
       {indexing && (
@@ -191,17 +228,12 @@ export function FolderSearchPanel() {
 
       {stats && !indexing && (
         <p className={panelStyles.note + ' ' + panelStyles.noteInfo}>
-          {t(
-            'Indexed ' +
-              stats.filesIndexed +
-              ' PDFs (' +
-              stats.pagesIndexed +
-              ' pages, ' +
-              stats.totalTokens +
-              ' tokens) in ' +
-              stats.durationMs +
-              'ms.'
-          )}
+          {t('Indexed {files} ({pages}, {tokens}) in {ms}ms.', {
+            files: tPlural('{count} PDFs', stats.filesIndexed),
+            pages: tPlural('{count} pages', stats.pagesIndexed),
+            tokens: tPlural('{count} tokens', stats.totalTokens),
+            ms: stats.durationMs
+          })}
         </p>
       )}
 
@@ -225,7 +257,7 @@ export function FolderSearchPanel() {
       {results.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
           <span style={{ font: 'var(--text-micro)', color: 'var(--ink-muted)' }}>
-            {results.length} {t('results found:')}
+            {tPlural('{count} results found:', results.length)}
           </span>
           <ul className={panelStyles.list} style={{ maxHeight: '300px' }}>
             {results.map((res, i) => (
@@ -257,7 +289,7 @@ export function FolderSearchPanel() {
                       whiteSpace: 'nowrap'
                     }}
                   >
-                    {t('Page')} {res.pageNumber}
+                    {t('Page {page}', { page: res.pageNumber })}
                   </span>
                 </div>
                 <div

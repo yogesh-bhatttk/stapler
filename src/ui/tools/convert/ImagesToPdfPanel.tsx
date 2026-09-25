@@ -16,7 +16,7 @@ import { IconButton } from '../../components/IconButton';
 import { Field, RadioGroup, Select, NumberStepper } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
 import { imagesToPdfSettings } from '../state';
-import { useTranslation } from '../../../core/i18n';
+import { tPlural, useTranslation } from '../../../core/i18n';
 
 export function ImagesToPdfPanel() {
   const t = useTranslation();
@@ -48,10 +48,7 @@ export function ImagesToPdfPanel() {
     const images = files.filter(isSupportedImage);
     const rejected = files.length - images.length;
     if (rejected > 0) {
-      notify(
-        'warning',
-        t('{count} file(s) were not images and were skipped.', { count: rejected })
-      );
+      notify('warning', tPlural('{count} files were not images and were skipped.', rejected));
     }
     if (images.length > 0) {
       imagesToPdfSettings.value = { ...settings, files: [...settings.files, ...images] };
@@ -76,16 +73,14 @@ export function ImagesToPdfPanel() {
       {openDocFilesAvailable && doc && (
         <div className={`${panelStyles.note} ${panelStyles.noteInfo} ${panelStyles.section}`}>
           <span>
-            {t(
-              '“{name}” is already open with {count} image(s) — this tool never reads the canvas, so add them here to build a PDF from them.',
-              {
-                name: doc.name,
-                count: openDocFiles.length
-              }
+            {tPlural(
+              '“{name}” is already open with {count} images — this tool never reads the canvas, so add them here to build a PDF from them.',
+              openDocFiles.length,
+              { name: doc.name }
             )}
           </span>
           <Button variant="secondary" size="compact" onClick={useOpenDocumentImages}>
-            {t('Use the image(s) from “{name}”', { name: doc.name })}
+            {tPlural('Use the images from “{name}”', openDocFiles.length, { name: doc.name })}
           </Button>
         </div>
       )}
@@ -193,7 +188,7 @@ export function ImagesToPdfPanel() {
       <p className={panelStyles.description}>
         {settings.files.length === 0
           ? t('Add photos or images to combine them into one PDF.')
-          : t('{count} image(s) → one PDF, in this order.', { count: settings.files.length })}
+          : tPlural('{count} images → one PDF, in this order.', settings.files.length)}
       </p>
     </>
   );

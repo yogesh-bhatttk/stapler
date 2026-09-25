@@ -12,11 +12,13 @@
  * the gate keys on `historyVersion` rather than the document id alone. What is
  * genuinely this tool's own is its gate sentence and its default options.
  */
+import { tKey } from '../../../core/i18n/key';
 import type { PdfToDocxOptions, PdfToDocxResult } from '../../../core/operations';
 import { createPdfSourceState } from './pdf-source-state';
 
-export const PDF_TO_WORD_GATE =
-  'Preview the conversion first — this is a beta converter, so check the result before saving.';
+export const PDF_TO_WORD_GATE = tKey(
+  'Preview the conversion first — this is a beta converter, so check the result before saving.'
+);
 
 const state = createPdfSourceState<PdfToDocxOptions, PdfToDocxResult>(
   'pdf-to-word',

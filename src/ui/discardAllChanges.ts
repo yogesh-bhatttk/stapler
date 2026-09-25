@@ -42,6 +42,9 @@ export function hasAnythingToDiscard(doc: StaplerDoc): boolean {
   // happened, so reference inequality is exactly "the page list changed",
   // not merely "an array was recreated".
   if (doc.pages !== doc.baseline) return true;
+  // Stamps and form fields placed with Sign — with nothing else changed, the
+  // action used not to be offered at all (UI-14).
+  if (doc.annotations.length > 0) return true;
 
   const keys = [...doc.pages, ...doc.baseline].map(p => p.key);
   if (keys.some(key => cropBoxes.value[key])) return true;

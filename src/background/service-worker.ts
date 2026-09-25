@@ -17,11 +17,12 @@ async function openEditor(): Promise<void> {
   const editorUrl = chrome.runtime.getURL('editor.html');
   // `tabs.query({ url })` needs the broad `tabs` permission. Extension contexts
   // expose their own tab IDs without that permission, so prefer this MV3 API.
-  // `runtime.getContexts` only landed in Firefox 127 (our manifest's
-  // `strict_min_version` is 109.0, and we deliberately don't add the `tabs`
-  // permission there either — see firefox-manifest.test.ts), so on an older
-  // Firefox this branch is skipped and a fresh tab opens every click instead
-  // of silently doing nothing, which is what happened before this existed.
+  // `runtime.getContexts` landed in Chrome 116 and Firefox 127, both below the
+  // manifests' floors (`scripts/browser-floors.mjs`: Chrome 147, Firefox 144),
+  // so it is always present on a supported browser. The guard stays for a
+  // sideloaded install on an older one: there the branch is skipped and a fresh
+  // tab opens every click, rather than adding the `tabs` permission (see
+  // firefox-manifest.test.ts) or silently doing nothing.
   if (typeof chrome.runtime.getContexts === 'function') {
     const contexts = await chrome.runtime.getContexts({
       contextTypes: ['TAB'],

@@ -1895,10 +1895,12 @@ describe('CNV-12 — the mandatory-preview gate', () => {
     const store = await import('../../src/core/store');
 
     const pageKey = 'ppt-page-1';
+    const docPages = [{ key: pageKey, sourceDocId: 'src-1', sourceIndex: 0, rotation: 0 }];
     const doc = {
       id: 'doc-ppt-edit',
       name: 'edited.pdf',
-      pages: [{ key: pageKey, sourceDocId: 'src-1', sourceIndex: 0, rotation: 0 }],
+      pages: docPages,
+      baseline: docPages,
       annotations: [],
       dirty: false
     };

@@ -1,11 +1,16 @@
 /**
  * OCR-01 & OCR-02 — the OCR options panel.
  */
+import { useEffect, useState } from 'preact/hooks';
+import { Trash2 } from 'lucide-preact';
+import { Button } from '../../components/Button';
 import { Checkbox, Field, Select } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
 import { selectedPageKeys } from '../../../core/store';
 import { OCR_LANGUAGES } from '../../../core/ocr/model';
-import { useTranslation } from '../../../core/i18n';
+import { listStoredOcrModels, removeAllOcrModels } from '../../../core/ocr/modelState';
+import { notify, notifyError } from '../../../core/notify';
+import { tPlural, translate, useTranslation } from '../../../core/i18n';
 import { ocrReport, ocrSettings } from './state';
 import { FolderSearchPanel } from './FolderSearchPanel';
 
@@ -14,6 +19,38 @@ export function OcrPanel() {
   const settings = ocrSettings.value;
   const report = ocrReport.value;
   const selected = selectedPageKeys.value.size;
+  // Audit 2026-09-25 CNV-8 — the only way to get rid of a stored language
+  // model used to be clearing all site data.
+  const [storedModels, setStoredModels] = useState<string[]>([]);
+  const [removing, setRemoving] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    void listStoredOcrModels()
+      .then(codes => {
+        if (live) setStoredModels(codes);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+    // Re-checked after each run, which is when a model can have been added.
+  }, [report]);
+
+  const removeModels = async () => {
+    setRemoving(true);
+    try {
+      await removeAllOcrModels();
+      setStoredModels([]);
+      notify('success', translate('Stored OCR language models removed.'), {
+        detail: translate('The next OCR run will ask before downloading a model again.')
+      });
+    } catch (err) {
+      notifyError('Remove OCR models', err);
+    } finally {
+      setRemoving(false);
+    }
+  };
 
   const update = (patch: Partial<typeof settings>) => {
     ocrSettings.value = { ...settings, ...patch };
@@ -28,7 +65,7 @@ export function OcrPanel() {
             value={settings.lang}
             options={OCR_LANGUAGES.map(language => ({
               value: language.code,
-              label: language.label
+              label: t(language.label)
             }))}
             onChange={lang => update({ lang })}
           />
@@ -61,35 +98,41 @@ export function OcrPanel() {
         )}
       </p>
 
+      {storedModels.length > 0 && (
+        <Button
+          variant="secondary"
+          size="compact"
+          icon={Trash2}
+          disabled={removing}
+          onClick={removeModels}
+        >
+          {t('Remove stored language models ({langs})', { langs: storedModels.join(', ') })}
+        </Button>
+      )}
+
       {report && (
         <p className={panelStyles.note + ' ' + panelStyles.noteInfo}>
           {report.wordsAdded === 0
             ? t('The last run found no text on those pages.')
-            : report.wordsAdded +
-              ' words added across ' +
-              report.pages +
-              ' page' +
-              (report.pages === 1 ? '' : 's') +
-              '.' +
-              (report.wordsSkipped > 0
-                ? ' ' + report.wordsSkipped + ' could not be encoded and were left out.'
-                : '') +
-              (report.pagesReplaced > 0
-                ? ' Replaced an existing, broken text layer on ' +
-                  report.pagesReplaced +
-                  ' page' +
-                  (report.pagesReplaced === 1 ? '' : 's') +
-                  '.'
-                : '') +
-              (report.pagesSkipped > 0
-                ? ' ' +
-                  report.pagesSkipped +
-                  ' page' +
-                  (report.pagesSkipped === 1 ? '' : 's') +
-                  ' could not be scanned and ' +
-                  (report.pagesSkipped === 1 ? 'was' : 'were') +
-                  ' left as-is.'
-                : '')}
+            : [
+                tPlural('{count} words added across {pages}.', report.wordsAdded, {
+                  pages: tPlural('{count} pages', report.pages)
+                }),
+                report.wordsSkipped > 0 &&
+                  tPlural('{count} could not be encoded and were left out.', report.wordsSkipped),
+                report.pagesReplaced > 0 &&
+                  tPlural(
+                    'Replaced an existing, broken text layer on {count} pages.',
+                    report.pagesReplaced
+                  ),
+                report.pagesSkipped > 0 &&
+                  tPlural(
+                    '{count} pages could not be scanned and were left as-is.',
+                    report.pagesSkipped
+                  )
+              ]
+                .filter(Boolean)
+                .join(' ')}
         </p>
       )}
 

@@ -1,4 +1,4 @@
-import { translate } from '../../../core/i18n';
+import { translate, useTranslation } from '../../../core/i18n';
 /**
  * Creating a signature: draw, type, or import (SGN-01).
  *
@@ -16,6 +16,7 @@ import { DOC_SIGNATURE_STROKE } from '../../../core/doc-colors';
 import { Button } from '../../components/Button';
 import { Modal } from '../../components/Modal';
 import { TextInput } from '../../components/Field';
+import { Tabs } from '../../components/Tabs';
 import styles from './SignatureModal.module.css';
 
 type Tab = 'draw' | 'type' | 'image';
@@ -27,30 +28,30 @@ export function SignatureModal({
   onClose: () => void;
   isInitials?: boolean;
 }) {
+  const t = useTranslation();
   const [tab, setTab] = useState<Tab>('draw');
 
   return (
     <Modal
-      title={isInitials ? 'Create initials' : 'Create a signature'}
+      title={isInitials ? t('Create initials') : t('Create a signature')}
       onClose={onClose}
       size="md"
     >
-      <div className={styles.tabs} role="tablist" aria-label={translate('Signature source')}>
-        {(['draw', 'type', 'image'] as Tab[]).map(name => (
-          <button
-            key={name}
-            type="button"
-            role="tab"
-            aria-selected={tab === name}
-            aria-controls={`tabpanel-${name}`}
-            id={`tab-${name}`}
-            tabIndex={tab === name ? 0 : -1}
-            className={`${styles.tab} ${tab === name ? styles.tabActive : ''}`}
-            onClick={() => setTab(name)}
-          >
-            {name === 'draw' ? 'Draw' : name === 'type' ? 'Type' : 'Import'}
-          </button>
-        ))}
+      {/* The shared Tabs component: its arrow/Home/End handling is what makes
+          Type and Import reachable. The hand-rolled list had a roving tabindex
+          but no key handling, and Draw needs a pointer, so a keyboard-only user
+          could not create a signature at all (AUDIT-2026-09-25 UI-6). */}
+      <div className={styles.tabs}>
+        <Tabs
+          items={[
+            { id: 'draw', label: t('Draw') },
+            { id: 'type', label: t('Type') },
+            { id: 'image', label: t('Import') }
+          ]}
+          activeId={tab}
+          onChange={id => setTab(id as Tab)}
+          ariaLabel={t('Signature source')}
+        />
       </div>
 
       <div id={`tabpanel-${tab}`} role="tabpanel" aria-labelledby={`tab-${tab}`} tabIndex={0}>
@@ -73,7 +74,9 @@ async function persist(
   try {
     const trimmed = await trimTransparentToPng(bitmap);
     if (!trimmed) {
-      notify('warning', translate('Nothing to save.'), { detail: 'The canvas is empty.' });
+      notify('warning', translate('Nothing to save.'), {
+        detail: translate('The canvas is empty.')
+      });
       return;
     }
     const saved = await saveSignature({
@@ -84,7 +87,9 @@ async function persist(
       purpose: isInitials ? 'initials' : 'signature'
     });
     if (saved) {
-      notify('success', translate('Signature saved.'), { detail: 'It stays on this device.' });
+      notify('success', translate('Signature saved.'), {
+        detail: translate('It stays on this device.')
+      });
       onDone();
     }
   } finally {
@@ -93,6 +98,7 @@ async function persist(
 }
 
 function DrawTab({ onDone, isInitials }: { onDone: () => void; isInitials?: boolean }) {
+  const t = useTranslation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [hasInk, setHasInk] = useState(false);
   const drawing = useRef(false);
@@ -142,7 +148,7 @@ function DrawTab({ onDone, isInitials }: { onDone: () => void; isInitials?: bool
         <canvas
           ref={canvasRef}
           className={styles.canvas}
-          aria-label={translate('Draw your signature')}
+          aria-label={t('Draw your signature')}
           onPointerDown={event => {
             drawing.current = true;
             setHasInk(true);
@@ -170,7 +176,7 @@ function DrawTab({ onDone, isInitials }: { onDone: () => void; isInitials?: bool
             setHasInk(false);
           }}
         >
-          Clear
+          {t('Clear')}
         </Button>
         <Button
           variant="primary"
@@ -179,7 +185,7 @@ function DrawTab({ onDone, isInitials }: { onDone: () => void; isInitials?: bool
             if (canvasRef.current) void persist(canvasRef.current, 'draw', onDone, isInitials);
           }}
         >
-          Save signature
+          {t('Save signature')}
         </Button>
       </div>
     </>
@@ -187,6 +193,7 @@ function DrawTab({ onDone, isInitials }: { onDone: () => void; isInitials?: bool
 }
 
 function TypeTab({ onDone, isInitials }: { onDone: () => void; isInitials?: boolean }) {
+  const t = useTranslation();
   const [text, setText] = useState('');
 
   const save = async () => {
@@ -206,14 +213,16 @@ function TypeTab({ onDone, isInitials }: { onDone: () => void; isInitials?: bool
       <input
         className={styles.typeInput}
         value={text}
-        placeholder="Your name"
-        aria-label={translate('Signature text')}
+        placeholder={t('Your name')}
+        aria-label={t('Signature text')}
         onInput={event => setText((event.target as HTMLInputElement).value)}
       />
-      <p>The face is whatever script font your system provides — Stapler ships no webfonts.</p>
+      <p>
+        {t('The face is whatever script font your system provides — Stapler ships no webfonts.')}
+      </p>
       <div className={styles.actions}>
         <Button variant="primary" disabled={!text.trim()} onClick={save}>
-          Save signature
+          {t('Save signature')}
         </Button>
       </div>
     </>
@@ -221,6 +230,7 @@ function TypeTab({ onDone, isInitials }: { onDone: () => void; isInitials?: bool
 }
 
 function ImageTab({ onDone, isInitials }: { onDone: () => void; isInitials?: boolean }) {
+  const t = useTranslation();
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [dropWhite, setDropWhite] = useState(true);
@@ -256,7 +266,7 @@ function ImageTab({ onDone, isInitials }: { onDone: () => void; isInitials?: boo
         <TextInput
           type="file"
           accept="image/png,image/jpeg,image/webp"
-          aria-label={translate('Signature image file')}
+          aria-label={t('Signature image file')}
           onChange={event => {
             const chosen = (event.target as HTMLInputElement).files?.[0] ?? null;
             setFile(chosen);
@@ -269,19 +279,19 @@ function ImageTab({ onDone, isInitials }: { onDone: () => void; isInitials?: boo
             checked={dropWhite}
             onChange={event => setDropWhite((event.target as HTMLInputElement).checked)}
           />{' '}
-          Make the white background transparent
+          {t('Make the white background transparent')}
         </label>
       </div>
 
       {preview && (
         <div className={styles.preview}>
-          <img src={preview} alt="Imported signature preview" />
+          <img src={preview} alt={t('Imported signature preview')} />
         </div>
       )}
 
       <div className={styles.actions}>
         <Button variant="primary" disabled={!file} onClick={save}>
-          Save signature
+          {t('Save signature')}
         </Button>
       </div>
     </>

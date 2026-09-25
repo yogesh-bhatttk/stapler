@@ -1,4 +1,4 @@
-import { translate } from '../../../core/i18n';
+import { tKey, tPlural, translate } from '../../../core/i18n';
 import { ChevronDown, ChevronUp } from 'lucide-preact';
 import { Button } from '../../components/Button';
 import { IconButton } from '../../components/IconButton';
@@ -26,10 +26,10 @@ import { nupSettings } from '../nup/state';
 import type { NUpSettings } from '../nup/state';
 import { normalizeSettings } from '../normalize/state';
 import type { NormalizeSettings } from '../normalize/state';
-import { runBatch } from './runner';
+import { cancelBatch, startBatch } from './runner';
 import { useTranslation } from '../../../core/i18n';
 
-import { useRef, useEffect, useState } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 
 import {
   hasDirectoryPicker,
@@ -42,15 +42,14 @@ import { notify } from '../../../core/notify';
 
 /** The only tools a recipe can chain, in the order they'd normally run. */
 const RECIPE_TOOL_CHOICES: { id: Recipe['tools'][number]; label: string }[] = [
-  { id: 'watermark', label: 'Watermark' },
-  { id: 'normalize', label: 'Normalize' },
-  { id: 'nup', label: 'N-up' },
-  { id: 'compress', label: 'Compress' }
+  { id: 'watermark', label: tKey('Watermark') },
+  { id: 'normalize', label: tKey('Normalize') },
+  { id: 'nup', label: tKey('N-up') },
+  { id: 'compress', label: tKey('Compress') }
 ];
 
 export function BatchPanel() {
   const t = useTranslation();
-  const abortControllerRef = useRef<AbortController | null>(null);
   const [recipeFormOpen, setRecipeFormOpen] = useState(false);
   const [draftName, setDraftName] = useState('');
   const [draftTools, setDraftTools] = useState<Recipe['tools']>([]);
@@ -72,7 +71,7 @@ export function BatchPanel() {
         ? `${error.name}${error.message ? `: ${error.message}` : ''}`
         : error instanceof Error
           ? error.message
-          : 'Please try selecting the folder again.';
+          : translate('Please try selecting the folder again.');
 
     notify('warning', scope, { detail });
   };
@@ -80,8 +79,9 @@ export function BatchPanel() {
   const handleSelectInput = async () => {
     if (!hasDirectoryPicker()) {
       notify('warning', translate('Directory selection unavailable'), {
-        detail:
+        detail: translate(
           'Folder processing requires a browser with File System Access support (Chrome or Edge).'
+        )
       });
       return;
     }
@@ -89,15 +89,16 @@ export function BatchPanel() {
       const dir = await showDirectoryPicker({ mode: 'read' });
       inputDirHandle.value = dir;
     } catch (e) {
-      reportPickerFailure('Input folder selection failed', e);
+      reportPickerFailure(translate('Input folder selection failed'), e);
     }
   };
 
   const handleSelectOutput = async () => {
     if (!hasDirectoryPicker()) {
       notify('warning', translate('Directory selection unavailable'), {
-        detail:
+        detail: translate(
           'Folder processing requires a browser with File System Access support (Chrome or Edge).'
+        )
       });
       return;
     }
@@ -106,7 +107,7 @@ export function BatchPanel() {
       outputFormat.value = 'directory';
       outputDirHandle.value = dir;
     } catch (e) {
-      reportPickerFailure('Output folder selection failed', e);
+      reportPickerFailure(translate('Output folder selection failed'), e);
     }
   };
 
@@ -118,21 +119,22 @@ export function BatchPanel() {
     // sibling buttons already give.
     if (!hasFileSystemAccess()) {
       notify('warning', translate('Saving a ZIP file this way is unavailable'), {
-        detail:
+        detail: translate(
           'Batch processing requires a browser with File System Access support (Chrome or Edge).'
+        )
       });
       return;
     }
     try {
       const handle = await showSaveFilePicker({
         suggestedName: 'batch-output.zip',
-        types: [{ description: 'ZIP Archive', accept: { 'application/zip': ['.zip'] } }]
+        types: [{ description: translate('ZIP Archive'), accept: { 'application/zip': ['.zip'] } }]
       });
       outputFormat.value = 'zip';
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       outputZipHandle.value = handle as any;
     } catch (e) {
-      reportPickerFailure('Output ZIP selection failed', e);
+      reportPickerFailure(translate('Output ZIP selection failed'), e);
     }
   };
 
@@ -230,44 +232,27 @@ export function BatchPanel() {
     input.click();
   };
 
-  const handleRun = async () => {
-    // §2.1 — checked and set synchronously, before the first `await`, so a
-    // fast double-click/double-Enter on this button (before the disabled
-    // state re-renders) cannot overwrite the in-flight run's controller with
-    // a second, inert one. Without this, Cancel would end up aborting the
-    // newer controller — the one runBatch() below never actually receives,
-    // since runner.ts's own reentrancy guard already made that second call a
-    // no-op — leaving the real run with nothing left able to cancel it.
-    if (abortControllerRef.current) return;
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-    try {
-      await runBatch(controller.signal);
-    } finally {
-      abortControllerRef.current = null;
-    }
-  };
-
-  const handleCancel = () => {
-    abortControllerRef.current?.abort();
-  };
+  const handleRun = () => startBatch();
+  const handleCancel = () => cancelBatch();
 
   return (
     <>
       <div className={panelStyles.section}>
         <Button onClick={handleSelectInput} variant="secondary">
-          {inputDirHandle.value ? `Input: ${inputDirHandle.value.name}` : 'Select Input Folder'}
+          {inputDirHandle.value
+            ? t('Input: {name}', { name: inputDirHandle.value.name })
+            : t('Select Input Folder')}
         </Button>
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
           <Button onClick={handleSelectOutput} variant="secondary">
             {outputFormat.value === 'directory' && outputDirHandle.value
-              ? `Output: ${outputDirHandle.value.name}/`
-              : 'Select Output Folder'}
+              ? t('Output: {name}/', { name: outputDirHandle.value.name })
+              : t('Select Output Folder')}
           </Button>
           <Button onClick={handleSelectZipOutput} variant="secondary">
             {outputFormat.value === 'zip' && outputZipHandle.value
-              ? `Output: ${outputZipHandle.value.name}`
-              : 'Select Output ZIP'}
+              ? t('Output: {name}', { name: outputZipHandle.value.name })
+              : t('Select Output ZIP')}
           </Button>
         </div>
       </div>
@@ -280,7 +265,7 @@ export function BatchPanel() {
               value={activeRecipeId.value || ''}
               onChange={val => (activeRecipeId.value = val || null)}
               options={[
-                { value: '', label: 'None (Use current settings)' },
+                { value: '', label: t('None (Use current settings)') },
                 ...savedRecipes.value.map(r => ({ value: r.id, label: r.name }))
               ]}
             />
@@ -321,7 +306,11 @@ export function BatchPanel() {
               return (
                 <div key={choice.id} style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                   <Checkbox
-                    label={included ? `${index + 1}. ${choice.label}` : choice.label}
+                    label={
+                      included
+                        ? t('{n}. {tool}', { n: index + 1, tool: t(choice.label) })
+                        : t(choice.label)
+                    }
                     checked={included}
                     onChange={checked => toggleDraftTool(choice.id, checked)}
                   />
@@ -330,14 +319,14 @@ export function BatchPanel() {
                       <IconButton
                         icon={ChevronUp}
                         size="compact"
-                        aria-label={`Move ${choice.label} earlier`}
+                        aria-label={t('Move {tool} earlier', { tool: t(choice.label) })}
                         disabled={index === 0}
                         onClick={() => moveDraftTool(choice.id, -1)}
                       />
                       <IconButton
                         icon={ChevronDown}
                         size="compact"
-                        aria-label={`Move ${choice.label} later`}
+                        aria-label={t('Move {tool} later', { tool: t(choice.label) })}
                         disabled={index === draftTools.length - 1}
                         onClick={() => moveDraftTool(choice.id, 1)}
                       />
@@ -376,7 +365,8 @@ export function BatchPanel() {
           )}
         </Field>
         <p style={{ fontSize: '0.75em', opacity: 0.7, margin: '4px 0 0' }}>
-          Tokens: <code>{'{basename}'}</code>, <code>{'{index}'}</code>, <code>{'{date}'}</code>
+          {t('Tokens:')} <code>{'{basename}'}</code>, <code>{'{index}'}</code>,{' '}
+          <code>{'{date}'}</code>
         </p>
       </div>
 
@@ -400,27 +390,31 @@ export function BatchPanel() {
           aria-valuenow={batchProgress.value.completed}
           aria-valuemax={batchProgress.value.total}
         >
+          <p>{t('Processing: {file}', { file: batchProgress.value.currentFile })}</p>
           <p>
-            {t('Processing:')} {batchProgress.value.currentFile}
+            {t('{completed} / {total} completed', {
+              completed: batchProgress.value.completed,
+              total: batchProgress.value.total
+            })}
           </p>
-          <p>
-            {batchProgress.value.completed} / {batchProgress.value.total} {t('completed')}
-          </p>
-          <p>
-            {batchProgress.value.failed} {t('failed')}
-          </p>
+          <p>{tPlural('{count} failed', batchProgress.value.failed)}</p>
         </div>
       )}
 
       {batchProgress.value.notes.length > 0 && (
         <div className={panelStyles.section}>
           <p>
-            {batchProgress.value.notes.filter(n => n.kind === 'kept-original').length}{' '}
-            {t('written unchanged')}
+            {tPlural(
+              '{count} written unchanged',
+              batchProgress.value.notes.filter(n => n.kind === 'kept-original').length
+            )}
             {batchProgress.value.notes.some(n => n.kind === 'failed') && (
               <>
-                {' '}
-                | {batchProgress.value.notes.filter(n => n.kind === 'failed').length} {t('failed')}
+                {' | '}
+                {tPlural(
+                  '{count} failed',
+                  batchProgress.value.notes.filter(n => n.kind === 'failed').length
+                )}
               </>
             )}
           </p>

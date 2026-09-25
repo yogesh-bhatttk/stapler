@@ -10,21 +10,20 @@
  */
 import { useState } from 'preact/hooks';
 import { ScanSearch } from 'lucide-preact';
-import { activeDoc, registerSource, repointPage, type SourceDocument } from '../../../core/store';
+import { activeDoc, repointPage } from '../../../core/store';
+import { registerSourceFromBytes } from '../../../core/import';
 import { beginTransaction } from '../../../core/history';
 import {
   checkFontEmbedding,
   currentDocumentBytes,
   embedMissingFont
 } from '../../../core/operations';
-import { renderWorker } from '../../../core/workers';
 import type { FontEmbeddingFinding } from '../../../core/workers/process.worker';
-import { writeSourceBytes } from '../../../core/opfs';
 import { notify } from '../../../core/notify';
 import { Button } from '../../components/Button';
 import { panelStyles } from '../../shell/panelStyles';
 import { useJob } from '../../useJob';
-import { useTranslation } from '../../../core/i18n';
+import { translate, useTranslation } from '../../../core/i18n';
 
 export function FontEmbeddingSection() {
   const t = useTranslation();
@@ -44,11 +43,14 @@ export function FontEmbeddingSection() {
   const check = async () => {
     setBusy(true);
     try {
-      await run({ label: 'Checking font embedding', scope: 'fonts.check' }, async job => {
-        const bytes = await currentDocumentBytes(job);
-        const report = await checkFontEmbedding(bytes);
-        setFindings(report.findings);
-      });
+      await run(
+        { label: translate('Checking font embedding'), scope: 'fonts.check' },
+        async job => {
+          const bytes = await currentDocumentBytes(job);
+          const report = await checkFontEmbedding(bytes);
+          setFindings(report.findings);
+        }
+      );
     } finally {
       setBusy(false);
     }
@@ -57,33 +59,25 @@ export function FontEmbeddingSection() {
   const embed = async (baseFont: string) => {
     setBusy(true);
     try {
-      await run({ label: `Embedding ${baseFont}`, scope: 'fonts.embed' }, async job => {
-        const bytes = await currentDocumentBytes(job);
-        const fixed = await embedMissingFont(bytes, baseFont);
+      await run(
+        { label: translate('Embedding {font}', { font: baseFont }), scope: 'fonts.embed' },
+        async job => {
+          const bytes = await currentDocumentBytes(job);
+          const fixed = await embedMissingFont(bytes, baseFont);
 
-        const info = await renderWorker.lease(api => api.loadDocument(fixed));
-        try {
-          const newSource: SourceDocument = {
-            id: crypto.randomUUID(),
-            name: doc.name,
-            pageCount: info.pageCount,
-            pageSizes: info.pageSizes
-          };
-          await writeSourceBytes(newSource.id, fixed);
-          registerSource(newSource);
-
+          // RT-22 — parsed, stored and registered with the load and the close
+          // on one pinned render-worker instance (see `registerSourceFromBytes`).
+          const newSource = await registerSourceFromBytes(fixed, doc.name);
           const tx = beginTransaction('embed-font');
           doc.pages.forEach((page, index) => {
             repointPage(doc.id, page.key, newSource.id, index);
           });
           tx.end();
-        } finally {
-          await renderWorker.lease(api => api.closeDocument(info.handle));
-        }
 
-        notify('success', t('Embedded "{font}".', { font: baseFont }));
-        setFindings(prev => prev?.filter(finding => finding.baseFont !== baseFont) ?? null);
-      });
+          notify('success', t('Embedded "{font}".', { font: baseFont }));
+          setFindings(prev => prev?.filter(finding => finding.baseFont !== baseFont) ?? null);
+        }
+      );
     } finally {
       setBusy(false);
     }

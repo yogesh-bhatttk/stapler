@@ -13,6 +13,7 @@
  *    forever, with nothing to tell the user something had gone wrong.
  */
 import { useEffect, useRef, useState } from 'preact/hooks';
+import { refuseEditWhileBusy } from '../busy';
 import { forwardRef } from 'preact/compat';
 import type { ComponentChildren } from 'preact';
 import { Check, RotateCw, Trash2 } from 'lucide-preact';
@@ -22,6 +23,7 @@ import { isCancellation, logEvent } from '../../core/errors';
 import { normalizeRotation } from '../../core/rotation';
 import { Icon } from './Icon';
 import { mergeRefs } from './mergeRefs';
+import { translate } from '../../core/i18n';
 import styles from './Thumbnail.module.css';
 import iconButtonStyles from './IconButton.module.css';
 
@@ -122,9 +124,11 @@ export const Thumbnail = forwardRef<HTMLDivElement, ThumbnailProps>(function Thu
           bitmap.close();
           return;
         }
-        thumbnailCache.set(key, bitmap);
+        // `set` may keep a copy another tile raced in and is still drawing,
+        // closing this one (RT-10) — so draw what it returns.
+        const shown = thumbnailCache.set(key, bitmap);
         thumbnailCache.retain(key);
-        draw(bitmap);
+        draw(shown);
       } catch (err) {
         if (cancelled || isCancellation(err)) return;
         logEvent('warn', 'thumbnail', `Page ${page.sourceIndex + 1}: ${String(err)}`);
@@ -155,7 +159,7 @@ export const Thumbnail = forwardRef<HTMLDivElement, ThumbnailProps>(function Thu
 
       {state !== 'ready' && (
         <div className={`${styles.placeholder} ${state === 'failed' ? styles.failed : ''}`}>
-          {state === 'failed' ? 'Cannot render' : ''}
+          {state === 'failed' ? translate('Cannot render') : ''}
         </div>
       )}
 
@@ -183,6 +187,7 @@ export const Thumbnail = forwardRef<HTMLDivElement, ThumbnailProps>(function Thu
           className={`${iconButtonStyles.iconButton} ${iconButtonStyles['size-compact']}`}
           onClick={event => {
             event.stopPropagation();
+            if (refuseEditWhileBusy()) return;
             rotatePage(docId, page.key, 90);
           }}
         >
@@ -192,6 +197,7 @@ export const Thumbnail = forwardRef<HTMLDivElement, ThumbnailProps>(function Thu
           className={`${iconButtonStyles.iconButton} ${iconButtonStyles['size-compact']}`}
           onClick={event => {
             event.stopPropagation();
+            if (refuseEditWhileBusy()) return;
             deletePage(docId, page.key);
           }}
         >

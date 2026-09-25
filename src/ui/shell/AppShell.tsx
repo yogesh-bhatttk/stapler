@@ -1,4 +1,4 @@
-import { translate } from '../../core/i18n';
+import { tPlural, translate } from '../../core/i18n';
 /**
  * The application shell: top bar, rail, canvas, options panel, action bar, plus the
  * global overlays (palette, toasts, confirmations, first-run, shortcuts).
@@ -29,6 +29,8 @@ const OptionsPanel = lazy(() => import('./OptionsPanel').then(m => ({ default: m
 const ActionBar = lazy(() => import('./ActionBar').then(m => ({ default: m.ActionBar })));
 import { CommandPalette } from '../components/CommandPalette';
 import { ConfirmDialog } from '../components/ConfirmDialog';
+import { isModalOpen } from '../components/Modal';
+import { refuseEditWhileBusy } from '../busy';
 import { OcrConsentDialog } from '../components/OcrConsentDialog';
 import { ExportReviewModal } from '../components/ExportReviewModal';
 import { ToastRegion } from '../components/Feedback';
@@ -41,17 +43,12 @@ import {
   selectAllPages,
   insertPages,
   selectedPageKeys,
-  addDocument,
-  makePageRefs,
   documents,
   sources,
   activeDocId
 } from '../../core/store';
 import {
-  loadPendingRecovery,
-  checkRecovery,
-  clearSession,
-  restoreSession,
+  runStartupRecovery,
   scheduleSessionSave,
   sessionRecoveryChecked
 } from '../../core/session-recovery';
@@ -59,7 +56,13 @@ import { useLocation } from 'wouter-preact';
 import { toolRoute } from '../../core/tools';
 import { useImageImportOptions } from '../useImageImportOptions';
 import { importFiles } from '../../core/import';
-import { importFilesAsDocuments } from '../../core/open-document';
+import {
+  addImportedDocuments,
+  discardImported,
+  ensureImportsAllowed,
+  importFilesAsDocuments,
+  runImportJob
+} from '../../core/open-document';
 import { platform } from '../../platform/current';
 import { notify, confirmAction } from '../../core/notify';
 import { readSetting, writeSetting } from '../../core/db';
@@ -104,46 +107,29 @@ export function AppShell({ children }: { children: ComponentChildren }) {
   // in the same tick would let the very first (empty, pre-restore) autosave
   // fire and overwrite it before the prompt ever resolves.
   useEffect(() => {
-    void (async () => {
-      const pending = await loadPendingRecovery();
-      // Confirms the record's sources still have bytes behind them before it is
-      // ever offered — a browser without OPFS support, or a crash landing in
-      // the gap between closing a document and the next autosave, can leave a
-      // record naming bytes that are already gone. See `checkRecovery`.
-      const checked = pending ? await checkRecovery(pending) : null;
-      if (checked) {
-        const { record, droppedDocuments } = checked;
-        const count = record.documents.length;
-        const body =
-          translate(
-            'Stapler found {count} document{plural} open from before this tab closed. Restore ' +
-              'them exactly as they were, undo history included, or start with a clean workspace.',
-            { count, plural: count === 1 ? '' : 's' }
-          ) +
-          (droppedDocuments > 0
-            ? ` ${translate(
-                '{dropped} other document{droppedPlural} from that session could not be recovered — its saved data no longer exists.',
-                { dropped: droppedDocuments, droppedPlural: droppedDocuments === 1 ? '' : 's' }
-              )}`
-            : '');
-        const restore = await confirmAction({
-          title: translate('Restore your previous session?'),
-          body,
-          confirmLabel: translate('Restore'),
-          cancelLabel: translate('Start fresh')
-        });
-        if (restore) {
-          restoreSession(record);
-        } else {
-          await clearSession();
-        }
-      } else if (pending) {
-        // Every document in the record was unrecoverable — nothing to offer,
-        // and no stale pointer worth keeping around for next time either.
-        await clearSession();
-      }
-      sessionRecoveryChecked.value = true;
-    })();
+    // RT-23/RT-4/RT-14 — see `runStartupRecovery`: always ends with
+    // `sessionRecoveryChecked` true, sweeps orphaned OPFS sources once the
+    // decision is made, and flags the prompt so imports refuse under it.
+    void runStartupRecovery(({ record, droppedDocuments }) => {
+      const count = record.documents.length;
+      const found = tPlural(
+        'Stapler found {count} documents open from before this tab closed. Restore them exactly as they were, undo history included, or start with a clean workspace.',
+        count
+      );
+      const body =
+        droppedDocuments > 0
+          ? `${found} ${tPlural(
+              '{count} other documents from that session could not be recovered — its saved data no longer exists.',
+              droppedDocuments
+            )}`
+          : found;
+      return confirmAction({
+        title: translate('Restore your previous session?'),
+        body,
+        confirmLabel: translate('Restore'),
+        cancelLabel: translate('Start fresh')
+      });
+    });
   }, []);
 
   // DOC-11 — autosaves the lightweight pointer state (never document bytes;
@@ -163,6 +149,10 @@ export function AppShell({ children }: { children: ComponentChildren }) {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      // Nothing global acts behind an open dialog: opening the palette over the
+      // session-restore prompt and pressing Escape used to answer the prompt
+      // too, and Undo or a tool switch could run unseen (AUDIT-2026-09-25 UI-7).
+      if (isModalOpen()) return;
       const typing = isTypingTarget(event.target);
 
       if (eventMatchesShortcut(event, getEffectiveBinding('palette'))) {
@@ -217,38 +207,51 @@ export function AppShell({ children }: { children: ComponentChildren }) {
         return;
       }
       event.preventDefault();
+      if (!(await ensureImportsAllowed())) return;
 
       const options = await requestOptions([file]);
       if (!options) return;
 
-      const { imported, failures } = await importFiles([file], undefined, options);
-      if (failures.length > 0) {
-        notify('danger', failures[0].message);
+      // RT-7 — a job like every other open: progress in the action bar, a
+      // working Cancel, and edits locked while it runs.
+      const outcome = await runImportJob(translate('Adding pasted image'), async job => {
+        const result = await importFiles([file], job, options);
+        if (job.signal?.aborted) {
+          discardImported(result);
+          return null;
+        }
+        return result;
+      });
+      if (!outcome) return;
+      if (outcome.failures.length > 0) {
+        notify('danger', outcome.failures[0].message);
         return;
       }
+      const imported = outcome.imported[0];
+      if (!imported) return;
 
-      if (imported.length > 0) {
-        if (doc) {
-          let at = doc.pages.length;
-          if (selectedPageKeys.value.size > 0) {
-            const indices = Array.from(selectedPageKeys.value)
-              .map(k => doc.pages.findIndex(p => p.key === k))
-              .filter(i => i >= 0);
-            if (indices.length > 0) {
-              at = Math.max(...indices) + 1;
-            }
-          }
-          insertPages(doc.id, imported[0].pages, at);
-        } else {
-          addDocument({
-            id: crypto.randomUUID(),
-            name: imported[0].source.name,
-            pages: makePageRefs(imported[0].source.id, imported[0].source.pageCount),
-            annotations: [],
-            dirty: false
-          });
-          setLocation(toolRoute('organize'));
+      // Looked up again: the document captured when the paste started may
+      // have been closed while the image was being imported.
+      const target = doc ? documents.value.find(d => d.id === doc.id) : undefined;
+      if (target) {
+        if (refuseEditWhileBusy()) {
+          discardImported(outcome);
+          return;
         }
+        let at = target.pages.length;
+        if (selectedPageKeys.value.size > 0) {
+          const indices = Array.from(selectedPageKeys.value)
+            .map(k => target.pages.findIndex(p => p.key === k))
+            .filter(i => i >= 0);
+          if (indices.length > 0) {
+            at = Math.max(...indices) + 1;
+          }
+        }
+        insertPages(target.id, imported.pages, at);
+      } else {
+        // RT-6 — the same add as every other open path: one undo step.
+        addImportedDocuments(outcome, [file]);
+        setLocation(toolRoute('organize'));
       }
     };
 
@@ -272,17 +275,20 @@ export function AppShell({ children }: { children: ComponentChildren }) {
     };
 
     const onDrop = (event: DragEvent) => {
+      // A drop some element already handled (the Home DropZone, a panel's own
+      // drop target) has bubbled here. Importing it again opened every dropped
+      // PDF as two tabs (AUDIT-2026-09-25 UI-2).
+      if (event.defaultPrevented) return;
       event.preventDefault();
       if (!isFileDrag(event.dataTransfer)) return; // an internal reorder drag, already handled
       const files = Array.from(event.dataTransfer?.files ?? []);
       if (files.length === 0) return;
 
       if (activeDoc.value) {
-        // Importing here would go through importFilesAsDocuments(), which calls
-        // resetHistory() — wiping the undo stack of the document already open
-        // and being edited. That trades one data-loss bug for a quieter one, so
-        // block the destructive default and point at the real affordance
-        // instead of guessing what a mid-edit drop was supposed to do.
+        // A drop onto a document being edited is ambiguous — a new tab, or
+        // pages inserted into this one? Rather than guess, point at the real
+        // affordance. (It used to be refused because the open path wiped the
+        // undo history; since RT-6 opening is an ordinary undo step.)
         notify('info', translate('Use "Add PDF" to insert pages into this document.'));
         return;
       }

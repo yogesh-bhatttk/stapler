@@ -29,10 +29,9 @@ export const TrustModal = forwardRef<HTMLDivElement, { onClose: () => void }>(fu
     >
       <div className={styles.grid}>
         <p className={styles.pointBody}>
-          {t('Stapler does all its work in this')}{' '}
-          {platform.kind === 'extension' ? 'extension page' : 'tab'}
           {t(
-            '. Your documents are never uploaded, there is no account, and there is no size limit or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.'
+            'Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no size limit or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.',
+            { place: platform.kind === 'extension' ? t('extension page') : t('tab') }
           )}
         </p>
 
@@ -64,6 +63,16 @@ export const TrustModal = forwardRef<HTMLDivElement, { onClose: () => void }>(fu
         <p>
           <a className={styles.link} href="privacy.html" target="_blank" rel="noopener noreferrer">
             {t('Read the full privacy policy →')}
+          </a>
+        </p>
+        <p>
+          <a
+            className={styles.link}
+            href="THIRD_PARTY_LICENSES.txt"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {t('Third-party licenses →')}
           </a>
         </p>
       </div>

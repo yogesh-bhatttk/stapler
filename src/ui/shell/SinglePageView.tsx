@@ -9,12 +9,11 @@ import { translate } from '../../core/i18n';
  * criterion could not be met.
  */
 import type { ComponentChildren } from 'preact';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useRef, useState } from 'preact/hooks';
 import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-preact';
 import { sources, type PageRef } from '../../core/store';
 import { normalizeRotation } from '../../core/rotation';
-import { bitmapKey, renderHandleFor, thumbnailCache } from '../../core/render-cache';
-import { isCancellation, logEvent } from '../../core/errors';
+import { usePageRender } from './usePageRender';
 import { Button } from '../components/Button';
 import { IconButton } from '../components/IconButton';
 import styles from './SinglePageView.module.css';
@@ -42,59 +41,19 @@ export function SinglePageView({
   const t = useTranslation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [zoomStep, setZoomStep] = useState(2); // 100%
-  const [size, setSize] = useState({ width: 0, height: 0 });
   const zoom = ZOOM_STEPS[zoomStep];
 
   const page = pages[pageIndex];
   const source = page ? sources.value[page.sourceDocId] : undefined;
   const pageSize = source?.pageSizes[page?.sourceIndex ?? 0];
-
-  useEffect(() => {
-    if (!page || !source || !pageSize) return;
-    let cancelled = false;
-    const scale = Number(
-      (zoom * Math.min(2, typeof devicePixelRatio === 'number' ? devicePixelRatio : 1)).toFixed(2)
-    );
-    const key = bitmapKey(source.id, page.sourceIndex, scale);
-
-    const draw = (bitmap: ImageBitmap) => {
-      const canvas = canvasRef.current;
-      if (cancelled || !canvas) return;
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
-      canvas.getContext('2d')?.drawImage(bitmap, 0, 0);
-      // CSS size is the logical page size at this zoom; the backing store is at
-      // device resolution. Keeping them separate is what makes 400% sharp.
-      setSize({ width: pageSize.width * zoom, height: pageSize.height * zoom });
-    };
-
-    const cached = thumbnailCache.get(key);
-    if (cached) {
-      draw(cached);
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    void (async () => {
-      try {
-        const { handle, client } = await renderHandleFor(source.id);
-        if (cancelled) return;
-        const bitmap = await client.lease(api => api.renderPage(handle, page.sourceIndex, scale));
-        thumbnailCache.set(key, bitmap);
-        if (cancelled) return;
-        draw(bitmap);
-      } catch (err) {
-        if (!cancelled && !isCancellation(err)) {
-          logEvent('warn', 'single-page', String(err));
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [page, source, pageSize, zoom]);
+  const { state, reduced, size } = usePageRender(
+    canvasRef,
+    page,
+    source,
+    pageSize,
+    zoom,
+    'single-page'
+  );
 
   if (!page || !pageSize) return null;
 
@@ -132,10 +91,21 @@ export function SinglePageView({
             <canvas
               ref={canvasRef}
               className={styles.canvas}
-              aria-label={`Page ${pageIndex + 1}`}
+              aria-label={t('Page {page}', { page: pageIndex + 1 })}
             />
             {overlay?.({ width: rawWidth, height: rawHeight, page })}
           </div>
+          {/* UI-16 — covers the page (and blocks the overlay) until this
+              page's own pixels are on screen, so nothing is marked against
+              a blank or stale image. */}
+          {state !== 'ready' && (
+            <div
+              className={`${styles.status} ${state === 'failed' ? styles.statusFailed : ''}`}
+              role="status"
+            >
+              {state === 'failed' ? t('This page could not be displayed.') : t('Loading page…')}
+            </div>
+          )}
         </div>
       </div>
 
@@ -150,7 +120,7 @@ export function SinglePageView({
           {t('Previous')}
         </Button>
         <span className={styles.pagerLabel}>
-          {t('Page')} {pageIndex + 1} {t('of')} {pages.length}
+          {t('Page {n} of {total}', { n: pageIndex + 1, total: pages.length })}
         </span>
         <Button
           variant="tertiary"
@@ -172,6 +142,16 @@ export function SinglePageView({
             onClick={() => setZoomStep(step => Math.max(0, step - 1))}
           />
           <span className={styles.zoomLabel}>{Math.round(zoom * 100)}%</span>
+          {reduced && (
+            <span
+              className={styles.reduced}
+              title={translate(
+                'This zoom needs more pixels than a preview renders, so the page is shown at lower detail. The exported file is not affected.'
+              )}
+            >
+              {t('Reduced detail')}
+            </span>
+          )}
           <IconButton
             icon={ZoomIn}
             size="compact"

@@ -102,7 +102,7 @@
 }
 
 .itemHint {
-  margin-left: auto;
+  margin-inline-start: auto;
   font: var(--text-micro);
   letter-spacing: var(--text-micro-ls);
   opacity: 0.8;

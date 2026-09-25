@@ -4,7 +4,7 @@ import type { ImagesToPdfOptions } from '../../core/operations';
 import { Button } from './Button';
 import { Modal } from './Modal';
 import { Field, Select } from './Field';
-import { useTranslation } from '../../core/i18n';
+import { tPlural, useTranslation } from '../../core/i18n';
 import styles from './ImageOptionsDialog.module.css';
 
 export interface ImageOptionsDialogProps {
@@ -24,7 +24,7 @@ export const ImageOptionsDialog = forwardRef<HTMLDivElement, ImageOptionsDialogP
     return (
       <Modal
         ref={ref}
-        title={t('Import {count} image{plural}', { count, plural: count === 1 ? '' : 's' })}
+        title={tPlural('Import {count} images', count)}
         onClose={onCancel}
         footer={
           <>

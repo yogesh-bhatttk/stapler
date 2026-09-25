@@ -27,10 +27,18 @@ export function CleanupPanel() {
           update({ preset, deskew: preset === 'auto' || preset === 'bw' })
         }
         options={[
-          { value: 'auto', label: 'Auto', hint: 'Adaptive threshold, gentle' },
-          { value: 'bw', label: 'B&W document', hint: 'Pure white paper, solid black text' },
-          { value: 'photo', label: 'Photo / colour', hint: 'Tone only — never thresholded' },
-          { value: 'original', label: 'Manual', hint: 'Just the sliders below' }
+          { value: 'auto', label: t('Auto'), hint: t('Adaptive threshold, gentle') },
+          {
+            value: 'bw',
+            label: t('B&W document'),
+            hint: t('Pure white paper, solid black text')
+          },
+          {
+            value: 'photo',
+            label: t('Photo / colour'),
+            hint: t('Tone only — never thresholded')
+          },
+          { value: 'original', label: t('Manual'), hint: t('Just the sliders below') }
         ]}
       />
 

@@ -49,6 +49,25 @@ function paint(theme: 'light' | 'dark') {
   // bare `:root` cannot disagree.
   document.documentElement.setAttribute('data-theme', theme);
   document.documentElement.style.colorScheme = theme;
+  syncThemeColor();
+}
+
+/**
+ * The browser-chrome `theme-color` follows the painted theme's `--canvas`
+ * token. It used to be a hardcoded `#ffffff` in `editor.html` — a raw colour
+ * outside tokens.css that was also wrong in dark mode (audit 2026-09-25 PLT-6).
+ * A `<meta>` cannot read a CSS variable, so the resolved value is copied in.
+ */
+function syncThemeColor() {
+  const canvas = getComputedStyle(document.documentElement).getPropertyValue('--canvas').trim();
+  if (!canvas) return;
+  let meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+  if (!meta) {
+    meta = document.createElement('meta');
+    meta.name = 'theme-color';
+    document.head.appendChild(meta);
+  }
+  meta.content = canvas;
 }
 
 /**

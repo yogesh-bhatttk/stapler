@@ -1,4 +1,3 @@
-import { translate } from '../../core/i18n';
 import { House, Moon, Search, Sun } from 'lucide-preact';
 import { useState } from 'preact/hooks';
 import { Badge } from '../components/Badge';
@@ -8,8 +7,16 @@ import { IconButton } from '../components/IconButton';
 import { TrustModal } from '../components/TrustModal';
 import { FileTabs } from './FileTabs';
 import { isCommandPaletteOpen } from '../../core/ui';
+import { disclosedDownloads } from '../../core/disclosedDownloads';
 import { resolvedTheme, toggleTheme } from '../theme';
-import { useTranslation, currentLocale, setLocale, locales } from '../../core/i18n';
+import {
+  useTranslation,
+  currentLocale,
+  setLocale,
+  locales,
+  tPlural,
+  translate
+} from '../../core/i18n';
 import styles from './TopBar.module.css';
 
 /** ⌘ on Apple platforms, Ctrl everywhere else — the hint must match the key. */
@@ -22,6 +29,9 @@ export function TopBar() {
   const [showTrust, setShowTrust] = useState(false);
   const isDark = resolvedTheme.value === 'dark';
   const t = useTranslation();
+  // PLT-16 — the chip counts this page's disclosed, consented model downloads
+  // (the only request Stapler can ever make) instead of always claiming zero.
+  const downloads = disclosedDownloads.value;
 
   return (
     <header className={styles.topBar}>
@@ -54,7 +64,7 @@ export function TopBar() {
           icon={isDark ? Sun : Moon}
           onClick={toggleTheme}
           size="compact"
-          aria-label={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
+          aria-label={isDark ? t('Switch to light theme') : t('Switch to dark theme')}
         />
         <select
           value={currentLocale.value}
@@ -98,9 +108,20 @@ export function TopBar() {
           type="button"
           className={styles.trustChip}
           onClick={() => setShowTrust(true)}
-          aria-label={translate('Offline, zero network requests. Read how to verify this.')}
+          aria-label={
+            downloads === 0
+              ? translate('Offline, zero network requests. Read how to verify this.')
+              : tPlural(
+                  'Offline except {count} disclosed model downloads you approved. Read how to verify this.',
+                  downloads
+                )
+          }
         >
-          <Badge variant="success">{t('Offline · 0 requests')}</Badge>
+          <Badge variant="success">
+            {downloads === 0
+              ? t('Offline · 0 requests')
+              : tPlural('Offline · {count} disclosed downloads', downloads)}
+          </Badge>
         </button>
       </div>
 

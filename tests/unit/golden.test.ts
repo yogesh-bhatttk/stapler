@@ -19,7 +19,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { PDFDocument } from 'pdf-lib';
+import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { unzipSync } from 'fflate';
 
 vi.mock('comlink', () => ({
@@ -48,6 +48,16 @@ import {
 } from '../../src/core/store';
 import { resetHistory } from '../../src/core/history';
 import { __memoryFallback } from '../../src/core/opfs';
+
+/** An A4 document whose page N shows `${label} N` — a second, distinguishable source. */
+async function labelledPdf(pageCount: number, label: string): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  for (let i = 0; i < pageCount; i++) {
+    doc.addPage([595.28, 841.89]).drawText(`${label} ${i + 1}`, { x: 56, y: 780, size: 18, font });
+  }
+  return doc.save();
+}
 
 /** Every page's visible text, in document order — enough to prove order and content. */
 async function pageTexts(bytes: Uint8Array): Promise<string[]> {
@@ -98,10 +108,12 @@ function seedDoc(sourceId: string, pageCount: number, bytes: Uint8Array): Staple
     pageCount,
     pageSizes: Array.from({ length: pageCount }, () => ({ width: 595.28, height: 841.89 }))
   } as any);
+  const pages = makePageRefs(sourceId, pageCount);
   const doc: StaplerDoc = {
     id: `${sourceId}-doc`,
     name: 'doc.pdf',
-    pages: makePageRefs(sourceId, pageCount),
+    pages,
+    baseline: pages,
     annotations: [],
     dirty: false
   };
@@ -182,7 +194,8 @@ describe('golden: OPS-01 merge', () => {
    * source documents' — which is exactly the part that is easy to get wrong.
    */
   it('preserves bookmarks across a merge, remapped to the merged pages', async () => {
-    const { PDFName, PDFString, PDFDict, PDFNumber } = await import('pdf-lib');
+    const { PDFName, PDFString, PDFHexString, PDFArray, PDFDict, PDFNumber } =
+      await import('pdf-lib');
     const src = await PDFDocument.create();
     const p1 = src.addPage([595.28, 841.89]);
     const p2 = src.addPage([595.28, 841.89]);
@@ -235,14 +248,18 @@ describe('golden: OPS-01 merge', () => {
     expect(outOutlines).toBeDefined();
     const first = outOutlines!.lookupMaybe(PDFName.of('First'), PDFDict)!;
     const second = first.lookupMaybe(PDFName.of('Next'), PDFDict)!;
-    expect(first.lookup(PDFName.of('Title')).decodeText()).toBe('Chapter 1');
-    expect(second.lookup(PDFName.of('Title')).decodeText()).toBe('Chapter 2');
+    expect(first.lookup(PDFName.of('Title'), PDFString, PDFHexString).decodeText()).toBe(
+      'Chapter 1'
+    );
+    expect(second.lookup(PDFName.of('Title'), PDFString, PDFHexString).decodeText()).toBe(
+      'Chapter 2'
+    );
 
     // The real assertion: each bookmark's /Dest must point at the *merged*
     // output's page objects, in their new positions — not the source pages,
     // which are no longer part of this document's page tree at all.
-    const dest1 = first.lookup(PDFName.of('Dest'));
-    const dest2 = second.lookup(PDFName.of('Dest'));
+    const dest1 = first.lookup(PDFName.of('Dest'), PDFArray);
+    const dest2 = second.lookup(PDFName.of('Dest'), PDFArray);
     expect(dest1.get(0)).toEqual(out.getPage(0).ref);
     expect(dest2.get(0)).toEqual(out.getPage(1).ref);
 
@@ -368,7 +385,10 @@ describe('golden: OPS-04 insert pages from another document', () => {
   it('splices pages from a second source into the middle, keeping both intact', async () => {
     const { textPdf } = await import('../e2e/fixtures');
     const doc = seedDoc('insert-a', 3, await textPdf(3));
-    const insertBBytes = await textPdf(4, 'B Page');
+    // `textPdf` labels every page "Stapler fixture page N", so source B needs its
+    // own label — otherwise B's page 1 is indistinguishable from A's page 1 and
+    // the order assertions below could not tell an insert from a duplicate.
+    const insertBBytes = await labelledPdf(4, 'Inserted B page');
     __memoryFallback.set('insert-b', insertBBytes);
     registerSource({
       id: 'insert-b',
@@ -392,10 +412,11 @@ describe('golden: OPS-04 insert pages from another document', () => {
     const output = await composeCurrent(after);
     const texts = await pageTexts(output);
     expect(texts[0]).toContain('fixture page 1');
-    expect(texts[1]).toContain('fixture page 1');
-    expect(texts[2]).toContain('fixture page 2');
+    expect(texts[1]).toContain('Inserted B page 1');
+    expect(texts[2]).toContain('Inserted B page 2');
     expect(texts[3]).toContain('fixture page 2');
     expect(texts[4]).toContain('fixture page 3');
+    for (const i of [0, 3, 4]) expect(texts[i]).not.toContain('Inserted B page');
   });
 });
 
@@ -425,7 +446,6 @@ describe('golden: OPS-03 split and extract', () => {
     );
 
     expect(result.isZip).toBe(true);
-    expect(result.fileCount).toBe(3);
     const files = unzipSync(result.bytes);
     const names = Object.keys(files).sort();
     expect(names).toEqual(['split-01.pdf', 'split-02.pdf', 'split-03.pdf']);
@@ -519,7 +539,7 @@ describe('golden: CNV-01 images to PDF', () => {
     ];
     const images = sizes.map(([w, h]) => minimalJpeg(w, h));
 
-    const output = await processWorkerImpl.imagesToPdf(images, silentJob);
+    const output = await processWorkerImpl.imagesToPdf(images, undefined, silentJob);
     const doc = await PDFDocument.load(output);
     expect(doc.getPageCount()).toBe(3);
     sizes.forEach(([w, h], i) => {

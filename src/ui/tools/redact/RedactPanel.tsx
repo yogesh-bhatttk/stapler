@@ -1,4 +1,3 @@
-import { translate } from '../../../core/i18n';
 /**
  * Redaction options and the verification report (RED-01, RED-03).
  *
@@ -27,7 +26,7 @@ import {
   redactionReport
 } from './state';
 import { useJob } from '../../useJob';
-import { useTranslation } from '../../../core/i18n';
+import { tPlural, translate, useTranslation } from '../../../core/i18n';
 
 export function RedactPanel() {
   const t = useTranslation();
@@ -40,7 +39,7 @@ export function RedactPanel() {
   if (!doc) return null;
 
   const scan = () =>
-    run({ label: 'Scanning for sensitive data', scope: 'redact.scan' }, async job => {
+    run({ label: translate('Scanning for sensitive data'), scope: 'redact.scan' }, async job => {
       const bytes = await currentDocumentBytes(job);
       const found = await scanForPatterns(bytes, job);
       patternSuggestions.value = found;
@@ -52,15 +51,9 @@ export function RedactPanel() {
         );
         return;
       }
-      notify(
-        'info',
-        translate('{count} suggestion(s) found — nothing is marked yet.', {
-          count: found.length
-        }),
-        {
-          detail: 'Accept the ones you want redacted; the rest are left alone.'
-        }
-      );
+      notify('info', tPlural('{count} suggestions found — nothing is marked yet.', found.length), {
+        detail: translate('Accept the ones you want redacted; the rest are left alone.')
+      });
     });
 
   /** Accepting is the only path from a suggestion to a mark. */
@@ -80,20 +73,23 @@ export function RedactPanel() {
     .filter(group => group.items.length > 0);
 
   const search = () =>
-    run({ label: `Searching for "${query}"`, scope: 'redact.search' }, async job => {
-      const bytes = await currentDocumentBytes(job);
-      const found = await findTextRegions(bytes, query.trim(), matchCase, job);
-      if (found.length === 0) {
-        notify('warning', translate('No matches for "{query}".', { query: query.trim() }));
-        return;
+    run(
+      { label: translate('Searching for "{query}"', { query }), scope: 'redact.search' },
+      async job => {
+        const bytes = await currentDocumentBytes(job);
+        const found = await findTextRegions(bytes, query.trim(), matchCase, job);
+        if (found.length === 0) {
+          notify('warning', translate('No matches for "{query}".', { query: query.trim() }));
+          return;
+        }
+        // Existing marks are kept: searching twice for different terms should add to
+        // the list, not replace it.
+        pendingRedactions.value = [...regions, ...found];
+        notify('info', tPlural('Marked {count} occurrences.', found.length), {
+          detail: translate('Review the list, then use Verify & apply.')
+        });
       }
-      // Existing marks are kept: searching twice for different terms should add to
-      // the list, not replace it.
-      pendingRedactions.value = [...regions, ...found];
-      notify('info', translate('Marked {count} occurrence(s).', { count: found.length }), {
-        detail: 'Review the list, then use Verify & apply.'
-      });
-    });
+    );
 
   return (
     <>
@@ -156,22 +152,33 @@ export function RedactPanel() {
             <h3 className={panelStyles.title}>
               {t(PATTERN_LABELS[category])} ({items.length})
             </h3>
-            <ul className={panelStyles.list} aria-label={`${PATTERN_LABELS[category]} suggestions`}>
+            <ul
+              className={panelStyles.list}
+              aria-label={t('{category} suggestions', { category: t(PATTERN_LABELS[category]) })}
+            >
               {items.map(item => (
                 <li className={panelStyles.listRow} key={item.id}>
                   <span className={panelStyles.listRowText}>
-                    {item.text} {t('· page')} {item.pageIndex + 1}
+                    {item.text} {t('· page {page}', { page: item.pageIndex + 1 })}
                   </span>
                   <IconButton
                     icon={Check}
                     size="compact"
-                    aria-label={`Accept ${PATTERN_LABELS[category]} ${item.text} on page ${item.pageIndex + 1} as a redaction mark`}
+                    aria-label={t('Accept {category} {text} on page {page} as a redaction mark', {
+                      category: t(PATTERN_LABELS[category]),
+                      text: item.text,
+                      page: item.pageIndex + 1
+                    })}
                     onClick={() => accept([item])}
                   />
                   <IconButton
                     icon={X}
                     size="compact"
-                    aria-label={`Dismiss ${PATTERN_LABELS[category]} ${item.text} on page ${item.pageIndex + 1}`}
+                    aria-label={t('Dismiss {category} {text} on page {page}', {
+                      category: t(PATTERN_LABELS[category]),
+                      text: item.text,
+                      page: item.pageIndex + 1
+                    })}
                     onClick={() => dismiss(item.id)}
                   />
                 </li>
@@ -182,7 +189,10 @@ export function RedactPanel() {
               size="compact"
               icon={Check}
               onClick={() => accept(items)}
-              aria-label={`Accept all ${items.length} ${PATTERN_LABELS[category]} suggestions`}
+              aria-label={t('Accept all {count} {category} suggestions', {
+                count: items.length,
+                category: t(PATTERN_LABELS[category])
+              })}
             >
               {t('Accept all')}
             </Button>
@@ -197,10 +207,7 @@ export function RedactPanel() {
       <hr className={panelStyles.divider} />
 
       <div className={panelStyles.section}>
-        <h2 className={panelStyles.title}>
-          {t('Marks (')}
-          {regions.length})
-        </h2>
+        <h2 className={panelStyles.title}>{t('Marks ({count})', { count: regions.length })}</h2>
         {regions.length === 0 ? (
           <p className={panelStyles.description}>
             {t(
@@ -217,12 +224,12 @@ export function RedactPanel() {
                     : region.points
                       ? t('Drawn shape')
                       : t('Drawn region')}{' '}
-                  {t('· page')} {region.pageIndex + 1}
+                  {t('· page {page}', { page: region.pageIndex + 1 })}
                 </span>
                 <IconButton
                   icon={Trash2}
                   size="compact"
-                  aria-label={`Remove mark ${index + 1}`}
+                  aria-label={t('Remove mark {n}', { n: index + 1 })}
                   onClick={() => (pendingRedactions.value = regions.filter((_, i) => i !== index))}
                 />
               </li>

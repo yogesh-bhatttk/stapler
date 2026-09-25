@@ -1,4 +1,4 @@
-import { translate } from '../../../core/i18n';
+import { tPlural, translate } from '../../../core/i18n';
 import {
   batchProgress,
   inputDirHandle,
@@ -50,6 +50,37 @@ function addNote(note: BatchNote): void {
 // between the check and the set within one synchronous stretch of JS.
 let batchRunInFlight = false;
 
+/**
+ * The running batch's controller, at module scope. It used to live in the
+ * panel's `useRef`: switch tool and come back, and the remounted panel showed
+ * Cancel (from the global `isProcessing`) wired to a null ref — the run could
+ * no longer be stopped (AUDIT-2026-09-25 UI-9).
+ */
+let batchController: AbortController | null = null;
+
+/** Whether input and output are chosen, i.e. whether `startBatch` would do anything. */
+export function batchIsConfigured(): boolean {
+  if (!inputDirHandle.value) return false;
+  return outputFormat.value === 'directory' ? !!outputDirHandle.value : !!outputZipHandle.value;
+}
+
+/** Starts a batch run unless one is already going; resolves when it ends. */
+export async function startBatch(): Promise<void> {
+  if (batchController) return;
+  const controller = new AbortController();
+  batchController = controller;
+  try {
+    await runBatch(controller.signal);
+  } finally {
+    if (batchController === controller) batchController = null;
+  }
+}
+
+/** Cancels the running batch, from whichever panel instance (or the action bar) asks. */
+export function cancelBatch(): void {
+  batchController?.abort();
+}
+
 export async function runBatch(signal?: AbortSignal) {
   const inDir = inputDirHandle.value;
   const outDir = outputDirHandle.value;
@@ -81,8 +112,9 @@ async function runBatchBody(
     (await inDir.isSameEntry(outDir as unknown as FileSystemHandle))
   ) {
     notify('danger', translate('Input and output folders are the same'), {
-      detail:
+      detail: translate(
         'Choose a different output folder. Running batch in-place would overwrite your originals.'
+      )
     });
     return;
   }
@@ -123,7 +155,11 @@ async function runBatchBody(
     );
     if (missing.length > 0) {
       notify('warning', translate('Recipe is missing settings'), {
-        detail: `"${recipe.name}" lists ${missing.join(', ')} but has no saved settings for ${missing.length === 1 ? 'it' : 'them'}, so ${missing.length === 1 ? 'it' : 'they'} will be skipped. Re-save the recipe to capture the current settings.`
+        detail: tPlural(
+          '"{name}" lists {tools} but has no saved settings for them, so they will be skipped. Re-save the recipe to capture the current settings.',
+          missing.length,
+          { name: recipe.name, tools: missing.join(', ') }
+        )
       });
     }
   }
@@ -166,7 +202,7 @@ async function runBatchBody(
       const fileHandle = files[fileIndex];
       if (signal?.aborted) {
         notify('warning', translate('Batch Cancelled'), {
-          detail: 'Processing was cancelled by the user.'
+          detail: translate('Processing was cancelled by the user.')
         });
         break;
       }
@@ -301,7 +337,7 @@ async function runBatchBody(
               addNote({
                 file: fileHandle.name,
                 kind: 'kept-original',
-                detail: 'Already optimised — there was nothing left to compress.'
+                detail: translate('Already optimised — there was nothing left to compress.')
               });
             } else {
               preCompressBytes = currentBytes;
@@ -310,7 +346,9 @@ async function runBatchBody(
                 addNote({
                   file: fileHandle.name,
                   kind: 'kept-original',
-                  detail: 'Compressing would have made this file larger, so it was left unchanged.'
+                  detail: translate(
+                    'Compressing would have made this file larger, so it was left unchanged.'
+                  )
                 });
               } else {
                 currentBytes = res.bytes;
@@ -335,7 +373,7 @@ async function runBatchBody(
             addNote({
               file: fileHandle.name,
               kind: 'metadata-scrubbed',
-              detail: `Removed ${count} metadata finding${count === 1 ? '' : 's'}.`
+              detail: tPlural('Removed {count} metadata findings.', count)
             });
           }
         }
@@ -434,8 +472,12 @@ async function runBatchBody(
                 kind: 'kept-original',
                 detail:
                   compressIndex < activeTools.length - 1
-                    ? 'Compressing this document did not make the final file any smaller once its restrictions and later steps were reapplied, so the compressed version was discarded and those later steps were redone without it.'
-                    : 'Reapplying this document’s restrictions after compression would have produced a file no smaller than skipping compression, so the compressed version was discarded.'
+                    ? translate(
+                        'Compressing this document did not make the final file any smaller once its restrictions and later steps were reapplied, so the compressed version was discarded and those later steps were redone without it.'
+                      )
+                    : translate(
+                        'Reapplying this document’s restrictions after compression would have produced a file no smaller than skipping compression, so the compressed version was discarded.'
+                      )
               });
             }
           }
@@ -477,7 +519,10 @@ async function runBatchBody(
     }
 
     if (outputFormat.value === 'zip' && outZip) {
-      batchProgress.value = { ...batchProgress.value, currentFile: 'Saving ZIP archive...' };
+      batchProgress.value = {
+        ...batchProgress.value,
+        currentFile: translate('Saving ZIP archive...')
+      };
       const zipBytes = zipSync(zipEntries);
       const writable = await outZip.createWritable();
       try {
@@ -490,15 +535,20 @@ async function runBatchBody(
     }
 
     const kept = batchProgress.value.notes.filter(n => n.kind === 'kept-original');
-    notify(kept.length > 0 ? 'info' : 'success', 'Batch Processing Complete', {
-      detail:
-        `Successfully processed ${batchProgress.value.completed} files. ` +
-        `${batchProgress.value.failed} failed.` +
-        (kept.length > 0
-          ? ` ${kept.length} ${kept.length === 1 ? 'file was' : 'files were'} written unchanged ` +
-            `because compressing would not have made ${kept.length === 1 ? 'it' : 'them'} smaller: ` +
-            `${kept.map(n => n.file).join(', ')}.`
-          : ''),
+    notify(kept.length > 0 ? 'info' : 'success', translate('Batch Processing Complete'), {
+      detail: [
+        tPlural('Successfully processed {count} files.', batchProgress.value.completed),
+        tPlural('{count} failed.', batchProgress.value.failed),
+        kept.length > 0
+          ? tPlural(
+              '{count} files were written unchanged because compressing would not have made them smaller: {files}.',
+              kept.length,
+              { files: kept.map(n => n.file).join(', ') }
+            )
+          : null
+      ]
+        .filter(Boolean)
+        .join(' '),
       timeout: kept.length > 0 ? 0 : undefined
     });
   } catch (err) {

@@ -15,7 +15,13 @@ import { forwardRef } from 'preact/compat';
 import { unzipSync } from 'fflate';
 import { ChevronLeft, ChevronRight } from 'lucide-preact';
 import { exportReviewRequest } from '../../core/notify';
-import { diffPage, documentPageCount, renderPage, type PageDiff } from '../../core/diff-preview';
+import {
+  diffPage,
+  documentPageCount,
+  releasePreviewDocuments,
+  renderPage,
+  type PageDiff
+} from '../../core/diff-preview';
 import type { PageAlignment } from '../../core/page-alignment';
 import { Modal } from './Modal';
 import { Button } from './Button';
@@ -498,6 +504,12 @@ export const ExportReviewModal = forwardRef<HTMLDivElement, Record<string, never
   function ExportReviewModal(_props, ref) {
     const t = useTranslation();
     const request = exportReviewRequest.value;
+    // The previews keep each document loaded in the render worker for the
+    // length of one review; close them when that review ends or is replaced.
+    useEffect(() => {
+      if (!request) return;
+      return () => void releasePreviewDocuments();
+    }, [request]);
     if (!request) return null;
 
     return (

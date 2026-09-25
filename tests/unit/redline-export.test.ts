@@ -29,15 +29,17 @@ function withMark(base: ImageData, x: number, y: number, size: number): ImageDat
 }
 
 function docWithPages(id: string, pageCount: number): StaplerDoc {
+  const pages = Array.from({ length: pageCount }, (_, i) => ({
+    key: `${id}-p${i}`,
+    sourceDocId: `${id}-src`,
+    sourceIndex: i,
+    rotation: 0 as const
+  }));
   return {
     id,
     name: `${id}.pdf`,
-    pages: Array.from({ length: pageCount }, (_, i) => ({
-      key: `${id}-p${i}`,
-      sourceDocId: `${id}-src`,
-      sourceIndex: i,
-      rotation: 0 as const
-    })),
+    pages,
+    baseline: pages,
     annotations: [],
     dirty: false
   };
@@ -181,6 +183,7 @@ describe('exportRedlinePdf (ANN-06)', () => {
       id: 'e1',
       name: 'e1.pdf',
       pages: [],
+      baseline: [],
       annotations: [],
       dirty: false
     };
@@ -188,6 +191,7 @@ describe('exportRedlinePdf (ANN-06)', () => {
       id: 'e2',
       name: 'e2.pdf',
       pages: [],
+      baseline: [],
       annotations: [],
       dirty: false
     };

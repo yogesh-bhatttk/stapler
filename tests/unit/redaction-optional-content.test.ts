@@ -20,7 +20,7 @@
  * Everything is asserted against the re-parsed output bytes.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { PDFArray, PDFDict, PDFDocument, PDFName, PDFRef, StandardFonts } from 'pdf-lib';
+import { PDFArray, PDFDict, PDFDocument, PDFName, PDFRef, PDFStream, StandardFonts } from 'pdf-lib';
 
 vi.mock('comlink', () => ({
   expose: vi.fn(),
@@ -128,6 +128,18 @@ describe('redaction keeps a hidden layer hidden (§3)', () => {
     expect(content).not.toContain(MARKED);
   });
 
+  it("keeps the layer hidden through the pipeline's mandatory metadata scrub (PDF-5)", async () => {
+    // redactRegions() in operations.ts always follows applyRedactions with
+    // scrubMetadata(output, undefined). That default used to delete
+    // /OCProperties, undoing everything the tests above pin down.
+    const redacted = await processWorkerImpl.applyRedactions(await layeredDocument(), [
+      BOTTOM_MARK
+    ]);
+    const out = await processWorkerImpl.scrubMetadata(redacted, undefined);
+    const doc = await PDFDocument.load(out);
+    expect(configuration(doc).off.map(String)).toContain(String(groupNamedByPage(doc, 0)));
+  });
+
   it('gives two pages that share one group the same object, not one copy each', async () => {
     // The failure this pins down: per-page copiers make page 1's group and
     // page 2's group different objects, so a configuration can name at most
@@ -191,7 +203,8 @@ describe('redaction keeps a hidden layer hidden (§3)', () => {
       ?.lookupMaybe(PDFName.of('XObject'), PDFDict);
     const formEntry = xObjects?.get(PDFName.of('Fm0'));
     const formStream = formEntry instanceof PDFRef ? rebuilt.context.lookup(formEntry) : formEntry;
-    const oc = (formStream as { dict: PDFDict }).dict.get(PDFName.of('OC'));
+    expect(formStream).toBeInstanceOf(PDFStream);
+    const oc = (formStream as PDFStream).dict.get(PDFName.of('OC'));
     expect(oc).toBeInstanceOf(PDFRef);
 
     const { ocgs, off } = configuration(rebuilt);

@@ -354,7 +354,8 @@ function wireStubs(pixels: { checkRegionPixels: any }) {
     planImageRedactions: vi.fn(async () => []),
     applyRedactions: vi.fn(async () => output),
     scrubMetadata: vi.fn(async () => output),
-    collectOffPageText: vi.fn(async () => [])
+    collectOffPageText: vi.fn(async () => []),
+    scanResidualText: vi.fn(async () => ({ found: [], orphanPages: 0, undecodableStreams: 0 }))
   };
   stubs.render = {
     loadDocument: vi.fn(async () => ({ handle: 'h' })),
@@ -433,5 +434,42 @@ describe('applyRedactions blocks on the pixel half (RED-03)', () => {
     await applyRedactions(new Uint8Array([9, 9]), [REGION]);
     expect(spy).toHaveBeenCalledTimes(1);
     expect(spy.mock.calls[0][1]).toEqual([REGION]);
+  });
+});
+
+describe('applyRedactions blocks on the residual scan (M7)', () => {
+  const clean = {
+    sampled: 1000,
+    offFill: 0,
+    fraction: 0,
+    maxDeviation: 0,
+    content: { sampled: 1000, offDominant: 0, offDominantFraction: 0, edges: 0, edgeFraction: 0 }
+  };
+  const cleanPixels = {
+    checkRegionPixels: vi.fn(async (_h: string, regions: (typeof REGION)[]) =>
+      regions.map(region => ({ region, residue: clean }))
+    )
+  };
+
+  it('fails every region when a page dictionary exists outside the page tree', async () => {
+    wireStubs(cleanPixels);
+    stubs.process.scanResidualText = vi.fn(async () => ({
+      found: [],
+      orphanPages: 1,
+      undecodableStreams: 0
+    }));
+    const outcome = await applyRedactions(new Uint8Array([9, 9]), [REGION]);
+    expect(outcome.verified).toBe(false);
+    expect(outcome.verdicts[0].detail).toMatch(/outside its page tree/);
+  });
+
+  it('fails a searched region whose text survives in the file data, and asks for it', async () => {
+    wireStubs(cleanPixels);
+    const scan = vi.fn(async () => ({ found: ['Secret'], orphanPages: 0, undecodableStreams: 0 }));
+    stubs.process.scanResidualText = scan;
+    const outcome = await applyRedactions(new Uint8Array([9, 9]), [{ ...REGION, text: 'secret' }]);
+    expect(scan.mock.calls[0]).toEqual([expect.anything(), ['secret']]);
+    expect(outcome.verified).toBe(false);
+    expect(outcome.verdicts[0].detail).toMatch(/inside the file's data/);
   });
 });

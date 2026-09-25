@@ -12,12 +12,14 @@
  * — which is exactly the case PLAN §5.5's mandatory preview exists for, and what
  * this tool's own gate sentence says.
  */
+import { tKey } from '../../../core/i18n/key';
 import type { PdfToPptxOptions, PdfToPptxResult } from '../../../core/operations';
 import { createPdfSourceState } from './pdf-source-state';
 
-export const PDF_TO_PPT_GATE =
+export const PDF_TO_PPT_GATE = tKey(
   'Preview the conversion first — this converter approximates the page layout, so check the ' +
-  'slides before saving.';
+    'slides before saving.'
+);
 
 const state = createPdfSourceState<PdfToPptxOptions, PdfToPptxResult>(
   'pdf-to-ppt',

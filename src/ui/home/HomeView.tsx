@@ -9,13 +9,13 @@ import { translate } from '../../core/i18n';
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { useLocation } from 'wouter-preact';
 import { ChevronDown, Clock, Info, X } from 'lucide-preact';
-import { TOOLS, groupedTools, toolRoute } from '../../core/tools';
-import { importFiles } from '../../core/import';
-import { addDocument, makePageRefs } from '../../core/store';
+import { TOOLS, groupedTools, toolGroupLabel, toolRoute } from '../../core/tools';
+import { importFilesAsDocuments } from '../../core/open-document';
 import { notify, notifyError } from '../../core/notify';
 import { platform } from '../../platform/current';
 import type { RecentEntry } from '../../platform/index';
 import { DropZone } from '../components/DropZone';
+import { JobStatusRow } from '../components/JobStatusRow';
 import { Field, TextInput } from '../components/Field';
 import { Button } from '../components/Button';
 import { IconButton } from '../components/IconButton';
@@ -24,8 +24,9 @@ import { fuzzyRank } from '../../core/fuzzy';
 import styles from './HomeView.module.css';
 import { useTranslation } from '../../core/i18n';
 import { useImageImportOptions } from '../useImageImportOptions';
-import { isPdfFile } from '../../core/import';
-import { isSupportedImage } from '../../core/image';
+
+/** Recent-entry ids whose reopen is in flight. */
+const reopening = new Set<string>();
 
 export function HomeView() {
   const t = useTranslation();
@@ -34,6 +35,9 @@ export function HomeView() {
   const [recents, setRecents] = useState<RecentEntry[]>([]);
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
   const { requestOptions, node } = useImageImportOptions();
+  // RT-7 — Home has no action bar, so a Recents reopen shows its own
+  // progress and Cancel while it runs.
+  const [reopenBusy, setReopenBusy] = useState(false);
 
   const toggleSection = (name: string) => {
     setCollapsedSections(prev => {
@@ -52,13 +56,38 @@ export function HomeView() {
   }, []);
 
   const groups = useMemo(() => {
-    if (!query.trim()) return groupedTools();
-    // While searching, a single ranked list beats four sparse groups.
-    const matches = fuzzyRank(TOOLS, query, tool => `${tool.title} ${tool.group} ${tool.summary}`);
-    return matches.length > 0 ? [{ group: 'Matches', tools: matches }] : [];
-  }, [query]);
+    const labelled = (entries: ReturnType<typeof groupedTools>) =>
+      entries.map(entry => ({ ...entry, label: t(toolGroupLabel(entry.group)) }));
+    if (!query.trim()) return labelled(groupedTools());
+    // While searching, a single ranked list beats four sparse groups. The
+    // haystack holds the translated text *and* the English, so a query in
+    // either language finds the tool.
+    const matches = fuzzyRank(
+      TOOLS,
+      query,
+      tool =>
+        `${t(tool.title)} ${t(toolGroupLabel(tool.group))} ${t(tool.summary)} ${tool.title} ${tool.group}`
+    );
+    return matches.length > 0 ? [{ group: 'Matches', label: t('Matches'), tools: matches }] : [];
+    // `t` is a new function each render, so this recomputes whenever the
+    // locale (or anything else) re-renders the view — cheap for ~40 tools.
+  }, [query, t]);
 
   const reopen = async (entry: RecentEntry) => {
+    // A double click (or Enter pressed twice) used to open the file as two
+    // tabs (AUDIT-2026-09-25 UI-27).
+    if (reopening.has(entry.id)) return;
+    reopening.add(entry.id);
+    setReopenBusy(true);
+    try {
+      await reopenOnce(entry);
+    } finally {
+      reopening.delete(entry.id);
+      setReopenBusy(reopening.size > 0);
+    }
+  };
+
+  const reopenOnce = async (entry: RecentEntry) => {
     // Shared by both ways a Recents entry turns out to be unreachable: no
     // handle at all, or a handle whose permission is still 'granted' from a
     // prior session but whose underlying file was moved or deleted since —
@@ -86,30 +115,15 @@ export function HomeView() {
         reportUnreachable();
         return;
       }
-      const files = [file];
-      let imageOptions = undefined;
-      if (files.some(f => !isPdfFile(f) && isSupportedImage(f))) {
-        const opts = await requestOptions(files);
-        if (!opts) return;
-        imageOptions = opts;
-      }
-      const outcome = await importFiles(files, {}, imageOptions);
-      for (const imported of outcome.imported) {
-        addDocument({
-          id: crypto.randomUUID(),
-          name: imported.source.name,
-          pages: makePageRefs(imported.source.id, imported.source.pageCount),
-          annotations: [],
-          dirty: false,
-          sourceHandle: handle.writable ? { fileId: handle.id, writable: true } : undefined
-        });
-      }
-      for (const failure of outcome.failures) {
-        notify('danger', translate('Could not open {name}', { name: failure.name }), {
-          detail: failure.message
-        });
-      }
-      if (outcome.imported.length > 0) setLocation(toolRoute('organize'));
+      // The same open path as the drop zone (RT-6/RT-7): one undo step,
+      // cancellable through the job Cancel, and RT-14's restore-prompt gate —
+      // which `importFilesAsDocuments` checks after `reopenHandle`, whose
+      // permission prompt needs the click's user activation.
+      const result = await importFilesAsDocuments([file], {
+        handles: [handle],
+        requestImageOptions: requestOptions
+      });
+      if (result.imported > 0) setLocation(toolRoute('organize'));
     } catch (err) {
       notifyError('recents.reopen', err);
     }
@@ -126,6 +140,7 @@ export function HomeView() {
         </div>
 
         <DropZone onImported={() => setLocation(toolRoute('organize'))} />
+        {reopenBusy && <JobStatusRow />}
         {node}
 
         <div className={styles.section}>
@@ -141,13 +156,10 @@ export function HomeView() {
           </Field>
 
           {groups.length === 0 && (
-            <p className={styles.empty}>
-              {t('No tool matches “')}
-              {query}”.
-            </p>
+            <p className={styles.empty}>{t('No tool matches “{query}”.', { query })}</p>
           )}
 
-          {groups.map(({ group, tools }) => {
+          {groups.map(({ group, label, tools }) => {
             const isCollapsed = collapsedSections.has(group);
             const sectionId = `home-section-${group}`;
             return (
@@ -159,7 +171,7 @@ export function HomeView() {
                   aria-expanded={!isCollapsed}
                   aria-controls={sectionId}
                 >
-                  <span>{group}</span>
+                  <span>{label}</span>
                   <ChevronDown
                     size={14}
                     aria-hidden="true"
@@ -172,8 +184,8 @@ export function HomeView() {
                       <a className={styles.tool} href={`#${toolRoute(tool.id)}`}>
                         <ToolIcon name={tool.icon} size={18} />
                         <span className={styles.toolBody}>
-                          <span>{tool.title}</span>
-                          <span className={styles.toolSummary}>{tool.summary}</span>
+                          <span>{t(tool.title)}</span>
+                          <span className={styles.toolSummary}>{t(tool.summary)}</span>
                         </span>
                       </a>
                     </li>
@@ -201,10 +213,14 @@ export function HomeView() {
                   <IconButton
                     icon={X}
                     size="compact"
-                    aria-label={`Forget ${entry.name}`}
+                    aria-label={translate('Forget {name}', { name: entry.name })}
                     onClick={async () => {
-                      await platform.revokeHandle(entry.id);
-                      setRecents(await platform.restoreHandles());
+                      try {
+                        await platform.revokeHandle(entry.id);
+                        setRecents(await platform.restoreHandles());
+                      } catch (err) {
+                        notifyError('recents.forget', err);
+                      }
                     }}
                   />
                 </li>

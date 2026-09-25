@@ -12,13 +12,15 @@
  * does. What is this tool's own is its two gate sentences and its default page
  * size.
  */
+import { tKey } from '../../../core/i18n/key';
 import type { DocxToPdfOptions, DocxToPdfResult } from '../../../core/operations';
 import { createOfficeSourceState } from './office-source-state';
 
-export const WORD_TO_PDF_GATE =
-  'Preview the conversion first — this is a beta converter, so check the result before saving.';
+export const WORD_TO_PDF_GATE = tKey(
+  'Preview the conversion first — this is a beta converter, so check the result before saving.'
+);
 
-export const WORD_TO_PDF_NO_FILE_GATE = 'Choose a .docx file to convert first.';
+export const WORD_TO_PDF_NO_FILE_GATE = tKey('Choose a .docx file to convert first.');
 
 const state = createOfficeSourceState<DocxToPdfOptions, DocxToPdfResult>(
   'word-to-pdf',

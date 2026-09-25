@@ -42,9 +42,10 @@ describe('scanDocumentBarcodes (SCN-04)', () => {
     renderApi.closeDocument.mockResolvedValue(undefined);
     renderApi.decodePageBarcodes.mockResolvedValue([]);
 
+    // `null` (indeterminate) is recorded as NaN so it cannot match the expectation.
     const progress: number[] = [];
     await scanDocumentBarcodes(new Uint8Array([1]), [0, 1], {
-      onProgress: fraction => progress.push(fraction)
+      onProgress: fraction => progress.push(fraction ?? NaN)
     });
 
     expect(progress).toEqual([0, 0.5]);

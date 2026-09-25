@@ -115,7 +115,7 @@ function pageRefs(sourceDocId: string, pageCount: number) {
 /** Every page's drawn text, decoded from the raw content streams. */
 async function drawnText(bytes: Uint8Array): Promise<string[]> {
   const { decodeStream } = await import('../../src/core/pdf/interpreter');
-  const { PDFArray } = await import('pdf-lib');
+  const { PDFArray, PDFStream } = await import('pdf-lib');
   const doc = await PDFDocument.load(bytes);
   const out: string[] = [];
   for (let i = 0; i < doc.getPageCount(); i++) {
@@ -128,11 +128,10 @@ async function drawnText(bytes: Uint8Array): Promise<string[]> {
           : [];
     let text = '';
     for (const stream of streams) {
-      // Only raw streams carry bytes; anything else is not page content.
-      const raw = (stream as { getContents(): Uint8Array }).getContents();
-      const filter = String(
-        (stream as { dict?: { get(name: PDFName): unknown } }).dict?.get(PDFName.of('Filter'))
-      );
+      // Only streams carry bytes; anything else is not page content.
+      if (!(stream instanceof PDFStream)) continue;
+      const raw = stream.getContents();
+      const filter = String(stream.dict.get(PDFName.of('Filter')));
       text += new TextDecoder('latin1').decode(
         filter === '/FlateDecode' ? await decodeStream(raw) : raw
       );

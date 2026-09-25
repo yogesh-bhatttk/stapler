@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import {
   deletePages,
+  documents,
   movePages,
   rotatePages,
   selectAllPages,
@@ -24,6 +25,15 @@ import {
   type StaplerDoc
 } from '../../core/store';
 import { beginTransaction } from '../../core/history';
+import {
+  dropGapIndex,
+  isRightToLeft,
+  keyboardMoveTarget,
+  logicalArrowKey
+} from '../../core/reorder';
+import { tPlural, useTranslation } from '../../core/i18n';
+import { activeJob } from '../../core/notify';
+import { refuseEditWhileBusy } from '../busy';
 import { displayedAspectRatio } from '../../core/rotation';
 import { Thumbnail } from '../components/Thumbnail';
 import { eventMatchesShortcut, getEffectiveBinding, customShortcuts } from '../../core/shortcuts';
@@ -31,6 +41,7 @@ import { WatermarkOverlay } from '../tools/watermark/WatermarkOverlay';
 import { watermarkSettings, hasWatermarkContent } from '../tools/watermark/state';
 import { CropBoxPreview } from '../tools/crop/CropBoxPreview';
 import { cropBoxes } from '../tools/crop/state';
+import { withSlots } from '../i18nSlots';
 import styles from './PageGrid.module.css';
 
 /** Matches the `minmax()` floor below; both must change together. */
@@ -46,6 +57,7 @@ export interface PageGridProps {
 }
 
 export function PageGrid({ doc, selection, selectable }: PageGridProps) {
+  const t = useTranslation();
   void customShortcuts.value;
   const scrollerRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -174,6 +186,9 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
   /** Keyboard equivalents for every mouse action (DOC-04, NFR-01). */
   const onKeyDown = (event: KeyboardEvent, index: number, page: PageRef) => {
     const columns = metrics.columns;
+    // Under RTL the grid runs right-to-left, so the horizontal arrows swap
+    // meaning (AUDIT UI-21). Everything below is written for LTR.
+    const key = logicalArrowKey(event.key, isRightToLeft(event.currentTarget as Element));
     const move = (to: number) => {
       const clamped = Math.max(0, Math.min(doc.pages.length - 1, to));
       setFocusIndex(clamped);
@@ -183,24 +198,36 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
     };
 
     // Alt+arrow reorders — the accessible alternative to dragging.
-    if (event.altKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+    if (
+      event.altKey &&
+      (key === 'ArrowLeft' || key === 'ArrowRight' || key === 'ArrowUp' || key === 'ArrowDown')
+    ) {
       event.preventDefault();
+      if (refuseEditWhileBusy()) return;
       const keys = selection.has(page.key) ? [...selection] : [page.key];
-      movePages(doc.id, keys, event.key === 'ArrowLeft' ? index - 1 : index + keys.length + 1);
-      move(event.key === 'ArrowLeft' ? index - 1 : index + 1);
-      return;
-    }
-    if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
-      event.preventDefault();
-      const keys = selection.has(page.key) ? [...selection] : [page.key];
-      const delta = event.key === 'ArrowUp' ? -columns : columns;
-      movePages(doc.id, keys, index + delta + (delta > 0 ? keys.length : 0));
-      move(index + delta);
+      const keySet = new Set(keys);
+      const indices = doc.pages.flatMap((p, i) => (keySet.has(p.key) ? [i] : []));
+      const direction =
+        key === 'ArrowLeft'
+          ? 'left'
+          : key === 'ArrowRight'
+            ? 'right'
+            : key === 'ArrowUp'
+              ? 'up'
+              : 'down';
+      const target = keyboardMoveTarget(indices, doc.pages.length, direction, columns);
+      if (target === null) return;
+      movePages(doc.id, keys, target);
+      // Keep focus on the page the user moved, wherever it landed.
+      const moved = documents.value.find(d => d.id === doc.id)?.pages ?? [];
+      const landed = moved.findIndex(p => p.key === page.key);
+      if (landed !== -1) move(landed);
       return;
     }
 
     if (eventMatchesShortcut(event, getEffectiveBinding('rotatePage'))) {
       event.preventDefault();
+      if (refuseEditWhileBusy()) return;
       rotatePages(
         doc.id,
         selection.has(page.key) ? selection : [page.key],
@@ -210,6 +237,7 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
     }
     if (eventMatchesShortcut(event, getEffectiveBinding('deletePage'))) {
       event.preventDefault();
+      if (refuseEditWhileBusy()) return;
       deletePages(doc.id, selection.has(page.key) ? selection : [page.key]);
       move(Math.min(index, doc.pages.length - 2));
       return;
@@ -220,7 +248,7 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
       return;
     }
 
-    switch (event.key) {
+    switch (key) {
       case 'ArrowRight':
         event.preventDefault();
         move(index + 1);
@@ -292,8 +320,8 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
       <div className={styles.header}>
         <h2 className={styles.title}>{doc.name}</h2>
         <span className={styles.count}>
-          {doc.pages.length} page{doc.pages.length === 1 ? '' : 's'}
-          {selection.size > 0 && ` · ${selection.size} selected`}
+          {tPlural('{count} pages', doc.pages.length)}
+          {selection.size > 0 && ` · ${t('{count} selected', { count: selection.size })}`}
         </span>
       </div>
 
@@ -303,7 +331,7 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
         style={{ height: `${Math.max(0, rowCount * rowHeight - GAP)}px` }}
         role="listbox"
         aria-multiselectable={selectable}
-        aria-label={`Pages of ${doc.name}`}
+        aria-label={t('Pages of {name}', { name: doc.name })}
       >
         <div
           className={styles.window}
@@ -334,7 +362,13 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
                   .join(' ')}
                 role="option"
                 aria-selected={isSelected}
-                aria-label={`Page ${index + 1} of ${doc.pages.length}${isSelected ? ', selected' : ''}`}
+                aria-label={t(
+                  isSelected ? 'Page {n} of {total}, selected' : 'Page {n} of {total}',
+                  {
+                    n: index + 1,
+                    total: doc.pages.length
+                  }
+                )}
                 // Roving tabindex: one tab stop for the whole grid, arrows within.
                 tabIndex={index === focusIndex ? 0 : -1}
                 draggable
@@ -342,6 +376,11 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
                 onKeyDown={event => onKeyDown(event, index, page)}
                 onFocus={() => setFocusIndex(index)}
                 onDragStart={event => {
+                  if (activeJob.value !== null) {
+                    event.preventDefault();
+                    refuseEditWhileBusy();
+                    return;
+                  }
                   setDragKey(page.key);
                   event.dataTransfer?.setData('text/plain', page.key);
                   if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
@@ -349,17 +388,29 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
                 onDragOver={event => {
                   if (!dragKey) return;
                   event.preventDefault();
-                  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-                  // Insert before or after depending on which half is hovered.
-                  setDropIndex(event.clientX < rect.left + rect.width / 2 ? index : index + 1);
+                  const tile = event.currentTarget as HTMLElement;
+                  // Insert before or after depending on which half is hovered —
+                  // mirrored under RTL, where the page before is to the right.
+                  setDropIndex(
+                    dropGapIndex(
+                      event.clientX,
+                      tile.getBoundingClientRect(),
+                      index,
+                      isRightToLeft(tile)
+                    )
+                  );
                 }}
                 onDragEnd={() => {
                   setDragKey(null);
                   setDropIndex(null);
                 }}
                 onDrop={event => {
+                  // Only an internal reorder is this tile's to handle. A file
+                  // from the OS must reach AppShell's window handler, which
+                  // skips any drop that is already defaultPrevented.
+                  if (!dragKey) return;
                   event.preventDefault();
-                  if (dragKey && dropIndex !== null) {
+                  if (dropIndex !== null) {
                     const keys = selection.has(dragKey) ? [...selection] : [dragKey];
                     movePages(doc.id, keys, dropIndex);
                   }
@@ -399,7 +450,10 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
       </div>
 
       <p className={styles.hint}>
-        Arrow keys move · Space selects · <kbd>Alt</kbd> + arrows reorders · <kbd>R</kbd> rotates
+        {withSlots(t('Arrow keys move · Space selects · {alt} + arrows reorders · {r} rotates'), {
+          alt: <kbd>Alt</kbd>,
+          r: <kbd>R</kbd>
+        })}
       </p>
     </div>
   );

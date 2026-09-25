@@ -32,18 +32,22 @@ function setPixel(img: ImageData, x: number, y: number, color: [number, number, 
 }
 
 describe('exportVisualDiff (ANN-05)', () => {
+  const mockDocAPages = [{ key: 'p1', sourceDocId: 'srcA', sourceIndex: 0, rotation: 0 }];
   const mockDocA: StaplerDoc = {
     id: 'docA-id',
     name: 'base.pdf',
-    pages: [{ key: 'p1', sourceDocId: 'srcA', sourceIndex: 0, rotation: 0 }],
+    pages: mockDocAPages,
+    baseline: mockDocAPages,
     annotations: [],
     dirty: false
   };
 
+  const mockDocBPages = [{ key: 'p2', sourceDocId: 'srcB', sourceIndex: 0, rotation: 0 }];
   const mockDocB: StaplerDoc = {
     id: 'docB-id',
     name: 'compare.pdf',
-    pages: [{ key: 'p2', sourceDocId: 'srcB', sourceIndex: 0, rotation: 0 }],
+    pages: mockDocBPages,
+    baseline: mockDocBPages,
     annotations: [],
     dirty: false
   };
@@ -118,24 +122,28 @@ describe('exportVisualDiff (ANN-05)', () => {
   });
 
   it('handles multi-page document diff exports', async () => {
+    const multiDocAPages = [
+      { key: 'p1', sourceDocId: 'srcA', sourceIndex: 0, rotation: 0 },
+      { key: 'p2', sourceDocId: 'srcA', sourceIndex: 1, rotation: 0 }
+    ];
     const multiDocA: StaplerDoc = {
       id: 'docA-multi',
       name: 'base-multi.pdf',
-      pages: [
-        { key: 'p1', sourceDocId: 'srcA', sourceIndex: 0, rotation: 0 },
-        { key: 'p2', sourceDocId: 'srcA', sourceIndex: 1, rotation: 0 }
-      ],
+      pages: multiDocAPages,
+      baseline: multiDocAPages,
       annotations: [],
       dirty: false
     };
 
+    const multiDocBPages = [
+      { key: 'p1', sourceDocId: 'srcB', sourceIndex: 0, rotation: 0 },
+      { key: 'p2', sourceDocId: 'srcB', sourceIndex: 1, rotation: 0 }
+    ];
     const multiDocB: StaplerDoc = {
       id: 'docB-multi',
       name: 'compare-multi.pdf',
-      pages: [
-        { key: 'p1', sourceDocId: 'srcB', sourceIndex: 0, rotation: 0 },
-        { key: 'p2', sourceDocId: 'srcB', sourceIndex: 1, rotation: 0 }
-      ],
+      pages: multiDocBPages,
+      baseline: multiDocBPages,
       annotations: [],
       dirty: false
     };
@@ -156,6 +164,7 @@ describe('exportVisualDiff (ANN-05)', () => {
       id: 'empty',
       name: 'empty.pdf',
       pages: [],
+      baseline: [],
       annotations: [],
       dirty: false
     };

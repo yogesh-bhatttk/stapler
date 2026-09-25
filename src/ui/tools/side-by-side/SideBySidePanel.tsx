@@ -13,30 +13,55 @@ import { panelStyles } from '../../shell/panelStyles';
 import { useTranslation } from '../../../core/i18n';
 import { sources, releaseSourceIfUnused } from '../../../core/store';
 import { sideBySideSourceId } from './state';
+import { activeJob, notify } from '../../../core/notify';
+import { translate } from '../../../core/i18n';
+import { discardImported } from '../../../core/open-document';
+import { useJob } from '../../useJob';
 import styles from './SideBySidePanel.module.css';
 
 export function SideBySidePanel() {
   const t = useTranslation();
   const [loading, setLoading] = useState(false);
+  const { run } = useJob();
   const sourceId = sideBySideSourceId.value;
   const compareSource = sourceId ? sources.value[sourceId] : undefined;
 
   const openSecondFile = async () => {
+    // Checked before the picker opens, so a choice is never thrown away (UI-20).
+    if (activeJob.value !== null) {
+      notify('info', translate('Finish or cancel the current operation first.'));
+      return;
+    }
     try {
       setLoading(true);
       const files = await platform.openFiles({ accept: { 'application/pdf': ['.pdf'] } });
       if (files.length === 0) return;
       const fileObjects = await Promise.all(files.map(f => f.getFile()));
-      const { imported, failures } = await importFiles(fileObjects);
-      if (imported.length > 0) {
-        // Released *after* the new source is registered, not before: the two
-        // could be the same id in principle, and releasing first would delete
-        // bytes the swap is about to need.
-        const previous = sideBySideSourceId.value;
-        sideBySideSourceId.value = imported[0].source.id;
-        if (previous) releaseSourceIfUnused(previous);
-      }
-      if (failures.length > 0) logEvent('error', 'side-by-side', failures[0].message);
+      // RT-7 — a job with progress and a working Cancel in the action bar.
+      await run({ label: translate('Opening document'), scope: 'side-by-side' }, async job => {
+        const outcome = await importFiles(fileObjects, job);
+        if (job.signal?.aborted) {
+          discardImported(outcome);
+          return;
+        }
+        const { imported, failures } = outcome;
+        if (imported.length > 0) {
+          // Released *after* the new source is registered, not before: the two
+          // could be the same id in principle, and releasing first would delete
+          // bytes the swap is about to need.
+          const previous = sideBySideSourceId.value;
+          sideBySideSourceId.value = imported[0].source.id;
+          if (previous) releaseSourceIfUnused(previous);
+          // Only the first file is shown; the rest are not kept.
+          discardImported({ imported: imported.slice(1), failures: [] });
+        }
+        if (failures.length > 0) {
+          logEvent('error', 'side-by-side', failures[0].message);
+          notify('danger', translate('Could not open {name}', { name: failures[0].name }), {
+            detail: failures[0].message
+          });
+        }
+      });
     } catch (err: unknown) {
       logEvent('error', 'side-by-side', fromUnknown(err).message);
     } finally {

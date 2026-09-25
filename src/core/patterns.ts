@@ -10,6 +10,7 @@
  * click before a proposal becomes a mark, and marks are only removed from the
  * document by the existing RED-02 commit path.
  */
+import { tKey } from './i18n/key';
 
 export type PatternCategory =
   'email' | 'phone' | 'ssn' | 'credit-card' | 'ip' | 'iban' | 'uk-nino' | 'passport';
@@ -23,14 +24,14 @@ export interface PatternHit {
 }
 
 export const PATTERN_LABELS: Record<PatternCategory, string> = {
-  email: 'Email address',
-  phone: 'Phone number',
-  ssn: 'US Social Security number',
-  'credit-card': 'Credit card number',
-  ip: 'IP address',
-  iban: 'IBAN (bank account number)',
-  'uk-nino': 'UK National Insurance number',
-  passport: 'Passport number'
+  email: tKey('Email address'),
+  phone: tKey('Phone number'),
+  ssn: tKey('US Social Security number'),
+  'credit-card': tKey('Credit card number'),
+  ip: tKey('IP address'),
+  iban: tKey('IBAN (bank account number)'),
+  'uk-nino': tKey('UK National Insurance number'),
+  passport: tKey('Passport number')
 };
 
 /**

@@ -32,24 +32,27 @@ import {
 import { MAX_TARGET_TRIALS } from '../../../core/compress-target';
 import { useEffect } from 'preact/hooks';
 import { useJob } from '../../useJob';
-import { useTranslation } from '../../../core/i18n';
+import { fromUnknown, isCancellation, logEvent } from '../../../core/errors';
+import { tKey, translate, useTranslation } from '../../../core/i18n';
 
 const DPI_OPTIONS = [
-  { value: 72, label: '72 DPI — smallest' },
-  { value: 150, label: '150 DPI — recommended' },
-  { value: 300, label: '300 DPI — print' }
+  { value: 72, label: tKey('72 DPI — smallest') },
+  { value: 150, label: tKey('150 DPI — recommended') },
+  { value: 300, label: tKey('300 DPI — print') }
 ] as const;
 
 const MODE_OPTIONS = [
   {
     value: 'quality' as CompressMode,
-    label: 'Choose quality',
-    hint: 'You pick the resolution and quality; the preview shows the result.'
+    label: tKey('Choose quality'),
+    hint: tKey('You pick the resolution and quality; the preview shows the result.')
   },
   {
     value: 'target' as CompressMode,
-    label: 'Aim for a size',
-    hint: `Stapler tries up to ${MAX_TARGET_TRIALS} real settings and reports the size it actually reached.`
+    label: tKey('Aim for a size'),
+    hint: tKey(
+      'Stapler tries up to {trials} real settings and reports the size it actually reached.'
+    )
   }
 ] as const;
 
@@ -67,22 +70,38 @@ export function CompressPanel() {
   if (!doc) return null;
 
   const analyse = () =>
-    run({ label: 'Analysing document', scope: 'compress.plan' }, async job => {
+    run({ label: translate('Analysing document'), scope: 'compress.plan' }, async job => {
       const bytes = await currentDocumentBytes(job);
       compressReport.value = await planCompression(bytes, settings, job);
     });
 
   useEffect(() => {
     if (!report) return;
+    const controller = new AbortController();
+    const planned = activeDoc.value;
     const timer = setTimeout(() => {
-      // Re-run projection quietly without a big loading screen for every slider tick
-      currentDocumentBytes().then(bytes =>
-        planCompression(bytes, settings).then(newReport => {
+      // Re-run projection quietly without a big loading screen for every slider tick.
+      // Aborted when the slider moves again or the panel unmounts, so an older
+      // projection can't land after a newer one; dropped if the document or its
+      // pages changed meanwhile; and never an unhandled rejection (UI-11).
+      void (async () => {
+        try {
+          const bytes = await currentDocumentBytes({ signal: controller.signal });
+          const newReport = await planCompression(bytes, settings, { signal: controller.signal });
+          const now = activeDoc.value;
+          if (controller.signal.aborted || now?.id !== planned?.id || now?.pages !== planned?.pages)
+            return;
           compressReport.value = newReport;
-        })
-      );
+        } catch (err) {
+          if (!isCancellation(err))
+            logEvent('warn', 'compress.reproject', fromUnknown(err).message);
+        }
+      })();
     }, 300);
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
   }, [settings.dpi, settings.quality]);
 
   // CMP-05: once the preview has re-encoded the representative page for real,
@@ -146,7 +165,7 @@ export function CompressPanel() {
         options={MODE_OPTIONS.map(option => ({
           value: option.value,
           label: t(option.label),
-          hint: t(option.hint)
+          hint: t(option.hint, { trials: MAX_TARGET_TRIALS })
         }))}
         onChange={next => (compressMode.value = next)}
       />
@@ -185,8 +204,10 @@ export function CompressPanel() {
           </Field>
           {report && targetBytes >= report.originalBytes && (
             <p className={panelStyles.note}>
-              {t('This document is already')} {formatBytes(report.originalBytes)} —{' '}
-              {t('smaller than the target, so there is nothing to do.')}
+              {t(
+                'This document is already {size} — smaller than the target, so there is nothing to do.',
+                { size: formatBytes(report.originalBytes) }
+              )}
             </p>
           )}
         </>
@@ -204,17 +225,30 @@ export function CompressPanel() {
           <SizeDelta before={outcome.originalBytes} after={outcome.achievedBytes} />
           <p className={panelStyles.description}>
             {outcome.reached
-              ? `${t('Reached')} ${formatBytes(outcome.achievedBytes)} — ${t('at or under your target of')} ${formatBytes(outcome.targetBytes)}.`
-              : `${t('Could not reach')} ${formatBytes(outcome.targetBytes)}. ${t('The smallest Stapler can produce without destroying this document is')} ${formatBytes(outcome.achievedBytes)}.`}
+              ? t('Reached {achieved} — at or under your target of {target}.', {
+                  achieved: formatBytes(outcome.achievedBytes),
+                  target: formatBytes(outcome.targetBytes)
+                })
+              : t(
+                  'Could not reach {target}. The smallest Stapler can produce without destroying this document is {achieved}.',
+                  {
+                    target: formatBytes(outcome.targetBytes),
+                    achieved: formatBytes(outcome.achievedBytes)
+                  }
+                )}
             {outcome.settings
-              ? ` ${t('Settings used:')} ${outcome.settings.dpi} DPI, ${Math.round(outcome.settings.quality * 100)}%. `
+              ? ` ${t('Settings used: {dpi} DPI, {quality}%.', {
+                  dpi: outcome.settings.dpi,
+                  quality: Math.round(outcome.settings.quality * 100)
+                })} `
               : ' '}
-            {t('Attempts:')} {outcome.attempts}.
+            {t('Attempts: {count}.', { count: outcome.attempts })}
           </p>
           {!outcome.reached && outcome.skipped.length > 0 && (
             <p className={panelStyles.note}>
-              {t('Some content cannot be re-encoded safely, so it stays at full size:')}{' '}
-              {outcome.skipped.join('; ')}.
+              {t('Some content cannot be re-encoded safely, so it stays at full size: {items}.', {
+                items: outcome.skipped.join('; ')
+              })}
             </p>
           )}
         </div>
@@ -227,7 +261,7 @@ export function CompressPanel() {
               <Select
                 id={id}
                 value={settings.dpi}
-                options={DPI_OPTIONS}
+                options={DPI_OPTIONS.map(option => ({ ...option, label: t(option.label) }))}
                 onChange={dpi => (compressSettings.value = { ...settings, dpi })}
               />
             )}
@@ -241,7 +275,7 @@ export function CompressPanel() {
                 max={95}
                 step={5}
                 value={Math.round(settings.quality * 100)}
-                scale={['Smaller file', 'Better quality']}
+                scale={[t('Smaller file'), t('Better quality')]}
                 onChange={value => (compressSettings.value = { ...settings, quality: value / 100 })}
               />
             )}
@@ -252,8 +286,10 @@ export function CompressPanel() {
         // showing them as editable controls would misrepresent what the export
         // will do. The preview keeps rendering at whatever the search last used.
         <p className={panelStyles.note}>
-          {t('Resolution and quality are chosen by the search. The preview shows')} {settings.dpi}{' '}
-          DPI, {Math.round(settings.quality * 100)}%.
+          {t(
+            'Resolution and quality are chosen by the search. The preview shows {dpi} DPI, {quality}%.',
+            { dpi: settings.dpi, quality: Math.round(settings.quality * 100) }
+          )}
         </p>
       )}
 
@@ -315,16 +351,21 @@ export function CompressPanel() {
 
           {report.plan.skipped.length > 0 && (
             <p className={panelStyles.note}>
-              {t('Not re-encoded, to avoid damaging them:')} {report.plan.skipped.join('; ')}.
+              {t('Not re-encoded, to avoid damaging them: {items}.', {
+                items: report.plan.skipped.join('; ')
+              })}
             </p>
           )}
 
           {report.alreadyOptimized && (
             <p className={panelStyles.note}>
-              {t('This document is already optimized — about')}{' '}
-              {Math.max(0, Math.round(report.estimatedFraction * 100))}
-              {t('% is all that is available from')} {formatBytes(report.originalBytes)}
-              {t('. Compressing it is not worth the time.')}
+              {t(
+                'This document is already optimized — about {percent}% is all that is available from {size}. Compressing it is not worth the time.',
+                {
+                  percent: Math.max(0, Math.round(report.estimatedFraction * 100)),
+                  size: formatBytes(report.originalBytes)
+                }
+              )}
             </p>
           )}
 

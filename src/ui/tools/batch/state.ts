@@ -20,20 +20,45 @@ export interface Recipe {
 
 import { listRecipes, putRecipe, deleteRecipe } from '../../../core/db';
 
+/**
+ * localStorage throws in Safari private mode and other hardened contexts, and
+ * does not exist at all in a worker or test realm. These settings are
+ * conveniences, so a failed read falls back to the default and a failed write
+ * is dropped — never an exception at module load, which took down every module
+ * importing this one.
+ */
+function readLocal(key: string): string | null {
+  try {
+    return typeof localStorage === 'undefined' ? null : localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeLocal(key: string, value: string | null): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch {
+    // Not remembered for next time; the in-memory value still applies.
+  }
+}
+
 export const savedRecipes = signal<Recipe[]>([]);
 export const recipesLoaded = signal<boolean>(false);
 
 export async function loadRecipes() {
   if (recipesLoaded.value) return;
   const recipes = await listRecipes();
-  const legacyStr = localStorage.getItem('stapler:recipes');
+  const legacyStr = readLocal('stapler:recipes');
   if (legacyStr && recipes.length === 0) {
     const legacy = JSON.parse(legacyStr) as Recipe[];
     for (const r of legacy) {
       await putRecipe(r);
       recipes.push(r);
     }
-    localStorage.removeItem('stapler:recipes');
+    writeLocal('stapler:recipes', null);
   }
   savedRecipes.value = recipes as Recipe[];
   recipesLoaded.value = true;
@@ -96,18 +121,18 @@ export const batchProgress = signal<BatchProgress>({
  * Defaults to '{basename}' which preserves the pre-BAT-03 behaviour exactly.
  */
 export const outputPattern = signal<string>(
-  localStorage.getItem('stapler:batch:outputPattern') ?? '{basename}'
+  readLocal('stapler:batch:outputPattern') ?? '{basename}'
 );
 
 outputPattern.subscribe(p => {
-  localStorage.setItem('stapler:batch:outputPattern', p);
+  writeLocal('stapler:batch:outputPattern', p);
 });
 
 /** RED-09 — scrub every finding RED-04 would report, independently per file. */
 export const scrubMetadataInBatch = signal<boolean>(
-  localStorage.getItem('stapler:batch:scrubMetadata') === 'true'
+  readLocal('stapler:batch:scrubMetadata') === 'true'
 );
 
 scrubMetadataInBatch.subscribe(v => {
-  localStorage.setItem('stapler:batch:scrubMetadata', String(v));
+  writeLocal('stapler:batch:scrubMetadata', String(v));
 });

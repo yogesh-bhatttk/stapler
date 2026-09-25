@@ -1,4 +1,4 @@
-import { translate } from '../../core/i18n';
+import { useTranslation } from '../../core/i18n';
 /**
  * The tool rail, driven by the registry in core/tools.ts. Previously every item was
  * hand-written here *and* the same set was re-derived in the options panel, the
@@ -7,12 +7,13 @@ import { translate } from '../../core/i18n';
  */
 import { useState } from 'preact/hooks';
 import { useLocation } from 'wouter-preact';
-import { groupedTools, toolRoute, type ToolGroup } from '../../core/tools';
+import { groupedTools, toolGroupLabel, toolRoute, type ToolGroup } from '../../core/tools';
 import { ToolIcon } from '../components/ToolIcon';
 import styles from './ToolRail.module.css';
 import { ChevronDown } from 'lucide-preact';
 
 export function ToolRail() {
+  const t = useTranslation();
   const [location] = useLocation();
   const [collapsed, setCollapsed] = useState<Set<ToolGroup>>(new Set());
 
@@ -29,7 +30,7 @@ export function ToolRail() {
   };
 
   return (
-    <nav className={styles.rail} aria-label={translate('Tools')}>
+    <nav className={styles.rail} aria-label={t('Tools')}>
       {groupedTools().map(({ group, tools }) => {
         const isCollapsed = collapsed.has(group);
         const groupId = `rail-group-${group}`;
@@ -42,7 +43,7 @@ export function ToolRail() {
               aria-expanded={!isCollapsed}
               aria-controls={groupId}
             >
-              <span>{group}</span>
+              <span>{t(toolGroupLabel(group))}</span>
               <ChevronDown
                 size={14}
                 aria-hidden="true"
@@ -64,11 +65,11 @@ export function ToolRail() {
                       // The rail collapses to icons under 800px, where the label is
                       // hidden — so the accessible name comes from the title, not
                       // from the visually-hidden text.
-                      title={tool.title}
+                      title={t(tool.title)}
                       aria-current={active ? 'page' : undefined}
                     >
                       <ToolIcon name={tool.icon} />
-                      <span className={styles.railLabel}>{tool.title}</span>
+                      <span className={styles.railLabel}>{t(tool.title)}</span>
                     </a>
                   </li>
                 );

@@ -81,7 +81,7 @@ export function Canvas() {
   );
 
   if (!tool) {
-    return <EmptyState title={t('Unknown tool')} body="Pick one from the rail or press ⌘K." />;
+    return <EmptyState title={t('Unknown tool')} body={t('Pick one from the rail or press ⌘K.')} />;
   }
 
   if (tool.id === 'batch') {
@@ -94,8 +94,8 @@ export function Canvas() {
         title={t('No document open')}
         body={
           doc
-            ? 'Every page in this document has been deleted. Undo with ⌘Z, or open another file.'
-            : 'Open a PDF or some images to start. Nothing is uploaded.'
+            ? t('Every page in this document has been deleted. Undo with ⌘Z, or open another file.')
+            : t('Open a PDF or some images to start. Nothing is uploaded.')
         }
       />
     );

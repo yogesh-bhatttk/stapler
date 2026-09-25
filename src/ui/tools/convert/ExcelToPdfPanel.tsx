@@ -12,8 +12,8 @@ import { FilePlus, RefreshCw, Upload } from 'lucide-preact';
 import { platform } from '../../../platform/current';
 import { XLSX_ONLY } from '../../../platform/index';
 import { convertXlsxToPdf } from '../../../core/operations';
-import { EXCEL_LIMITATIONS } from '../../../core/convert/xlsx-reader';
-import { translate, useTranslation } from '../../../core/i18n';
+import { EXCEL_LIMITATION_KEYS, EXCEL_LIMITATION_PARAMS } from '../../../core/convert/xlsx-reader';
+import { tKey, tPlural, translate, useTranslation } from '../../../core/i18n';
 import { notify } from '../../../core/notify';
 import { formatBytes } from '../../components/Feedback';
 import { Badge } from '../../components/Badge';
@@ -40,11 +40,11 @@ import {
  * band's column range.
  */
 const KIND_LABEL: Record<string, string> = {
-  heading: 'Sheet',
-  paragraph: 'Note',
-  'list-item': 'List item',
-  table: 'Grid',
-  image: 'Image'
+  heading: tKey('Sheet'),
+  paragraph: tKey('Note'),
+  'list-item': tKey('List item'),
+  table: tKey('Grid'),
+  image: tKey('Image')
 };
 
 export function ExcelToPdfPanel() {
@@ -66,9 +66,10 @@ export function ExcelToPdfPanel() {
     const file = await opened[0].getFile();
     if (!/\.xlsx$/i.test(file.name)) {
       notify('warning', translate('That is not an .xlsx file.'), {
-        detail:
+        detail: translate(
           'This converter reads Excel’s modern .xlsx format. A legacy .xls, a macro-enabled ' +
-          '.xlsm, or a .csv has to be saved as .xlsx first.'
+            '.xlsm, or a .csv has to be saved as .xlsx first.'
+        )
       });
       return;
     }
@@ -78,7 +79,7 @@ export function ExcelToPdfPanel() {
   const handlePreview = () => {
     const file = excelToPdfSource.value;
     if (!file) return;
-    run({ label: 'Converting to PDF', scope: 'convert.excel-to-pdf' }, async job => {
+    run({ label: translate('Converting to PDF'), scope: 'convert.excel-to-pdf' }, async job => {
       // Captured before the bytes are read, so a change made *during* the
       // conversion still invalidates its result.
       const revision = excelToPdfInputRevision.value;
@@ -91,20 +92,23 @@ export function ExcelToPdfPanel() {
       setExcelToPdfPreview(result, file, revision);
       notify(
         'success',
-        translate(
-          'Converted {sheets} sheet(s) to {pages} page(s). Review the preview, then save.',
-          {
-            sheets: result.sheets.length,
-            pages: result.pageCount
-          }
-        ),
-        { detail: `${formatBytes(result.bytes.byteLength)} · ${result.outline.length} sections` }
+        translate('Converted {sheets} to {pages}. Review the preview, then save.', {
+          sheets: tPlural('{count} sheets', result.sheets.length),
+          pages: tPlural('{count} pages', result.pageCount)
+        }),
+        {
+          detail: translate('{size} · {sections}', {
+            size: formatBytes(result.bytes.byteLength),
+            sections: tPlural('{count} sections', result.outline.length)
+          })
+        }
       );
       if (result.hadUnsupportedCharacters) {
         notify('warning', translate('Some characters could not be represented.'), {
-          detail:
+          detail: translate(
             'This export uses a fixed set of Latin fonts and replaced unsupported characters ' +
-            '(e.g. CJK, Cyrillic, Arabic) with "?". Check the affected text before sharing it.',
+              '(e.g. CJK, Cyrillic, Arabic) with "?". Check the affected text before sharing it.'
+          ),
           timeout: 0
         });
       }
@@ -154,8 +158,8 @@ export function ExcelToPdfPanel() {
             className={panelStyles.proseList}
             aria-label={t('What this converter does not carry across')}
           >
-            {EXCEL_LIMITATIONS.map((limitation, index) => (
-              <li key={index}>{t(limitation)}</li>
+            {EXCEL_LIMITATION_KEYS.map((limitation, index) => (
+              <li key={index}>{t(limitation, EXCEL_LIMITATION_PARAMS)}</li>
             ))}
           </ul>
         </div>
@@ -202,9 +206,10 @@ export function ExcelToPdfPanel() {
       {preview && !stale ? (
         <div className={panelStyles.section}>
           <p className="text-small" style={{ margin: '0 0 var(--space-xs)', fontWeight: 600 }}>
-            {t('Preview')} · {preview.sheets.length}{' '}
-            {preview.sheets.length === 1 ? t('sheet') : t('sheets')} · {preview.pageCount}{' '}
-            {preview.pageCount === 1 ? t('page') : t('pages')}
+            {t('Preview · {sheets} · {pages}', {
+              sheets: tPlural('{count} sheets', preview.sheets.length),
+              pages: tPlural('{count} pages', preview.pageCount)
+            })}
           </p>
 
           <ol className={panelStyles.list} aria-label={t('Sheets that will be drawn into the PDF')}>
@@ -219,7 +224,10 @@ export function ExcelToPdfPanel() {
                     fontVariantNumeric: 'tabular-nums'
                   }}
                 >
-                  p{item.pageIndex + 1} · {KIND_LABEL[item.kind] ?? item.kind}
+                  {t('p{page} · {kind}', {
+                    page: item.pageIndex + 1,
+                    kind: KIND_LABEL[item.kind] ? t(KIND_LABEL[item.kind]) : item.kind
+                  })}
                 </span>
                 <span
                   className={panelStyles.listRowText}

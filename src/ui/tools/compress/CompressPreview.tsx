@@ -23,9 +23,9 @@
  * it started rather than letting it run to completion unwatched.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { translate } from '../../../core/i18n';
+import { translate, useTranslation } from '../../../core/i18n';
 import { ZoomIn, ZoomOut } from 'lucide-preact';
-import { type PageRef } from '../../../core/store';
+import { activeDoc, type PageRef } from '../../../core/store';
 import { compressMeasurement, compressReport, compressSettings, projectedOutput } from './state';
 import {
   composeDocument,
@@ -42,7 +42,6 @@ import { IconButton } from '../../components/IconButton';
 import { EmptyState, SizeDelta } from '../../components/Feedback';
 import { isCancellation, logEvent, fromUnknown } from '../../../core/errors';
 import styles from './CompressPreview.module.css';
-import { useTranslation } from '../../../core/i18n';
 
 export interface CompressPreviewProps {
   pages: PageRef[];
@@ -114,8 +113,17 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
    * while still showing the previous zoom's bitmap is exactly the kind of stale
    * frame a quality judgement must not be made on.
    */
-  const [shown, setShown] = useState<{ dpi: number; quality: number; scale: number } | null>(null);
-  const [shownBeforeScale, setShownBeforeScale] = useState(0);
+  // Each half remembers *which page* it drew, not just at what settings: the
+  // representative page changes once the analysis lands (page 1 → the page
+  // with the most image area), and "ready" used to stay true while the new
+  // page was still rendering because the settings had not changed.
+  const [shown, setShown] = useState<{
+    dpi: number;
+    quality: number;
+    scale: number;
+    pageKey: string;
+  } | null>(null);
+  const [shownBefore, setShownBefore] = useState<{ scale: number; pageKey: string } | null>(null);
 
   const report = compressReport.value;
   const settings = compressSettings.value;
@@ -181,6 +189,7 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
    * having to press "Analyse" first; if a report already exists (the panel ran
    * one, or the settings changed), this does nothing.
    */
+  const revision = activeDoc.value;
   useEffect(() => {
     if (compressReport.value) return;
     const controller = new AbortController();
@@ -196,9 +205,11 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
       }
     })();
     return () => controller.abort();
-    // Deliberately mount-only: re-running on every settings change would
-    // duplicate the panel's own debounced re-projection.
-  }, []);
+    // Once per document revision, not per settings change: re-running on every
+    // settings change would duplicate the panel's own debounced re-projection.
+    // Mount-only was not enough — a tab switch reset the report and nothing
+    // re-analysed the new document (UI-11).
+  }, [revision?.id, revision?.pages]);
 
   // "Before" — the page exactly as it is today.
   useEffect(() => {
@@ -215,7 +226,7 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
         }
         setBeforeSize(paint(beforeCanvasRef.current, bitmap, scale));
         bitmap.close();
-        setShownBeforeScale(scale);
+        setShownBefore({ scale, pageKey: page.key });
       } catch (err) {
         if (!isCancellation(err)) logEvent('error', 'compress.preview', fromUnknown(err).message);
       }
@@ -289,7 +300,7 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
           dpi,
           quality
         };
-        setShown({ dpi, quality, scale });
+        setShown({ dpi, quality, scale, pageKey: page.key });
         setFailed(false);
       } catch (err) {
         if (isCancellation(err)) return;
@@ -310,7 +321,7 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
   }, [page, index, settings, scale, composeOnce]);
 
   if (!page) {
-    return <EmptyState title={t('No page')} body="There are no pages to preview." />;
+    return <EmptyState title={t('No page')} body={t('There are no pages to preview.')} />;
   }
 
   const projection = projectedOutput(report, compressMeasurement.value, settings);
@@ -320,7 +331,9 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
     shown?.dpi === settings.dpi &&
     shown?.quality === settings.quality &&
     shown?.scale === scale &&
-    shownBeforeScale === scale;
+    shown?.pageKey === page.key &&
+    shownBefore?.scale === scale &&
+    shownBefore?.pageKey === page.key;
 
   return (
     <div
@@ -356,9 +369,7 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
       </div>
 
       <div className={styles.bar}>
-        <span className={styles.label}>
-          {t('Page')} {index + 1} — {t('most image area')}
-        </span>
+        <span className={styles.label}>{t('Page {n} — most image area', { n: index + 1 })}</span>
 
         {measured && (
           <span className={styles.projection}>
@@ -379,7 +390,10 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
             : pending || !upToDate
               ? t('Updating…')
               : shown
-                ? `${Math.round(shown.quality * 100)}% · ${shown.dpi} DPI`
+                ? t('{quality}% · {dpi} DPI', {
+                    quality: Math.round(shown.quality * 100),
+                    dpi: shown.dpi
+                  })
                 : ''}
         </span>
 

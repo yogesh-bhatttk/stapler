@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { degrees, PDFDocument, PDFName } from 'pdf-lib';
-import { processWorkerImpl, type NewFormField } from '../../src/core/workers/process.worker';
-import { extractFormFieldsToCreate } from '../../src/core/operations';
+import { processWorkerImpl } from '../../src/core/workers/process.worker';
+import { extractFormFieldsToCreate, type NewFormField } from '../../src/core/operations';
 import type { Annotation } from '../../src/core/store';
 import { displayFrame, displayPointToPage } from '../../src/core/rotation';
 

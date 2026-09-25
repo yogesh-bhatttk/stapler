@@ -6,7 +6,7 @@
 }
 
 .table th {
-  text-align: left;
+  text-align: start;
   padding: var(--space-xxs);
   border-bottom: 1px solid var(--hairline-strong);
   font: var(--text-micro);

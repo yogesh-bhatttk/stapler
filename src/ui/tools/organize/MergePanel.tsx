@@ -1,4 +1,4 @@
-import { translate } from '../../../core/i18n';
+import { tPlural, translate, useTranslation } from '../../../core/i18n';
 /**
  * Merge / insert options (OPS-01, OPS-04).
  *
@@ -11,14 +11,13 @@ import { platform } from '../../../platform/current';
 import { PDF_AND_IMAGES } from '../../../platform/index';
 import { importFiles } from '../../../core/import';
 import { addDocument, appendPages, activeDoc, activeSources } from '../../../core/store';
-import { notify, notifyError } from '../../../core/notify';
+import { activeJob, notify, notifyError } from '../../../core/notify';
 import { Button } from '../../components/Button';
 import { useImageImportOptions } from '../../useImageImportOptions';
 import { isPdfFile } from '../../../core/import';
 import { isSupportedImage } from '../../../core/image';
 import { panelStyles } from '../../shell/panelStyles';
 import { useJob } from '../../useJob';
-import { useTranslation } from '../../../core/i18n';
 
 export function MergePanel() {
   const t = useTranslation();
@@ -29,6 +28,12 @@ export function MergePanel() {
   const { requestOptions, node } = useImageImportOptions();
 
   const addFiles = async () => {
+    // Checked before the picker opens, not after: otherwise the user chooses
+    // files only for the import to be refused and the choice discarded (UI-20).
+    if (activeJob.value !== null) {
+      notify('info', translate('Finish or cancel the current operation first.'));
+      return;
+    }
     setBusy(true);
     try {
       const opened = await platform.openFiles({ multiple: true, accept: PDF_AND_IMAGES });
@@ -44,7 +49,7 @@ export function MergePanel() {
         imageOptions = opts;
       }
 
-      await run({ label: 'Importing', scope: 'merge.add' }, async job => {
+      await run({ label: translate('Importing'), scope: 'merge.add' }, async job => {
         const outcome = await importFiles(files, job, imageOptions);
         // With nothing open yet, the first imported file becomes a new
         // document rather than being silently dropped — merge builds a
@@ -75,10 +80,7 @@ export function MergePanel() {
           });
         }
         if (outcome.imported.length > 0) {
-          notify(
-            'success',
-            translate('Added {count} document(s).', { count: outcome.imported.length })
-          );
+          notify('success', tPlural('Added {count} documents.', outcome.imported.length));
         }
       });
     } catch (err) {
@@ -104,7 +106,7 @@ export function MergePanel() {
                 <span className={panelStyles.listRowText}>
                   {index + 1}. {source.name}
                 </span>
-                <span>{source.pageCount}p</span>
+                <span>{t('{count}p', { count: source.pageCount })}</span>
               </li>
             ))}
           </ol>

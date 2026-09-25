@@ -1,8 +1,15 @@
 /**
  * ACC-02 — read the document's extracted text aloud via the Web Speech
- * Synthesis API. Every voice it can use is on-device (the OS's or browser's
- * own), so this never fetches anything — same invariant as everything else here,
- * just enforced by what the API is capable of rather than by a check.
+ * Synthesis API.
+ *
+ * Audit 2026-09-25 PLT-5: not every speech-synthesis voice is on-device.
+ * Chrome's "Google …" voices (the default on ChromeOS, and on Linux without
+ * speech-dispatcher) synthesise on Google's servers, so leaving
+ * `utterance.voice` unset could send the document's text off the device —
+ * invisibly to the page's CSP, DevTools, and every test that watches requests.
+ * So this panel only ever speaks with a voice whose `localService` is `true`,
+ * always sets it explicitly, and is disabled with an explanation when the
+ * browser offers no local voice at all.
  */
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { ChevronLeft, ChevronRight, Pause, Play, Square } from 'lucide-preact';
@@ -10,14 +17,32 @@ import { activeDoc } from '../../../core/store';
 import { currentDocumentBytes, extractPageText } from '../../../core/operations';
 import { Button } from '../../components/Button';
 import { IconButton } from '../../components/IconButton';
-import { Field, Slider } from '../../components/Field';
+import { Field, Select, Slider } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
 import { useJob } from '../../useJob';
 import { useTranslation } from '../../../core/i18n';
-import { readAloudProgress, readAloudRate } from './state';
+import { readAloudProgress, readAloudRate, readAloudVoiceUri } from './state';
+import { localVoices, pickLocalVoice } from './voices';
+import { SpeechSession } from './speech-session';
 
 function hasSpeechSynthesis(): boolean {
   return typeof window !== 'undefined' && 'speechSynthesis' in window;
+}
+
+/** The browser's local voices, kept current (Chrome populates them asynchronously). */
+function useLocalVoices(): SpeechSynthesisVoice[] {
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>(() =>
+    hasSpeechSynthesis() ? localVoices(window.speechSynthesis.getVoices()) : []
+  );
+  useEffect(() => {
+    if (!hasSpeechSynthesis()) return;
+    const synth = window.speechSynthesis;
+    const refresh = () => setVoices(localVoices(synth.getVoices()));
+    refresh();
+    synth.addEventListener('voiceschanged', refresh);
+    return () => synth.removeEventListener('voiceschanged', refresh);
+  }, []);
+  return voices;
 }
 
 export function ReadAloudPanel() {
@@ -26,14 +51,25 @@ export function ReadAloudPanel() {
   const { run } = useJob();
   const [bytes, setBytes] = useState<Uint8Array | null>(null);
   const bytesDocId = useRef<string | null>(null);
-  const currentUtterance = useRef<SpeechSynthesisUtterance | null>(null);
+  // UI-15 — decides which speech request may still act; one per mount.
+  const [session] = useState(() => new SpeechSession());
   const progress = readAloudProgress.value;
+  const voices = useLocalVoices();
+  const voice = pickLocalVoice(
+    voices,
+    readAloudVoiceUri.value,
+    typeof navigator !== 'undefined' ? navigator.language : 'en'
+  );
 
   // Leaving the tool (or the document changing) must not leave audio playing
-  // over whatever the user looks at next.
+  // over whatever the user looks at next. Idle and no current utterance
+  // *before* the cancel (UI-15): Chrome answers cancel() with `onend`, which
+  // would otherwise read as "page finished" and advance to the next one.
   useEffect(
     () => () => {
-      if (hasSpeechSynthesis()) window.speechSynthesis.cancel();
+      session.dispose(hasSpeechSynthesis() ? window.speechSynthesis : null, () => {
+        readAloudProgress.value = { ...readAloudProgress.value, status: 'idle', note: null };
+      });
     },
     []
   );
@@ -41,8 +77,9 @@ export function ReadAloudPanel() {
     if (bytesDocId.current !== (doc?.id ?? null)) {
       setBytes(null);
       bytesDocId.current = doc?.id ?? null;
-      if (hasSpeechSynthesis()) window.speechSynthesis.cancel();
-      readAloudProgress.value = { status: 'idle', pageIndex: 0, note: null };
+      session.stop(hasSpeechSynthesis() ? window.speechSynthesis : null, () => {
+        readAloudProgress.value = { status: 'idle', pageIndex: 0, note: null };
+      });
     }
   }, [doc?.id]);
 
@@ -60,9 +97,24 @@ export function ReadAloudPanel() {
     );
   }
 
+  if (!voice) {
+    return (
+      <div className={panelStyles.section}>
+        <p className={panelStyles.description}>
+          {t(
+            'Read-aloud is off: this browser offers no on-device voice. Its other voices ' +
+              'synthesise speech on a remote server, which would send the text of your document ' +
+              'off this device, so Stapler will not use them. Install a speech voice in your ' +
+              'operating system settings, then reopen this tool.'
+          )}
+        </p>
+      </div>
+    );
+  }
+
   const ensureBytes = async (): Promise<Uint8Array | null> => {
     if (bytes) return bytes;
-    const fetched = await run({ label: 'Preparing text', scope: 'read-aloud.prepare' }, job =>
+    const fetched = await run({ label: t('Preparing text'), scope: 'read-aloud.prepare' }, job =>
       currentDocumentBytes(job)
     );
     if (fetched) setBytes(fetched);
@@ -70,7 +122,11 @@ export function ReadAloudPanel() {
   };
 
   const speakPage = async (pageIndex: number, currentBytes: Uint8Array) => {
+    // UI-15 — a Stop, another page, or leaving the tool while this page's text
+    // is being extracted supersedes this request; it must not speak late.
+    const token = session.begin();
     const layout = await extractPageText(currentBytes, pageIndex, 'text');
+    if (!session.isLive(token)) return;
     const text = layout.replace(/\s+/g, ' ').trim();
 
     if (!text) {
@@ -85,8 +141,11 @@ export function ReadAloudPanel() {
 
     readAloudProgress.value = { status: 'playing', pageIndex, note: null };
     const utterance = new SpeechSynthesisUtterance(text);
+    // Always explicit, and always a local voice (PLT-5): an unset voice lets
+    // the browser fall back to its default, which may be a server-side one.
+    utterance.voice = voice;
+    utterance.lang = voice.lang;
     utterance.rate = readAloudRate.value;
-    currentUtterance.current = utterance;
     utterance.onend = () => {
       // A stale utterance's `onend` can still fire after Stop or after the user
       // has already moved to a different page by hand — only auto-advance if
@@ -96,7 +155,7 @@ export function ReadAloudPanel() {
       // touching either, and Chrome fires `onend` — not `onerror` — for the
       // one `cancel()` merely interrupted. Only the utterance that is still
       // the current one actually reached the end of its text.
-      if (currentUtterance.current !== utterance) return;
+      if (!session.finished(utterance)) return;
       if (
         readAloudProgress.value.status === 'playing' &&
         readAloudProgress.value.pageIndex === pageIndex
@@ -104,15 +163,15 @@ export function ReadAloudPanel() {
         goToPage(pageIndex + 1, currentBytes);
       }
     };
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utterance);
+    session.speak(window.speechSynthesis, token, utterance);
   };
 
   const goToPage = (pageIndex: number, currentBytes: Uint8Array) => {
     if (pageIndex < 0) return;
     if (pageIndex >= doc.pages.length) {
-      window.speechSynthesis.cancel();
-      readAloudProgress.value = { status: 'idle', pageIndex: doc.pages.length - 1, note: null };
+      session.stop(window.speechSynthesis, () => {
+        readAloudProgress.value = { status: 'idle', pageIndex: doc.pages.length - 1, note: null };
+      });
       return;
     }
     void speakPage(pageIndex, currentBytes);
@@ -134,8 +193,9 @@ export function ReadAloudPanel() {
   };
 
   const handleStop = () => {
-    window.speechSynthesis.cancel();
-    readAloudProgress.value = { status: 'idle', pageIndex: progress.pageIndex, note: null };
+    session.stop(window.speechSynthesis, () => {
+      readAloudProgress.value = { status: 'idle', pageIndex: progress.pageIndex, note: null };
+    });
   };
 
   const handleStep = async (delta: 1 | -1) => {
@@ -191,6 +251,26 @@ export function ReadAloudPanel() {
           disabled={progress.pageIndex >= doc.pages.length - 1}
         />
       </div>
+
+      {voices.length > 1 && (
+        <div className={panelStyles.section}>
+          <Field label={t('Voice (on-device only)')}>
+            {id => (
+              <Select
+                id={id}
+                value={voice.voiceURI}
+                options={voices.map(option => ({
+                  value: option.voiceURI,
+                  label: `${option.name} (${option.lang})`
+                }))}
+                onChange={uri => {
+                  readAloudVoiceUri.value = uri;
+                }}
+              />
+            )}
+          </Field>
+        </div>
+      )}
 
       <div className={panelStyles.section}>
         <Field label={t('Speed ({rate}x)', { rate: readAloudRate.value.toFixed(2) })}>
