@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../src/core/db', () => ({
   readSetting: vi.fn(async () => undefined),
+  readSettingResult: vi.fn(async () => ({ ok: true, value: undefined })),
   writeSetting: vi.fn(async () => {})
 }));
 

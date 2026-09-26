@@ -84,6 +84,7 @@ import {
   PDFDocument,
   PDFDropdown,
   PDFName,
+  PDFNull,
   PDFNumber,
   PDFObjectCopier,
   type PDFObject,
@@ -118,6 +119,7 @@ import { checkpoint, releaseJobHandlesAfterCall, subJob } from './protocol';
 import { corrupt, fromUnknown, internal, unsupported } from '../errors';
 import { loadPdfDocument, loadPdfDocumentWithRestrictions } from '../pdf/load';
 import type { ImagesToPdfOptions } from '../operations';
+import { drawPlacedImage, embedPdfImage, type PdfImageSource } from '../image-embed';
 import type { ImageResultStat } from '../compress-report';
 import { UNDECODABLE_FILTERS } from '../compress-plan';
 import { DOC_HAIRLINE_RGB, DOC_INK_RGB, DOC_REDACT_RGB } from '../doc-colors';
@@ -700,7 +702,7 @@ export interface ProcessJob extends LocaleAware {
     job?: JobHandle
   ): Promise<{ bytes: Uint8Array; keptOriginal: boolean; imageStats: ImageResultStat[] }>;
   imagesToPdf(
-    images: Uint8Array[],
+    images: PdfImageSource[],
     options?: ImagesToPdfOptions,
     job?: JobHandle
   ): Promise<Uint8Array>;
@@ -857,10 +859,15 @@ export interface ProcessJob extends LocaleAware {
   /**
    * M7 — the verifier's defence in depth: every string and every decoded
    * text-bearing stream in the file is searched for `needles`, and every
-   * `/Type /Page` dictionary outside the page tree is counted. See
+   * `/Type /Page` dictionary outside the page tree is counted. Content streams
+   * of `markedPages` that cannot be decoded are reported (N-4). See
    * `core/pdf/residual-text.ts`.
    */
-  scanResidualText(bytes: Uint8Array, needles: string[]): Promise<ResidualTextScan>;
+  scanResidualText(
+    bytes: Uint8Array,
+    needles: string[],
+    markedPages?: number[]
+  ): Promise<ResidualTextScan>;
   /**
    * OCR-01 — writes recognised words back as an invisible text layer.
    *
@@ -1235,6 +1242,16 @@ async function applyNUp(
   for (const original of originalPages) {
     for (const key of ['Annots', 'B', 'Thumb', 'PieceInfo', 'Metadata']) {
       original.node.delete(PDFName.of(key));
+    }
+    // A page with no `/Contents` is valid PDF (a blank page), but pdf-lib's
+    // embedPage throws "Can't embed page with missing Contents" and the whole
+    // N-up failed (found by the 2026-09-26 master-vs-HEAD differential run;
+    // present on master too). An empty stream embeds as the blank cell it is.
+    if (!original.node.get(PDFName.of('Contents'))) {
+      original.node.set(
+        PDFName.of('Contents'),
+        original.doc.context.register(original.doc.context.stream(new Uint8Array(0)))
+      );
     }
   }
   const embeddedPages = await finalDoc.embedPages(
@@ -5664,7 +5681,11 @@ Q
     }
 
     const out = await PDFDocument.create();
-    preserveDocumentCatalog(source, out);
+    // The catalog is carried further down, through the page-premapped copier
+    // (N-1): copied here with a copier of its own, every bookmark destination
+    // dragged in a full orphan copy of its target page — original content and
+    // full-resolution images — and the never-grow gate then discarded the
+    // compression of any bookmarked document.
     const total = source.getPageCount();
 
     /*
@@ -5738,6 +5759,7 @@ Q
     const reserved = new Map<number, PDFRef>();
     for (let i = 0; i < total; i++) reserved.set(i, reservePageRef(out));
     premapSourcePages(copier, source, reserved, tombstone);
+    preserveDocumentCatalog(source, out, copier);
     const copies: PDFPage[] = [];
     for (const idx of kept) {
       copies.push(copyPageInto(copier, source.getPage(idx), reserved.get(idx)!, out));
@@ -5887,10 +5909,11 @@ Q
         i / images.length,
         translate('Adding image {current} of {total}', { current: i + 1, total: images.length })
       );
-      // JPEG, or PNG from the lossless import path (CONV-10) — told apart by
-      // the PNG signature's first bytes.
-      const isPng = images[i][0] === 0x89 && images[i][1] === 0x50 && images[i][2] === 0x4e;
-      const embedded = isPng ? await doc.embedPng(images[i]) : await doc.embedJpg(images[i]);
+      // JPEG or PNG, told apart by signature; a passed-through JPEG carries
+      // the EXIF orientation it still needs, applied in the placement matrix
+      // rather than by re-encoding (CONV-10, `image-embed.ts`). `embedded`'s
+      // width/height are the *displayed* size.
+      const embedded = await embedPdfImage(doc, images[i]);
 
       let pageWidth = embedded.width;
       let pageHeight = embedded.height;
@@ -5937,7 +5960,7 @@ Q
       const x = margin + (availableWidth - drawWidth) / 2;
       const y = margin + (availableHeight - drawHeight) / 2;
 
-      page.drawImage(embedded, { x, y, width: drawWidth, height: drawHeight });
+      drawPlacedImage(page, embedded, { x, y, width: drawWidth, height: drawHeight });
     }
     return transfer(await pseudoLinearize(doc).save({ useObjectStreams: true }));
   },
@@ -6415,7 +6438,23 @@ Q
       if (s.hasXmp) page.node.delete(PDFName.of('Metadata'));
     }
 
+    if (s.hasXmp) {
+      // Every XMP packet, not only the document's and the pages': an image or
+      // font carries its own (`xmp:CreatorTool`, author, source file path),
+      // and a redaction's residual scan reads them as text.
+      for (const [, obj] of doc.context.enumerateIndirectObjects()) {
+        const dict = obj instanceof PDFStream ? obj.dict : obj;
+        if (dict instanceof PDFDict) dict.delete(PDFName.of('Metadata'));
+      }
+    }
+
     if (s.hasEmbeddedJavaScript) {
+      // R-PDF-2: inline actions first. The rebuild carries bookmarks, named
+      // destinations, article threads and the structure tree, so a
+      // `/A << /S /JavaScript … >>` written *directly* into an outline item,
+      // an annotation or an `/AA` dictionary would otherwise ride along — the
+      // loop below only ever saw indirect action objects.
+      purgeJavaScriptActions(doc);
       for (const [ref, obj] of doc.context.enumerateIndirectObjects()) {
         if (obj instanceof PDFDict && isJavaScriptAction(obj)) doc.context.delete(ref);
       }
@@ -6935,8 +6974,8 @@ Q
     return transfer(await pseudoLinearize(out).save({ useObjectStreams: true }));
   },
 
-  async scanResidualText(bytes, needles) {
-    return scanResidualText(bytes, needles, load);
+  async scanResidualText(bytes, needles, markedPages) {
+    return scanResidualText(bytes, needles, load, markedPages ?? []);
   },
 
   async collectOffPageText(bytes) {
@@ -8684,6 +8723,62 @@ function localizeContentsArray(page: PDFPage, context: PDFContext): void {
   const local = PDFArray.withContext(context);
   for (let i = 0; i < array.size(); i++) local.push(array.get(i));
   page.node.set(PDFName.of('Contents'), local);
+}
+
+/**
+ * R-PDF-2 — removes every reference to a JavaScript action reachable from the
+ * catalog, whether the action is an indirect object or written inline: the
+ * `/A`, `/OpenAction` or `/AA` entry that names it is deleted, a `/Next` chain
+ * loses the JavaScript links, and any other array slot becomes `null`. A
+ * Rendition (or any) action carrying a `/JS` script counts as JavaScript.
+ * Returns how many references were removed.
+ */
+function purgeJavaScriptActions(doc: PDFDocument): number {
+  const context = doc.context;
+  const isScript = (value: unknown): boolean => {
+    const dict = value instanceof PDFRef ? context.lookup(value) : value;
+    if (!(dict instanceof PDFDict)) return false;
+    if (isJavaScriptAction(dict)) return true;
+    return dict.get(PDFName.of('S')) instanceof PDFName && dict.has(PDFName.of('JS'));
+  };
+  const visited = new Set<unknown>();
+  let removed = 0;
+  const visit = (value: unknown, key: string | null): void => {
+    const target = value instanceof PDFRef ? context.lookup(value) : value;
+    if (visited.has(target)) return;
+    if (target instanceof PDFStream) {
+      visited.add(target);
+      visit(target.dict, null);
+      return;
+    }
+    if (target instanceof PDFDict) {
+      visited.add(target);
+      for (const [entryKey, entry] of target.entries()) {
+        if (isScript(entry)) {
+          target.delete(entryKey);
+          removed += 1;
+        } else {
+          visit(entry, entryKey.decodeText());
+        }
+      }
+      return;
+    }
+    if (target instanceof PDFArray) {
+      visited.add(target);
+      for (let i = target.size() - 1; i >= 0; i--) {
+        const entry = target.get(i);
+        if (!isScript(entry)) {
+          visit(entry, null);
+          continue;
+        }
+        if (key === 'Next') target.remove(i);
+        else target.set(i, PDFNull);
+        removed += 1;
+      }
+    }
+  };
+  visit(doc.catalog, null);
+  return removed;
 }
 
 function isJavaScriptAction(dict: PDFDict): boolean {

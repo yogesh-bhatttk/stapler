@@ -32,4 +32,13 @@ describe('toast cap (UI-17)', () => {
     expect(toasts.value.at(-1)?.title).toBe('note 9');
     toasts.value = [];
   });
+
+  it('never lets an info note push out an unread error (R-UI-6)', async () => {
+    const { notify } = await import('../../src/core/notify');
+    toasts.value = [];
+    for (let i = 0; i < 4; i++) notify('danger', `error ${i}`);
+    notify('info', 'a note', { timeout: 0 });
+    expect(toasts.value.map(t => t.title)).toEqual(['error 0', 'error 1', 'error 2', 'error 3']);
+    toasts.value = [];
+  });
 });

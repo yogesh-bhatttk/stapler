@@ -468,8 +468,51 @@ describe('applyRedactions blocks on the residual scan (M7)', () => {
     const scan = vi.fn(async () => ({ found: ['Secret'], orphanPages: 0, undecodableStreams: 0 }));
     stubs.process.scanResidualText = scan;
     const outcome = await applyRedactions(new Uint8Array([9, 9]), [{ ...REGION, text: 'secret' }]);
-    expect(scan.mock.calls[0]).toEqual([expect.anything(), ['secret']]);
+    expect(scan.mock.calls[0]).toEqual([expect.anything(), ['secret'], [0]]);
     expect(outcome.verified).toBe(false);
     expect(outcome.verdicts[0].detail).toMatch(/inside the file's data/);
+  });
+  it('says a word still drawn on another page is "elsewhere", not hidden file data (U1)', async () => {
+    wireStubs(cleanPixels);
+    stubs.render.documentText = vi.fn(async () => ['', 'the secret is on page two']);
+    stubs.process.scanResidualText = vi.fn(async () => ({
+      found: ['secret'],
+      orphanPages: 0,
+      undecodableStreams: 0
+    }));
+    const outcome = await applyRedactions(new Uint8Array([9, 9]), [{ ...REGION, text: 'secret' }]);
+    expect(outcome.verified).toBe(false);
+    expect(outcome.verdicts[0].detail).toMatch(/elsewhere in the document/);
+    expect(outcome.verdicts[0].detail).not.toMatch(/no page shows it/);
+  });
+
+  it('passes the marked pages to the scan, and fails a mark whose page content could not be decoded (N-4)', async () => {
+    wireStubs(cleanPixels);
+    const scan = vi.fn(async () => ({
+      found: [],
+      orphanPages: 0,
+      undecodableStreams: 1,
+      undecodablePages: [0],
+      undecodableFilters: { 0: 'FooDecode' }
+    }));
+    stubs.process.scanResidualText = scan;
+    const outcome = await applyRedactions(new Uint8Array([9, 9]), [REGION]);
+    expect(scan.mock.calls[0]).toEqual([expect.anything(), [], [0]]);
+    expect(outcome.verified).toBe(false);
+    expect(outcome.verdicts[0].detail).toMatch(/not proven/);
+    expect(outcome.verdicts[0].detail).toContain('FooDecode');
+  });
+
+  it('does not fail a mark because a stream on another page could not be decoded (N-4)', async () => {
+    wireStubs(cleanPixels);
+    stubs.process.scanResidualText = vi.fn(async () => ({
+      found: [],
+      orphanPages: 0,
+      undecodableStreams: 1,
+      undecodablePages: [3],
+      undecodableFilters: { 3: 'FooDecode' }
+    }));
+    const outcome = await applyRedactions(new Uint8Array([9, 9]), [REGION]);
+    expect(outcome.verified).toBe(true);
   });
 });

@@ -70,7 +70,7 @@ export async function runImportJob<T>(
 ): Promise<T | undefined> {
   if (activeJob.value !== null) {
     notify('info', translate('Finish or cancel the current operation first.'), {
-      detail: `"${activeJob.value.label}" is still running.`
+      detail: translate('"{label}" is still running.', { label: activeJob.value.label })
     });
     return undefined;
   }

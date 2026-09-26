@@ -223,6 +223,12 @@ async function forgetUploadedModel(code: string): Promise<void> {
  * if they aborted a run that had already started — the two are different events
  * and the caller reports them differently.
  */
+/** The DPI a bitmap of `bitmapWidth` px represents for a page `pageWidth` pt wide. */
+export function effectiveDpi(bitmapWidth: number, pageWidth: number | undefined): number {
+  if (!pageWidth || pageWidth <= 0 || !bitmapWidth) return OCR_DPI;
+  return (72 * bitmapWidth) / pageWidth;
+}
+
 export async function runOcr(
   bytes: Uint8Array,
   pageCount: number,
@@ -381,7 +387,13 @@ export async function runOcr(
             pageIndex,
             bitmapWidth: width,
             bitmapHeight: height,
-            dpi: OCR_DPI,
+            // The DPI the page was *actually* rendered at. The render worker
+            // clamps very large pages (A1, A0) to its pixel ceiling, so the
+            // bitmap can be smaller than OCR_DPI asked for; placing words with
+            // the requested DPI put every word on an A0 page at ~69% of its
+            // position (regression review R-RT-3). `pageSizes` is the viewport
+            // at scale 1 — the same box and rotation the bitmap was rendered in.
+            dpi: effectiveDpi(width, info.pageSizes?.[pageIndex]?.width),
             words: result.words
           });
         } catch (err) {

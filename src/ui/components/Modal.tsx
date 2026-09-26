@@ -36,6 +36,25 @@ export interface ModalProps {
  */
 const openModals: symbol[] = [];
 
+const requestKeys = new WeakMap<object, number>();
+let nextRequestKey = 1;
+
+/**
+ * A stable React `key` for a queued request object. The Modal's setup (focus,
+ * key handling) runs once per mount, so a dialog that shows the *next* queued
+ * request in the same component instance must remount — otherwise focus stays
+ * on the previous dialog's button and a double Enter can confirm the second
+ * (a danger confirmation) unseen (regression review R-UI-4).
+ */
+export function requestKey(request: object): number {
+  let key = requestKeys.get(request);
+  if (key === undefined) {
+    key = nextRequestKey++;
+    requestKeys.set(request, key);
+  }
+  return key;
+}
+
 /** True while any dialog is open; global shortcuts stand down so nothing acts behind it. */
 export function isModalOpen(): boolean {
   return openModals.length > 0;

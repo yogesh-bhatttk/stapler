@@ -670,6 +670,8 @@
   "Margin (pt)": "Margin (pt)",
   "Quality": "Kualitas",
   "100% (Lossless)": "100% (Lossless)",
+  "Maximum (originals kept where possible)": "Maksimum (asli dipertahankan bila memungkinkan)",
+  "JPEG photos are embedded exactly as they are, and PNG and GIF images stay lossless. HEIC, TIFF and lossy WebP photos are saved as 95% JPEG when that is smaller.": "Foto JPEG disematkan persis apa adanya, dan gambar PNG serta GIF tetap lossless. Foto HEIC, TIFF, dan WebP lossy disimpan sebagai JPEG 95% bila hasilnya lebih kecil.",
   "90% (High)": "90% (Tinggi)",
   "75% (Medium)": "75% (Sedang)",
   "50% (Low)": "50% (Rendah)",
@@ -1921,8 +1923,8 @@
   "{count} formula cells carried no cached result, so there is nothing to draw for them. Excel stores the last computed value alongside each formula; a file written by a tool that does not, or one saved before it recalculated, leaves the cell blank. Nothing is calculated here._other": "{count} sel rumus tidak membawa hasil tersimpan, sehingga tidak ada yang dapat digambar untuknya. Excel menyimpan nilai terakhir yang dihitung bersama setiap rumus; file yang ditulis oleh alat yang tidak melakukannya, atau yang disimpan sebelum dihitung ulang, membuat selnya kosong. Tidak ada yang dihitung di sini.",
   "{count} paragraphs had more than {max} emphasis markers (*, _ or ~), so their emphasis was shown as plain characters instead of being interpreted._one": "{count} paragraf memiliki lebih dari {max} penanda penekanan (*, _ atau ~), sehingga penekanannya ditampilkan sebagai karakter biasa alih-alih ditafsirkan.",
   "{count} paragraphs had more than {max} emphasis markers (*, _ or ~), so their emphasis was shown as plain characters instead of being interpreted._other": "{count} paragraf memiliki lebih dari {max} penanda penekanan (*, _ atau ~), sehingga penekanannya ditampilkan sebagai karakter biasa alih-alih ditafsirkan.",
-  "{count} links were kept as plain text only, because only web (http/https) and email (mailto) links are made clickable in the PDF._one": "{count} tautan dipertahankan hanya sebagai teks biasa, karena hanya tautan web (http/https) dan email (mailto) yang dibuat dapat diklik di PDF.",
-  "{count} links were kept as plain text only, because only web (http/https) and email (mailto) links are made clickable in the PDF._other": "{count} tautan dipertahankan hanya sebagai teks biasa, karena hanya tautan web (http/https) dan email (mailto) yang dibuat dapat diklik di PDF.",
+  "{count} links were kept as plain text only, because only web (http/https), email (mailto) and phone (tel) links are made clickable in the PDF._one": "{count} tautan dipertahankan hanya sebagai teks biasa, karena hanya tautan web (http/https), email (mailto), dan telepon (tel) yang dibuat dapat diklik di PDF.",
+  "{count} links were kept as plain text only, because only web (http/https), email (mailto) and phone (tel) links are made clickable in the PDF._other": "{count} tautan dipertahankan hanya sebagai teks biasa, karena hanya tautan web (http/https), email (mailto), dan telepon (tel) yang dibuat dapat diklik di PDF.",
   "{count} images were left out (Markdown images are not embedded); the alt text is shown in their place._one": "{count} gambar tidak disertakan (gambar Markdown tidak ditanam); teks alternatifnya ditampilkan sebagai gantinya.",
   "{count} images were left out (Markdown images are not embedded); the alt text is shown in their place._other": "{count} gambar tidak disertakan (gambar Markdown tidak ditanam); teks alternatifnya ditampilkan sebagai gantinya.",
   "the substitute font has no glyph for {glyphs} and {count} more_one": "font pengganti tidak memiliki glyph untuk {glyphs} dan {count} lainnya",
@@ -1930,5 +1932,9 @@
   "{count} cells were longer than Excel's {max}-character limit and were truncated to fit._one": "{count} sel melebihi batas {max} karakter Excel dan dipotong agar muat.",
   "{count} cells were longer than Excel's {max}-character limit and were truncated to fit._other": "{count} sel melebihi batas {max} karakter Excel dan dipotong agar muat.",
   "Drawing {count} form fields_one": "Menggambar {count} bidang formulir",
-  "Drawing {count} form fields_other": "Menggambar {count} bidang formulir"
+  "Drawing {count} form fields_other": "Menggambar {count} bidang formulir",
+  "The previous session could not be restored.": "Sesi sebelumnya tidak dapat dipulihkan.",
+  "Its files are no longer in browser storage.": "File-filenya sudah tidak ada di penyimpanan browser.",
+  "Some saved shortcuts were reset because they would block keyboard navigation.": "Beberapa pintasan yang disimpan direset karena akan menghalangi navigasi keyboard.",
+  "Set them again under Custom shortcuts.": "Atur ulang di Pintasan kustom."
 }

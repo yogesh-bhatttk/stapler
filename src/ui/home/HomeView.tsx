@@ -62,12 +62,10 @@ export function HomeView() {
     // While searching, a single ranked list beats four sparse groups. The
     // haystack holds the translated text *and* the English, so a query in
     // either language finds the tool.
-    const matches = fuzzyRank(
-      TOOLS,
-      query,
-      tool =>
-        `${t(tool.title)} ${t(toolGroupLabel(tool.group))} ${t(tool.summary)} ${tool.title} ${tool.group}`
-    );
+    const matches = fuzzyRank(TOOLS, query, tool => [
+      `${t(tool.title)} ${t(toolGroupLabel(tool.group))} ${t(tool.summary)}`,
+      `${tool.title} ${tool.group} ${tool.summary}`
+    ]);
     return matches.length > 0 ? [{ group: 'Matches', label: t('Matches'), tools: matches }] : [];
     // `t` is a new function each render, so this recomputes whenever the
     // locale (or anything else) re-renders the view — cheap for ~40 tools.

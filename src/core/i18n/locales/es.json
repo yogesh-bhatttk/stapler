@@ -670,6 +670,8 @@
   "Margin (pt)": "Margen (pt)",
   "Quality": "Calidad",
   "100% (Lossless)": "100 % (sin pérdida)",
+  "Maximum (originals kept where possible)": "Máxima (originales conservados cuando es posible)",
+  "JPEG photos are embedded exactly as they are, and PNG and GIF images stay lossless. HEIC, TIFF and lossy WebP photos are saved as 95% JPEG when that is smaller.": "Las fotos JPEG se incrustan tal cual y las imágenes PNG y GIF se mantienen sin pérdida. Las fotos HEIC, TIFF y WebP con pérdida se guardan como JPEG al 95 % cuando así ocupan menos.",
   "90% (High)": "90 % (alta)",
   "75% (Medium)": "75 % (media)",
   "50% (Low)": "50 % (baja)",
@@ -2037,9 +2039,9 @@
   "{count} paragraphs had more than {max} emphasis markers (*, _ or ~), so their emphasis was shown as plain characters instead of being interpreted._one": "{count} párrafo tenía más de {max} marcas de énfasis (*, _ o ~), así que su énfasis se mostró como caracteres sin formato en lugar de interpretarse.",
   "{count} paragraphs had more than {max} emphasis markers (*, _ or ~), so their emphasis was shown as plain characters instead of being interpreted._many": "{count} párrafos tenían más de {max} marcas de énfasis (*, _ o ~), así que su énfasis se mostró como caracteres sin formato en lugar de interpretarse.",
   "{count} paragraphs had more than {max} emphasis markers (*, _ or ~), so their emphasis was shown as plain characters instead of being interpreted._other": "{count} párrafos tenían más de {max} marcas de énfasis (*, _ o ~), así que su énfasis se mostró como caracteres sin formato en lugar de interpretarse.",
-  "{count} links were kept as plain text only, because only web (http/https) and email (mailto) links are made clickable in the PDF._one": "{count} enlace se conservó solo como texto sin formato, porque en el PDF solo se hacen clicables los enlaces web (http/https) y de correo electrónico (mailto).",
-  "{count} links were kept as plain text only, because only web (http/https) and email (mailto) links are made clickable in the PDF._many": "{count} enlaces se conservaron solo como texto sin formato, porque en el PDF solo se hacen clicables los enlaces web (http/https) y de correo electrónico (mailto).",
-  "{count} links were kept as plain text only, because only web (http/https) and email (mailto) links are made clickable in the PDF._other": "{count} enlaces se conservaron solo como texto sin formato, porque en el PDF solo se hacen clicables los enlaces web (http/https) y de correo electrónico (mailto).",
+  "{count} links were kept as plain text only, because only web (http/https), email (mailto) and phone (tel) links are made clickable in the PDF._one": "{count} enlace se conservó solo como texto sin formato, porque en el PDF solo se hacen clicables los enlaces web (http/https), de correo electrónico (mailto) y de teléfono (tel).",
+  "{count} links were kept as plain text only, because only web (http/https), email (mailto) and phone (tel) links are made clickable in the PDF._many": "{count} enlaces se conservaron solo como texto sin formato, porque en el PDF solo se hacen clicables los enlaces web (http/https), de correo electrónico (mailto) y de teléfono (tel).",
+  "{count} links were kept as plain text only, because only web (http/https), email (mailto) and phone (tel) links are made clickable in the PDF._other": "{count} enlaces se conservaron solo como texto sin formato, porque en el PDF solo se hacen clicables los enlaces web (http/https), de correo electrónico (mailto) y de teléfono (tel).",
   "{count} images were left out (Markdown images are not embedded); the alt text is shown in their place._one": "Se omitió {count} imagen (las imágenes de Markdown no se incrustan); en su lugar se muestra el texto alternativo.",
   "{count} images were left out (Markdown images are not embedded); the alt text is shown in their place._many": "Se omitieron {count} imágenes (las imágenes de Markdown no se incrustan); en su lugar se muestra el texto alternativo.",
   "{count} images were left out (Markdown images are not embedded); the alt text is shown in their place._other": "Se omitieron {count} imágenes (las imágenes de Markdown no se incrustan); en su lugar se muestra el texto alternativo.",
@@ -2051,5 +2053,9 @@
   "{count} cells were longer than Excel's {max}-character limit and were truncated to fit._other": "{count} celdas superaban el límite de {max} caracteres de Excel y se truncaron para ajustarse.",
   "Drawing {count} form fields_one": "Dibujando {count} campo de formulario",
   "Drawing {count} form fields_many": "Dibujando {count} campos de formulario",
-  "Drawing {count} form fields_other": "Dibujando {count} campos de formulario"
+  "Drawing {count} form fields_other": "Dibujando {count} campos de formulario",
+  "The previous session could not be restored.": "No se pudo restaurar la sesión anterior.",
+  "Its files are no longer in browser storage.": "Sus archivos ya no están en el almacenamiento del navegador.",
+  "Some saved shortcuts were reset because they would block keyboard navigation.": "Se restablecieron algunos atajos guardados porque bloquearían la navegación con el teclado.",
+  "Set them again under Custom shortcuts.": "Vuelve a configurarlos en Atajos personalizados."
 }

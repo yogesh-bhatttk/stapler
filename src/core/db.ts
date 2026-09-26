@@ -298,6 +298,19 @@ export async function deleteStoredSignature(id: string) {
 
 /* ---------------- settings ---------------- */
 
+/**
+ * A setting read that says whether storage answered at all. `readSetting`
+ * folds "storage unavailable or timed out" into `undefined`, which a caller
+ * that must not act on a missing record — session recovery — cannot tell
+ * apart from "no such record" (regression review R-RT-4).
+ */
+export async function readSettingResult<T>(
+  key: string
+): Promise<{ ok: boolean; value: T | undefined }> {
+  const result = await guard('db.readSetting', db => db.get('settings', key));
+  return { ok: result.ok, value: result.value as T | undefined };
+}
+
 export async function readSetting<T>(key: string): Promise<T | undefined> {
   return (await guard('db.readSetting', db => db.get('settings', key))).value as T | undefined;
 }

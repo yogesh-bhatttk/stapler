@@ -118,7 +118,10 @@ export const CommandPalette = forwardRef<HTMLDivElement, Record<string, never>>(
           commands.filter(command => command.enabled?.() ?? true),
           query,
           // The group is searchable too, so "document" surfaces everything in it.
-          command => `${command.title} ${command.group} ${command.english ?? ''}`
+          command =>
+            command.english
+              ? [`${command.title} ${command.group}`, command.english]
+              : `${command.title} ${command.group}`
         ),
       [commands, query]
     );

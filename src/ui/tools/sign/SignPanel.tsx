@@ -4,7 +4,7 @@
  * `Detect signature lines` previously passed the store document id to the render
  * worker, which expects its own handle, so it threw on every use.
  */
-import { useEffect } from 'preact/hooks';
+import { useEffect, useRef } from 'preact/hooks';
 import {
   Calendar,
   Check,
@@ -88,9 +88,16 @@ export function SignPanel() {
     void loadSignatures();
   }, []);
 
+  const fetchedFor = useRef<string | null>(null);
   const formFieldKey = (doc?.annotations ?? [])
     .filter(a => a.type.startsWith('form-'))
-    .map(a => `${a.id}:${a.pageKey}:${a.fieldName ?? ''}:${a.exportValue ?? ''}`)
+    // Geometry included: a moved or resized field must move its typeable
+    // input too (regression review R-UI-1).
+    .map(
+      a =>
+        `${a.id}:${a.pageKey}:${a.fieldName ?? ''}:${a.exportValue ?? ''}:` +
+        `${a.x}:${a.y}:${a.width}:${a.height}:${a.rotation ?? 0}`
+    )
     .join('|');
 
   useEffect(() => {
@@ -101,44 +108,56 @@ export function SignPanel() {
     }
     // Only query fields if the document properties imply they exist
     let cancelled = false;
-    // Cleared up front, so the previous document's fields are never shown (or
-    // filled) while this one's are fetched.
-    formFields.value = null;
-    signatureIntegrity.value = null;
-    void currentDocumentBytes().then(
-      bytes => {
-        getFormFields(bytes)
-          .then(fields => {
-            // Discard a response that resolves after `doc` has already moved on
-            // (switched tabs, or an edit landed) — otherwise a slow fetch for a
-            // document the user has left can clobber the fields shown/filled for
-            // whatever document is active now.
-            if (cancelled) return;
-            formFields.value = fields;
-          })
-          .catch(() => {
-            if (cancelled) return;
-            formFields.value = null;
-          });
-        // SGN-09 — a structural check only, independent of whether the document
-        // has *fillable* fields, so it runs alongside rather than inside the
-        // form-fields fetch above.
-        checkSignatureIntegrity(bytes)
-          .then(report => {
-            if (cancelled) return;
-            signatureIntegrity.value = report;
-          })
-          .catch(() => {
-            if (cancelled) return;
-            signatureIntegrity.value = null;
-          });
-      },
-      err => {
-        if (!cancelled) logEvent('warn', 'sign.fields', fromUnknown(err).message);
-      }
+    // Cleared up front only for a *different* document, so its fields are never
+    // shown (or filled) while this one's are fetched. For the same document the
+    // current fields stay until the refetch lands: clearing them unmounted any
+    // open input mid-typing (regression review R-UI-8).
+    if (fetchedFor.current !== doc.id) {
+      formFields.value = null;
+      signatureIntegrity.value = null;
+    }
+    fetchedFor.current = doc.id;
+    // Debounced, so dragging a field refetches once when it settles rather
+    // than recomposing the document on every pointer move.
+    const timer = setTimeout(
+      () =>
+        void currentDocumentBytes().then(
+          bytes => {
+            getFormFields(bytes)
+              .then(fields => {
+                // Discard a response that resolves after `doc` has already moved on
+                // (switched tabs, or an edit landed) — otherwise a slow fetch for a
+                // document the user has left can clobber the fields shown/filled for
+                // whatever document is active now.
+                if (cancelled) return;
+                formFields.value = fields;
+              })
+              .catch(() => {
+                if (cancelled) return;
+                formFields.value = null;
+              });
+            // SGN-09 — a structural check only, independent of whether the document
+            // has *fillable* fields, so it runs alongside rather than inside the
+            // form-fields fetch above.
+            checkSignatureIntegrity(bytes)
+              .then(report => {
+                if (cancelled) return;
+                signatureIntegrity.value = report;
+              })
+              .catch(() => {
+                if (cancelled) return;
+                signatureIntegrity.value = null;
+              });
+          },
+          err => {
+            if (!cancelled) logEvent('warn', 'sign.fields', fromUnknown(err).message);
+          }
+        ),
+      250
     );
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
     // Keyed on what can change the field list — the document, its pages, and
     // the form-field annotations it creates — not the whole `doc`: every

@@ -89,15 +89,22 @@ interface Instance<T> {
   /** Set by the `error` handler; never cleared — a dead instance stays dead. */
   dead: boolean;
   /**
-   * Rejects when the instance dies. Every call runs raced against this.
+   * Reject callbacks of the calls currently in flight on this instance.
    *
    * RT-1: Comlink's pending-call promises have no reject path at all — they
    * are `new Promise(resolve)` waiting for a reply message — so terminating
    * the worker left every in-flight `lease()` pending forever. `useJob`'s
    * `finally` then never ran, `activeJob` stayed set, and the whole UI
    * (undo, tab switch, every later job) stayed locked until a reload.
+   *
+   * A set, not one long-lived "death" promise raced against every call: a
+   * `Promise.race` against a promise that never settles keeps a reaction on
+   * it for the instance's lifetime, and that reaction kept every call's
+   * *result* reachable — 20 × 10 MB results held 200 MB until the worker
+   * died (regression review R-RT-1). Each entry is removed when its call
+   * settles.
    */
-  death: Promise<never>;
+  pending: Set<(err: Error) => void>;
   kill: (err: Error) => void;
   /**
    * With `syncLocale`, settles once the worker has applied the most recently
@@ -127,8 +134,27 @@ function raceDeath<T, R>(
   fn: (api: Comlink.Remote<T>) => Promise<R>
 ): Promise<R> {
   if (inst.dead) return Promise.reject(workerCrashed(name));
-  const call = inst.ready ? inst.ready.then(() => fn(inst.proxy)) : fn(inst.proxy);
-  return Promise.race([call, inst.death]);
+  return untilDeath(inst, () =>
+    inst.ready ? inst.ready.then(() => fn(inst.proxy)) : fn(inst.proxy)
+  );
+}
+
+/**
+ * Settles with `start()`'s promise, or rejects when the instance dies first.
+ * Registers its reject callback only while the call is in flight, so nothing
+ * retains the call (or its result) once it has settled.
+ */
+function untilDeath<T, R>(inst: Instance<T>, start: () => Promise<R>): Promise<R> {
+  return new Promise<R>((resolve, reject) => {
+    inst.pending.add(reject);
+    let call: Promise<R>;
+    try {
+      call = start();
+    } catch (err) {
+      call = Promise.reject(err);
+    }
+    call.then(resolve, reject).finally(() => inst.pending.delete(reject));
+  });
 }
 
 /**
@@ -139,7 +165,7 @@ function sendLocale<T>(inst: Instance<T>, locale: Locale): void {
   const proxy = inst.proxy as unknown as Comlink.Remote<LocaleAware>;
   const previous = inst.ready ?? Promise.resolve();
   inst.ready = previous
-    .then(() => Promise.race([proxy.setLocale(locale), inst.death]))
+    .then(() => (inst.dead ? undefined : untilDeath(inst, () => proxy.setLocale(locale))))
     .then(
       () => undefined,
       () => undefined
@@ -192,13 +218,11 @@ export function createWorkerClient<T>(
 
   const spawnInstance = (): Instance<T> => {
     const worker = spawn();
-    let kill: (err: Error) => void = () => {};
-    const death = new Promise<never>((_, reject) => {
-      kill = reject;
-    });
-    // Nobody may be racing against it when it rejects (an idle instance that
-    // crashes), which must not surface as an unhandled rejection.
-    death.catch(() => {});
+    const pending = new Set<(err: Error) => void>();
+    const kill = (err: Error) => {
+      for (const reject of [...pending]) reject(err);
+      pending.clear();
+    };
     const inst: Instance<T> = {
       worker,
       // Placeholder until Comlink.wrap runs; assigned immediately below, but the
@@ -207,7 +231,7 @@ export function createWorkerClient<T>(
       leases: 0,
       idleTimer: null,
       dead: false,
-      death,
+      pending,
       kill,
       ready: null
     };

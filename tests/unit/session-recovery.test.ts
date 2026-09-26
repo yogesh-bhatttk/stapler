@@ -12,6 +12,10 @@ const settings = new Map<string, unknown>();
 
 vi.mock('../../src/core/db', () => ({
   readSetting: vi.fn(async (key: string) => settings.get(key)),
+  readSettingResult: vi.fn(async (key: string) => ({
+    ok: true,
+    value: await (await import('../../src/core/db')).readSetting(key)
+  })),
   writeSetting: vi.fn(async (key: string, value: unknown) => {
     settings.set(key, value);
   })

@@ -19,6 +19,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const settings = new Map<string, unknown>();
 vi.mock('../../src/core/db', () => ({
   readSetting: vi.fn(async (key: string) => settings.get(key)),
+  readSettingResult: vi.fn(async (key: string) => ({
+    ok: true,
+    value: await (await import('../../src/core/db')).readSetting(key)
+  })),
   writeSetting: vi.fn(async (key: string, value: unknown) => {
     settings.set(key, value);
   })
@@ -558,7 +562,12 @@ describe('RT-23 / RT-4 / RT-14 — runStartupRecovery', () => {
           return undefined;
         }
         return callback(shared > 0 && options.ifAvailable ? null : {});
-      }
+      },
+      // The sweep decides "only tab alive" from the holders list (R-RT-2).
+      query: async () => ({
+        held: Array.from({ length: shared }, () => ({ name: 'stapler.workspace' })),
+        pending: []
+      })
     };
   }
 
@@ -637,6 +646,65 @@ describe('RT-23 / RT-4 / RT-14 — runStartupRecovery', () => {
     await recovery.runStartupRecovery(async () => true);
     expect(__memoryFallback.has('KEPT')).toBe(true);
     expect(__memoryFallback.has('ORPHAN')).toBe(false);
+  });
+
+  it('takes its tab lock before the restore prompt, so another tab cannot sweep under it (R-RT-2)', async () => {
+    const locks = fakeLocks(false);
+    nav.locks = locks;
+    await source('KEPT');
+    addDocument({
+      id: 'A',
+      name: 'a.pdf',
+      pages: makePageRefs('KEPT', 1),
+      annotations: [],
+      dirty: false
+    });
+    await saveSession();
+    documents.value = [];
+    sources.value = {};
+
+    let heldDuringPrompt = 0;
+    await recovery.runStartupRecovery(async () => {
+      heldDuringPrompt = (await locks.query()).held.length;
+      return true;
+    });
+    // Visible to any other tab's sweep for the whole time the prompt is up.
+    expect(heldDuringPrompt).toBe(1);
+    expect(documents.value.map(d => d.id)).toEqual(['A']);
+  });
+
+  it('never clears, sweeps or overwrites a session it could not read (R-RT-4)', async () => {
+    nav.locks = fakeLocks(false);
+    await source('KEPT');
+    addDocument({
+      id: 'A',
+      name: 'a.pdf',
+      pages: makePageRefs('KEPT', 1),
+      annotations: [],
+      dirty: false
+    });
+    await saveSession();
+    const saved = settings.get('session.recovery');
+    documents.value = [];
+    sources.value = {};
+
+    const db = await import('../../src/core/db');
+    vi.mocked(db.readSettingResult).mockResolvedValueOnce({ ok: false, value: undefined });
+    const confirm = vi.fn(async () => true);
+    try {
+      await recovery.runStartupRecovery(confirm);
+      expect(sessionRecoveryChecked.value).toBe(true);
+      expect(confirm).not.toHaveBeenCalled();
+      // The record and its bytes are untouched…
+      expect(settings.get('session.recovery')).toBe(saved);
+      expect(__memoryFallback.has('KEPT')).toBe(true);
+      // …and autosave cannot overwrite it this session.
+      expect(recovery.isAutosaveSuspended()).toBe(true);
+      await saveSession();
+      expect(settings.get('session.recovery')).toBe(saved);
+    } finally {
+      recovery.__resetAutosaveSuspendedForTests();
+    }
   });
 
   it('without the Web Locks API nothing is swept', async () => {

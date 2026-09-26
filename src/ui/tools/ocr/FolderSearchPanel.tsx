@@ -46,6 +46,9 @@ export function FolderSearchPanel() {
     try {
       const handle = await showDirectoryPicker({ mode: 'read' });
       if (handle) {
+        // Paths are relative to the picked folder: a second folder's
+        // `report.pdf` is a different file (regression review R-UI-5).
+        openedFromFolder.clear();
         setDirHandle(handle);
         setStatusText(t('Folder selected: {name}', { name: handle.name }));
       }

@@ -670,6 +670,8 @@
   "Margin (pt)": "边距（pt）",
   "Quality": "质量",
   "100% (Lossless)": "100%（无损）",
+  "Maximum (originals kept where possible)": "最高（尽可能保留原图）",
+  "JPEG photos are embedded exactly as they are, and PNG and GIF images stay lossless. HEIC, TIFF and lossy WebP photos are saved as 95% JPEG when that is smaller.": "JPEG 照片按原样嵌入，PNG 和 GIF 图像保持无损。HEIC、TIFF 和有损 WebP 照片在体积更小时保存为 95% 质量的 JPEG。",
   "90% (High)": "90%（高）",
   "75% (Medium)": "75%（中）",
   "50% (Low)": "50%（低）",
@@ -1921,8 +1923,8 @@
   "{count} formula cells carried no cached result, so there is nothing to draw for them. Excel stores the last computed value alongside each formula; a file written by a tool that does not, or one saved before it recalculated, leaves the cell blank. Nothing is calculated here._other": "有 {count} 个公式单元格没有缓存结果，因此没有可绘制的内容。Excel 会在每个公式旁存储最后一次计算的值；由不这样做的工具写入的文件，或在重新计算之前保存的文件，会使该单元格为空。此处不会进行任何计算。",
   "{count} paragraphs had more than {max} emphasis markers (*, _ or ~), so their emphasis was shown as plain characters instead of being interpreted._one": "有 {count} 个段落的强调标记（*、_ 或 ~）超过 {max} 个，因此其强调以普通字符显示，而不会被解析。",
   "{count} paragraphs had more than {max} emphasis markers (*, _ or ~), so their emphasis was shown as plain characters instead of being interpreted._other": "有 {count} 个段落的强调标记（*、_ 或 ~）超过 {max} 个，因此其强调以普通字符显示，而不会被解析。",
-  "{count} links were kept as plain text only, because only web (http/https) and email (mailto) links are made clickable in the PDF._one": "有 {count} 个链接仅以纯文本形式保留，因为 PDF 中只有网页（http/https）和电子邮件（mailto）链接会被设为可点击。",
-  "{count} links were kept as plain text only, because only web (http/https) and email (mailto) links are made clickable in the PDF._other": "有 {count} 个链接仅以纯文本形式保留，因为 PDF 中只有网页（http/https）和电子邮件（mailto）链接会被设为可点击。",
+  "{count} links were kept as plain text only, because only web (http/https), email (mailto) and phone (tel) links are made clickable in the PDF._one": "有 {count} 个链接仅以纯文本形式保留，因为 PDF 中只有网页（http/https）、电子邮件（mailto）和电话（tel）链接会被设为可点击。",
+  "{count} links were kept as plain text only, because only web (http/https), email (mailto) and phone (tel) links are made clickable in the PDF._other": "有 {count} 个链接仅以纯文本形式保留，因为 PDF 中只有网页（http/https）、电子邮件（mailto）和电话（tel）链接会被设为可点击。",
   "{count} images were left out (Markdown images are not embedded); the alt text is shown in their place._one": "有 {count} 张图像被省略（Markdown 图像不会被嵌入）；在其位置显示替代文本。",
   "{count} images were left out (Markdown images are not embedded); the alt text is shown in their place._other": "有 {count} 张图像被省略（Markdown 图像不会被嵌入）；在其位置显示替代文本。",
   "the substitute font has no glyph for {glyphs} and {count} more_one": "替代字体没有 {glyphs} 以及另外 {count} 个字符的字形",
@@ -1930,5 +1932,9 @@
   "{count} cells were longer than Excel's {max}-character limit and were truncated to fit._one": "有 {count} 个单元格超过了 Excel 的 {max} 字符上限，已被截断以适应。",
   "{count} cells were longer than Excel's {max}-character limit and were truncated to fit._other": "有 {count} 个单元格超过了 Excel 的 {max} 字符上限，已被截断以适应。",
   "Drawing {count} form fields_one": "正在绘制 {count} 个表单字段",
-  "Drawing {count} form fields_other": "正在绘制 {count} 个表单字段"
+  "Drawing {count} form fields_other": "正在绘制 {count} 个表单字段",
+  "The previous session could not be restored.": "无法恢复上一个会话。",
+  "Its files are no longer in browser storage.": "其文件已不在浏览器存储中。",
+  "Some saved shortcuts were reset because they would block keyboard navigation.": "部分已保存的快捷键已重置，因为它们会妨碍键盘导航。",
+  "Set them again under Custom shortcuts.": "请在“自定义快捷键”中重新设置。"
 }

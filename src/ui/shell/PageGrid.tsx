@@ -238,8 +238,12 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
     if (eventMatchesShortcut(event, getEffectiveBinding('deletePage'))) {
       event.preventDefault();
       if (refuseEditWhileBusy()) return;
+      const before = doc.pages.length;
       deletePages(doc.id, selection.has(page.key) ? selection : [page.key]);
-      move(Math.min(index, doc.pages.length - 2));
+      const after = documents.value.find(d => d.id === doc.id)?.pages.length ?? before;
+      // A refused delete (every page selected — RT-3) leaves focus where it
+      // was instead of jumping to another tile (regression review R-RT-9).
+      if (after < before) move(Math.min(index, after - 1));
       return;
     }
     if (eventMatchesShortcut(event, getEffectiveBinding('selectAll')) && selectable) {

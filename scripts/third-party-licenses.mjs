@@ -17,6 +17,17 @@
  * (`EXTRA_LICENSE_FILES`). Code another project vendored *inside* a package's
  * own bundle, which carries no licence file of its own, is listed from
  * `EMBEDDED_COMPONENTS`, only when that package is actually in the tree.
+ *
+ * The build narrows the list to what it actually shipped (R-BUILD-1):
+ * `vite.config.ts` records every package a bundled module came from — the
+ * pages and each worker build — plus the packages whose files it copies
+ * verbatim, and passes that set as `shipped`. The notices then cover those
+ * packages and everything they reach through their regular `dependencies`
+ * (a package consumed as a prebuilt bundle, like jszip's `dist/jszip.min.js`,
+ * carries its dependencies inside it, where no module id shows them). What is
+ * left out is what only a Node-only *optional* dependency pulls in — pdf.js's
+ * `@napi-rs/canvas` and its platform binaries — or what no shipped package
+ * depends on at all.
  */
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -100,13 +111,18 @@ function licenseFilesIn(dir, pattern) {
 
 /**
  * @param {string} root  Project root (the directory holding package.json).
+ * @param {{ shipped?: (name: string) => boolean }} [options]  When given, keep only
+ *   the packages `shipped` accepts and their regular-dependency closure.
  * @returns {Array<{ name: string, version: string, license: string, repository: string,
  *   files: Array<{ file: string, text: string }>, embedded: string[] }>}
  */
-export function collectThirdPartyLicenses(root) {
+export function collectThirdPartyLicenses(root, options = {}) {
   const rootPkg = readJson(resolve(root, 'package.json'));
   /** @type {Map<string, ReturnType<typeof collectThirdPartyLicenses>[number]>} */
   const found = new Map();
+  /** `name@version` → the `name@version` keys of its regular (non-optional) dependencies. */
+  const edges = new Map();
+  /** @type {Array<{ name: string, from: string, optional: boolean, parent?: string }>} */
   const queue = [
     ...Object.keys(rootPkg.dependencies ?? {}).map(name => ({ name, from: root, optional: false })),
     ...Object.keys(rootPkg.optionalDependencies ?? {}).map(name => ({
@@ -117,7 +133,7 @@ export function collectThirdPartyLicenses(root) {
   ];
 
   while (queue.length > 0) {
-    const { name, from, optional } = /** @type {(typeof queue)[number]} */ (queue.shift());
+    const { name, from, optional, parent } = /** @type {(typeof queue)[number]} */ (queue.shift());
     const dir = findPackageDir(name, from);
     if (!dir) {
       if (optional) continue;
@@ -125,7 +141,9 @@ export function collectThirdPartyLicenses(root) {
     }
     const pkg = readJson(join(dir, 'package.json'));
     const key = `${pkg.name}@${pkg.version}`;
+    if (parent && !optional) edges.get(parent)?.add(key);
     if (found.has(key)) continue;
+    edges.set(key, new Set());
 
     const files = licenseFilesIn(dir, LICENSE_FILE);
     for (const extra of EXTRA_LICENSE_FILES[pkg.name] ?? []) {
@@ -133,26 +151,41 @@ export function collectThirdPartyLicenses(root) {
         files.push({ file: `${extra.dir}/${f.file}`, text: f.text });
       }
     }
-    found.set(key, {
+    const entry = {
       name: pkg.name,
       version: pkg.version,
       license: licenseOf(pkg),
       repository: repositoryOf(pkg),
       files,
       embedded: EMBEDDED_COMPONENTS[pkg.name] ?? []
-    });
+    };
+    found.set(key, entry);
 
     for (const dep of Object.keys(pkg.dependencies ?? {})) {
-      queue.push({ name: dep, from: dir, optional: false });
+      queue.push({ name: dep, from: dir, optional: false, parent: key });
     }
     for (const dep of Object.keys(pkg.optionalDependencies ?? {})) {
-      queue.push({ name: dep, from: dir, optional: true });
+      queue.push({ name: dep, from: dir, optional: true, parent: key });
     }
   }
 
-  return [...found.values()].sort((a, b) =>
-    a.name === b.name ? a.version.localeCompare(b.version) : a.name.localeCompare(b.name)
-  );
+  let kept = [...found.entries()];
+  if (options.shipped) {
+    const reach = new Set();
+    const stack = kept.filter(([, e]) => options.shipped?.(e.name)).map(([key]) => key);
+    while (stack.length > 0) {
+      const key = /** @type {string} */ (stack.pop());
+      if (reach.has(key)) continue;
+      reach.add(key);
+      for (const dep of edges.get(key) ?? []) stack.push(dep);
+    }
+    kept = kept.filter(([key]) => reach.has(key));
+  }
+  return kept
+    .map(([, entry]) => entry)
+    .sort((a, b) =>
+      a.name === b.name ? a.version.localeCompare(b.version) : a.name.localeCompare(b.name)
+    );
 }
 
 /** @param {ReturnType<typeof collectThirdPartyLicenses>} entries @param {string} product */
@@ -163,7 +196,7 @@ export function renderThirdPartyLicenses(entries, product) {
     '',
     `${product} includes the open-source packages below. Each is listed with its`,
     'declared licence and the licence and NOTICE files it ships, reproduced as the',
-    'licences require. Generated at build time from the production dependency tree.',
+    'licences require. Generated at build time from the packages the build bundled or copied.',
     '',
     `Packages: ${entries.length}`,
     ''
@@ -184,4 +217,19 @@ export function renderThirdPartyLicenses(entries, product) {
     out.push('');
   }
   return `${out.join('\n')}\n`;
+}
+
+/**
+ * The npm package a bundled module id belongs to (`…/node_modules/@scope/name/x.js`
+ * → `@scope/name`), or null for project source and virtual modules. Works with
+ * pnpm's `.pnpm/<pkg>@<v>/node_modules/<pkg>` layout: the *last* `node_modules`
+ * segment names the package.
+ */
+export function packageOfModuleId(id) {
+  const clean = id.replace(/^\0/, '').split('?')[0].replace(/\\/g, '/');
+  const at = clean.lastIndexOf('/node_modules/');
+  if (at < 0) return null;
+  const parts = clean.slice(at + '/node_modules/'.length).split('/');
+  if (parts[0] === '' || parts[0] === '.pnpm') return null;
+  return parts[0].startsWith('@') ? (parts[1] ? `${parts[0]}/${parts[1]}` : null) : parts[0];
 }

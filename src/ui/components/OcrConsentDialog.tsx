@@ -3,7 +3,7 @@ import { ocrConsentRequest } from '../../core/notify';
 import { writeModelBytes } from '../../core/opfs';
 import { notifyError } from '../../core/notify';
 import { Button } from './Button';
-import { Modal } from './Modal';
+import { Modal, requestKey } from './Modal';
 import { useTranslation } from '../../core/i18n';
 
 export const OcrConsentDialog = forwardRef<HTMLDivElement, Record<string, never>>(
@@ -55,6 +55,7 @@ export const OcrConsentDialog = forwardRef<HTMLDivElement, Record<string, never>
 
     return (
       <Modal
+        key={requestKey(request)}
         ref={ref}
         title={request.title}
         size="sm"

@@ -17,8 +17,12 @@ import {
 import { DOC_PAGE_WHITE } from './doc-colors';
 import { translate } from './i18n';
 import type { RasterKind } from './raster-decode';
+import { jpegPassthrough, readJpegInfo, type JpegInfo } from './jpeg-info';
+import { encodeCanvasAtMaximum, webpTraits } from './max-quality';
+import type { PdfImageSource } from './image-embed';
 
-export type { RasterKind };
+export type { RasterKind, JpegInfo, PdfImageSource };
+export { jpegPassthrough, readJpegInfo };
 
 const SUPPORTED = new Set([
   'image/png',
@@ -59,12 +63,15 @@ export async function bitmapToJpeg(bitmap: ImageBitmap, quality = 0.9): Promise<
 }
 
 /**
- * The same flattening as {@link bitmapToJpeg}, encoded as PNG — the lossless
- * path for the "100% (Lossless)" import option (CONV-10). It used to be a
- * quality-1.0 JPEG, which is still DCT: text edges ring and colours shift.
- * The white matte is kept for the same reason as the JPEG path.
+ * The same flattening as {@link bitmapToJpeg}, encoded for the "Maximum"
+ * import option (CONV-10): PNG, or — for a `photographic` source whose 95%
+ * JPEG is the smaller file — that JPEG (`max-quality.ts` has the rule). The
+ * white matte is kept for the same reason as the JPEG path.
  */
-export async function bitmapToPng(bitmap: ImageBitmap): Promise<Uint8Array> {
+export async function bitmapToMaximum(
+  bitmap: ImageBitmap,
+  photographic: boolean
+): Promise<Uint8Array> {
   const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
   const ctx = canvas.getContext('2d');
   if (!ctx) throw corrupt(translate('A 2D canvas context was unavailable for image conversion.'));
@@ -73,115 +80,19 @@ export async function bitmapToPng(bitmap: ImageBitmap): Promise<Uint8Array> {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(bitmap, 0, 0);
 
-  const blob = await canvas.convertToBlob({ type: 'image/png' });
-  return new Uint8Array(await blob.arrayBuffer());
-}
-
-/** What {@link readJpegInfo} learns from a JPEG's markers without decoding it. */
-export interface JpegInfo {
-  width: number;
-  height: number;
-  /** Sample precision in bits (8 for every ordinary JPEG). */
-  precision: number;
-  components: number;
-  /** EXIF orientation 1–8; 1 when the file has no EXIF orientation tag. */
-  orientation: number;
+  const out = await encodeCanvasAtMaximum(canvas, photographic);
+  canvas.width = 0;
+  canvas.height = 0;
+  return out;
 }
 
 /**
- * Walks a JPEG's marker segments up to the first frame header. Returns null for
- * anything that is not a well-formed JPEG up to that point.
- */
-export function readJpegInfo(bytes: Uint8Array): JpegInfo | null {
-  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
-  let orientation = 1;
-  let p = 2;
-  while (p + 4 <= bytes.length) {
-    if (bytes[p] !== 0xff) return null;
-    const marker = bytes[p + 1];
-    // Fill bytes and standalone markers carry no length.
-    if (marker === 0xff) {
-      p += 1;
-      continue;
-    }
-    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
-      p += 2;
-      continue;
-    }
-    const length = (bytes[p + 2] << 8) | bytes[p + 3];
-    if (length < 2 || p + 2 + length > bytes.length) return null;
-    const seg = p + 4;
-    if (marker === 0xe1 && length >= 16) {
-      orientation = exifOrientation(bytes, seg, p + 2 + length) ?? orientation;
-    }
-    // SOF0–SOF15, except DHT (C4), JPG (C8) and DAC (CC).
-    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
-      if (length < 8) return null;
-      return {
-        precision: bytes[seg],
-        height: (bytes[seg + 1] << 8) | bytes[seg + 2],
-        width: (bytes[seg + 3] << 8) | bytes[seg + 4],
-        components: bytes[seg + 5],
-        orientation
-      };
-    }
-    if (marker === 0xda || marker === 0xd9) return null; // scan before any frame header
-    p += 2 + length;
-  }
-  return null;
-}
-
-/** The orientation tag (0x0112) of an APP1 "Exif" segment, if it has one. */
-function exifOrientation(b: Uint8Array, start: number, end: number): number | null {
-  // "Exif\0\0" then a TIFF header.
-  if (
-    b[start] !== 0x45 ||
-    b[start + 1] !== 0x78 ||
-    b[start + 2] !== 0x69 ||
-    b[start + 3] !== 0x66
-  ) {
-    return null;
-  }
-  const tiff = start + 6;
-  if (tiff + 8 > end) return null;
-  const little = b[tiff] === 0x49 && b[tiff + 1] === 0x49;
-  if (!little && !(b[tiff] === 0x4d && b[tiff + 1] === 0x4d)) return null;
-  const u16 = (o: number) => (little ? b[o] | (b[o + 1] << 8) : (b[o] << 8) | b[o + 1]);
-  const u32 = (o: number) =>
-    little
-      ? (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0
-      : ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0;
-  const ifd = tiff + u32(tiff + 4);
-  if (ifd + 2 > end) return null;
-  const count = u16(ifd);
-  for (let i = 0; i < count; i++) {
-    const entry = ifd + 2 + i * 12;
-    if (entry + 12 > end) return null;
-    if (u16(entry) === 0x0112) {
-      const value = u16(entry + 8);
-      return value >= 1 && value <= 8 ? value : null;
-    }
-  }
-  return null;
-}
-
-/**
- * True when a JPEG's own bytes can go straight into the PDF (`embedJpg`) and
- * look exactly as the browser would draw them: upright (no EXIF rotation to
- * apply — pdf-lib ignores EXIF, so a rotated photo must still be re-encoded),
- * 8-bit, and grey or RGB. CMYK is excluded because pdf-lib assumes Adobe's
- * inverted CMYK, which not every producer writes. (CONV-10)
+ * True when an upright JPEG's own bytes can go straight into the PDF: see
+ * {@link jpegPassthrough}, which also accepts a rotated one (the rotation is
+ * then applied at placement).
  */
 export function canEmbedJpegAsIs(bytes: Uint8Array): boolean {
-  const info = readJpegInfo(bytes);
-  return (
-    info !== null &&
-    info.orientation === 1 &&
-    info.precision === 8 &&
-    (info.components === 1 || info.components === 3) &&
-    info.width > 0 &&
-    info.height > 0
-  );
+  return jpegPassthrough(bytes)?.orientation === 1;
 }
 
 /* ------------------------------------------------------------------ *
@@ -216,6 +127,50 @@ export interface RasterDecodeOptions {
 }
 
 /**
+ * HEIC/TIFF decodes run one at a time, in the order they were asked for
+ * (R-CONV-3). The image worker is a single instance and a stuck decode can
+ * only be stopped by terminating it, so if two imports shared it, cancelling
+ * (or timing out) one killed the other's decode mid-way — and the second
+ * import's timeout was already running while it merely waited its turn. With
+ * this queue only the decode that owns the turn is ever on the worker, so
+ * terminating it touches nothing else, and each timeout starts when its own
+ * decode does.
+ */
+let decodeQueue: Promise<void> = Promise.resolve();
+
+/**
+ * Waits for this caller's turn on the image worker and returns the function
+ * that hands the turn on. An abort while still waiting rejects at once (as a
+ * cancellation) without disturbing the queue or the decode that is running.
+ */
+async function takeDecodeTurn(signal?: AbortSignal): Promise<() => void> {
+  const previous = decodeQueue;
+  let release!: () => void;
+  const mine = new Promise<void>(resolve => {
+    release = resolve;
+  });
+  decodeQueue = previous.then(() => mine);
+  let onAbort: (() => void) | undefined;
+  try {
+    await Promise.race([
+      previous,
+      new Promise<never>((_, reject) => {
+        if (!signal) return;
+        onAbort = () => reject(cancelled());
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+      })
+    ]);
+  } catch (err) {
+    release();
+    throw err;
+  } finally {
+    if (onAbort) signal?.removeEventListener('abort', onAbort);
+  }
+  return release;
+}
+
+/**
  * Decodes a HEIC or TIFF in the image worker (`workers/image.worker.ts`) and
  * returns what `imagesToPdf` embeds: JPEG at `quality`, or PNG when
  * `quality >= 1`.
@@ -241,6 +196,34 @@ export async function decodeRasterInWorker(
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (signal?.aborted) throw cancelled();
 
+  // The timeout below starts only once this decode owns the worker.
+  const release = await takeDecodeTurn(signal);
+  try {
+    return await decodeOnOwnedWorker(file, kind, quality, bytes, options, {
+      imageWorker,
+      createJobHandle,
+      transfer: Comlink.transfer
+    });
+  } finally {
+    release();
+  }
+}
+
+async function decodeOnOwnedWorker(
+  file: File,
+  kind: RasterKind,
+  quality: number,
+  bytes: Uint8Array,
+  options: RasterDecodeOptions,
+  deps: {
+    imageWorker: (typeof import('./workers'))['imageWorker'];
+    createJobHandle: (typeof import('./workers/protocol'))['createJobHandle'];
+    transfer: (typeof import('comlink'))['transfer'];
+  }
+): Promise<Uint8Array[]> {
+  const { signal } = options;
+  const { imageWorker, createJobHandle } = deps;
+  if (signal?.aborted) throw cancelled();
   const timeoutMs = options.timeoutMs ?? heicTimeoutMs(file.size);
   const label = kind === 'heic' ? 'HEIC' : 'TIFF';
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -252,7 +235,8 @@ export async function decodeRasterInWorker(
       stopped = err;
       reject(err);
       // Every Stapler decode is one WASM/JS call that cannot be interrupted;
-      // terminating the (single-instance) pool is what actually stops it.
+      // terminating the (single-instance) pool is what actually stops it —
+      // and because of the decode queue, this decode is the only thing on it.
       imageWorker.terminate();
     };
     timer = setTimeout(
@@ -281,7 +265,7 @@ export async function decodeRasterInWorker(
       imageWorker.lease(api =>
         api.decodeToPdfImages(
           kind,
-          Comlink.transfer(bytes, [bytes.buffer as ArrayBuffer]),
+          deps.transfer(bytes, [bytes.buffer as ArrayBuffer]),
           quality,
           file.name,
           job
@@ -310,32 +294,50 @@ export async function decodeRasterInWorker(
 }
 
 /**
- * Decodes an image file into bytes `imagesToPdf` can embed: JPEG, or PNG on
- * the lossless path.
+ * Decodes an image file into what `imagesToPdf` embeds: encoded JPEG/PNG
+ * bytes, or — at "Maximum" — a JPEG's own bytes plus the EXIF orientation to
+ * apply when it is placed.
  *
  * HEIC and TIFF decode in the image worker ({@link decodeRasterInWorker}).
  * PNG/JPEG/WebP/GIF go through `createImageBitmap`, which decodes off the main
  * thread already and applies EXIF orientation.
  *
- * At `quality >= 1` ("100% (Lossless)") nothing lossy happens (CONV-10): an
- * upright 8-bit grey/RGB JPEG is passed through byte for byte, and everything
- * else — PNG, WebP, GIF, TIFF, HEIC, or a JPEG whose EXIF rotation has to be
- * applied — is decoded (with orientation) and written as PNG. Below 1 the
- * image is re-encoded as JPEG at that quality, as before.
+ * At `quality >= 1` ("Maximum", CONV-10):
+ *  - a JPEG every viewer can decode is passed through byte for byte — upright
+ *    or not; a rotation is applied by the placement matrix, and an embedded
+ *    ICC profile goes into the PDF with it (`image-embed.ts`);
+ *  - PNG, GIF and lossless WebP stay lossless (PNG);
+ *  - a photographic source that has to be decoded (lossy WebP, a JPEG that
+ *    cannot be passed through, and HEIC/TIFF in the worker) becomes a 95% JPEG
+ *    when that is smaller than the PNG (`max-quality.ts`).
+ * Below 1 the image is re-encoded as JPEG at that quality, as before.
  */
 export async function imageFileToPdfImages(
   file: File,
   quality = 0.9,
   signal?: AbortSignal
-): Promise<Uint8Array[]> {
+): Promise<PdfImageSource[]> {
   const lossless = quality >= 1;
   const kind = rasterKindOf(file);
   if (kind) return decodeRasterInWorker(file, kind, quality, { signal });
 
   if (signal?.aborted) throw cancelled();
+  let photographic = false;
   if (lossless) {
     const original = new Uint8Array(await file.arrayBuffer());
-    if (canEmbedJpegAsIs(original)) return [original];
+    const passthrough = jpegPassthrough(original);
+    if (passthrough) {
+      return [
+        passthrough.orientation === 1
+          ? original
+          : { bytes: original, orientation: passthrough.orientation }
+      ];
+    }
+    // A JPEG that could not be passed through is photographic by nature; a
+    // WebP is when it is lossy and opaque. PNG and GIF stay lossless.
+    const webp = webpTraits(original);
+    photographic =
+      readJpegInfo(original) !== null || (webp !== null && !webp.lossless && !webp.alpha);
   }
   let bitmap: ImageBitmap;
   try {
@@ -349,7 +351,9 @@ export async function imageFileToPdfImages(
     );
   }
   try {
-    return [lossless ? await bitmapToPng(bitmap) : await bitmapToJpeg(bitmap, quality)];
+    return [
+      lossless ? await bitmapToMaximum(bitmap, photographic) : await bitmapToJpeg(bitmap, quality)
+    ];
   } finally {
     bitmap.close();
   }

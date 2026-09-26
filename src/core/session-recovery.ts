@@ -26,9 +26,11 @@ import type { CropBox } from '../ui/tools/crop/state';
 import { pageAnnotations } from '../ui/tools/annotate/state';
 import type { Annotation } from '../ui/tools/annotate/state';
 import { serializeHistory, restoreHistoryFromRecord, type SerializedHistory } from './history';
-import { readSetting, writeSetting } from './db';
+import { readSettingResult, writeSetting } from './db';
 import { logEvent } from './errors';
-import { sourceBytesExist, sweepOrphanedSourceBytesIfSoleTab } from './opfs';
+import { announceTab, sourceBytesExist, sweepOrphanedSourceBytesIfSoleTab } from './opfs';
+import { notify } from './notify';
+import { translate } from './i18n';
 
 const SESSION_KEY = 'session.recovery';
 const SAVE_DEBOUNCE_MS = 500;
@@ -90,9 +92,35 @@ export function waitForImportReadiness(): Promise<'ready' | 'prompting'> {
   });
 }
 
+/** Thrown when storage could not be read, as opposed to "there is no record". */
+export class RecoveryStorageUnavailable extends Error {
+  constructor() {
+    super('Session storage could not be read');
+    this.name = 'RecoveryStorageUnavailable';
+  }
+}
+
 export async function loadPendingRecovery(): Promise<SessionRecord | null> {
-  const record = await readSetting<SessionRecord>(SESSION_KEY);
+  const { ok, value: record } = await readSettingResult<SessionRecord>(SESSION_KEY);
+  if (!ok) throw new RecoveryStorageUnavailable();
   return record && record.documents.length > 0 ? record : null;
+}
+
+/**
+ * Set when the recovery record could not be read at startup. The saved
+ * session may still be there, so nothing may overwrite or clear it this
+ * session — autosave stays off (regression review R-RT-4).
+ */
+let autosaveSuspended = false;
+
+/** Whether autosave was turned off because the saved session could not be read. */
+export function isAutosaveSuspended(): boolean {
+  return autosaveSuspended;
+}
+
+/** Test hook: clear the suspension a previous startup set. */
+export function __resetAutosaveSuspendedForTests(): void {
+  autosaveSuspended = false;
 }
 
 export async function clearSession(): Promise<void> {
@@ -108,6 +136,7 @@ let needsSave = false;
  * leaving a stale one around would offer to restore nothing back to nothing.
  */
 export async function saveSession(): Promise<void> {
+  if (autosaveSuspended) return;
   if (isSaving) {
     needsSave = true;
     return;
@@ -288,6 +317,11 @@ export function restoreSession(record: SessionRecord): void {
 export async function runStartupRecovery(
   confirm: (check: RecoveryCheck) => Promise<boolean>
 ): Promise<void> {
+  // Announce this tab before anything else, so a tab that starts meanwhile —
+  // or is already sitting on its own restore prompt — can see it and won't
+  // sweep bytes this one is about to restore (regression review R-RT-2).
+  await announceTab();
+  let storageReadable = true;
   try {
     const pending = await loadPendingRecovery();
     // Confirms the record's sources still have bytes behind them before it is
@@ -302,7 +336,17 @@ export async function runStartupRecovery(
         sessionRecoveryPrompting.value = false;
       }
       if (restore) {
-        restoreSession(checked.record);
+        // Re-checked after the prompt: the user may have taken a while, and
+        // bytes can disappear meanwhile (another tab, the browser evicting
+        // storage). Restoring a record with missing bytes gives blank pages.
+        const still = pending ? await checkRecovery(pending) : null;
+        if (still) restoreSession(still.record);
+        else {
+          notify('warning', translate('The previous session could not be restored.'), {
+            detail: translate('Its files are no longer in browser storage.')
+          });
+          await clearSession();
+        }
       } else {
         await clearSession();
       }
@@ -312,11 +356,22 @@ export async function runStartupRecovery(
       await clearSession();
     }
   } catch (err) {
-    logEvent('warn', 'session-recovery', `Recovery check failed: ${String(err)}`);
-    await clearSession().catch(() => {});
+    if (err instanceof RecoveryStorageUnavailable) {
+      // Storage did not answer (e.g. a slow or blocked IndexedDB open). The
+      // saved session may well exist: never clear it, never sweep its bytes,
+      // never let autosave overwrite it this session (R-RT-4).
+      storageReadable = false;
+      autosaveSuspended = true;
+      logEvent('warn', 'session-recovery', 'Recovery record unreadable; autosave suspended');
+    } else {
+      logEvent('warn', 'session-recovery', `Recovery check failed: ${String(err)}`);
+      await clearSession().catch(() => {});
+    }
   }
   try {
-    await sweepOrphanedSourceBytesIfSoleTab(id => id in sources.value || isSourcePending(id));
+    if (storageReadable) {
+      await sweepOrphanedSourceBytesIfSoleTab(id => id in sources.value || isSourcePending(id));
+    }
   } catch (err) {
     logEvent('warn', 'opfs', `Sweep failed: ${String(err)}`);
   } finally {

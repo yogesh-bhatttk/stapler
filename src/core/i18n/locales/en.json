@@ -670,6 +670,8 @@
   "Margin (pt)": "Margin (pt)",
   "Quality": "Quality",
   "100% (Lossless)": "100% (Lossless)",
+  "Maximum (originals kept where possible)": "Maximum (originals kept where possible)",
+  "JPEG photos are embedded exactly as they are, and PNG and GIF images stay lossless. HEIC, TIFF and lossy WebP photos are saved as 95% JPEG when that is smaller.": "JPEG photos are embedded exactly as they are, and PNG and GIF images stay lossless. HEIC, TIFF and lossy WebP photos are saved as 95% JPEG when that is smaller.",
   "90% (High)": "90% (High)",
   "75% (Medium)": "75% (Medium)",
   "50% (Low)": "50% (Low)",
@@ -1921,8 +1923,8 @@
   "{count} formula cells carried no cached result, so there is nothing to draw for them. Excel stores the last computed value alongside each formula; a file written by a tool that does not, or one saved before it recalculated, leaves the cell blank. Nothing is calculated here._other": "{count} formula cells carried no cached result, so there is nothing to draw for them. Excel stores the last computed value alongside each formula; a file written by a tool that does not, or one saved before it recalculated, leaves the cell blank. Nothing is calculated here.",
   "{count} paragraphs had more than {max} emphasis markers (*, _ or ~), so their emphasis was shown as plain characters instead of being interpreted._one": "{count} paragraph had more than {max} emphasis markers (*, _ or ~), so its emphasis was shown as plain characters instead of being interpreted.",
   "{count} paragraphs had more than {max} emphasis markers (*, _ or ~), so their emphasis was shown as plain characters instead of being interpreted._other": "{count} paragraphs had more than {max} emphasis markers (*, _ or ~), so their emphasis was shown as plain characters instead of being interpreted.",
-  "{count} links were kept as plain text only, because only web (http/https) and email (mailto) links are made clickable in the PDF._one": "{count} link was kept as plain text only, because only web (http/https) and email (mailto) links are made clickable in the PDF.",
-  "{count} links were kept as plain text only, because only web (http/https) and email (mailto) links are made clickable in the PDF._other": "{count} links were kept as plain text only, because only web (http/https) and email (mailto) links are made clickable in the PDF.",
+  "{count} links were kept as plain text only, because only web (http/https), email (mailto) and phone (tel) links are made clickable in the PDF._one": "{count} link was kept as plain text only, because only web (http/https), email (mailto) and phone (tel) links are made clickable in the PDF.",
+  "{count} links were kept as plain text only, because only web (http/https), email (mailto) and phone (tel) links are made clickable in the PDF._other": "{count} links were kept as plain text only, because only web (http/https), email (mailto) and phone (tel) links are made clickable in the PDF.",
   "{count} images were left out (Markdown images are not embedded); the alt text is shown in their place._one": "{count} image was left out (Markdown images are not embedded); the alt text is shown in their place.",
   "{count} images were left out (Markdown images are not embedded); the alt text is shown in their place._other": "{count} images were left out (Markdown images are not embedded); the alt text is shown in their place.",
   "the substitute font has no glyph for {glyphs} and {count} more_one": "the substitute font has no glyph for {glyphs} and {count} more",
@@ -1930,5 +1932,9 @@
   "{count} cells were longer than Excel's {max}-character limit and were truncated to fit._one": "{count} cell was longer than Excel's {max}-character limit and was truncated to fit.",
   "{count} cells were longer than Excel's {max}-character limit and were truncated to fit._other": "{count} cells were longer than Excel's {max}-character limit and were truncated to fit.",
   "Drawing {count} form fields_one": "Drawing {count} form field",
-  "Drawing {count} form fields_other": "Drawing {count} form fields"
+  "Drawing {count} form fields_other": "Drawing {count} form fields",
+  "The previous session could not be restored.": "The previous session could not be restored.",
+  "Its files are no longer in browser storage.": "Its files are no longer in browser storage.",
+  "Some saved shortcuts were reset because they would block keyboard navigation.": "Some saved shortcuts were reset because they would block keyboard navigation.",
+  "Set them again under Custom shortcuts.": "Set them again under Custom shortcuts."
 }

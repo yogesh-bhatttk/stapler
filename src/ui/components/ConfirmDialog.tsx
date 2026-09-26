@@ -5,7 +5,7 @@
 import { forwardRef } from 'preact/compat';
 import { confirmRequest } from '../../core/notify';
 import { Button } from './Button';
-import { Modal } from './Modal';
+import { Modal, requestKey } from './Modal';
 
 export const ConfirmDialog = forwardRef<HTMLDivElement, Record<string, never>>(
   function ConfirmDialog(_props, ref) {
@@ -14,6 +14,7 @@ export const ConfirmDialog = forwardRef<HTMLDivElement, Record<string, never>>(
 
     return (
       <Modal
+        key={requestKey(request)}
         ref={ref}
         title={request.title}
         size="sm"

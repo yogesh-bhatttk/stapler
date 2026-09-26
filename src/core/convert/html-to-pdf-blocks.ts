@@ -652,8 +652,13 @@ function listBlocks(node: ElementNode, depth: number, notes: string[]): LayoutBl
     // note — the one failure mode this file's contract rules out outright, and a
     // reachable one, since Word offers nine list levels to this engine's eight.
     const innerDepth = Math.min(depth + 1, MAX_LIST_DEPTH - 1);
-    if (nested.length > 0 && innerDepth === depth && !notes.includes(DEEP_LIST_NOTE)) {
-      notes.push(translate(DEEP_LIST_NOTE_KEY, { depth: MAX_LIST_DEPTH }));
+    if (nested.length > 0 && innerDepth === depth) {
+      // De-duplicated against the note as it is actually pushed — the
+      // translated sentence. Comparing with the English `DEEP_LIST_NOTE` never
+      // matched in any other locale, so the note repeated once per over-deep
+      // item there (R-CONV-6).
+      const note = translate(DEEP_LIST_NOTE_KEY, { depth: MAX_LIST_DEPTH });
+      if (!notes.includes(note)) notes.push(note);
     }
     for (const inner of nested) blocks.push(...listBlocks(inner, innerDepth, notes));
   }

@@ -670,6 +670,8 @@
   "Margin (pt)": "余白（pt）",
   "Quality": "品質",
   "100% (Lossless)": "100%（ロスレス）",
+  "Maximum (originals kept where possible)": "最高（可能な限り元のまま）",
+  "JPEG photos are embedded exactly as they are, and PNG and GIF images stay lossless. HEIC, TIFF and lossy WebP photos are saved as 95% JPEG when that is smaller.": "JPEG 写真はそのまま埋め込まれ、PNG と GIF 画像はロスレスのままです。HEIC、TIFF、非可逆 WebP の写真は、そのほうが小さい場合に 95% の JPEG として保存されます。",
   "90% (High)": "90%（高）",
   "75% (Medium)": "75%（中）",
   "50% (Low)": "50%（低）",
@@ -1921,8 +1923,8 @@
   "{count} formula cells carried no cached result, so there is nothing to draw for them. Excel stores the last computed value alongside each formula; a file written by a tool that does not, or one saved before it recalculated, leaves the cell blank. Nothing is calculated here._other": "{count} 個の数式セルにキャッシュされた結果がないため、描画するものがありません。Excelは各数式と一緒に最後に計算した値を保存します。そうしないツールで書き出されたファイルや、再計算前に保存されたファイルでは、セルが空白になります。ここでは何も計算されません。",
   "{count} paragraphs had more than {max} emphasis markers (*, _ or ~), so their emphasis was shown as plain characters instead of being interpreted._one": "{count} 個の段落に {max} 個を超える強調記号（*、_、~）があったため、強調は解釈されずにそのままの文字として表示されています。",
   "{count} paragraphs had more than {max} emphasis markers (*, _ or ~), so their emphasis was shown as plain characters instead of being interpreted._other": "{count} 個の段落に {max} 個を超える強調記号（*、_、~）があったため、強調は解釈されずにそのままの文字として表示されています。",
-  "{count} links were kept as plain text only, because only web (http/https) and email (mailto) links are made clickable in the PDF._one": "{count} 個のリンクは書式なしのテキストとしてのみ残しました。PDFでクリック可能になるのは、Web（http/https）とメール（mailto）のリンクのみです。",
-  "{count} links were kept as plain text only, because only web (http/https) and email (mailto) links are made clickable in the PDF._other": "{count} 個のリンクは書式なしのテキストとしてのみ残しました。PDFでクリック可能になるのは、Web（http/https）とメール（mailto）のリンクのみです。",
+  "{count} links were kept as plain text only, because only web (http/https), email (mailto) and phone (tel) links are made clickable in the PDF._one": "{count} 個のリンクは書式なしのテキストとしてのみ残しました。PDFでクリック可能になるのは、Web（http/https）、メール（mailto）、電話（tel）のリンクのみです。",
+  "{count} links were kept as plain text only, because only web (http/https), email (mailto) and phone (tel) links are made clickable in the PDF._other": "{count} 個のリンクは書式なしのテキストとしてのみ残しました。PDFでクリック可能になるのは、Web（http/https）、メール（mailto）、電話（tel）のリンクのみです。",
   "{count} images were left out (Markdown images are not embedded); the alt text is shown in their place._one": "{count} 枚の画像を省きました（Markdownの画像は埋め込まれません）。代わりに代替テキストを表示しています。",
   "{count} images were left out (Markdown images are not embedded); the alt text is shown in their place._other": "{count} 枚の画像を省きました（Markdownの画像は埋め込まれません）。代わりに代替テキストを表示しています。",
   "the substitute font has no glyph for {glyphs} and {count} more_one": "代替フォントに{glyphs}ほか {count} 個のグリフがありません",
@@ -1930,5 +1932,9 @@
   "{count} cells were longer than Excel's {max}-character limit and were truncated to fit._one": "{count} 個のセルがExcelの上限である {max} 文字を超えていたため、収まるように切り詰めました。",
   "{count} cells were longer than Excel's {max}-character limit and were truncated to fit._other": "{count} 個のセルがExcelの上限である {max} 文字を超えていたため、収まるように切り詰めました。",
   "Drawing {count} form fields_one": "{count} 個のフォームフィールドを描画しています",
-  "Drawing {count} form fields_other": "{count} 個のフォームフィールドを描画しています"
+  "Drawing {count} form fields_other": "{count} 個のフォームフィールドを描画しています",
+  "The previous session could not be restored.": "前回のセッションを復元できませんでした。",
+  "Its files are no longer in browser storage.": "そのファイルはブラウザのストレージにもう存在しません。",
+  "Some saved shortcuts were reset because they would block keyboard navigation.": "保存済みのショートカットの一部は、キーボード操作を妨げるためリセットされました。",
+  "Set them again under Custom shortcuts.": "「カスタムショートカット」で再設定してください。"
 }

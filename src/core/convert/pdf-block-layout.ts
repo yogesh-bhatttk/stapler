@@ -26,8 +26,10 @@ import { DOC_HAIRLINE_RGB, SUMMARY_ACCENT_RGB } from '../doc-colors';
 import { corrupt } from '../errors';
 import { tPlural, translate } from '../i18n';
 import {
-  addLinkAnnotation,
+  annotateLinkGroup,
   droppedLinksNote,
+  isInternalLink,
+  type LinkWrapState,
   newSubstitutionTally,
   sanitizeWinAnsiText,
   type SubstitutionTally
@@ -400,12 +402,28 @@ export async function layoutBlocksToPdf(
     if (y - height < MARGIN && y < pageHeight - MARGIN) newPage();
   };
 
-  const drawLine = (pieces: readonly Piece[], x: number, baseline: number, size: number) => {
+  /**
+   * Draws one line of pieces. `wrap` carries the link the previous line of the
+   * same block ended in, so a refused link that wraps is counted once
+   * (R-CONV-7); a fresh object means "no previous line".
+   */
+  const drawLine = (
+    pieces: readonly Piece[],
+    x: number,
+    baseline: number,
+    size: number,
+    wrap: LinkWrapState = {}
+  ) => {
     if (pieces.length > 0) pageUsed = true;
     let cursor = x;
     let index = 0;
+    let lastHref: string | undefined;
     while (index < pieces.length) {
+      const atLineStart = index === 0;
       const href = pieces[index].href;
+      // An in-document link (`#_Toc…` from a Word table of contents) has
+      // nowhere to point in this PDF: plain text, and not a refusal.
+      const linkHref = isInternalLink(href) ? undefined : href;
       const groupStart = cursor;
       while (index < pieces.length && pieces[index].href === href) {
         const piece = pieces[index];
@@ -414,18 +432,23 @@ export async function layoutBlocksToPdf(
           y: baseline,
           size,
           font: fontFor(fonts, piece.bold, piece.italic),
-          ...(href ? { color: LINK_COLOR } : {})
+          ...(linkHref ? { color: LINK_COLOR } : {})
         });
         cursor += piece.width;
         index += 1;
       }
-      if (
-        href &&
-        !addLinkAnnotation(page, [groupStart, baseline - 2, cursor, baseline + size], href)
-      ) {
-        droppedLinks += 1;
+      if (linkHref) {
+        droppedLinks += annotateLinkGroup(
+          page,
+          [groupStart, baseline - 2, cursor, baseline + size],
+          linkHref,
+          wrap,
+          atLineStart
+        );
       }
+      lastHref = linkHref;
     }
+    wrap.carried = lastHref;
   };
 
   /**
@@ -445,6 +468,7 @@ export async function layoutBlocksToPdf(
     const lineHeight = size * LINE_RATIO;
     let firstPage = pageIndex;
     let drawnAny = false;
+    const wrap: LinkWrapState = {};
 
     for (const pieces of lines) {
       ensure(lineHeight);
@@ -458,7 +482,7 @@ export async function layoutBlocksToPdf(
           font: fonts.regular
         });
       }
-      drawLine(pieces, x, y, size);
+      drawLine(pieces, x, y, size, wrap);
       drawnAny = true;
     }
 
@@ -541,12 +565,14 @@ export async function layoutBlocksToPdf(
           borderWidth: RULE_WIDTH
         });
         const lines = wrapped[column] ?? [];
+        const wrap: LinkWrapState = {};
         lines.forEach((pieces, lineIndex) => {
           drawLine(
             pieces,
             x + CELL_PADDING_X,
             top - CELL_PADDING_Y - (lineIndex + 1) * lineHeight,
-            TABLE_FONT_SIZE
+            TABLE_FONT_SIZE,
+            wrap
           );
         });
       }
@@ -676,12 +702,13 @@ export async function layoutBlocksToPdf(
     ): boolean => {
       const lines = wrapRuns(runs, fonts, size, width, tally);
       const lineHeight = size * LINE_RATIO;
+      const wrap: LinkWrapState = {};
       lines.forEach((pieces, index) => {
         if (pieces.length === 0) return;
         const lineWidth = pieces.reduce((sum, piece) => sum + piece.width, 0);
         const slack = Math.max(0, width - lineWidth);
         const x = left + (align === 'center' ? slack / 2 : align === 'right' ? slack : 0);
-        drawLine(pieces, x, top - (index + 1) * lineHeight, size);
+        drawLine(pieces, x, top - (index + 1) * lineHeight, size, wrap);
       });
       // Text taller than its own box is *drawn anyway*, overrunning downward,
       // and counted. Clipping it would delete words the deck contains; shrinking
@@ -760,12 +787,14 @@ export async function layoutBlocksToPdf(
             borderColor: RULE_COLOR,
             borderWidth: RULE_WIDTH
           });
+          const wrap: LinkWrapState = {};
           (wrapped[column] ?? []).forEach((pieces, lineIndex) => {
             drawLine(
               pieces,
               x + CELL_PADDING_X,
               top - CELL_PADDING_Y - (lineIndex + 1) * lineHeight,
-              size
+              size,
+              wrap
             );
           });
           x += widths[column];

@@ -325,6 +325,35 @@ describe('PDF-7 / PDF-12 — shared resources stay shared', () => {
     expect(await imageCount(nup)).toBe(1);
     expect(nup.byteLength).toBeLessThan(bytes.byteLength * 1.5);
   });
+
+  it('2-up accepts a blank page with no /Contents (found by the differential run)', async () => {
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    doc.addPage([600, 800]).drawText('first', { x: 50, y: 700, size: 12, font });
+    doc.addPage([600, 800]); // never drawn on: no /Contents at all
+    const blank = doc.getPage(1).node;
+    blank.delete(PDFName.of('Contents'));
+    const bytes = await doc.save();
+    const pages = [0, 1].map(i => ({
+      key: `k${i}`,
+      sourceDocId: 'd',
+      sourceIndex: i,
+      rotation: 0
+    }));
+    const nup = await W.compose(
+      pages,
+      { d: bytes },
+      [],
+      undefined,
+      undefined,
+      null,
+      { layout: '2-up', margin: 10, gutter: 10, drawBorders: false },
+      undefined,
+      undefined,
+      {}
+    );
+    expect((await PDFDocument.load(nup)).getPageCount()).toBe(1);
+  });
 });
 
 describe('PDF-11 — a redacted field value does not survive on sibling widgets', () => {

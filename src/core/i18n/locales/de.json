@@ -670,6 +670,8 @@
   "Margin (pt)": "Rand (pt)",
   "Quality": "Qualität",
   "100% (Lossless)": "100 % (verlustfrei)",
+  "Maximum (originals kept where possible)": "Maximal (Originale wo möglich beibehalten)",
+  "JPEG photos are embedded exactly as they are, and PNG and GIF images stay lossless. HEIC, TIFF and lossy WebP photos are saved as 95% JPEG when that is smaller.": "JPEG-Fotos werden unverändert eingebettet, PNG- und GIF-Bilder bleiben verlustfrei. HEIC-, TIFF- und verlustbehaftete WebP-Fotos werden als JPEG mit 95 % gespeichert, wenn das kleiner ist.",
   "90% (High)": "90 % (hoch)",
   "75% (Medium)": "75 % (mittel)",
   "50% (Low)": "50 % (niedrig)",
@@ -1921,8 +1923,8 @@
   "{count} formula cells carried no cached result, so there is nothing to draw for them. Excel stores the last computed value alongside each formula; a file written by a tool that does not, or one saved before it recalculated, leaves the cell blank. Nothing is calculated here._other": "{count} Formelzellen hatten kein zwischengespeichertes Ergebnis, daher gibt es nichts, was dafür gezeichnet werden könnte. Excel speichert den zuletzt berechneten Wert neben jeder Formel; eine Datei, die von einem Werkzeug geschrieben wurde, das dies nicht tut, oder eine, die vor der Neuberechnung gespeichert wurde, lässt die Zelle leer. Hier wird nichts berechnet.",
   "{count} paragraphs had more than {max} emphasis markers (*, _ or ~), so their emphasis was shown as plain characters instead of being interpreted._one": "{count} Absatz hatte mehr als {max} Hervorhebungszeichen (*, _ oder ~), daher wurde seine Hervorhebung als einfache Zeichen angezeigt statt interpretiert.",
   "{count} paragraphs had more than {max} emphasis markers (*, _ or ~), so their emphasis was shown as plain characters instead of being interpreted._other": "{count} Absätze hatten mehr als {max} Hervorhebungszeichen (*, _ oder ~), daher wurde ihre Hervorhebung als einfache Zeichen angezeigt statt interpretiert.",
-  "{count} links were kept as plain text only, because only web (http/https) and email (mailto) links are made clickable in the PDF._one": "{count} Link wurde nur als einfacher Text beibehalten, da im PDF nur Web- (http/https) und E-Mail-Links (mailto) anklickbar gemacht werden.",
-  "{count} links were kept as plain text only, because only web (http/https) and email (mailto) links are made clickable in the PDF._other": "{count} Links wurden nur als einfacher Text beibehalten, da im PDF nur Web- (http/https) und E-Mail-Links (mailto) anklickbar gemacht werden.",
+  "{count} links were kept as plain text only, because only web (http/https), email (mailto) and phone (tel) links are made clickable in the PDF._one": "{count} Link wurde nur als einfacher Text beibehalten, da im PDF nur Web- (http/https), E-Mail- (mailto) und Telefon-Links (tel) anklickbar gemacht werden.",
+  "{count} links were kept as plain text only, because only web (http/https), email (mailto) and phone (tel) links are made clickable in the PDF._other": "{count} Links wurden nur als einfacher Text beibehalten, da im PDF nur Web- (http/https), E-Mail- (mailto) und Telefon-Links (tel) anklickbar gemacht werden.",
   "{count} images were left out (Markdown images are not embedded); the alt text is shown in their place._one": "{count} Bild wurde weggelassen (Markdown-Bilder werden nicht eingebettet); an seiner Stelle wird der Alternativtext angezeigt.",
   "{count} images were left out (Markdown images are not embedded); the alt text is shown in their place._other": "{count} Bilder wurden weggelassen (Markdown-Bilder werden nicht eingebettet); an ihrer Stelle wird der Alternativtext angezeigt.",
   "the substitute font has no glyph for {glyphs} and {count} more_one": "der Ersatzschrift fehlen Glyphen für {glyphs} und {count} weiteres Zeichen",
@@ -1930,5 +1932,9 @@
   "{count} cells were longer than Excel's {max}-character limit and were truncated to fit._one": "{count} Zelle war länger als die Grenze von {max} Zeichen in Excel und wurde passend gekürzt.",
   "{count} cells were longer than Excel's {max}-character limit and were truncated to fit._other": "{count} Zellen waren länger als die Grenze von {max} Zeichen in Excel und wurden passend gekürzt.",
   "Drawing {count} form fields_one": "{count} Formularfeld wird gezeichnet",
-  "Drawing {count} form fields_other": "{count} Formularfelder werden gezeichnet"
+  "Drawing {count} form fields_other": "{count} Formularfelder werden gezeichnet",
+  "The previous session could not be restored.": "Die vorherige Sitzung konnte nicht wiederhergestellt werden.",
+  "Its files are no longer in browser storage.": "Die zugehörigen Dateien sind nicht mehr im Browserspeicher.",
+  "Some saved shortcuts were reset because they would block keyboard navigation.": "Einige gespeicherte Tastenkürzel wurden zurückgesetzt, weil sie die Tastaturnavigation blockieren würden.",
+  "Set them again under Custom shortcuts.": "Lege sie unter „Eigene Tastenkürzel“ neu fest."
 }

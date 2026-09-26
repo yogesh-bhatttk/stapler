@@ -27,11 +27,13 @@ import {
   type RgbaFrame
 } from '../raster-decode';
 import { corrupt, internal } from '../errors';
+import { encodeCanvasAtMaximum, hasTransparency } from '../max-quality';
 
 export interface ImageJob extends LocaleAware {
   /**
    * Decodes a HEIC (primary image) or TIFF (every page) and returns one encoded
-   * image per frame: JPEG at `quality`, or PNG when `quality >= 1`.
+   * image per frame: JPEG at `quality`, or at `quality >= 1` PNG/95% JPEG
+   * by the `max-quality.ts` rule.
    */
   decodeToPdfImages(
     kind: RasterKind,
@@ -77,21 +79,32 @@ function dataUrlToBytes(url: string): Uint8Array {
   return bytes;
 }
 
+/**
+ * Encodes one decoded frame: JPEG at `quality`, or at "Maximum" (`quality >=
+ * 1`) the `max-quality.ts` rule — PNG for anything with transparency or that
+ * is not photographic, otherwise a 95% JPEG when it is the smaller file. HEIC
+ * and TIFF pages are photographic candidates; a flat scan of text stays PNG
+ * because its PNG is already small.
+ */
 async function encode(frame: RgbaFrame, quality: number): Promise<Uint8Array> {
+  const transparent = quality >= 1 && hasTransparency(frame.data);
   flattenOnWhite(frame);
   const canvas = new OffscreenCanvas(frame.width, frame.height);
   const ctx = canvas.getContext('2d');
   if (!ctx) throw corrupt(translate('A 2D canvas context was unavailable for image conversion.'));
   ctx.putImageData(new ImageData(frame.data, frame.width, frame.height), 0, 0);
-  const blob =
-    quality >= 1
-      ? await canvas.convertToBlob({ type: 'image/png' })
-      : await canvas.convertToBlob({ type: 'image/jpeg', quality });
+  let out: Uint8Array;
+  if (quality >= 1) {
+    out = await encodeCanvasAtMaximum(canvas, !transparent);
+  } else {
+    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality });
+    out = new Uint8Array(await blob.arrayBuffer());
+  }
   // Release the backing store now rather than at GC: a 20-page TIFF would
   // otherwise hold every page's canvas at once.
   canvas.width = 0;
   canvas.height = 0;
-  return new Uint8Array(await blob.arrayBuffer());
+  return out;
 }
 
 const api: ImageJob = {

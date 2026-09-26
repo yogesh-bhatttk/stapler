@@ -8,6 +8,8 @@ import { signal } from '@preact/signals';
 import { readSetting, writeSetting } from './db';
 import { logEvent } from './errors';
 import { tKey } from './i18n/key';
+import { translate } from './i18n';
+import { notify } from './notify';
 
 export interface ShortcutBinding {
   key: string; // Normalized lowercase, e.g. 'k', 'z', 'y', 'a', 'r', 'delete', 'backspace', '?'
@@ -119,10 +121,25 @@ export function reservedBindingReason(id: string, binding: ShortcutBinding): str
 function usableOverrides(saved: unknown): Record<string, ShortcutBinding> {
   if (!saved || typeof saved !== 'object') return {};
   const out: Record<string, ShortcutBinding> = {};
+  let dropped = 0;
   for (const [id, binding] of Object.entries(saved as Record<string, ShortcutBinding>)) {
     if (!binding || typeof binding.key !== 'string') continue;
-    if (reservedBindingReason(id, binding)) continue;
+    if (reservedBindingReason(id, binding)) {
+      dropped += 1;
+      continue;
+    }
     out[id] = binding;
+  }
+  if (dropped > 0) {
+    // Said out loud, and the cleaned set saved, rather than a binding the user
+    // chose silently vanishing (regression review R-UI-9).
+    notify(
+      'info',
+      translate('Some saved shortcuts were reset because they would block keyboard navigation.'),
+      { detail: translate('Set them again under Custom shortcuts.') }
+    );
+    persistShortcuts(out);
+    mirrorToLocalStorage(out);
   }
   return out;
 }

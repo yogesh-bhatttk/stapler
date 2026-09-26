@@ -1,4 +1,4 @@
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig, type Plugin, type Rollup } from 'vite';
 import preact from '@preact/preset-vite';
 import {
   cpSync,
@@ -15,6 +15,7 @@ import { transformManifestForFirefox } from './scripts/firefox-manifest.mjs';
 import { STAPLER_CSP } from './scripts/csp.mjs';
 import {
   collectThirdPartyLicenses,
+  packageOfModuleId,
   renderThirdPartyLicenses
 } from './scripts/third-party-licenses.mjs';
 
@@ -187,10 +188,47 @@ export function webCspMeta(): Plugin {
 }
 
 /**
+ * R-BUILD-1 — the npm packages the build really ships: every package a module
+ * Rollup bundled comes from (the pages here, each worker build through
+ * {@link recordBundledPackages} in `worker.plugins`), plus the packages whose
+ * files are copied into the output verbatim by the plugins above. Shared by
+ * the page build and the worker builds of one `vite build`; worker bundles are
+ * built while the pages are transformed, so the set is complete by the pages'
+ * `generateBundle`.
+ */
+const bundledPackages = new Set<string>([
+  'pdfjs-dist',
+  'tesseract.js',
+  'tesseract.js-core',
+  'zxing-wasm'
+]);
+
+function recordPackagesOf(bundle: Rollup.OutputBundle): void {
+  for (const output of Object.values(bundle)) {
+    if (output.type !== 'chunk') continue;
+    for (const id of output.moduleIds) {
+      const name = packageOfModuleId(id);
+      if (name) bundledPackages.add(name);
+    }
+  }
+}
+
+function recordBundledPackages(): Plugin {
+  return {
+    name: 'stapler:record-bundled-packages',
+    apply: 'build',
+    generateBundle(_options, bundle) {
+      recordPackagesOf(bundle);
+    }
+  };
+}
+
+/**
  * Audit 2026-09-25 PLT-12 — the MIT, BSD and Apache licences of the bundled
  * packages (and Apache NOTICE files, where a package ships one) have to travel
  * with the redistribution. Emitted into every build as
  * `THIRD_PARTY_LICENSES.txt`, generated from the production dependency tree
+ * narrowed to the packages the build actually bundled or copied (R-BUILD-1)
  * (`scripts/third-party-licenses.mjs`), and linked from the trust panel and
  * `privacy.html`.
  */
@@ -198,11 +236,15 @@ function thirdPartyLicenses(): Plugin {
   return {
     name: 'stapler:third-party-licenses',
     apply: 'build',
-    generateBundle() {
+    generateBundle(_options, bundle) {
+      recordPackagesOf(bundle);
       this.emitFile({
         type: 'asset',
         fileName: 'THIRD_PARTY_LICENSES.txt',
-        source: renderThirdPartyLicenses(collectThirdPartyLicenses(root), 'Stapler')
+        source: renderThirdPartyLicenses(
+          collectThirdPartyLicenses(root, { shipped: name => bundledPackages.has(name) }),
+          'Stapler'
+        )
       });
     }
   };
@@ -325,7 +367,8 @@ export default defineConfig(() => {
       }
     },
     worker: {
-      format: 'es' as const
+      format: 'es' as const,
+      plugins: () => [recordBundledPackages()]
     }
   };
 });

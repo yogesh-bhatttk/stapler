@@ -72,11 +72,15 @@ export function usePageRender(
 
     // A zoom change on the same page may keep its (rescaled) pixels while the
     // sharper render arrives; a different page never shows the old one's.
+    // Only a different page shows the loading cover: covering the page (and
+    // blocking the Redact/Crop overlays) on every zoom step made each zoom
+    // flash an opaque panel for pixels the user was already looking at
+    // (regression review R-RT-8).
     if (shown.current !== pageId) {
       clearCanvas(canvasRef.current);
       shown.current = null;
+      setState('loading');
     }
-    setState('loading');
     setReduced(clamped);
 
     void (async () => {

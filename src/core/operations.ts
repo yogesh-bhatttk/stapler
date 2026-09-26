@@ -1303,8 +1303,16 @@ async function verifyRedaction(
   // dictionary that exists outside the page tree. Either finding fails the
   // redaction, whatever the rendered page looks like.
   const searchTerms = regions.map(r => r.text).filter((t): t is string => !!t && !!t.trim());
-  const residual = await processWorker.lease(api => api.scanResidualText(output, searchTerms));
+  const markedPages = [...new Set(regions.map(r => r.pageIndex))];
+  const residual = await processWorker.lease(api =>
+    api.scanResidualText(output, searchTerms, markedPages)
+  );
   const residualFound = new Set(residual.found.map(t => t.toLowerCase()));
+  // N-4: a page whose own content could not be decoded cannot be proven clean.
+  // Only pages that carry a mark are held to this — an undecodable stream
+  // elsewhere cannot hold what a mark on another page removed, and failing on
+  // it would block ordinary files for no reason.
+  const undecodablePages = new Set(residual.undecodablePages ?? []);
 
   // Which images the *output* still draws under a mark, and which of their pixels
   // the mark covers — the same plan the redaction worked from, recomputed against
@@ -1401,14 +1409,16 @@ async function verifyRedaction(
           };
         }
 
-        if (region.text && residualFound.has(region.text.toLowerCase())) {
+        if (undecodablePages.has(region.pageIndex)) {
           return {
             region,
             pass: false,
-            detail: translate(
-              'The text "{text}" is still present inside the file\'s data, even though no page shows it.',
-              { text: region.text }
-            )
+            detail: translate('The redaction on page {page} is not proven: {reason}', {
+              page: region.pageIndex + 1,
+              reason: translate('its stream could not be decoded ({message})', {
+                message: residual.undecodableFilters?.[region.pageIndex] || '?'
+              })
+            })
           };
         }
 
@@ -1430,6 +1440,21 @@ async function verifyRedaction(
             detail: translate('The text "{text}" is still present elsewhere in the document.', {
               text: region.text
             })
+          };
+        }
+
+        // Checked after the visible-text checks, so "no page shows it" is only
+        // said when that is true: the whole-file scan also matches text still
+        // drawn on another page, and ran first, so a word left on page 2 was
+        // reported as hidden file data (regression review U1).
+        if (region.text && residualFound.has(region.text.toLowerCase())) {
+          return {
+            region,
+            pass: false,
+            detail: translate(
+              'The text "{text}" is still present inside the file\'s data, even though no page shows it.',
+              { text: region.text }
+            )
           };
         }
 

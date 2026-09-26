@@ -12,7 +12,10 @@ function isQuotaError(err: unknown): boolean {
 }
 
 /** A scratch file the startup probe creates and removes; never a `*.pdf`, so no sweep sees it. */
-const PROBE_FILE = '.stapler-opfs-probe';
+// Unique per probe: with one fixed name, two tabs booting at once could
+// remove each other's scratch file mid-probe and fall back to memory-only
+// storage for the whole session (regression review R-RT-5).
+const probeFileName = () => `.stapler-opfs-probe-${crypto.randomUUID()}`;
 
 /**
  * `navigator.storage.getDirectory()` existing is not proof it works: Firefox
@@ -35,7 +38,8 @@ async function probeOpfsRoot(): Promise<FileSystemDirectoryHandle | null> {
   if (!globalThis.navigator?.storage?.getDirectory) return null;
   try {
     const root = await navigator.storage.getDirectory();
-    const handle = await root.getFileHandle(PROBE_FILE, { create: true });
+    const probeFile = probeFileName();
+    const handle = await root.getFileHandle(probeFile, { create: true });
     try {
       if (typeof (handle as Partial<FileSystemFileHandle>).createWritable !== 'function') {
         return null;
@@ -45,7 +49,7 @@ async function probeOpfsRoot(): Promise<FileSystemDirectoryHandle | null> {
       return root;
     } finally {
       try {
-        await root.removeEntry(PROBE_FILE);
+        await root.removeEntry(probeFile);
       } catch {
         // Harmless: an empty scratch file, and not a `*.pdf` any sweep touches.
       }
@@ -306,6 +310,10 @@ interface LockManagerLike {
     options: { mode?: 'shared' | 'exclusive'; ifAvailable?: boolean },
     callback: (lock: unknown) => Promise<T> | T
   ): Promise<T>;
+  query?(): Promise<{
+    held?: { name?: string }[];
+    pending?: { name?: string }[];
+  }>;
 }
 
 function lockManager(): LockManagerLike | null {
@@ -350,19 +358,32 @@ export async function sweepOrphanedSourceBytesIfSoleTab(
   isLive: (id: string) => boolean
 ): Promise<number | null> {
   const locks = lockManager();
-  if (!locks) return null;
-  let removed: number | null;
-  try {
-    removed = await locks.request(
-      WORKSPACE_LOCK,
-      { mode: 'exclusive', ifAvailable: true },
-      async lock => (lock ? sweepOrphanedSourceBytes(isLive) : null)
-    );
-  } catch {
-    removed = null;
-  }
+  if (!locks || typeof locks.query !== 'function') return null;
+  // This tab's own shared lock comes first (normally already taken by
+  // `announceTab` at the very start of startup). Every other tab takes its
+  // lock just as early, so one still deciding on its restore prompt is
+  // visible here — it used to take the lock only after its decision, and a
+  // second tab's "Start fresh" swept the bytes it was about to restore
+  // (regression review R-RT-2).
   await holdTabLock(locks);
-  return removed;
+  try {
+    const state = await locks.query();
+    const holders = (state.held ?? []).filter(l => l.name === WORKSPACE_LOCK).length;
+    const waiting = (state.pending ?? []).filter(l => l.name === WORKSPACE_LOCK).length;
+    if (holders !== 1 || waiting !== 0) return null;
+    return await sweepOrphanedSourceBytes(isLive);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Takes this tab's shared workspace lock as early as possible in startup, so
+ * other tabs see it before they consider sweeping. Never rejects or hangs.
+ */
+export async function announceTab(): Promise<void> {
+  const locks = lockManager();
+  if (locks) await holdTabLock(locks);
 }
 
 /** Test hook: forget that this module already holds the tab lock. */

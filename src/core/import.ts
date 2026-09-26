@@ -23,7 +23,7 @@ import {
   type SourceDocument
 } from './store';
 import { deleteSourceBytes, usesMemoryFallback, writeSourceBytes } from './opfs';
-import { imageFileToPdfImages, isSupportedImage } from './image';
+import { imageFileToPdfImages, isSupportedImage, type PdfImageSource } from './image';
 import { hasXfaMarker, XFA_MESSAGE } from './pdf/xfa';
 import { tPlural, translate } from './i18n';
 
@@ -231,8 +231,9 @@ export async function imagesToPdfBytes(
   imageOptions?: ImagesToPdfOptions
 ): Promise<{ bytes: Uint8Array; warnings: string[] }> {
   const job = createJobHandle(options);
-  // JPEG, or PNG on the lossless path — `imagesToPdf` sniffs which (CONV-10).
-  const images: Uint8Array[] = [];
+  // JPEG or PNG bytes (`imagesToPdf` sniffs which), or a passed-through JPEG
+  // plus the orientation to place it with (CONV-10).
+  const images: PdfImageSource[] = [];
   const warnings: string[] = [];
   for (let i = 0; i < files.length; i++) {
     // Per-image cancellation point: decoding a 120MB TIFF is the slow part, and the

@@ -55,13 +55,118 @@ export function literalEmphasisNote(count: number): string {
   );
 }
 
-function countEmphasisDelimiters(src: string): number {
-  let n = 0;
-  for (let i = 0; i < src.length; i++) {
-    const c = src.charCodeAt(i);
-    if (c === 42 /* * */ || c === 95 /* _ */ || c === 126 /* ~ */) n++;
+const AUTOLINK = /<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*|[^\s<>@]+@[^\s<>]+)>/y;
+const BARE_URL = /(?:https?:\/\/|www\.)[^\s<]*/iy;
+const WORD_CHAR = /[\p{L}\p{N}_]/u;
+
+/**
+ * The inline source with every `*`, `_` and `~` in *plain text* backslash-
+ * escaped, and how many were (R-CONV-4). Left exactly as written: code spans
+ * (their content is literal — an escape there would be drawn), autolinks and
+ * bare URLs (a backslash would become part of the address), a link's `(…)`
+ * destination, and any character that is already backslash-escaped (escaping
+ * the marker after `\` would turn `\*` into `\\*`, a literal backslash
+ * followed by a live delimiter). Fenced and indented code never gets here —
+ * those are block tokens, not inline runs.
+ *
+ * Linear: each backtick-run length whose closing run is not found is
+ * remembered, so a run of unmatched backticks cannot make the scan quadratic.
+ */
+export function escapePlainTextEmphasis(src: string): { text: string; escaped: number } {
+  let out = '';
+  let escaped = 0;
+  let plainStart = 0;
+  const flushPlain = (end: number) => {
+    for (let k = plainStart; k < end; k++) {
+      const c = src[k];
+      if (c === '*' || c === '_' || c === '~') {
+        out += '\\' + c;
+        escaped++;
+      } else {
+        out += c;
+      }
+    }
+  };
+  const copyVerbatim = (from: number, to: number) => {
+    flushPlain(from);
+    out += src.slice(from, to);
+    plainStart = to;
+  };
+  /** Backtick-run lengths known to have no closing run past the current position. */
+  const unclosed = new Set<number>();
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === '\\' && i + 1 < src.length) {
+      copyVerbatim(i, i + 2);
+      i += 2;
+      continue;
+    }
+    if (c === '`') {
+      let run = 1;
+      while (src[i + run] === '`') run++;
+      let close = -1;
+      if (!unclosed.has(run)) {
+        let from = i + run;
+        while (from < src.length) {
+          const at = src.indexOf('`', from);
+          if (at < 0) break;
+          let len = 1;
+          while (src[at + len] === '`') len++;
+          if (len === run) {
+            close = at;
+            break;
+          }
+          from = at + len;
+        }
+        if (close < 0) unclosed.add(run);
+      }
+      const end = close < 0 ? i + run : close + run;
+      copyVerbatim(i, end);
+      i = end;
+      continue;
+    }
+    if (c === '<') {
+      AUTOLINK.lastIndex = i;
+      if (AUTOLINK.test(src)) {
+        copyVerbatim(i, AUTOLINK.lastIndex);
+        i = AUTOLINK.lastIndex;
+        continue;
+      }
+    }
+    if (
+      (c === 'h' || c === 'H' || c === 'w' || c === 'W') &&
+      !(i > 0 && WORD_CHAR.test(src[i - 1]))
+    ) {
+      BARE_URL.lastIndex = i;
+      if (BARE_URL.test(src)) {
+        copyVerbatim(i, BARE_URL.lastIndex);
+        i = BARE_URL.lastIndex;
+        continue;
+      }
+    }
+    if (c === ']' && src[i + 1] === '(') {
+      // A link or image destination: up to the balancing `)` on this line.
+      let depth = 0;
+      let k = i + 1;
+      for (; k < src.length && src[k] !== '\n'; k++) {
+        if (src[k] === '\\') {
+          k++;
+          continue;
+        }
+        if (src[k] === '(') depth++;
+        else if (src[k] === ')' && --depth === 0) break;
+      }
+      if (k < src.length && src[k] === ')') {
+        copyVerbatim(i, k + 1);
+        i = k + 1;
+        continue;
+      }
+    }
+    i++;
   }
-  return n;
+  flushPlain(src.length);
+  return { text: out, escaped };
 }
 
 /** How often (ms) a long conversion checks for cancel and reports progress. */
@@ -90,8 +195,11 @@ async function lexMarkdown(
       last = Date.now();
     }
     let inline = queue[i].src;
-    if (countEmphasisDelimiters(inline) > MAX_INLINE_EMPHASIS_DELIMITERS) {
-      inline = inline.replace(/[*_~]/g, '\\$&');
+    // Only the markers in plain text are delimiters marked's matcher can
+    // choke on, and only they are escaped (R-CONV-4).
+    const guarded = escapePlainTextEmphasis(inline);
+    if (guarded.escaped > MAX_INLINE_EMPHASIS_DELIMITERS) {
+      inline = guarded.text;
       counts.literalEmphasis += 1;
     }
     lexer.inlineTokens(inline, queue[i].tokens);
@@ -100,8 +208,8 @@ async function lexMarkdown(
   return lexer.tokens;
 }
 
-/** URI schemes a link annotation may carry (CONV-11). */
-const SAFE_LINK_PROTOCOLS = new Set(['http:', 'https:', 'mailto:']);
+/** URI schemes a link annotation may carry (CONV-11; `tel:` since R-CONV-7). */
+const SAFE_LINK_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:']);
 
 /**
  * A link target as it can safely go into a PDF `/URI`, or `null` to drop it.
@@ -109,9 +217,9 @@ const SAFE_LINK_PROTOCOLS = new Set(['http:', 'https:', 'mailto:']);
  * `PDFString.of` writes each UTF-16 code unit as a byte, so a non-ASCII URL
  * came out as mojibake (`https://例え.jp/パス` → `https://H.jp/Ñ¹`). `URL`'s
  * serialisation is pure ASCII — punycoded host, percent-encoded path — which is
- * exactly what the PDF spec asks a `/URI` to be. Only http(s) and mailto are
- * kept: `javascript:` and `file:` were written verbatim before, and a relative
- * link has nothing to resolve against in a standalone PDF.
+ * exactly what the PDF spec asks a `/URI` to be. Only http(s), mailto and tel
+ * are kept: `javascript:` and `file:` were written verbatim before, and a
+ * relative link has nothing to resolve against in a standalone PDF.
  */
 export function safeLinkUri(href: string | undefined): string | null {
   if (!href) return null;
@@ -125,12 +233,48 @@ export function safeLinkUri(href: string | undefined): string | null {
   return url.href;
 }
 
+/**
+ * A link to a place inside the same document — `#heading`, or a Word
+ * table-of-contents / cross-reference entry (`#_Toc…`, which mammoth emits for
+ * every TOC line). There is no URI to give it; its text is drawn as ordinary
+ * text, and it is not reported as a refused link — nothing about it was
+ * unsafe or lost (R-CONV-7).
+ */
+export function isInternalLink(href: string | undefined): boolean {
+  return href !== undefined && href.trim().startsWith('#');
+}
+
+/**
+ * Per wrapped block: the link a line ended in, so the same link continuing on
+ * the next line is not counted a second time when it is refused (R-CONV-7).
+ */
+export interface LinkWrapState {
+  carried?: string;
+}
+
+/**
+ * The annotation for one run of same-link words on a line. Returns 1 when the
+ * link was refused *and* this is not the continuation of a link already
+ * counted on the line before, else 0. `atLineStart` is whether this group is
+ * the first on its line.
+ */
+export function annotateLinkGroup(
+  page: PDFPage,
+  rect: [number, number, number, number],
+  href: string,
+  wrap: LinkWrapState,
+  atLineStart: boolean
+): number {
+  if (addLinkAnnotation(page, rect, href)) return 0;
+  return atLineStart && wrap.carried === href ? 0 : 1;
+}
+
 /** The note for links {@link safeLinkUri} refused, or null when there were none. */
 export function droppedLinksNote(count: number): string | null {
   if (count === 0) return null;
   return tPlural(
     '{count} links were kept as plain text only, because only ' +
-      'web (http/https) and email (mailto) links are made clickable in the PDF.',
+      'web (http/https), email (mailto) and phone (tel) links are made clickable in the PDF.',
     count
   );
 }
@@ -432,12 +576,23 @@ async function renderMarkdown(
 
   /** Draws one wrapped line of words at the current cursor, adding a link
    * annotation for each contiguous run of words that share an `href`. */
-  const drawWordsLine = (words: Word[], x: number, y: number, font: PDFFont, size: number) => {
+  const drawWordsLine = (
+    words: Word[],
+    x: number,
+    y: number,
+    font: PDFFont,
+    size: number,
+    wrap: LinkWrapState
+  ) => {
     let cursorX = x;
     const spaceWidth = font.widthOfTextAtSize(' ', size);
     let i = 0;
+    let lastHref: string | undefined;
     while (i < words.length) {
+      const atLineStart = i === 0;
       const href = words[i].href;
+      // An in-document link has nowhere to point in this PDF: plain text.
+      const linkHref = isInternalLink(href) ? undefined : href;
       const groupStartX = cursorX;
       while (i < words.length && words[i].href === href) {
         const word = words[i];
@@ -446,25 +601,34 @@ async function renderMarkdown(
           y,
           size,
           font,
-          color: href ? LINK_COLOR : undefined
+          color: linkHref ? LINK_COLOR : undefined
         });
         cursorX += font.widthOfTextAtSize(word.text, size);
         i++;
         if (i < words.length && words[i].href === href) cursorX += spaceWidth;
       }
-      if (href && !addLinkAnnotation(page, [groupStartX, y - 2, cursorX, y + size], href)) {
-        counts.droppedLinks += 1;
+      if (linkHref) {
+        counts.droppedLinks += annotateLinkGroup(
+          page,
+          [groupStartX, y - 2, cursorX, y + size],
+          linkHref,
+          wrap,
+          atLineStart
+        );
       }
+      lastHref = linkHref;
       if (i < words.length) cursorX += spaceWidth;
     }
+    wrap.carried = lastHref;
   };
 
   const drawInlineWrapped = (runs: InlineRun[], font: PDFFont, size: number, indent = 0) => {
     const words = runsToWords(runs, tally);
     const lines = wrapWords(words, font, size, PAGE_WIDTH - MARGIN * 2 - indent);
+    const wrap: LinkWrapState = {};
     for (const line of lines) {
       advanceY(size * 1.5);
-      drawWordsLine(line, state.x + indent, state.y, font, size);
+      drawWordsLine(line, state.x + indent, state.y, font, size, wrap);
     }
   };
 

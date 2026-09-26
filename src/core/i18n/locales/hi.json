@@ -670,6 +670,8 @@
   "Margin (pt)": "हाशिया (pt)",
   "Quality": "गुणवत्ता",
   "100% (Lossless)": "100% (दोषरहित)",
+  "Maximum (originals kept where possible)": "अधिकतम (जहाँ संभव हो मूल फ़ाइल बरकरार)",
+  "JPEG photos are embedded exactly as they are, and PNG and GIF images stay lossless. HEIC, TIFF and lossy WebP photos are saved as 95% JPEG when that is smaller.": "JPEG फ़ोटो बिना बदलाव के जोड़ी जाती हैं, और PNG व GIF छवियाँ दोषरहित रहती हैं। HEIC, TIFF और हानिपूर्ण WebP फ़ोटो 95% JPEG के रूप में सहेजी जाती हैं, जब वह छोटी हो।",
   "90% (High)": "90% (उच्च)",
   "75% (Medium)": "75% (मध्यम)",
   "50% (Low)": "50% (निम्न)",
@@ -1921,8 +1923,8 @@
   "{count} formula cells carried no cached result, so there is nothing to draw for them. Excel stores the last computed value alongside each formula; a file written by a tool that does not, or one saved before it recalculated, leaves the cell blank. Nothing is calculated here._other": "{count} सूत्र सेल में कोई कैश्ड परिणाम नहीं था, इसलिए उनके लिए बनाने को कुछ नहीं है। Excel हर सूत्र के साथ अंतिम गणना किया गया मान संग्रहीत करता है; ऐसा न करने वाले टूल द्वारा लिखी गई फ़ाइल, या पुनर्गणना से पहले सहेजी गई फ़ाइल, सेल को खाली छोड़ देती है। यहाँ कुछ भी गणना नहीं किया जाता।",
   "{count} paragraphs had more than {max} emphasis markers (*, _ or ~), so their emphasis was shown as plain characters instead of being interpreted._one": "{count} पैराग्राफ़ में {max} से अधिक ज़ोर चिह्न (*, _ या ~) थे, इसलिए उसके ज़ोर को व्याख्यायित करने के बजाय सादे वर्णों के रूप में दिखाया गया।",
   "{count} paragraphs had more than {max} emphasis markers (*, _ or ~), so their emphasis was shown as plain characters instead of being interpreted._other": "{count} पैराग्राफ़ में {max} से अधिक ज़ोर चिह्न (*, _ या ~) थे, इसलिए उनके ज़ोर को व्याख्यायित करने के बजाय सादे वर्णों के रूप में दिखाया गया।",
-  "{count} links were kept as plain text only, because only web (http/https) and email (mailto) links are made clickable in the PDF._one": "{count} लिंक केवल सादे पाठ के रूप में रखा गया, क्योंकि PDF में केवल वेब (http/https) और ईमेल (mailto) लिंक ही क्लिक करने योग्य बनाए जाते हैं।",
-  "{count} links were kept as plain text only, because only web (http/https) and email (mailto) links are made clickable in the PDF._other": "{count} लिंक केवल सादे पाठ के रूप में रखे गए, क्योंकि PDF में केवल वेब (http/https) और ईमेल (mailto) लिंक ही क्लिक करने योग्य बनाए जाते हैं।",
+  "{count} links were kept as plain text only, because only web (http/https), email (mailto) and phone (tel) links are made clickable in the PDF._one": "{count} लिंक केवल सादे पाठ के रूप में रखा गया, क्योंकि PDF में केवल वेब (http/https), ईमेल (mailto) और फ़ोन (tel) लिंक ही क्लिक करने योग्य बनाए जाते हैं।",
+  "{count} links were kept as plain text only, because only web (http/https), email (mailto) and phone (tel) links are made clickable in the PDF._other": "{count} लिंक केवल सादे पाठ के रूप में रखे गए, क्योंकि PDF में केवल वेब (http/https), ईमेल (mailto) और फ़ोन (tel) लिंक ही क्लिक करने योग्य बनाए जाते हैं।",
   "{count} images were left out (Markdown images are not embedded); the alt text is shown in their place._one": "{count} छवि छोड़ दी गई (Markdown छवियाँ एम्बेड नहीं की जातीं); उसकी जगह वैकल्पिक पाठ दिखाया गया है।",
   "{count} images were left out (Markdown images are not embedded); the alt text is shown in their place._other": "{count} छवियाँ छोड़ दी गईं (Markdown छवियाँ एम्बेड नहीं की जातीं); उनकी जगह वैकल्पिक पाठ दिखाया गया है।",
   "the substitute font has no glyph for {glyphs} and {count} more_one": "स्थानापन्न फ़ॉन्ट में {glyphs} और {count} अन्य के लिए कोई ग्लिफ़ नहीं है",
@@ -1930,5 +1932,9 @@
   "{count} cells were longer than Excel's {max}-character limit and were truncated to fit._one": "{count} सेल Excel की {max}-वर्ण सीमा से लंबा था और उसे फ़िट करने के लिए छोटा कर दिया गया।",
   "{count} cells were longer than Excel's {max}-character limit and were truncated to fit._other": "{count} सेल Excel की {max}-वर्ण सीमा से लंबे थे और उन्हें फ़िट करने के लिए छोटा कर दिया गया।",
   "Drawing {count} form fields_one": "{count} फ़ॉर्म फ़ील्ड बनाया जा रहा है",
-  "Drawing {count} form fields_other": "{count} फ़ॉर्म फ़ील्ड बनाए जा रहे हैं"
+  "Drawing {count} form fields_other": "{count} फ़ॉर्म फ़ील्ड बनाए जा रहे हैं",
+  "The previous session could not be restored.": "पिछला सत्र पुनर्स्थापित नहीं किया जा सका।",
+  "Its files are no longer in browser storage.": "इसकी फ़ाइलें अब ब्राउज़र स्टोरेज में नहीं हैं।",
+  "Some saved shortcuts were reset because they would block keyboard navigation.": "कुछ सहेजे गए शॉर्टकट रीसेट कर दिए गए क्योंकि वे कीबोर्ड नेविगेशन रोक देते।",
+  "Set them again under Custom shortcuts.": "इन्हें कस्टम शॉर्टकट में फिर से सेट करें।"
 }

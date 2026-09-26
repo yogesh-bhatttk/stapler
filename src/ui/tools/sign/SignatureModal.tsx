@@ -51,6 +51,7 @@ export function SignatureModal({
           activeId={tab}
           onChange={id => setTab(id as Tab)}
           ariaLabel={t('Signature source')}
+          panelIdPrefix="tabpanel-"
         />
       </div>
 

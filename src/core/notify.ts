@@ -61,7 +61,11 @@ export function notify(
   const timeout = options.timeout ?? DEFAULT_TIMEOUTS[tone];
   const next = [...toasts.value, { id, tone, title, ...options, timeout }];
   while (next.length > MAX_VISIBLE_TOASTS) {
-    const victim = next.findIndex(t => t.tone !== 'danger' && t.id !== id);
+    // Oldest non-danger first — including, if every older toast is an error,
+    // the one just added: an unread error must outlive an info note, and with
+    // four errors up the new note used to push the oldest error out
+    // (regression review R-UI-6). Only when all are errors does the oldest go.
+    const victim = next.findIndex(t => t.tone !== 'danger');
     next.splice(victim === -1 ? 0 : victim, 1);
   }
   toasts.value = next;
