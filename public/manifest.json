@@ -19,6 +19,9 @@
     },
     "default_title": "Open Stapler"
   },
+  "omnibox": {
+    "keyword": "pdf"
+  },
   "background": {
     "service_worker": "background.js",
     "type": "module"

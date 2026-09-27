@@ -115,8 +115,16 @@
   .railHeading {
     display: none;
   }
+  /* Visually hidden, not `display: none`: the label stays the item's
+     accessible name (the floating tooltip shows it to sighted users). */
   .railLabel {
-    display: none;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
   }
   .railItem {
     width: var(--control-h);
@@ -128,5 +136,20 @@
      icons in icon-only mode regardless of collapse state. */
   .railList[hidden] {
     display: flex;
+  }
+  /* GAP-7 — the headings are hidden here, so a hairline keeps the groups
+     visibly grouped, as on the home page. Each group is still announced by
+     name (role="group" + aria-labelledby). */
+  .railGroup + .railGroup {
+    padding-top: var(--space-md);
+    border-top: 1px solid var(--hairline);
+  }
+}
+
+/* GAP-3 — at phone width the rail gives its ~15% of the screen back; the top
+   bar's Tools button opens the same list as a searchable sheet instead. */
+@media (max-width: 599px) {
+  .rail {
+    display: none;
   }
 }

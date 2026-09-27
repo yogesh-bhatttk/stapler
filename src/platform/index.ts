@@ -60,6 +60,13 @@ export interface PlatformAdapter {
 
   /** Reads an image from the OS clipboard, or null if empty/refused. */
   readClipboardImage(): Promise<File | null>;
+
+  /**
+   * GAP-7 — routes pushed from outside the page (the extension's omnibox
+   * keyword asking this editor tab to open a tool). Absent on the web build.
+   * Returns an unsubscribe function.
+   */
+  onExternalNavigate?(handler: (route: string) => void): () => void;
 }
 
 /** `accept` map → the `accept` attribute of an `<input type=file>`. */

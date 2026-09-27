@@ -51,6 +51,63 @@
   outline-offset: 2px;
 }
 
+.trustCompact {
+  display: none;
+}
+
+/* Only below 600px, where it stands in for the tool rail (GAP-3). */
+.toolsButton {
+  display: none;
+}
+
+/* A key chord means nothing on a touch screen (GAP-3). */
+@media (hover: none), (pointer: coarse) {
+  .shortcut {
+    display: none;
+  }
+}
+
+/*
+ * GAP-3 — phone width. At 360–414px the full chip ("Offline · 0 requests")
+ * was clipped off the edge. The wordmark and chip text give way to icons (each
+ * keeps its accessible name), the Tools button takes the rail's place, and the
+ * spacing tightens to the 4px half-step so nothing is cut off.
+ */
+@media (max-width: 599px) {
+  .topBar {
+    gap: var(--space-xs);
+    padding: 0 var(--space-xs);
+  }
+
+  .actions {
+    gap: var(--space-xxs);
+  }
+
+  .wordmark {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+  }
+
+  .toolsButton {
+    display: inline-flex;
+    min-width: 0;
+  }
+
+  .trustFull {
+    display: none;
+  }
+
+  .trustCompact {
+    display: inline-flex;
+    align-items: center;
+  }
+}
+
 /* ---------- file tabs ---------- */
 
 .tabs {

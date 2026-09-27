@@ -1,0 +1,80 @@
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.heading {
+  font: var(--text-micro);
+  letter-spacing: var(--text-micro-ls);
+  text-transform: uppercase;
+  color: var(--primary-text);
+  margin: 0;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+}
+
+.tool {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  /* Comfortably above the 44px touch-target minimum. */
+  min-height: 56px;
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--ink);
+  text-decoration: none;
+  font: var(--text-body);
+}
+
+.tool:hover {
+  border-color: var(--primary);
+  background: var(--surface-2);
+}
+
+.tool:focus-visible {
+  outline: 2px solid var(--primary-focus);
+  outline-offset: 2px;
+}
+
+.active {
+  background: var(--surface-3);
+  border-inline-start: 3px solid var(--primary);
+}
+
+.toolBody {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.toolTitle {
+  font: var(--text-body-strong);
+  letter-spacing: var(--text-body-strong-ls);
+}
+
+.toolSummary {
+  font: var(--text-small);
+  color: var(--ink-subtle);
+}
+
+.empty {
+  margin: 0;
+  font: var(--text-small);
+  color: var(--ink-subtle);
+}

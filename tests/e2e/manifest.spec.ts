@@ -19,6 +19,15 @@ test.describe('manifest', () => {
     expect(manifest.host_permissions ?? []).toEqual([]);
   });
 
+  test('declares the `pdf` omnibox keyword without any permission (GAP-7)', () => {
+    // `omnibox` is a manifest key, not a permission: Chrome lists no install
+    // warning for it (the permission warnings table has no entry for it), so
+    // it can ship while `permissions` stays empty.
+    expect(manifest.omnibox).toEqual({ keyword: 'pdf' });
+    expect(manifest.permissions ?? []).toEqual([]);
+    expect(manifest.optional_permissions ?? []).toEqual([]);
+  });
+
   test('declares no content scripts and no web-accessible resources', () => {
     expect(manifest.content_scripts).toBeUndefined();
     expect(manifest.web_accessible_resources).toBeUndefined();

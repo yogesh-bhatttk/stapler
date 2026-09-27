@@ -50,6 +50,13 @@ describe('transformManifestForFirefox', () => {
     expect(firefox.content_scripts).toBeUndefined();
   });
 
+  test('keeps the omnibox keyword, which Firefox supports and which needs no permission (GAP-7)', () => {
+    const firefox = firefoxOf(chromeManifest);
+    expect(firefox.omnibox).toEqual({ keyword: 'pdf' });
+    expect(firefox.permissions).toEqual([]);
+    expect(firefox.optional_permissions ?? []).toEqual([]);
+  });
+
   test('drops the Chrome-only minimum_chrome_version key', () => {
     expect(chromeManifest.minimum_chrome_version).toBeDefined();
     expect(firefoxOf(chromeManifest)).not.toHaveProperty('minimum_chrome_version');

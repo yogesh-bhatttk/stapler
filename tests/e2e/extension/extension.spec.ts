@@ -109,3 +109,40 @@ test('face blur runs with the bundled detector and no network', async ({ editor,
   await expect(editor.getByRole('dialog', { name: /Download/ })).toHaveCount(0);
   await expectClean(editor, diagnostics);
 });
+
+test('the omnibox keyword is wired and switches an open editor tab in place (GAP-7)', async ({
+  context,
+  editor,
+  diagnostics
+}) => {
+  const [worker] = context.serviceWorkers();
+  // The `pdf` keyword registered its listeners in the real service worker.
+  expect(
+    await worker.evaluate(
+      () =>
+        chrome.omnibox.onInputEntered.hasListeners() && chrome.omnibox.onInputChanged.hasListeners()
+    )
+  ).toBe(true);
+
+  // The same message the omnibox path sends, from the real service worker to
+  // the real editor tab: the tab answers and switches tool without reloading.
+  await editor.evaluate(() => ((window as unknown as { __marker: number }).__marker = 1));
+  // Target *this* editor tab by its URL: a fresh install also opens the
+  // welcome tab (`#/welcome`), so "the first TAB context" can be the other one.
+  const answered = await worker.evaluate(async editorUrl => {
+    const tabs = await chrome.runtime.getContexts({ contextTypes: ['TAB'] });
+    const tab = tabs.find(context => context.documentUrl === editorUrl);
+    if (!tab) throw new Error(`editor tab not found among ${tabs.length} tabs`);
+    return chrome.runtime.sendMessage({
+      type: 'stapler:navigate',
+      route: '/tool/compress',
+      tabId: tab.tabId
+    });
+  }, editor.url());
+  expect(answered).toBe(true);
+  await expect(editor).toHaveURL(/#\/tool\/compress$/);
+  expect(await editor.evaluate(() => (window as unknown as { __marker?: number }).__marker)).toBe(
+    1
+  );
+  await expectClean(editor, diagnostics);
+});
