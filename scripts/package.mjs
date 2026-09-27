@@ -81,6 +81,10 @@ function checkManifest(dir, label) {
   if (!existsSync(join(dir, 'THIRD_PARTY_LICENSES.txt'))) {
     fail(`${label}: THIRD_PARTY_LICENSES.txt is missing`);
   }
+  // GAP-2: the offline service worker and web app manifest are the website's.
+  for (const webOnly of ['sw.js', 'manifest.webmanifest']) {
+    if (existsSync(join(dir, webOnly))) fail(`${label}: ships the website's ${webOnly}`);
+  }
 }
 
 function zipDir(dir, zipName) {
@@ -114,6 +118,9 @@ if (existsSync(join(DIST, 'web', 'manifest.json'))) {
 }
 if (!existsSync(join(DIST, 'web', 'THIRD_PARTY_LICENSES.txt'))) {
   fail('dist/web: THIRD_PARTY_LICENSES.txt is missing');
+}
+for (const webOnly of ['sw.js', 'manifest.webmanifest']) {
+  if (!existsSync(join(DIST, 'web', webOnly))) fail(`dist/web: ${webOnly} is missing (GAP-2)`);
 }
 
 console.log('\n▶ zip');
