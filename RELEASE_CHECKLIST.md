@@ -226,6 +226,13 @@ so it gets its own explicit step below rather than being buried inside "run veri
        the three real viewers, which no test in this repo can launch.
 - [ ] **Feature Complete:** All features for this release are implemented; any
       known limitation is disclosed in the relevant panel, not silent.
+- [ ] **HEIC decoder licence (legal review, before first store release):**
+      `libheif-js` (the HEIC decoder, `src/core/raster-decode.ts`) is LGPL-3.0. It
+      ships as a separate, replaceable WASM chunk with its licence text included in
+      `THIRD_PARTY_LICENSES.txt` (see `scripts/third-party-licenses.mjs`), which
+      satisfies LGPL §4's "prominent notice" requirement, but confirm with counsel
+      that this distribution shape is acceptable before the first Chrome Web Store /
+      AMO submission. Not required again for routine updates once cleared.
 
 ## 2. Build the Extension
 - [ ] **Clean Build:** Remove any old `dist/ext` folder.

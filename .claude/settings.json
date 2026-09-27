@@ -3,12 +3,11 @@
   "permissions": {
     "allow": [
       "Read",
-      "Bash(npm run *)",
-      "Bash(npm test*)",
-      "Bash(npx vitest*)",
-      "Bash(npx playwright*)",
-      "Bash(npx prettier*)",
-      "Bash(npx tsc*)",
+      "Bash(pnpm *)",
+      "Bash(node_modules/.bin/vitest*)",
+      "Bash(node_modules/.bin/playwright*)",
+      "Bash(node_modules/.bin/prettier*)",
+      "Bash(node_modules/.bin/tsc*)",
       "Bash(node *)",
       "Bash(jq *)",
       "Bash(ls *)",
