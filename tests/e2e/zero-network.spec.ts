@@ -136,7 +136,17 @@ test.describe('zero network', () => {
       // for a remote cmap or standard font.
       await page.goto('/#/tool/organize');
       await expect(page.locator('canvas').first()).toBeVisible({ timeout: 30_000 });
-      await page.waitForTimeout(1500);
+      // Was a fixed 1.5 s sleep (audit PLT-18). pdf.js asks for cmaps and
+      // standard fonts *before* it can paint text, so a painted thumbnail is
+      // the condition that every such request has already been made.
+      await page.waitForFunction(
+        () => {
+          const canvas = document.querySelector('canvas');
+          return canvas instanceof HTMLCanvasElement && canvas.width > 1;
+        },
+        undefined,
+        { timeout: 30_000 }
+      );
     });
   });
 
@@ -540,6 +550,45 @@ test.describe('zero network', () => {
     );
     for (const reference of scripts) {
       expect(isLocal(new URL(reference, origin).href, origin)).toBe(true);
+    }
+  });
+
+  /**
+   * Audit 2026-09-25 PLT-4 — GitHub Pages cannot send a CSP header, so every
+   * entry page of the website twin carries the policy as its first <head>
+   * element (the `stapler:web-csp` Vite plugin). The request watch above is
+   * the test; this is the runtime backstop on the deployed site.
+   */
+  test('every web entry page carries the default-deny CSP meta tag', async ({ page }) => {
+    const pages = [
+      '/',
+      '/editor.html',
+      '/merge-pdf.html',
+      '/compress-pdf.html',
+      '/compress-pdf-to-100kb.html',
+      '/compress-pdf-to-200kb.html',
+      '/compress-pdf-to-500kb.html',
+      '/compress-pdf-to-1mb.html',
+      '/compress-pdf-to-size.html',
+      '/sign-pdf.html',
+      '/scan-cleanup.html',
+      '/redact-pdf.html',
+      '/pdf-to-word.html',
+      '/word-to-pdf.html',
+      '/pdf-to-excel.html',
+      '/excel-to-pdf.html',
+      '/pdf-to-ppt.html',
+      '/ppt-to-pdf.html',
+      '/privacy.html'
+    ];
+    for (const path of pages) {
+      await page.goto(path);
+      const csp = await page
+        .locator('meta[http-equiv="Content-Security-Policy"]')
+        .getAttribute('content');
+      expect(csp, path).toContain("default-src 'self'");
+      expect(csp, path).toContain("object-src 'none'");
+      expect(csp, path).not.toMatch(/connect-src[^;]*https:\/\/cdn\.jsdelivr\.net(\s|;)/);
     }
   });
 });

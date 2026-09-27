@@ -46,6 +46,7 @@
  */
 
 import { normalizeRotation } from '../rotation';
+import { tKey, tPlural, translate } from '../i18n';
 import { layoutLines, type TextRun } from '../text-layout';
 
 /** A run of text with the two attributes a PowerPoint run can carry from a PDF. */
@@ -283,10 +284,11 @@ export function slideRotation(rotate: number | null | undefined): SlideRotation 
  * way. Writing a deck of blank slides is the silent failure; naming both the
  * option and OCR is the useful answer.
  */
-export const EMPTY_DECK_MESSAGE =
+export const EMPTY_DECK_MESSAGE = tKey(
   'Nothing could be placed on any slide: this PDF has no selectable text and no embedded image ' +
-  'that PowerPoint can hold. If it is a scan, run the OCR tool on it first and convert the ' +
-  'result; if you switched text or images off, turn them back on.';
+    'that PowerPoint can hold. If it is a scan, run the OCR tool on it first and convert the ' +
+    'result; if you switched text or images off, turn them back on.'
+);
 
 /**
  * What this converter does not do, stated before it runs.
@@ -298,41 +300,61 @@ export const EMPTY_DECK_MESSAGE =
  * plainly. Every entry is a real property of the output, not a hedge.
  */
 export const PPTX_LIMITATIONS: readonly string[] = [
-  'Each line of text becomes its own text box, placed where the page drew it. There are no ' +
-    'paragraphs, no bullets, no outline and no title placeholders — a PDF states none of those, ' +
-    'so none is invented. This is not a deck you would build slides from; it is the page, ' +
-    'approximated.',
-  'Text does not reflow. Edit a box and it will not re-wrap with the rest of the slide, because ' +
-    'nothing on the slide is connected to anything else on it.',
-  'Fonts are not carried across. Every box uses the deck’s own theme font at the size the PDF ' +
-    'used, so line widths differ from the original and a long line can overrun its box.',
-  'All text is black. A PDF’s text colour is not read, so white-on-dark or coloured type arrives ' +
-    'as black type.',
-  'Tables, columns, rules, borders, backgrounds and every other vector drawing on the page are ' +
-    'not reproduced. Only text and embedded raster images are placed.',
-  'An OCR’d scan’s invisible text layer becomes *visible* black text over the page image, ' +
-    'because PowerPoint has no invisible text. Switch “Place page text” off for a scan, or ' +
-    'switch “Place embedded images” off to keep the text alone.',
-  'One slide size for the whole deck — PowerPoint allows no other. It is the first page’s size; ' +
-    'pages of any other size are scaled to fit it and centred, keeping their own proportions.',
-  'JBIG2 and JPEG 2000 images cannot be embedded in a slide. Each one is named in the preview ' +
-    'and left in the PDF rather than re-encoded.',
-  'Image transparency is not carried across: a masked image appears fully opaque.',
-  'Positioning is approximate, and the approximation is in the *vertical* placement of a line. ' +
-    'Where a line starts and how wide it is are measured from the page; how far above its ' +
-    'baseline the box has to start is not — a PDF states no ascent, so ordinary Latin text ' +
-    'metrics are assumed (0.80 em ascent, 1.20 em line height). A line of Latin text lands ' +
-    'within about a point of where the page drew it; a face with unusual metrics, or a script ' +
-    'whose glyphs rise higher than Latin ones (CJK, Devanagari), can sit further off. Nothing ' +
-    'is shifted by the page’s crop — a cropped or offset page is placed against the box the ' +
-    'reader sees, not against raw PDF coordinates. `W n` clip paths are not applied, so an ' +
-    'image the page clips with one is placed at its unclipped size.',
-  'Text drawn at an angle — a diagonal watermark, a sideways column header — is placed at that ' +
-    'angle and at its real type size, but not reproduced exactly: each run of a rotated line ' +
-    'becomes its own text box rather than being joined into one, and a slanted or mirrored ' +
-    'transform is placed upright inside the same frame. Every page carrying angled text says so ' +
-    'in the preview.',
-  'Links, annotations, form fields, bookmarks and page labels are not carried into the deck.'
+  tKey(
+    'Each line of text becomes its own text box, placed where the page drew it. There are no ' +
+      'paragraphs, no bullets, no outline and no title placeholders — a PDF states none of those, ' +
+      'so none is invented. This is not a deck you would build slides from; it is the page, ' +
+      'approximated.'
+  ),
+  tKey(
+    'Text does not reflow. Edit a box and it will not re-wrap with the rest of the slide, because ' +
+      'nothing on the slide is connected to anything else on it.'
+  ),
+  tKey(
+    'Fonts are not carried across. Every box uses the deck’s own theme font at the size the PDF ' +
+      'used, so line widths differ from the original and a long line can overrun its box.'
+  ),
+  tKey(
+    'All text is black. A PDF’s text colour is not read, so white-on-dark or coloured type arrives ' +
+      'as black type.'
+  ),
+  tKey(
+    'Tables, columns, rules, borders, backgrounds and every other vector drawing on the page are ' +
+      'not reproduced. Only text and embedded raster images are placed.'
+  ),
+  tKey(
+    'An OCR’d scan’s invisible text layer becomes *visible* black text over the page image, ' +
+      'because PowerPoint has no invisible text. Switch “Place page text” off for a scan, or ' +
+      'switch “Place embedded images” off to keep the text alone.'
+  ),
+  tKey(
+    'One slide size for the whole deck — PowerPoint allows no other. It is the first page’s size; ' +
+      'pages of any other size are scaled to fit it and centred, keeping their own proportions.'
+  ),
+  tKey(
+    'JBIG2 and JPEG 2000 images cannot be embedded in a slide. Each one is named in the preview ' +
+      'and left in the PDF rather than re-encoded.'
+  ),
+  tKey('Image transparency is not carried across: a masked image appears fully opaque.'),
+  tKey(
+    'Positioning is approximate, and the approximation is in the *vertical* placement of a line. ' +
+      'Where a line starts and how wide it is are measured from the page; how far above its ' +
+      'baseline the box has to start is not — a PDF states no ascent, so ordinary Latin text ' +
+      'metrics are assumed (0.80 em ascent, 1.20 em line height). A line of Latin text lands ' +
+      'within about a point of where the page drew it; a face with unusual metrics, or a script ' +
+      'whose glyphs rise higher than Latin ones (CJK, Devanagari), can sit further off. Nothing ' +
+      'is shifted by the page’s crop — a cropped or offset page is placed against the box the ' +
+      'reader sees, not against raw PDF coordinates. `W n` clip paths are not applied, so an ' +
+      'image the page clips with one is placed at its unclipped size.'
+  ),
+  tKey(
+    'Text drawn at an angle — a diagonal watermark, a sideways column header — is placed at that ' +
+      'angle and at its real type size, but not reproduced exactly: each run of a rotated line ' +
+      'becomes its own text box rather than being joined into one, and a slanted or mirrored ' +
+      'transform is placed upright inside the same frame. Every page carrying angled text says so ' +
+      'in the preview.'
+  ),
+  tKey('Links, annotations, form fields, bookmarks and page labels are not carried into the deck.')
 ];
 
 /* ------------------------------------------------------------------ *
@@ -740,10 +762,17 @@ export function planSlides(pages: readonly PageSlideData[], options: SlidePlanOp
     (Math.abs(slideWidth - base.width) > 0.5 || Math.abs(slideHeight - base.height) > 0.5)
   ) {
     notes.push(
-      `The first page is ${Math.round(base.width)} × ${Math.round(base.height)} pt, which is ` +
-        `outside PowerPoint's slide-size limits, so the deck is ` +
-        `${Math.round(slideWidth)} × ${Math.round(slideHeight)} pt and every page is scaled to ` +
-        'fit it.'
+      translate(
+        'The first page is {pageWidth} × {pageHeight} pt, which is ' +
+          "outside PowerPoint's slide-size limits, so the deck is " +
+          '{slideWidth} × {slideHeight} pt and every page is scaled to fit it.',
+        {
+          pageWidth: Math.round(base.width),
+          pageHeight: Math.round(base.height),
+          slideWidth: Math.round(slideWidth),
+          slideHeight: Math.round(slideHeight)
+        }
+      )
     );
   }
 
@@ -787,14 +816,14 @@ export function planSlides(pages: readonly PageSlideData[], options: SlidePlanOp
       for (const placement of placementsByPage.get(page.pageIndex) ?? []) {
         const key = `${page.pageIndex}:${placement.objectNumber}`;
         const entry = entryByKey.get(key);
-        const reason = imageRefusal(entry, placement, options.archivedFiles);
+        const reason = imageRefusal(entry, placement, options.archivedFiles, human);
         if (reason) {
           // Reported once per image object per page, however many times the page
           // draws it: three refusal lines for one logo drawn three times is
           // noise, not disclosure.
           if (!reportedObjects.has(key)) {
             reportedObjects.add(key);
-            notes.push(`Page ${human}: ${reason}`);
+            notes.push(reason);
             unplaceable += 1;
           }
           continue;
@@ -825,16 +854,22 @@ export function planSlides(pages: readonly PageSlideData[], options: SlidePlanOp
         if (!placement.axisAligned && !reportedObjects.has(`${key}:skew`)) {
           reportedObjects.add(`${key}:skew`);
           notes.push(
-            `Page ${human}: an image is drawn rotated, mirrored or skewed on the page. ` +
-              'PowerPoint places it upright inside the same rectangle, so its orientation is ' +
-              'not reproduced.'
+            translate(
+              'Page {page}: an image is drawn rotated, mirrored or skewed on the page. ' +
+                'PowerPoint places it upright inside the same rectangle, so its orientation is ' +
+                'not reproduced.',
+              { page: human }
+            )
           );
         }
         if (entry?.maskFileName && !reportedObjects.has(`${key}:mask`)) {
           reportedObjects.add(`${key}:mask`);
           notes.push(
-            `Page ${human}: an image's transparency mask was not carried into PowerPoint, so it ` +
-              'appears fully opaque.'
+            translate(
+              "Page {page}: an image's transparency mask was not carried into PowerPoint, so it " +
+                'appears fully opaque.',
+              { page: human }
+            )
           );
         }
       }
@@ -859,8 +894,12 @@ export function planSlides(pages: readonly PageSlideData[], options: SlidePlanOp
       const dropped = options.droppedPlacements?.[page.pageIndex] ?? 0;
       if (dropped > 0) {
         notes.push(
-          `Page ${human}: ${dropped} further image placement(s) were left out — the page draws ` +
-            'more pictures than one slide can hold.'
+          tPlural(
+            'Page {page}: {count} further image placement(s) were left out — the page draws ' +
+              'more pictures than one slide can hold.',
+            dropped,
+            { page: human }
+          )
         );
       }
     }
@@ -875,15 +914,23 @@ export function planSlides(pages: readonly PageSlideData[], options: SlidePlanOp
 
       if (page.rotatedLines > 0) {
         notes.push(
-          `Page ${human}: ${page.rotatedLines} line(s) of text are drawn at an angle. Each is ` +
-            'placed at that angle and at its real type size, but a rotated line is not joined ' +
-            'into one box and a slant is not reproduced.'
+          tPlural(
+            'Page {page}: {count} line(s) of text are drawn at an angle. Each is ' +
+              'placed at that angle and at its real type size, but a rotated line is not joined ' +
+              'into one box and a slant is not reproduced.',
+            page.rotatedLines,
+            { page: human }
+          )
         );
       }
       if (page.mirroredLines > 0) {
         notes.push(
-          `Page ${human}: ${page.mirroredLines} run(s) of text are drawn mirrored. PowerPoint ` +
-            'places them upright inside the same frame, so their orientation is not reproduced.'
+          tPlural(
+            'Page {page}: {count} run(s) of text are drawn mirrored. PowerPoint ' +
+              'places them upright inside the same frame, so their orientation is not reproduced.',
+            page.mirroredLines,
+            { page: human }
+          )
         );
       }
 
@@ -940,33 +987,50 @@ export function planSlides(pages: readonly PageSlideData[], options: SlidePlanOp
 
   if (rescaledPages > 0) {
     notes.push(
-      `${rescaledPages} page(s) are not the same size as the first page. PowerPoint allows one ` +
-        'slide size per deck, so those pages are scaled to fit it and centred, keeping their ' +
-        'own proportions.'
+      tPlural(
+        '{count} page(s) are not the same size as the first page. PowerPoint allows one ' +
+          'slide size per deck, so those pages are scaled to fit it and centred, keeping their ' +
+          'own proportions.',
+        rescaledPages
+      )
     );
   }
   if (droppedLines > 0) {
     notes.push(
-      `${droppedLines} line(s) of text were left out: some page has more lines than the ` +
-        `${MAX_BOXES_PER_SLIDE}-text-box limit one slide carries.`
+      tPlural(
+        '{count} line(s) of text were left out: some page has more lines than the ' +
+          '{limit}-text-box limit one slide carries.',
+        droppedLines,
+        { limit: MAX_BOXES_PER_SLIDE }
+      )
     );
   }
   if (truncatedBoxes > 0) {
     notes.push(
-      `${truncatedBoxes} text box(es) were shortened to ${MAX_BOX_CHARS} characters. A whole ` +
-        'page drawn on one text baseline cannot be one editable line.'
+      tPlural(
+        '{count} text box(es) were shortened to {limit} characters. A whole ' +
+          'page drawn on one text baseline cannot be one editable line.',
+        truncatedBoxes,
+        { limit: MAX_BOX_CHARS }
+      )
     );
   }
   if (unplaceable > 0) {
     notes.push(
-      `${unplaceable} image(s) could not be placed; each is listed above with its reason. They ` +
-        'are still in the PDF.'
+      tPlural(
+        '{count} image(s) could not be placed; each is listed above with its reason. They ' +
+          'are still in the PDF.',
+        unplaceable
+      )
     );
   }
   if (neverDrawn > 0) {
     notes.push(
-      `${neverDrawn} image(s) are in a page's resources but are never drawn by that page, so ` +
-        'they were left out. Nothing visible on any page is missing.'
+      tPlural(
+        "{count} image(s) are in a page's resources but are never drawn by that page, so " +
+          'they were left out. Nothing visible on any page is missing.',
+        neverDrawn
+      )
     );
   }
 
@@ -983,32 +1047,41 @@ export function planSlides(pages: readonly PageSlideData[], options: SlidePlanOp
 function imageRefusal(
   entry: ExtractedImageInput | undefined,
   placement: ImagePlacementInput,
-  archivedFiles: ReadonlySet<string>
+  archivedFiles: ReadonlySet<string>,
+  page: number
 ): string | null {
   if (placement.objectNumber < 0) {
-    return (
-      `the image named /${placement.name} is stored directly in the page rather than as a ` +
-      'numbered object, so its bytes could not be matched to the drawing. It was left out.'
+    return translate(
+      'Page {page}: the image named /{name} is stored directly in the page rather than as a ' +
+        'numbered object, so its bytes could not be matched to the drawing. It was left out.',
+      { page, name: placement.name }
     );
   }
   if (!entry) {
-    return (
-      `the image named /${placement.name} is drawn by the page but was not found in its ` +
-      'resources, so it was left out.'
+    return translate(
+      'Page {page}: the image named /{name} is drawn by the page but was not found in its ' +
+        'resources, so it was left out.',
+      { page, name: placement.name }
     );
   }
   if (entry.status === 'skipped' || !entry.fileName) {
-    return entry.note ?? 'an image could not be read and was left out.';
+    return entry.note !== undefined
+      ? translate('Page {page}: {reason}', { page, reason: entry.note })
+      : translate('Page {page}: an image could not be read and was left out.', { page });
   }
   if (!slideImageFormat(entry.fileName)) {
     const ext = entry.fileName.replace(/^.*\./, '');
-    return (
-      `an image in ${ext} format cannot be embedded in a PowerPoint slide. It was left out; ` +
-      'the PDF still has it.'
+    return translate(
+      'Page {page}: an image in {ext} format cannot be embedded in a PowerPoint slide. ' +
+        'It was left out; the PDF still has it.',
+      { page, ext }
     );
   }
   if (!archivedFiles.has(entry.fileName)) {
-    return 'an image could not be read out of its archive and was left out.';
+    return translate(
+      'Page {page}: an image could not be read out of its archive and was left out.',
+      { page }
+    );
   }
   return null;
 }

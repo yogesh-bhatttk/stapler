@@ -12,6 +12,9 @@ import {
   sources,
   updateAnnotation,
   addAnnotation,
+  closeDocument,
+  replaceWithSource,
+  switchDocument,
   type StaplerDoc
 } from '../../src/core/store';
 import {
@@ -19,12 +22,19 @@ import {
   canRedo,
   canUndo,
   commit,
+  historySourceIds,
+  MAX_DEPTH,
+  MAX_TOTAL_SNAPSHOTS,
+  normalizeSerializedHistory,
   operationLog,
   redo,
   resetHistory,
+  restoreHistoryFromRecord,
+  serializeHistory,
   undo
 } from '../../src/core/history';
 import { activeToolId } from '../../src/core/tools';
+import { cropBoxes } from '../../src/ui/tools/crop/state';
 import {
   pageAnnotations,
   addAnnotation as addOverlayAnnotation,
@@ -36,14 +46,15 @@ function seed(pageCount = 5): StaplerDoc {
   registerSource({
     id: 'src',
     name: 'src.pdf',
-    bytes: new Uint8Array([1]),
     pageCount,
     pageSizes: Array.from({ length: pageCount }, () => ({ width: 595, height: 842 }))
   });
+  const pages = makePageRefs('src', pageCount);
   const doc: StaplerDoc = {
     id: 'doc-1',
     name: 'doc.pdf',
-    pages: makePageRefs('src', pageCount),
+    pages,
+    baseline: pages,
     annotations: [],
     dirty: false
   };
@@ -57,6 +68,7 @@ beforeEach(() => {
   activeDocId.value = null;
   selectedPageKeys.value = new Set();
   pageAnnotations.value = {};
+  cropBoxes.value = {};
   activeToolId.value = null;
   resetHistory();
 });
@@ -262,6 +274,8 @@ describe('transactions', () => {
    * pressing ⌘Z did nothing. It now rides the same snapshot as `cropBoxes`.
    */
   it('reaches the ANN-01 overlay layer, not just SGN-02 stamps', () => {
+    const doc = seed(1);
+    const key = doc.pages[0].key;
     const ann: OverlayAnnotation = {
       id: 'a1',
       type: 'rectangle',
@@ -269,18 +283,18 @@ describe('transactions', () => {
       strokeWidth: 0.01,
       rect: { x: 0.1, y: 0.1, width: 0.2, height: 0.2 }
     };
-    commitLikeOverlay(() => addOverlayAnnotation('doc-1-0', ann));
-    expect(pageAnnotations.value['doc-1-0']).toHaveLength(1);
+    commitLikeOverlay(() => addOverlayAnnotation(key, ann));
+    expect(pageAnnotations.value[key]).toHaveLength(1);
 
     undo();
-    expect(pageAnnotations.value['doc-1-0'] ?? []).toHaveLength(0);
+    expect(pageAnnotations.value[key] ?? []).toHaveLength(0);
     redo();
-    expect(pageAnnotations.value['doc-1-0']).toHaveLength(1);
+    expect(pageAnnotations.value[key]).toHaveLength(1);
 
-    commitLikeOverlay(() => removeOverlayAnnotation('doc-1-0', 'a1'));
-    expect(pageAnnotations.value['doc-1-0']).toHaveLength(0);
+    commitLikeOverlay(() => removeOverlayAnnotation(key, 'a1'));
+    expect(pageAnnotations.value[key]).toHaveLength(0);
     undo();
-    expect(pageAnnotations.value['doc-1-0']).toHaveLength(1);
+    expect(pageAnnotations.value[key]).toHaveLength(1);
   });
 });
 
@@ -334,6 +348,7 @@ describe('DOC-10: operation log', () => {
 
   it('is cleared by resetHistory', () => {
     const doc = seed(2);
+    resetHistory();
     activeToolId.value = 'organize';
     rotatePages(doc.id, [doc.pages[0].key], 90);
     expect(operationLog().length).toBe(1);
@@ -381,3 +396,261 @@ function commitLikeOverlay(mutate: () => void) {
   commit();
   mutate();
 }
+
+/* ---------------- GAP-11a — per-document undo/redo ---------------- */
+
+function seedDoc(id: string, sourceId: string, pageCount = 3): StaplerDoc {
+  registerSource({
+    id: sourceId,
+    name: `${sourceId}.pdf`,
+    pageCount,
+    pageSizes: Array.from({ length: pageCount }, () => ({ width: 595, height: 842 }))
+  });
+  const pages = makePageRefs(sourceId, pageCount);
+  const doc: StaplerDoc = {
+    id,
+    name: `${id}.pdf`,
+    pages,
+    baseline: pages,
+    annotations: [],
+    dirty: false
+  };
+  addDocument(doc);
+  return doc;
+}
+
+const docById = (id: string) => documents.value.find(d => d.id === id)!;
+
+describe('GAP-11a — each document has its own undo/redo', () => {
+  it('opening a document is not an undo step', () => {
+    seedDoc('A', 'SA');
+    expect(canUndo()).toBe(false);
+    seedDoc('B', 'SB');
+    expect(canUndo()).toBe(false);
+    undo();
+    expect(documents.value.map(d => d.id)).toEqual(['A', 'B']);
+  });
+
+  it('keeps independent stacks: undo in A leaves B untouched', () => {
+    const a = seedDoc('A', 'SA');
+    const b = seedDoc('B', 'SB');
+    rotatePages('A', [a.pages[0].key], 90);
+    rotatePages('B', [b.pages[0].key], 180);
+    deletePages('B', [b.pages[1].key]);
+
+    switchDocument('A');
+    expect(operationLog().length).toBe(1);
+    undo();
+    expect(docById('A').pages[0].rotation).toBe(0);
+    // B is exactly as it was: rotated, one page deleted, both still undoable.
+    expect(docById('B').pages[0].rotation).toBe(180);
+    expect(docById('B').pages).toHaveLength(2);
+    expect(canUndo('B')).toBe(true);
+    expect(operationLog('B')).toHaveLength(2);
+    // A has nothing left; Ctrl+Z again does not fall through into B.
+    undo();
+    expect(docById('B').pages).toHaveLength(2);
+  });
+
+  it('redo after switching documents redoes the right document', () => {
+    const a = seedDoc('A', 'SA');
+    const b = seedDoc('B', 'SB');
+    rotatePages('A', [a.pages[0].key], 90);
+    switchDocument('A');
+    undo();
+    expect(canRedo()).toBe(true);
+
+    switchDocument('B');
+    expect(canRedo()).toBe(false);
+    rotatePages('B', [b.pages[0].key], 90); // a new edit in B must not clear A's redo
+    redo(); // nothing to redo in B
+    expect(docById('A').pages[0].rotation).toBe(0);
+
+    switchDocument('A');
+    expect(canRedo()).toBe(true);
+    redo();
+    expect(docById('A').pages[0].rotation).toBe(90);
+    expect(docById('B').pages[0].rotation).toBe(90);
+  });
+
+  it('scopes crop boxes and overlay annotations to the document being undone', () => {
+    const a = seedDoc('A', 'SA');
+    const b = seedDoc('B', 'SB');
+    switchDocument('A');
+    commit('A');
+    cropBoxes.value = {
+      ...cropBoxes.value,
+      [a.pages[0].key]: { x: 0, y: 0, width: 0.5, height: 0.5 }
+    };
+    switchDocument('B');
+    commit('B');
+    cropBoxes.value = {
+      ...cropBoxes.value,
+      [b.pages[0].key]: { x: 0.1, y: 0.1, width: 0.5, height: 0.5 }
+    };
+
+    switchDocument('A');
+    undo();
+    expect(cropBoxes.value[a.pages[0].key]).toBeUndefined();
+    expect(cropBoxes.value[b.pages[0].key]).toEqual({ x: 0.1, y: 0.1, width: 0.5, height: 0.5 });
+    redo();
+    expect(cropBoxes.value[a.pages[0].key]).toEqual({ x: 0, y: 0, width: 0.5, height: 0.5 });
+  });
+
+  it('commit() defaults to the active document', () => {
+    seedDoc('A', 'SA');
+    seedDoc('B', 'SB'); // active
+    commit();
+    expect(canUndo('B')).toBe(true);
+    expect(canUndo('A')).toBe(false);
+  });
+
+  it("a transaction on one document never absorbs another document's edits", () => {
+    const a = seedDoc('A', 'SA');
+    const b = seedDoc('B', 'SB');
+    const tx = beginTransaction('drag', undefined, 'A');
+    rotatePages('A', [a.pages[0].key], 90);
+    rotatePages('B', [b.pages[0].key], 90); // recorded in B, not swallowed by A's drag
+    rotatePages('A', [a.pages[0].key], 90);
+    rotatePages('B', [b.pages[0].key], 90);
+    tx.end();
+
+    expect(operationLog('A')).toHaveLength(1);
+    expect(operationLog('B')).toHaveLength(2);
+
+    switchDocument('A');
+    undo();
+    expect(docById('A').pages[0].rotation).toBe(0);
+    expect(docById('B').pages[0].rotation).toBe(180);
+  });
+
+  it("undo refuses while the active document's transaction is open, but not another's", () => {
+    const a = seedDoc('A', 'SA');
+    const b = seedDoc('B', 'SB');
+    rotatePages('A', [a.pages[0].key], 90);
+    rotatePages('B', [b.pages[0].key], 90);
+    const tx = beginTransaction('drag', undefined, 'B');
+    switchDocument('B');
+    undo();
+    expect(docById('B').pages[0].rotation).toBe(90);
+    switchDocument('A');
+    undo();
+    expect(docById('A').pages[0].rotation).toBe(0);
+    tx.end();
+  });
+
+  it("closing B drops B's history and frees only B's sources", async () => {
+    const a = seedDoc('A', 'SA');
+    const b = seedDoc('B', 'SB');
+    // Redaction-style rewrites: each document's old source is now reachable
+    // only from its own undo stack.
+    replaceWithSource('A', {
+      id: 'SA2',
+      name: 'a.pdf',
+      pageCount: 3,
+      pageSizes: a.pages.map(() => ({ width: 1, height: 1 }))
+    });
+    replaceWithSource('B', {
+      id: 'SB2',
+      name: 'b.pdf',
+      pageCount: 3,
+      pageSizes: b.pages.map(() => ({ width: 1, height: 1 }))
+    });
+    expect(historySourceIds()).toEqual(new Set(['SA', 'SB']));
+
+    closeDocument('B');
+    expect(canUndo('B')).toBe(false);
+    expect(operationLog('B')).toEqual([]);
+    expect(Object.keys(sources.value).sort()).toEqual(['SA', 'SA2']);
+    expect(historySourceIds()).toEqual(new Set(['SA']));
+
+    // A's undo still reaches its original source.
+    switchDocument('A');
+    undo();
+    expect(docById('A').pages.every(p => p.sourceDocId === 'SA')).toBe(true);
+  });
+
+  it('caps each document at MAX_DEPTH and the whole workspace at MAX_TOTAL_SNAPSHOTS', () => {
+    const count = Math.ceil(MAX_TOTAL_SNAPSHOTS / MAX_DEPTH) + 1;
+    const ids: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const doc = seedDoc(`D${i}`, `S${i}`, 1);
+      ids.push(doc.id);
+      for (let step = 0; step < MAX_DEPTH + 5; step++) {
+        rotatePages(doc.id, [doc.pages[0].key], 90);
+      }
+      expect(operationLog(doc.id).length).toBeLessThanOrEqual(MAX_DEPTH);
+    }
+    const total = ids.reduce((sum, id) => sum + operationLog(id).length, 0);
+    expect(total).toBeLessThanOrEqual(MAX_TOTAL_SNAPSHOTS);
+    // The most recent document keeps its full depth; the oldest paid for it.
+    expect(operationLog(ids.at(-1)).length).toBe(MAX_DEPTH);
+    expect(operationLog(ids[0]).length).toBeLessThan(MAX_DEPTH);
+  });
+});
+
+describe('GAP-11a — session recovery of per-document history', () => {
+  it("round-trips every document's stacks through serialize/restore", () => {
+    const a = seedDoc('A', 'SA');
+    const b = seedDoc('B', 'SB');
+    activeToolId.value = 'organize';
+    rotatePages('A', [a.pages[0].key], 90);
+    rotatePages('B', [b.pages[1].key], 270);
+    deletePages('B', [b.pages[2].key]);
+    switchDocument('B');
+    undo(); // leaves a redo entry in B
+
+    const saved = JSON.parse(JSON.stringify(serializeHistory()));
+    resetHistory();
+    expect(canUndo('A')).toBe(false);
+
+    restoreHistoryFromRecord(saved, ['A', 'B']);
+    expect(operationLog('A').map(e => e.label)).toEqual(['Organize']);
+    expect(canRedo('B')).toBe(true);
+    redo();
+    expect(docById('B').pages).toHaveLength(2);
+    undo();
+    undo();
+    expect(docById('B').pages[1].rotation).toBe(0);
+    expect(docById('A').pages[0].rotation).toBe(90);
+  });
+
+  it('drops histories of documents that were not restored', () => {
+    const a = seedDoc('A', 'SA');
+    rotatePages('A', [a.pages[0].key], 90);
+    const saved = serializeHistory();
+    restoreHistoryFromRecord(saved, ['OTHER']);
+    expect(canUndo('A')).toBe(false);
+  });
+
+  it('migrates a pre-GAP-11 (global-stack) record by dropping it, not crashing', () => {
+    const a = seedDoc('A', 'SA');
+    const legacy = {
+      undoStack: [{ docs: [a], activeId: 'A', selection: [], cropBoxes: {}, pageAnnotations: {} }],
+      redoStack: [],
+      undoLog: [{ label: 'Open document', timestamp: 1 }],
+      redoLog: []
+    };
+    expect(normalizeSerializedHistory(legacy)).toEqual({ version: 2, docs: {} });
+    expect(() => restoreHistoryFromRecord(legacy, ['A'])).not.toThrow();
+    expect(canUndo('A')).toBe(false);
+    // Documents are untouched and edits record normally afterwards.
+    rotatePages('A', [a.pages[0].key], 90);
+    expect(canUndo('A')).toBe(true);
+  });
+
+  it('drops a malformed per-document history on its own', () => {
+    const a = seedDoc('A', 'SA');
+    rotatePages('A', [a.pages[0].key], 90);
+    const good = serializeHistory();
+    const mixed = {
+      version: 2,
+      docs: {
+        ...good.docs,
+        B: { undoStack: [{ nope: true }], redoStack: [], undoLog: [], redoLog: [] }
+      }
+    };
+    const normalized = normalizeSerializedHistory(mixed);
+    expect(Object.keys(normalized.docs)).toEqual(['A']);
+  });
+});

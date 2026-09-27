@@ -36,7 +36,14 @@ import {
   contractV1Pdf,
   contractV2Pdf
 } from './fixtures';
-import { commitAndRead, gotoTool, openApp } from './helpers';
+import {
+  commitAndRead,
+  confirmExportReviewIfShown,
+  dismissToasts,
+  gotoTool,
+  openApp,
+  waitForPageRendered
+} from './helpers';
 
 /**
  * QA-04 — one import → operate → export flow per P0 tool, asserting the real output
@@ -406,7 +413,7 @@ async function outlineTitles(bytes: Uint8Array): Promise<string[]> {
   const titles: string[] = [];
   let item = outlines.lookupMaybe(PDFName.of('First'), PDFDict);
   while (item) {
-    const title = item.lookup(PDFName.of('Title'));
+    const title: unknown = item.lookup(PDFName.of('Title'));
     titles.push(
       typeof (title as { decodeText?: () => string }).decodeText === 'function'
         ? (title as { decodeText: () => string }).decodeText()
@@ -443,7 +450,9 @@ test.describe('tool flows', () => {
     expect(output.getPage(0).getRotation().angle).toBe(90);
   });
 
-  test('deleting every page shows a clear message, not a crash dialog', async ({ page }) => {
+  test('deleting every page is refused with a clear message, not a crash or a silent close', async ({
+    page
+  }) => {
     const file = await ensureFixture('text-4.pdf', () => textPdf(4));
     await importFixture(page, file);
     await gotoTool(page, 'organize');
@@ -452,14 +461,13 @@ test.describe('tool flows', () => {
     await grid.getByRole('option', { name: /^Page 1 of/ }).click();
     await grid.getByRole('option', { name: /^Page 4 of/ }).click({ modifiers: ['Shift'] });
     await page.getByRole('button', { name: 'Delete' }).click();
-    await expect(page.getByText('0 pages', { exact: false }).first()).toBeVisible();
 
-    await page.getByRole('button', { name: 'View changes' }).click();
-    await expect(page.getByText('Nothing to export.')).toBeVisible();
-    await expect(page.getByRole('dialog', { name: 'Review before saving' })).not.toBeVisible();
-    // Never the generic "something went wrong inside Stapler" copy that
-    // `composeDocument`'s own internal error for an empty page list produces
-    // when nothing catches it first.
+    // AUDIT-2026-09-25 RT-3: this used to close the document outright — no
+    // confirmation, no undo, bytes deleted. It is refused instead, and every
+    // page is still there.
+    await expect(page.getByText(/needs at least one page/i).first()).toBeVisible();
+    await expect(grid.getByRole('option')).toHaveCount(4);
+    // Never the generic "something went wrong inside Stapler" copy.
     await expect(page.getByText(/file an issue/i)).not.toBeVisible();
   });
 
@@ -1312,7 +1320,7 @@ test.describe('tool flows', () => {
     const toast = page.getByText('Redaction verified and applied');
     await expect(toast).toBeVisible();
     // Dismiss the toast so it doesn't intercept the export click
-    await page.getByRole('button', { name: 'Dismiss notification' }).click();
+    await dismissToasts(page);
 
     await gotoTool(page, 'organize');
     const bytes = await commitAndRead(page, 'View changes');
@@ -1341,6 +1349,7 @@ test.describe('tool flows', () => {
     const drawingArea = page.getByRole('group', { name: /Redaction drawing area/ });
     const box = await drawingArea.boundingBox();
     if (!box) throw new Error('missing drawing area geometry');
+    await waitForPageRendered(page);
     await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.55);
     await page.mouse.down();
     await page.mouse.move(box.x + box.width * 0.45, box.y + box.height * 0.7, { steps: 5 });
@@ -1351,7 +1360,7 @@ test.describe('tool flows', () => {
     await expect(page.getByText('Redaction verified and applied')).toBeVisible({
       timeout: 60_000
     });
-    await page.getByRole('button', { name: 'Dismiss notification' }).click();
+    await dismissToasts(page);
 
     await gotoTool(page, 'organize');
     const bytes = await commitAndRead(page, 'View changes');
@@ -1428,6 +1437,7 @@ test.describe('tool flows', () => {
 
     // A right triangle: top edge across the page, hypotenuse back down to the
     // left, leaving the bottom-right of the bounding box outside the shape.
+    await waitForPageRendered(page);
     await page.mouse.move(...at(0.1, 0.1));
     await page.mouse.down();
     await page.mouse.move(...at(0.9, 0.1), { steps: 12 });
@@ -1442,7 +1452,7 @@ test.describe('tool flows', () => {
     await expect(page.getByText('Redaction verified and applied')).toBeVisible({
       timeout: 60_000
     });
-    await page.getByRole('button', { name: 'Dismiss notification' }).click();
+    await dismissToasts(page);
 
     await gotoTool(page, 'organize');
     const bytes = await commitAndRead(page, 'View changes');
@@ -1559,7 +1569,9 @@ test.describe('tool flows', () => {
     await page.getByLabel('Find and highlight text').focus();
     await page.keyboard.type('Line 3 of body text');
     await page.keyboard.press('Enter');
-    await expect(page.getByRole('status')).toContainText('Highlighted 6 match(es).', {
+    await expect(
+      page.getByRole('status').filter({ hasText: 'Highlighted 6 matches.' }).first()
+    ).toContainText('Highlighted 6 matches.', {
       timeout: 60_000
     });
 
@@ -1606,6 +1618,7 @@ test.describe('tool flows', () => {
     // rectangle covers several of them vertically too.
     const from = { x: box.x + box.width * 0.08, y: box.y + box.height * 0.38 };
     const to = { x: box.x + box.width * 0.36, y: box.y + box.height * 0.6 };
+    await waitForPageRendered(page);
     await page.mouse.move(from.x, from.y);
     await page.mouse.down();
     await page.mouse.move(to.x, to.y);
@@ -1638,6 +1651,7 @@ test.describe('tool flows', () => {
     await page.getByRole('radio', { name: 'Whiteout' }).check();
     const box2 = await drawingArea.boundingBox();
     if (!box2) throw new Error('missing drawing area geometry');
+    await waitForPageRendered(page);
     await page.mouse.move(box2.x + box2.width * 0.08, box2.y + box2.height * 0.38);
     await page.mouse.down();
     await page.mouse.move(box2.x + box2.width * 0.36, box2.y + box2.height * 0.6);
@@ -1676,6 +1690,7 @@ test.describe('tool flows', () => {
     const box = await layer.boundingBox();
     if (!box) throw new Error('no box');
 
+    await waitForPageRendered(page);
     await page.mouse.move(box.x + 50, box.y + 50);
     await page.mouse.down();
     await page.mouse.move(box.x + 200, box.y + 200, { steps: 5 });
@@ -1700,6 +1715,7 @@ test.describe('tool flows', () => {
     if (!box) throw new Error('no box');
 
     // Draw an initial crop box on page 1 (odd) while the "odd pages" scope is active.
+    await waitForPageRendered(page);
     await page.mouse.move(box.x + 40, box.y + 40);
     await page.mouse.down();
     await page.mouse.move(box.x + 220, box.y + 220, { steps: 5 });
@@ -2063,21 +2079,17 @@ test.describe('tool flows', () => {
     await expect(recipeSelect.locator('option', { hasText: 'No N-up' })).toHaveCount(1);
   });
 
-  test('redact: declining the face-detector download disables the tool and says so, on screen and on export (RED-08)', async ({
+  test('redact: face blur runs fully offline with the bundled detector — no dialog, no request (RED-08, audit CNV-6/PLT-8)', async ({
     page,
     baseURL
   }) => {
-    // RED-08's second acceptance criterion, driven through the real UI: a
-    // decline must leave a visible, persistent "off, and here is why" state —
-    // never a quiet nothing that lets a document be exported with faces the
-    // user believed had been blurred.
+    // The detector weights are part of the build, so face blur is an ordinary
+    // offline tool: no consent dialog, and nothing requested — recorded for
+    // the whole test so a fetch fired from a worker still counts.
     test.setTimeout(120_000);
 
-    // Nothing may be requested on this path. Recorded for the whole test rather
-    // than just the click, so a fetch fired from a worker still counts.
     // (baseURL, not page.url(), because the page hasn't navigated yet at this
-    // point — page.url() would still be about:blank, whose origin is the
-    // string "null", which no real request ever starts with.)
+    // point — page.url() would still be about:blank.)
     const origin = new URL(baseURL || 'http://localhost').origin;
     const external: string[] = [];
     page.on('request', request => {
@@ -2091,47 +2103,20 @@ test.describe('tool flows', () => {
     await importFixture(page, fixture);
     await gotoTool(page, 'redact');
 
-    // The disclosure is in the panel before anything is clicked, not only in
-    // the dialog: someone deciding whether to use the tool sees it first.
-    await expect(
-      page.getByText(/downloads a .* MB detection model from cdn\.jsdelivr\.net/i)
-    ).toBeVisible();
+    await expect(page.getByText(/face detector is built into Stapler/i)).toBeVisible();
+    await expect(page.getByRole('checkbox', { name: 'Blur faces' })).toBeEnabled();
 
     await page.getByRole('button', { name: 'Find and blur' }).click();
 
-    const dialog = page.getByRole('dialog', { name: /Download the on-device face detector/ });
-    await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText('cdn.jsdelivr.net');
-    await dialog.getByRole('button', { name: 'Not now' }).click();
-
-    // 1. A message, not silence.
+    // The run completes — with a result, not a download dialog.
     await expect(
-      page.getByText(/Face blur is off — the detector was not downloaded/i)
-    ).toBeVisible();
-    // 2. The tool is disabled, and stays disabled.
-    await expect(page.getByRole('checkbox', { name: 'Blur faces' })).toBeDisabled();
-    await expect(
-      page.getByText(/Face blur is switched off because the one-time detector/i)
-    ).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Allow the download' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Find and blur' })).toBeDisabled();
+      page.getByText(/Nothing was blurred|face\(s\) and .* logo\(s\) blurred/i).first()
+    ).toBeVisible({
+      timeout: 90_000
+    });
+    await expect(page.getByRole('dialog', { name: /Download/ })).toHaveCount(0);
 
-    // 3. Export says it too, so the state cannot be forgotten between clicks.
-    //    The decline toast stays up until dismissed (`timeout: 0` — deliberate,
-    //    this is not a message to miss), and it sits over the action bar, so it
-    //    has to go before the export button is reachable.
-    await page.getByRole('button', { name: 'Dismiss notification' }).first().click();
-    await expect(page.getByRole('button', { name: 'Dismiss notification' })).toHaveCount(0);
-    await page.getByRole('button', { name: 'Verify & apply' }).click();
-    await expect(page.getByText(/Faces in this document were not blurred/i)).toBeVisible();
-
-    // 4. And nothing was requested by declining.
-    expect(external, `declining must fetch nothing. Observed:\n${external.join('\n')}`).toEqual([]);
-
-    // 5. Changing your mind puts the tool back, without another decline sticking.
-    await page.getByRole('button', { name: 'Allow the download' }).click();
-    await expect(page.getByRole('checkbox', { name: 'Blur faces' })).toBeEnabled();
-    await expect(page.getByRole('button', { name: 'Find and blur' })).toBeEnabled();
+    expect(external, `face blur must fetch nothing. Observed:\n${external.join('\n')}`).toEqual([]);
   });
 
   test('ocr: the one disclosed network exception actually downloads the real model and recognizes text (OCR-01)', async ({
@@ -2157,6 +2142,9 @@ test.describe('tool flows', () => {
 
     const download = page.waitForEvent('download', { timeout: 150_000 });
     await dialog.getByRole('button', { name: 'Download and run OCR' }).click();
+    // OCR is in TOOLS_WITH_EXPORT_REVIEW, so the save waits behind the review
+    // dialog; this test never clicked through it and timed out waiting.
+    await confirmExportReviewIfShown(page, download);
     const saved = await download;
     const location = await saved.path();
     expect(location).toBeTruthy();

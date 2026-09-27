@@ -19,6 +19,15 @@ test.describe('manifest', () => {
     expect(manifest.host_permissions ?? []).toEqual([]);
   });
 
+  test('declares the `pdf` omnibox keyword without any permission (GAP-7)', () => {
+    // `omnibox` is a manifest key, not a permission: Chrome lists no install
+    // warning for it (the permission warnings table has no entry for it), so
+    // it can ship while `permissions` stays empty.
+    expect(manifest.omnibox).toEqual({ keyword: 'pdf' });
+    expect(manifest.permissions ?? []).toEqual([]);
+    expect(manifest.optional_permissions ?? []).toEqual([]);
+  });
+
   test('declares no content scripts and no web-accessible resources', () => {
     expect(manifest.content_scripts).toBeUndefined();
     expect(manifest.web_accessible_resources).toBeUndefined();
@@ -30,26 +39,59 @@ test.describe('manifest', () => {
     expect(manifest.background.type).toBe('module');
   });
 
-  test('forbids remote code in its CSP, allowing only the one pinned model-download host', () => {
-    // OCR-01 and RED-08 are documented exceptions to zero-network: each fetches
-    // one pinned host, once, on explicit consent (CLAUDE.md invariant #1). The
-    // CSP's `connect-src` is where that host has to be named, so this asserts
-    // the allowance is exactly that one host — not merely that *some* `https:`
-    // showed up, which an unrelated CSP change could satisfy without anyone
-    // meaning to add a fetchable remote host to the extension.
+  test('declares a minimum Chrome version at or above the pdf.js floor', () => {
+    // Audit 2026-09-25 PLT-9: with no floor, the store accepted installs on a
+    // Chrome whose pdf.js could not open a single PDF. The evidence and the
+    // exact number live in scripts/browser-floors.mjs (unit-tested there).
+    expect(Number(manifest.minimum_chrome_version)).toBeGreaterThanOrEqual(147);
+  });
+
+  test('has a default-deny CSP whose only remote source is the path-scoped pinned OCR model', () => {
+    // Audit 2026-09-25 PLT-3: without `default-src`, image beacons, remote
+    // styles and iframes were all allowed; and a bare `https://cdn.jsdelivr.net`
+    // in connect-src allowed every npm package on that CDN. The OCR language
+    // model (OCR-01) is the one documented network exception (CLAUDE.md
+    // invariant #1), so the only remote sources allowed are its exact pinned
+    // directories.
     const csp: string = manifest.content_security_policy.extension_pages;
-    expect(csp).toContain("script-src 'self'");
+    const directives = new Map(
+      csp
+        .split(';')
+        .map(d => d.trim())
+        .filter(Boolean)
+        .map(d => {
+          const [name, ...sources] = d.split(/\s+/);
+          return [name, sources] as const;
+        })
+    );
+
+    expect(directives.get('default-src')).toEqual(["'self'"]);
+    expect(directives.get('script-src')).toEqual(["'self'", "'wasm-unsafe-eval'"]);
+    expect(directives.get('object-src')).toEqual(["'none'"]);
+    expect(directives.get('base-uri')).toEqual(["'none'"]);
+    expect(directives.get('frame-src')).toEqual(["'none'"]);
+    expect(directives.get('form-action')).toEqual(["'none'"]);
     expect(csp).not.toContain("'unsafe-eval'");
-    expect(csp).not.toContain("'unsafe-inline'");
+    // Inline *styles* are allowed (dependencies create <style> elements);
+    // inline *script* never is.
+    expect(directives.get('script-src')).not.toContain("'unsafe-inline'");
 
-    const connectSrcMatch = csp.match(/connect-src\s+([^;]+);/);
-    expect(connectSrcMatch).not.toBeNull();
-    const connectSrcHosts = connectSrcMatch![1].trim().split(/\s+/);
-    expect(connectSrcHosts).toEqual(["'self'", 'https://cdn.jsdelivr.net']);
+    const remote = (directives.get('connect-src') ?? []).filter(source => /^https?:/.test(source));
+    expect(remote).toEqual([
+      'https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int/',
+      'https://cdn.jsdelivr.net/npm/@tesseract.js-data/hin@1.0.0/4.0.0_best_int/'
+    ]);
+    // Never the whole host.
+    expect(directives.get('connect-src')).not.toContain('https://cdn.jsdelivr.net');
 
-    // No other directive may name a remote host at all.
-    const withoutConnectSrc = csp.replace(/connect-src\s+[^;]+;/, '');
-    expect(withoutConnectSrc).not.toMatch(/https?:/);
+    // No other directive may name a remote source at all.
+    for (const [name, sources] of directives) {
+      if (name === 'connect-src') continue;
+      expect(
+        sources.filter(source => /^https?:/.test(source)),
+        name
+      ).toEqual([]);
+    }
   });
 
   test('ships every icon size the store requires, at real dimensions', () => {

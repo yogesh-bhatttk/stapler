@@ -7,9 +7,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -22,12 +22,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          # package.json pins pnpm via devEngines, which action-setup doesn't read.
+          version: 11
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
+
+  bundle-network:
+    # Audit 2026-09-25 PLT-6: the source guards only see Stapler's own code.
+    # This scans what ships — both builds, third-party code included — for a
+    # remote URL in a sink, or any remote URL not in the documented allowlist.
+    name: Bundle zero-network scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm check:bundle-network
 
   unit:
     name: Unit tests
@@ -35,9 +57,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          # package.json pins pnpm via devEngines, which action-setup doesn't read.
+          version: 11
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
@@ -48,16 +73,77 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          # package.json pins pnpm via devEngines, which action-setup doesn't read.
+          version: 11
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
-      - run: pnpm test:e2e
+      # The web-preview functional suite. One retry, and a test that only
+      # passes on it fails the run (`failOnFlakyTests`) — audit PLT-18.
+      - run: pnpm test:e2e:web
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: playwright-report
+          path: playwright-report/
+          retention-days: 14
+
+  e2e-extension:
+    # Audit 2026-09-25 PLT-7 / M4: the packaged extension itself, loaded with
+    # --load-extension under its MV3 CSP — not the web preview.
+    name: E2E (packaged extension)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      # Build first, so the artifact under test is exactly the one this job built.
+      - run: pnpm build:ext
+      - run: pnpm test:e2e:ext
+        env:
+          STAPLER_EXT_PREBUILT: '1'
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-extension
+          path: playwright-report/
+          retention-days: 14
+
+  perf:
+    # PLAN §5.1 budgets, never retried (audit PLT-18). A separate job so a
+    # budget failure is visibly a performance regression, not a flaky e2e.
+    name: Performance budgets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:perf
+        env:
+          # Headless-runner allowance over PLAN §5.1's numbers; every run
+          # records measured vs budget as a test annotation.
+          STAPLER_PERF_SLACK: '1.5'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report-perf
           path: playwright-report/
           retention-days: 14

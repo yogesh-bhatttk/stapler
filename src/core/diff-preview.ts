@@ -1,9 +1,9 @@
 /**
  * UX-02 — renders two documents' pages as images for the pre-export review
  * step (`ExportReviewModal`). Reuses the exact render-worker call shape
- * `visual-diff-export.ts` (ANN-05) already uses — load both documents in one
- * lease, render the target page from each, close both handles — but returns
- * image data for on-screen display instead of baking a diff into a new PDF.
+ * `visual-diff-export.ts` (ANN-05) already uses, but returns image data for
+ * on-screen display instead of baking a diff into a new PDF, and keeps each
+ * document loaded for the length of the review (see `PreviewSession` below).
  */
 import { renderWorker } from './workers';
 import { pixelDiff } from './pixel-diff';
@@ -30,13 +30,144 @@ async function toImageData(bitmap: ImageBitmap): Promise<ImageData | null> {
   return imageData;
 }
 
+/**
+ * Documents one review has handed to the render worker, keyed by the byte
+ * array's identity.
+ *
+ * Every page view used to post *both* whole documents to the worker again — a
+ * 10 × 5 MB merge meant ~50 MB structured-cloned twice per page, in one task,
+ * ~46 ms of main-thread block each time (AUDIT-2026-09-25 PLT-18 perf budget).
+ * Now each document is posted once per review and rendered from its handle; a
+ * pinned client keeps every call on the instance that holds the handle.
+ *
+ * The cache belongs to a {@link PreviewSession}, one per review, and only that
+ * review's release closes it (regression review R-PDF-3). A module-wide cache
+ * released on "review changed" also closed the documents the *next* queued
+ * review had just loaded: Preact runs a child's new effects before its parent's
+ * cleanup, so the replacement review's pages failed to render.
+ */
+interface LoadedPreview {
+  client: ReturnType<typeof renderWorker.pin>;
+  info: Promise<{ handle: string; pageCount: number }>;
+}
+
+/** One review's loaded documents. Opaque to callers. */
+export interface PreviewSession {
+  readonly released: boolean;
+}
+
+class Session implements PreviewSession {
+  readonly loaded = new Map<Uint8Array, LoadedPreview>();
+  released = false;
+}
+
+/** A fresh, empty cache for one review. */
+export function createPreviewSession(): PreviewSession {
+  return new Session();
+}
+
+function sessionOf(session: PreviewSession): Session {
+  if (!(session instanceof Session)) throw new Error('Not a preview session');
+  return session;
+}
+
+/** Closes one cached document and releases its pinned worker. */
+async function close(entry: LoadedPreview): Promise<void> {
+  try {
+    const { handle } = await entry.info;
+    if (!entry.client.dead) await entry.client.lease(api => api.closeDocument(handle));
+  } catch {
+    // Already failed or the worker is gone — nothing to close.
+  } finally {
+    entry.client.release();
+  }
+}
+
+function load(session: Session, bytes: Uint8Array): LoadedPreview {
+  if (session.released) throw new Error('This review has already been closed.');
+  let entry = session.loaded.get(bytes);
+  // A worker that crashed took the handle with it; every later render from this
+  // entry would fail. Drop it and load the document again on a live instance.
+  if (entry?.client.dead) {
+    session.loaded.delete(bytes);
+    entry.client.release();
+    entry = undefined;
+  }
+  if (!entry) {
+    const client = renderWorker.pin();
+    const info = client.lease(api => api.loadDocument(bytes));
+    const created: LoadedPreview = { client, info };
+    entry = created;
+    session.loaded.set(bytes, created);
+    // A failed load must not be cached: the next view retries it.
+    info.catch(() => {
+      if (session.loaded.get(bytes) === created) {
+        session.loaded.delete(bytes);
+        client.release();
+      }
+    });
+  }
+  return entry;
+}
+
+/** Yields a macrotask, so the next large postMessage lands in its own task. */
+const nextTask = () => new Promise<void>(resolve => setTimeout(resolve, 0));
+
+/** Closes every document `session` loaded. Safe to call more than once. */
+export async function releasePreviewDocuments(session: PreviewSession): Promise<void> {
+  const own = sessionOf(session);
+  own.released = true;
+  const entries = [...own.loaded.values()];
+  own.loaded.clear();
+  await Promise.all(entries.map(close));
+}
+
+/**
+ * Closes one document of `session` — a zip review calls this when the
+ * selection moves off a member, so browsing a 50-file split does not keep 50
+ * documents open in the render workers.
+ */
+export async function releasePreviewDocument(
+  session: PreviewSession,
+  bytes: Uint8Array
+): Promise<void> {
+  const own = sessionOf(session);
+  const entry = own.loaded.get(bytes);
+  if (!entry) return;
+  own.loaded.delete(bytes);
+  await close(entry);
+}
+
+async function renderFrom(
+  session: Session,
+  bytes: Uint8Array,
+  index: number,
+  rotationOverride?: number,
+  retried = false
+): Promise<ImageData | null> {
+  const entry = load(session, bytes);
+  try {
+    const { handle, pageCount } = await entry.info;
+    if (index < 0 || index >= pageCount) return null;
+    const bitmap = await entry.client.lease(api =>
+      api.renderPage(handle, index, SCALE, rotationOverride)
+    );
+    return await toImageData(bitmap);
+  } catch (error) {
+    // The instance died under this render: reload once on a live one.
+    if (!retried && entry.client.dead && !session.released) {
+      return renderFrom(session, bytes, index, rotationOverride, true);
+    }
+    throw error;
+  }
+}
+
 /** The after-document's page count — used to size the review UI's page navigator. */
-export async function documentPageCount(bytes: Uint8Array): Promise<number> {
-  return renderWorker.lease(async api => {
-    const { handle, pageCount } = await api.loadDocument(bytes);
-    await api.closeDocument(handle).catch(() => {});
-    return pageCount;
-  });
+export async function documentPageCount(
+  session: PreviewSession,
+  bytes: Uint8Array
+): Promise<number> {
+  return (await load(sessionOf(session), bytes).info).pageCount;
 }
 
 export interface PageDiff {
@@ -51,75 +182,37 @@ export interface PageDiff {
 /**
  * Renders `beforeIndex` from `beforeBytes` and `afterIndex` from `afterBytes`
  * and diffs them. The two indices are independent — a reordered page is at a
- * different position on each side — rather than one shared `pageIndex`, so a
- * caller with page-alignment info (`page-alignment.ts`) can pass each page's
- * true counterpart instead of assuming position N on one side is position N
- * on the other. `beforeIndex: null` means this page has no baseline
- * counterpart (new/duplicated) — the before side is skipped entirely, not
- * just rendered blank, so a new page costs one document load, not two.
+ * different position on each side — so a caller with page-alignment info
+ * (`page-alignment.ts`) can pass each page's true counterpart. `beforeIndex:
+ * null` means this page has no baseline counterpart (new/duplicated): the
+ * before side is skipped entirely.
  *
  * `beforeRotationOverride`, when given, is the rotation the *before* page is
- * rendered at instead of its own — pass the current page's own rotation
- * (`PageAlignEntry.afterRotation`) so a page that was only rotated renders
- * both sides at the same orientation and compares as identical, rather than
- * "changed size" (a 90/270° rotation swaps rendered width and height) purely
- * from the rotation itself, which would otherwise also mask any real edit
- * (crop, watermark) made on top of it — non-comparable suppresses the
- * pixel-diff mask entirely.
+ * rendered at instead of its own — the current page's own rotation — so a page
+ * that was only rotated compares as identical rather than "changed size".
  */
 export async function diffPage(
+  session: PreviewSession,
   beforeBytes: Uint8Array,
   afterBytes: Uint8Array,
   beforeIndex: number | null,
   afterIndex: number,
   beforeRotationOverride?: number
 ): Promise<PageDiff> {
-  const { before, after } = await renderWorker.lease(async api => {
-    let beforeHandle: string | undefined;
-    let afterHandle: string | undefined;
-    try {
-      const renderOne = async (
-        handle: string,
-        pageCount: number,
-        index: number,
-        rotationOverride?: number
-      ) => {
-        if (index < 0 || index >= pageCount) return null;
-        const bitmap = await api.renderPage(handle, index, SCALE, rotationOverride);
-        return toImageData(bitmap);
-      };
+  const own = sessionOf(session);
+  load(own, afterBytes);
+  if (beforeIndex !== null) {
+    // Two large first-time posts in one task would block it for their sum.
+    if (!own.loaded.has(beforeBytes)) await nextTask();
+    load(own, beforeBytes);
+  }
 
-      // Each load's handle is captured off its own `.then`, not off the
-      // combined `Promise.all` result — if the *before* load rejects,
-      // `Promise.all` rejects before ever reaching a destructuring
-      // assignment made from its resolved value, which would otherwise skip
-      // recording a handle for an *after* load that succeeded just fine,
-      // leaking it (the `finally` below only closes handles it knows about).
-      const beforePromise =
-        beforeIndex === null
-          ? Promise.resolve(null)
-          : api.loadDocument(beforeBytes).then(info => {
-              beforeHandle = info.handle;
-              return info;
-            });
-      const afterPromise = api.loadDocument(afterBytes).then(info => {
-        afterHandle = info.handle;
-        return info;
-      });
-      const [infoBefore, infoAfter] = await Promise.all([beforePromise, afterPromise]);
-
-      const [before, after] = await Promise.all([
-        infoBefore && beforeIndex !== null
-          ? renderOne(infoBefore.handle, infoBefore.pageCount, beforeIndex, beforeRotationOverride)
-          : Promise.resolve(null),
-        renderOne(infoAfter.handle, infoAfter.pageCount, afterIndex)
-      ]);
-      return { before, after };
-    } finally {
-      if (beforeHandle) await api.closeDocument(beforeHandle).catch(() => {});
-      if (afterHandle) await api.closeDocument(afterHandle).catch(() => {});
-    }
-  });
+  const [before, after] = await Promise.all([
+    beforeIndex !== null
+      ? renderFrom(own, beforeBytes, beforeIndex, beforeRotationOverride)
+      : Promise.resolve(null),
+    renderFrom(own, afterBytes, afterIndex)
+  ]);
 
   if (!before || !after) return { before, after, diff: null, comparable: false };
   const comparable = before.width === after.width && before.height === after.height;
@@ -132,15 +225,10 @@ export async function diffPage(
 }
 
 /** Renders a single page (no comparison) — used for zip members' after-only preview. */
-export async function renderPage(bytes: Uint8Array, pageIndex: number): Promise<ImageData | null> {
-  return renderWorker.lease(async api => {
-    const { handle, pageCount } = await api.loadDocument(bytes);
-    try {
-      if (pageIndex < 0 || pageIndex >= pageCount) return null;
-      const bitmap = await api.renderPage(handle, pageIndex, SCALE);
-      return toImageData(bitmap);
-    } finally {
-      await api.closeDocument(handle).catch(() => {});
-    }
-  });
+export async function renderPage(
+  session: PreviewSession,
+  bytes: Uint8Array,
+  pageIndex: number
+): Promise<ImageData | null> {
+  return renderFrom(sessionOf(session), bytes, pageIndex);
 }

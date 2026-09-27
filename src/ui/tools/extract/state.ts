@@ -1,4 +1,5 @@
 import { signal } from '@preact/signals';
+import { resetOnDocumentChange } from '../docScoped';
 import { DEFAULT_OCR_LANGUAGE } from '../../../core/ocr/model';
 
 export interface ExtractSettings {
@@ -17,3 +18,11 @@ export const extractSettings = signal<ExtractSettings>({
   lang: DEFAULT_OCR_LANGUAGE
 });
 export const extractedText = signal<string>('');
+
+// Text extracted from doc A must not be downloaded as `B.txt` (UI-3).
+resetOnDocumentChange(
+  () => {
+    extractedText.value = '';
+  },
+  { onPageEdits: true }
+);

@@ -20,6 +20,9 @@
 
 import { corrupt, fromUnknown, unsupported } from '../errors';
 import { checkpoint, type JobHandle } from '../workers/protocol';
+import { inflateZipVetted, repackStored } from './zip-guard';
+import { translate } from '../i18n';
+import { tKey } from '../i18n/key';
 
 /** `PK\x03\x04` — the local file header every ZIP, and so every `.docx`, opens with. */
 const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04];
@@ -31,17 +34,20 @@ const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04];
  */
 const OLE2_MAGIC = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
 
-export const DOCX_LEGACY_MESSAGE =
+export const DOCX_LEGACY_MESSAGE = tKey(
   'This is a legacy Word .doc file, or a password-protected .docx. Neither can be read here — ' +
-  'open it in Word or LibreOffice and save it as an unprotected .docx first.';
+    'open it in Word or LibreOffice and save it as an unprotected .docx first.'
+);
 
-export const DOCX_NOT_A_ZIP_MESSAGE =
+export const DOCX_NOT_A_ZIP_MESSAGE = tKey(
   'This file is not a readable .docx: its ZIP container could not be opened. The original file ' +
-  'is untouched — nothing was converted.';
+    'is untouched — nothing was converted.'
+);
 
-export const DOCX_NO_DOCUMENT_MESSAGE =
+export const DOCX_NO_DOCUMENT_MESSAGE = tKey(
   'This .docx is missing its main document part (word/document.xml), so there is nothing to ' +
-  'convert. The original file is untouched.';
+    'convert. The original file is untouched.'
+);
 
 function startsWith(bytes: Uint8Array, magic: readonly number[]): boolean {
   if (bytes.length < magic.length) return false;
@@ -62,16 +68,23 @@ export interface DocxHtmlResult {
  * forbids outright.
  */
 export async function readDocxAsHtml(bytes: Uint8Array, job?: JobHandle): Promise<DocxHtmlResult> {
-  await checkpoint(job, 0, 'Reading the Word document');
+  await checkpoint(job, 0, translate('Reading the Word document'));
 
   if (bytes.length === 0) {
-    throw corrupt('This file is empty, so there is nothing to convert.');
+    throw corrupt(translate('This file is empty, so there is nothing to convert.'));
   }
-  if (startsWith(bytes, OLE2_MAGIC)) throw unsupported(DOCX_LEGACY_MESSAGE);
-  if (!startsWith(bytes, ZIP_MAGIC)) throw corrupt(DOCX_NOT_A_ZIP_MESSAGE);
+  if (startsWith(bytes, OLE2_MAGIC)) throw unsupported(translate(DOCX_LEGACY_MESSAGE));
+  if (!startsWith(bytes, ZIP_MAGIC)) throw corrupt(translate(DOCX_NOT_A_ZIP_MESSAGE));
+  // mammoth's jszip inflates every entry the archive lists, and does not bound
+  // that by the declared size. So it is never handed the original archive: the
+  // entries are inflated here, each checked against the budget and its declared
+  // size, and re-packed stored (CONV-5).
+  const vetted = inflateZipVetted(bytes, 'Word document');
+  if (!vetted) throw corrupt(translate(DOCX_NOT_A_ZIP_MESSAGE));
+  const packed = repackStored(vetted);
 
   const mammoth = await import('mammoth');
-  await checkpoint(job, 0.2, 'Reading the Word document');
+  await checkpoint(job, 0.2, translate('Reading the Word document'));
 
   // `.slice()` so the `ArrayBuffer` handed to jszip is exactly this document and
   // nothing else: a `Uint8Array` can be a *view* onto a larger buffer, and
@@ -84,7 +97,7 @@ export async function readDocxAsHtml(bytes: Uint8Array, job?: JobHandle): Promis
   // Vitest picks the Node one, so passing both is what makes the worker and the
   // unit test execute the identical call instead of the test grading a path the
   // browser never takes. The browser build ignores `buffer` entirely.
-  const copy = bytes.slice();
+  const copy = packed.slice();
   const arrayBuffer = copy.buffer as ArrayBuffer;
 
   let result;
@@ -98,9 +111,81 @@ export async function readDocxAsHtml(bytes: Uint8Array, job?: JobHandle): Promis
 
   return {
     html: result.value ?? '',
-    messages: (result.messages ?? []).map(message => message.message)
+    messages: (result.messages ?? []).map(message => describeMammothMessage(message.message))
   };
 }
+
+/**
+ * `mammoth`'s warnings in the user's language (AUDIT UI-8).
+ *
+ * They are the library's own English sentences, so each shape it is known to
+ * produce (mammoth 1.x, `docx/body-reader.js` and `document-to-html.js`) is
+ * matched and re-said through `translate()`, with the style name, element or
+ * content type carried over verbatim. Anything else — a message a later
+ * mammoth adds — is passed through untouched rather than dropped.
+ */
+export function describeMammothMessage(message: string): string {
+  let match = /^Unrecognised (paragraph|run) style: '(.*)' \(Style ID: (.*)\)$/s.exec(message);
+  if (match) {
+    const params = { name: match[2], id: match[3] };
+    return match[1] === 'paragraph'
+      ? translate("Unrecognised paragraph style: '{name}' (Style ID: {id})", params)
+      : translate("Unrecognised run style: '{name}' (Style ID: {id})", params);
+  }
+  match =
+    /^(Paragraph|Run|Table) style with ID (.*) was referenced but not defined in the document$/s.exec(
+      message
+    );
+  if (match) {
+    const params = { id: match[2] };
+    if (match[1] === 'Paragraph') {
+      return translate(
+        'Paragraph style with ID {id} was referenced but not defined in the document',
+        params
+      );
+    }
+    if (match[1] === 'Run') {
+      return translate(
+        'Run style with ID {id} was referenced but not defined in the document',
+        params
+      );
+    }
+    return translate(
+      'Table style with ID {id} was referenced but not defined in the document',
+      params
+    );
+  }
+  match = /^An unrecognised element was ignored: (.*)$/s.exec(message);
+  if (match)
+    return translate('An unrecognised element was ignored: {element}', { element: match[1] });
+  match = /^Unsupported break type: (.*)$/s.exec(message);
+  if (match) return translate('Unsupported break type: {type}', { type: match[1] });
+  match = /^Image of type (.*) is unlikely to display in web browsers$/s.exec(message);
+  if (match) {
+    return translate('Image of type {type} is unlikely to display in web browsers', {
+      type: match[1]
+    });
+  }
+  match =
+    /^A w:sym element with an unsupported character was ignored: char (.*) in font (.*)$/s.exec(
+      message
+    );
+  if (match) {
+    return translate(
+      'A w:sym element with an unsupported character was ignored: char {char} in font {font}',
+      { char: match[1], font: match[2] }
+    );
+  }
+  const fixed = MAMMOTH_FIXED_MESSAGES.find(known => known === message);
+  return fixed ? translate(fixed) : message;
+}
+
+const MAMMOTH_FIXED_MESSAGES = [
+  tKey('Could not find image file for a:blip element'),
+  tKey('A v:imagedata element without a relationship ID was ignored'),
+  tKey('unexpected non-row element in table, cell merging may be incorrect'),
+  tKey('unexpected non-cell element in table row, cell merging may be incorrect')
+];
 
 /**
  * Turns whatever `mammoth`/jszip threw into a message a user can act on.
@@ -116,13 +201,15 @@ export function translateMammothError(err: unknown): Error {
   if (
     /end of central directory|End of data reached|Corrupted zip|is this a zip file/i.test(message)
   ) {
-    return corrupt(DOCX_NOT_A_ZIP_MESSAGE);
+    return corrupt(translate(DOCX_NOT_A_ZIP_MESSAGE));
   }
   if (/main document part/i.test(message)) {
-    return corrupt(DOCX_NO_DOCUMENT_MESSAGE);
+    return corrupt(translate(DOCX_NO_DOCUMENT_MESSAGE));
   }
   if (/encrypted|password/i.test(message)) {
-    return unsupported(DOCX_LEGACY_MESSAGE);
+    return unsupported(translate(DOCX_LEGACY_MESSAGE));
   }
-  return corrupt(`This .docx could not be read, so nothing was converted (${message}).`);
+  return corrupt(
+    translate('This .docx could not be read, so nothing was converted ({message}).', { message })
+  );
 }

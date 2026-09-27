@@ -183,6 +183,28 @@ describe('formatFormulaNumber (SGN-07)', () => {
   });
 });
 
+describe('evaluateFormulas: field names that collide with Object.prototype (CONV-15)', () => {
+  const fields = [
+    { name: 'constructor', type: 'TextField', value: '5' },
+    { name: 'total', type: 'TextField', value: '' },
+    { name: '__proto__', type: 'TextField', value: '' }
+  ] as unknown as Parameters<typeof evaluateFormulas>[1];
+
+  it('reads a field named constructor as its own value, not Object', () => {
+    const { values, errors } = evaluateFormulas(
+      [{ target: 'total', source: 'constructor + 1' }],
+      fields
+    );
+    expect(Object.keys(errors)).toEqual([]);
+    expect(values.total).toBe('6');
+  });
+
+  it('keeps an error on a __proto__ target visible to the save gate', () => {
+    const { errors } = evaluateFormulas([{ target: '__proto__', source: '1/0' }], fields);
+    expect(Object.keys(errors)).toEqual(['__proto__']);
+  });
+});
+
 describe('evaluateFormulas: live recalculation (SGN-07)', () => {
   it('sums the document values with no user input at all', () => {
     const { values, errors } = evaluateFormulas(sumFormula, FIELDS);

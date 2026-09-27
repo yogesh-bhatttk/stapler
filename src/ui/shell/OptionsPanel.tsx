@@ -6,6 +6,8 @@
  * repeated `style` objects. Each tool now owns its own panel file.
  */
 
+import { signal } from '@preact/signals';
+import { translate } from '../../core/i18n';
 import { useActiveTool } from '../useActiveTool';
 import { activeDoc } from '../../core/store';
 import { OpenDocumentPrompt } from '../components/OpenDocumentPrompt';
@@ -16,6 +18,7 @@ import { SplitPanel } from '../tools/split/SplitPanel';
 import { BlanksPanel } from '../tools/blanks/BlanksPanel';
 import { PdfToImagePanel } from '../tools/convert/PdfToImagePanel';
 import { ImagesToPdfPanel } from '../tools/convert/ImagesToPdfPanel';
+import { ImageSizePanel } from '../tools/image-size/ImageSizePanel';
 import { ExtractPanel } from '../tools/extract/ExtractPanel';
 import { ExtractImagesPanel } from '../tools/extract-images/ExtractImagesPanel';
 import { CompressPanel } from '../tools/compress/CompressPanel';
@@ -47,6 +50,8 @@ import { ReadAloudPanel } from '../tools/read-aloud/ReadAloudPanel';
 import { ReflowPanel } from '../tools/reflow/ReflowPanel';
 import { HistoryPanel } from '../tools/history/HistoryPanel';
 import { SideBySidePanel } from '../tools/side-by-side/SideBySidePanel';
+import { GrayscalePanel } from '../tools/grayscale/GrayscalePanel';
+import { RepairPanel } from '../tools/repair/RepairPanel';
 import styles from './OptionsPanel.module.css';
 
 const BODIES: Record<string, () => preact.JSX.Element | null> = {
@@ -57,6 +62,7 @@ const BODIES: Record<string, () => preact.JSX.Element | null> = {
   'remove-blanks': BlanksPanel,
   'pdf-to-img': PdfToImagePanel,
   'images-to-pdf': ImagesToPdfPanel,
+  'image-to-size': ImageSizePanel,
   extract: ExtractPanel,
   'extract-img': ExtractImagesPanel,
   compress: CompressPanel,
@@ -87,8 +93,13 @@ const BODIES: Record<string, () => preact.JSX.Element | null> = {
   'read-aloud': ReadAloudPanel,
   reflow: ReflowPanel,
   history: HistoryPanel,
-  'side-by-side': SideBySidePanel
+  'side-by-side': SideBySidePanel,
+  grayscale: GrayscalePanel,
+  repair: RepairPanel
 };
+
+/** Whether the bottom-sheet form of the panel is folded down to its title row. */
+export const optionsSheetCollapsed = signal(false);
 
 export function OptionsPanel() {
   const tool = useActiveTool();
@@ -97,13 +108,35 @@ export function OptionsPanel() {
   const Body = BODIES[tool.id];
   const hasDocument = activeDoc.value !== null;
 
+  const collapsed = optionsSheetCollapsed.value;
+
   return (
-    <aside className={styles.panel} aria-label={`${tool.title} options`}>
+    <aside
+      className={`${styles.panel} ${collapsed ? styles.collapsed : ''}`}
+      aria-label={translate('{tool} options', { tool: translate(tool.title) })}
+    >
       <div className={styles.section}>
-        <h1 className={styles.title}>{tool.title}</h1>
-        <p className={styles.description}>{tool.summary}</p>
+        <div className={styles.titleRow}>
+          <h1 className={styles.title}>{translate(tool.title)}</h1>
+          {/* Only shown while the panel is a bottom sheet (< 1100px), where it
+              covers the lower half of the canvas — and the Crop, Redact and
+              Sign overlays drawn there — with no way to get it out of the
+              way (AUDIT-2026-09-25 UI-28). */}
+          <button
+            type="button"
+            className={styles.sheetToggle}
+            aria-expanded={!collapsed}
+            aria-controls="options-panel-body"
+            onClick={() => (optionsSheetCollapsed.value = !collapsed)}
+          >
+            {collapsed ? translate('Show options') : translate('Hide options')}
+          </button>
+        </div>
+        <p className={styles.description}>{translate(tool.summary)}</p>
       </div>
-      {hasDocument || tool.worksWithoutDocument ? Body && <Body /> : <OpenDocumentPrompt />}
+      <div id="options-panel-body" className={styles.body}>
+        {hasDocument || tool.worksWithoutDocument ? Body && <Body /> : <OpenDocumentPrompt />}
+      </div>
     </aside>
   );
 }

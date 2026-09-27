@@ -1,5 +1,7 @@
 import { signal } from '@preact/signals';
 
+export { tKey } from './key';
+
 export const locales = [
   'en',
   'es',
@@ -32,17 +34,50 @@ const LOCALE_STORAGE_KEY = 'stapler.locale';
  */
 export const dictionaryVersion = signal(0);
 
-export async function setLocale(locale: Locale) {
-  let loaded = Boolean(dictionaries[locale]);
-  if (!loaded) {
-    try {
-      const dict = await import(`./locales/${locale}.json`);
-      dictionaries[locale] = dict.default || dict;
-      loaded = true;
-    } catch {
-      console.warn(`Failed to load locale: ${locale}`);
-    }
+/**
+ * Imports `locale`'s dictionary if it is not already loaded. Touches neither
+ * the DOM nor storage, so it runs in a worker realm too (AUDIT UI-8).
+ */
+async function loadDictionary(locale: Locale): Promise<boolean> {
+  if (dictionaries[locale]) return true;
+  try {
+    const dict = await import(`./locales/${locale}.json`);
+    dictionaries[locale] = dict.default || dict;
+    return true;
+  } catch {
+    console.warn(`Failed to load locale: ${locale}`);
+    return false;
   }
+}
+
+export function isLocale(value: unknown): value is Locale {
+  return typeof value === 'string' && (locales as readonly string[]).includes(value);
+}
+
+/**
+ * The worker-realm counterpart of {@link setLocale} (AUDIT UI-8): loads the
+ * dictionary and makes it current for `translate` / `tPlural`, without the
+ * `document` / `localStorage` side effects a worker does not have.
+ *
+ * English is loaded as well, whatever the target: `tPlural` falls back to the
+ * English plural forms, and without them a count of one would read "1 pages".
+ * Resolves false (leaving the current locale in place) for an unknown locale
+ * or a dictionary that failed to load.
+ */
+export async function loadLocale(locale: string): Promise<boolean> {
+  if (!isLocale(locale)) return false;
+  const [loaded] = await Promise.all([
+    loadDictionary(locale),
+    locale === 'en' ? Promise.resolve(true) : loadDictionary('en')
+  ]);
+  if (!loaded) return false;
+  currentLocale.value = locale;
+  dictionaryVersion.value++;
+  return true;
+}
+
+export async function setLocale(locale: Locale) {
+  const loaded = await loadDictionary(locale);
 
   if (!loaded) {
     // Setting `currentLocale` here anyway would leave every `t()` call
@@ -68,6 +103,9 @@ export async function setLocale(locale: Locale) {
   } else {
     document.documentElement.dir = 'ltr';
   }
+  // Screen readers pick their voice, and browsers their CJK glyph variants,
+  // from `lang`; it stayed "en" for every locale (WCAG 3.1.1, AUDIT UI-21).
+  document.documentElement.lang = locale;
 }
 
 export function initLocale(savedLocale?: string) {
@@ -133,6 +171,50 @@ export function translate(key: string, params?: TranslationParams): string {
   const dict = dictionaries[locale];
   const resolved = dict && key in dict ? dict[key] : dictionaries['en']?.[key];
   return interpolate(resolved ?? key, params);
+}
+
+const pluralRulesCache = new Map<string, Intl.PluralRules>();
+
+function pluralCategory(locale: string, count: number): Intl.LDMLPluralRule {
+  let rules = pluralRulesCache.get(locale);
+  if (!rules) {
+    rules = new Intl.PluralRules(locale);
+    pluralRulesCache.set(locale, rules);
+  }
+  return rules.select(count);
+}
+
+/**
+ * Count-dependent translation (AUDIT UI-8). Replaces the old
+ * `{plural}` → `'s'` hack, which only ever worked for English: Russian needs
+ * three forms, Arabic six, Japanese one.
+ *
+ * `key` is the English "other" form (`'{count} pages'`). Dictionaries hold one
+ * entry per CLDR plural category the language uses, suffixed with the
+ * category — `'{count} pages_one'`, `'{count} pages_other'`, and in `ru.json`
+ * also `_few` / `_many`, in `ar.json` `_zero` / `_two` / `_few` / `_many`. The
+ * category is chosen with `Intl.PluralRules` for the active locale; a missing
+ * category falls back to `_other`, then to English, then to the key itself.
+ * `{count}` is always available to the template.
+ */
+export function tPlural(key: string, count: number, params?: TranslationParams): string {
+  const locale = currentLocale.value;
+  const values: TranslationParams = { count, ...params };
+  const lookups: [string, Record<string, string> | undefined][] = [
+    [locale, dictionaries[locale]],
+    ['en', dictionaries['en']]
+  ];
+  for (const [lang, dict] of lookups) {
+    if (!dict) continue;
+    const hit = dict[`${key}_${pluralCategory(lang, count)}`] ?? dict[`${key}_other`];
+    if (hit !== undefined) return interpolate(hit, values);
+  }
+  return interpolate(key, values);
+}
+
+/** Test seam: install a dictionary without going through the dynamic import. */
+export function registerDictionary(locale: string, dict: Record<string, string>): void {
+  dictionaries[locale] = dict;
 }
 
 function interpolate(text: string, params?: TranslationParams): string {

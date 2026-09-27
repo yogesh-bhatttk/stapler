@@ -18,7 +18,7 @@
  * produced bytes.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { PDFArray, PDFDocument, PDFName } from 'pdf-lib';
+import { PDFArray, PDFDocument, PDFName, type PDFRef } from 'pdf-lib';
 import {
   filterContentStream,
   parseContentStream,
@@ -92,8 +92,8 @@ async function type3Document(text: string, fontMatrix: number[]): Promise<Uint8A
   const doc = await PDFDocument.create();
   const page = doc.addPage([600, 800]);
 
-  const charProcs: Record<string, unknown> = {};
-  const differences: unknown[] = [32];
+  const charProcs: Record<string, PDFRef> = {};
+  const differences: (number | PDFName)[] = [32];
   for (let code = 32; code < 127; code++) {
     const glyph = `g${code}`;
     differences.push(PDFName.of(glyph));

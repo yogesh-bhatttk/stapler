@@ -36,17 +36,21 @@ function deferred<T>() {
 }
 
 describe('ANN-03 search staleness guard', () => {
+  const docAPages = [{ key: 'a-1', sourceDocId: 'src-a', sourceIndex: 0, rotation: 0 }];
   const docA: StaplerDoc = {
     id: 'doc-a',
     name: 'a.pdf',
-    pages: [{ key: 'a-1', sourceDocId: 'src-a', sourceIndex: 0, rotation: 0 }],
+    pages: docAPages,
+    baseline: docAPages,
     annotations: [],
     dirty: false
   };
+  const docBPages = [{ key: 'b-1', sourceDocId: 'src-b', sourceIndex: 0, rotation: 0 }];
   const docB: StaplerDoc = {
     id: 'doc-b',
     name: 'b.pdf',
-    pages: [{ key: 'b-1', sourceDocId: 'src-b', sourceIndex: 0, rotation: 0 }],
+    pages: docBPages,
+    baseline: docBPages,
     annotations: [],
     dirty: false
   };
@@ -58,14 +62,12 @@ describe('ANN-03 search staleness guard', () => {
       'src-a': {
         id: 'src-a',
         name: 'a.pdf',
-        bytes: new Uint8Array([1]),
         pageCount: 1,
         pageSizes: [{ width: 595, height: 842 }]
       },
       'src-b': {
         id: 'src-b',
         name: 'b.pdf',
-        bytes: new Uint8Array([2]),
         pageCount: 1,
         pageSizes: [{ width: 595, height: 842 }]
       }

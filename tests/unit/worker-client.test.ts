@@ -147,8 +147,12 @@ describe('createWorkerClient pool', () => {
       expect(worker.terminate).toHaveBeenCalledTimes(1);
     }
 
+    // RT-1: in-flight calls reject rather than waiting on a reply a terminated
+    // worker can never send.
+    for (const lease of leases) {
+      await expect(lease).rejects.toThrow(/worker crashed before it could finish/);
+    }
     gates.forEach(g => g.resolve());
-    await Promise.all(leases);
   });
 
   it('drops an instance that errors, so a later lease spawns a fresh one', async () => {
@@ -174,8 +178,9 @@ describe('createWorkerClient pool', () => {
     errorHandler({ message: 'boom' });
     expect(workers[0].terminate).toHaveBeenCalledTimes(1);
 
+    // RT-1: the in-flight lease rejects instead of hanging on the dead port.
+    await expect(lease).rejects.toThrow(/worker crashed before it could finish/);
     gate.resolve();
-    await lease;
 
     await client.lease(async () => {});
     expect(spawn).toHaveBeenCalledTimes(2);

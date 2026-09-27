@@ -39,10 +39,12 @@ function seed(pageCount = 5, sourceId = 'src-a'): StaplerDoc {
     pageCount,
     pageSizes: Array.from({ length: pageCount }, () => ({ width: 595, height: 842 }))
   });
+  const pages = makePageRefs(sourceId, pageCount);
   const doc: StaplerDoc = {
     id: 'doc-1',
     name: 'doc.pdf',
-    pages: makePageRefs(sourceId, pageCount),
+    pages,
+    baseline: pages,
     annotations: [],
     dirty: false
   };
@@ -111,7 +113,6 @@ describe('insertPages', () => {
     registerSource({
       id: 'src-b',
       name: 'src-b.pdf',
-      bytes: new Uint8Array([9]),
       pageCount: 2,
       pageSizes: [
         { width: 595, height: 842 },
@@ -159,21 +160,26 @@ describe('insertPages', () => {
 
   it('leaves the source document that the inserted pages came from untouched', () => {
     const doc = seed(2, 'src-a');
+    __memoryFallback.set('src-b', new Uint8Array([1, 2, 3]));
     registerSource({
       id: 'src-b',
       name: 'src-b.pdf',
-      bytes: new Uint8Array([1, 2, 3]),
       pageCount: 4,
       pageSizes: Array.from({ length: 4 }, () => ({ width: 595, height: 842 }))
     });
-    const sourceBytesBefore = sources.value['src-b'].bytes;
+    // Source bytes live in OPFS (here, its in-memory fallback), not on the
+    // `SourceDocument` record — so check both the record and the stored bytes.
+    const sourceBefore = sources.value['src-b'];
+    const sourceBytesBefore = __memoryFallback.get('src-b');
     const inserted = makePageRefs('src-b', 4);
 
     insertPages(doc.id, inserted, 1);
 
     // Inserting only ever creates new PageRefs pointing at the existing source;
-    // the source's own bytes are never read back out or mutated by this call.
-    expect(sources.value['src-b'].bytes).toBe(sourceBytesBefore);
+    // the source's own record and bytes are never replaced or mutated by this call.
+    expect(sources.value['src-b']).toBe(sourceBefore);
+    expect(__memoryFallback.get('src-b')).toBe(sourceBytesBefore);
+    expect([...(__memoryFallback.get('src-b') ?? [])]).toEqual([1, 2, 3]);
   });
 });
 
@@ -397,7 +403,6 @@ describe('repointPage', () => {
     registerSource({
       id: 'cleaned',
       name: 'cleaned.pdf',
-      bytes: new Uint8Array([7]),
       pageCount: 1,
       pageSizes: [{ width: 595, height: 842 }]
     });
@@ -417,7 +422,6 @@ describe('repointPage', () => {
     registerSource({
       id: 'rebuilt',
       name: 'rebuilt.pdf',
-      bytes: new Uint8Array([9]),
       pageCount: 6,
       pageSizes: Array.from({ length: 6 }, () => ({ width: 595, height: 842 }))
     });
@@ -476,13 +480,15 @@ describe('source reference counting', () => {
     expect(sources.value['shared']).toBeDefined();
   });
 
-  it('drops to zero when the last referencing page is deleted', () => {
+  it('drops as pages are deleted, but deleting the last page is refused (RT-3)', () => {
     const doc = seed(2, 'src-a');
     deletePages(doc.id, [doc.pages[0].key]);
     expect(sourceRefCount('src-a')).toBe(1);
+    // RT-3: removing the final page no longer closes the document behind the
+    // user's back — the delete is refused and the page (and its source) stay.
     deletePages(doc.id, [doc.pages[1].key]);
-    expect(sourceRefCount('src-a')).toBe(0);
-    expect(sourceDocRefCount('src-a')).toBe(0);
+    expect(sourceRefCount('src-a')).toBe(1);
+    expect(sourceDocRefCount('src-a')).toBe(1);
   });
 
   it('follows duplicate, insert, move and repoint without any bookkeeping of its own', () => {
@@ -493,7 +499,6 @@ describe('source reference counting', () => {
     registerSource({
       id: 'src-b',
       name: 'b.pdf',
-      bytes: new Uint8Array([9]),
       pageCount: 2,
       pageSizes: [
         { width: 10, height: 10 },
@@ -523,7 +528,6 @@ describe('source reference counting', () => {
     replaceWithSource(doc.id, {
       id: 'redacted',
       name: 'redacted.pdf',
-      bytes: new Uint8Array([4, 5, 6]),
       pageCount: 3,
       pageSizes: Array.from({ length: 3 }, () => ({ width: 595, height: 842 }))
     });

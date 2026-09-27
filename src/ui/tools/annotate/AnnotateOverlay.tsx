@@ -276,7 +276,7 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
     const strokeWidth = annotationStrokeWidth.value / width;
 
     if (type === 'text') {
-      const text = window.prompt('Enter note text:');
+      const text = window.prompt(translate('Enter note text:'));
       if (text) {
         commit();
         addAnnotation(pageKey, {
@@ -294,7 +294,7 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
     }
 
     if (type === 'sticky') {
-      const text = window.prompt('Enter note text:');
+      const text = window.prompt(translate('Enter note text:'));
       if (text) {
         commit();
         addAnnotation(pageKey, {
@@ -382,7 +382,7 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
     const color = annotationColor.value;
 
     if (type === 'text') {
-      const text = window.prompt('Enter note text:');
+      const text = window.prompt(translate('Enter note text:'));
       if (!text) return;
       const ann: Annotation = {
         id: crypto.randomUUID(),
@@ -405,7 +405,7 @@ export function AnnotateOverlay({ pageKey, width, height }: AnnotateOverlayProps
     }
 
     if (type === 'sticky') {
-      const text = window.prompt('Enter note text:');
+      const text = window.prompt(translate('Enter note text:'));
       if (!text) return;
       const ann: Annotation = {
         id: crypto.randomUUID(),

@@ -10,11 +10,13 @@
  * being asked to check: every sheet in the output is the result of a guess about
  * where a table was.
  */
+import { tKey } from '../../../core/i18n/key';
 import type { PdfToXlsxOptions, PdfToXlsxResult } from '../../../core/operations';
 import { createPdfSourceState } from './pdf-source-state';
 
-export const PDF_TO_EXCEL_GATE =
-  'Preview the conversion first — table detection is a guess, so check the sheets before saving.';
+export const PDF_TO_EXCEL_GATE = tKey(
+  'Preview the conversion first — table detection is a guess, so check the sheets before saving.'
+);
 
 const state = createPdfSourceState<PdfToXlsxOptions, PdfToXlsxResult>(
   'pdf-to-excel',

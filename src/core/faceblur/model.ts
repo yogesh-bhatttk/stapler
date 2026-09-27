@@ -1,123 +1,136 @@
 /**
- * RED-08 — the face-detector weight catalogue, and the second (and last) URL
- * Stapler is ever allowed to fetch at runtime.
+ * RED-08 — the face-detector weights, bundled.
  *
- * PLAN §5.4 item 5 lists exactly two documented exceptions to the zero-network
- * invariant: OCR-01's language model (`src/core/ocr/model.ts`) and this one.
- * This file is deliberately the same shape as that one — same host, same
- * pin-an-exact-version rule, same `setModelBaseOverride` test seam — so the two
- * exceptions cannot drift into two different privacy stories.
+ * These used to be the second documented exception to the zero-network
+ * invariant: a one-time, consented download of the `tinyFaceDetector` weight
+ * manifest and shard from a CDN. That exception was never needed — the exact
+ * same two files ship inside the installed `@vladmandic/face-api` package — and
+ * downloading them meant trusting a remote manifest and a size check where a
+ * redaction feature needs certainty (a tampered shard that detects nothing
+ * makes face blur report "no faces found" and leave faces visible; audit
+ * 2026-09-25 CNV-6 / PLT-8). So they are now part of the build, like the
+ * engine that runs them: nothing is fetched, nothing is asked, and the bytes
+ * the detector loads are the bytes that were audited at build time.
  *
- * **Weights only.** The thing that *runs* the weights — `@vladmandic/face-api`
- * and the TensorFlow.js runtime it bundles — is a normal npm dependency,
- * code-split into a lazy chunk of our own bundle. That split is not an
- * optimisation, it is the rule: executable code fetched from a CDN is remote
- * code execution, which PLAN §5.4 item 2 forbids outright and which no amount
- * of user consent makes acceptable. It is the same line tesseract draws —
- * engine vendored, `.traineddata` fetched.
- *
- * The invariant hook (`.claude/hooks/check-invariants.mjs`) carves
- * `src/core/faceblur/` out of its `REMOTE_HOSTS` and network-API checks exactly
- * as it does `src/core/ocr/`, so the host is named in full here rather than
- * assembled from fragments to sneak past the scanner.
+ * The actual bytes live in `bundledWeights.ts` and are imported *dynamically*
+ * from here, so the ~260 KB base64 data URI lands in a lazy chunk that only a
+ * face-blur run loads — in practice the render worker's, since that is where
+ * `loadBundledFaceModelWeights` is called from.
  */
-
-/** Host the weights are fetched from. Named out loud in the confirmation dialog. */
-export const MODEL_HOST = 'cdn.jsdelivr.net';
+import { internal } from '../errors';
+import type { FaceModelWeights, WeightManifest } from './detect';
 
 /**
- * Pinned to an exact package *version*, not a floating tag, for the same reason
- * `resolveModelBase` in `ocr/model.ts` pins `DATA_VERSION`: an unpinned CDN URL
- * is a remote dependency that can change under a build that has already shipped
- * and been audited, which is precisely what "download once, then fully offline"
- * is supposed to rule out.
- *
- * `MODEL_PACKAGE_VERSION` intentionally matches the `@vladmandic/face-api`
- * version in `package.json`. The bundled inference code and the fetched weights
- * are two halves of one artefact; letting them drift apart is how you get a
- * detector that silently returns nothing.
+ * The installed `@vladmandic/face-api` version the weights come from. Kept as a
+ * constant so the test suite can assert it still matches `package.json`: the
+ * bundled inference code and the bundled weights are two halves of one artefact.
  */
-const MODEL_PACKAGE = '@vladmandic/face-api';
-const MODEL_PACKAGE_VERSION = '1.7.15';
+export const MODEL_PACKAGE_VERSION = '1.7.15';
 
-/**
- * The weight-manifest file name. face-api's `tinyFaceDetector` publishes its
- * weights as a TensorFlow.js graph-model pair: a JSON manifest listing every
- * tensor's name, shape, dtype and uint8 quantisation parameters, plus one binary
- * shard the manifest names. Both are fetched; nothing else is.
- */
+/** The weight-manifest file name inside `@vladmandic/face-api/model/`. */
 export const MANIFEST_FILE = 'tiny_face_detector_model-weights_manifest.json';
 
-/**
- * Approximate total download, for the disclosure copy.
- *
- * Unlike OCR's estimate this one *is* measured: the same files ship inside the
- * installed `@vladmandic/face-api` package, so `tiny_face_detector_model.bin`
- * (193,321 bytes) plus the manifest (3,219 bytes) is 196,540 bytes. Rounded up
- * to 0.2 MB — erring high, because a disclosure that under-states a download is
- * worse than one that over-states it.
- */
-export const APPROX_SIZE_MB = 0.2;
-
-/**
- * Stable id for the consent flag and the OPFS cache key. Versioned, so bumping
- * `MODEL_PACKAGE_VERSION` to different weights re-asks rather than silently
- * serving a stale cache that no longer matches the bundled engine.
- */
-export const FACE_MODEL_ID = `tiny_face_detector@${MODEL_PACKAGE_VERSION}`;
-
-/** Shown in the panel and in the confirmation dialog. */
+/** Shown in the panel copy. */
 export const FACE_MODEL_LABEL = 'on-device face detector';
 
 /**
- * Test seam. Point this at a local fixture directory and nothing in the face
- * blur path can reach the real CDN; `null` restores the pinned default.
+ * Decodes the bundled weights into the `{ manifest, shard }` shape
+ * `detect.ts`'s `loadFaceModel` takes, and sanity-checks them first.
  *
- * A module-level override rather than injected config, for the same reason
- * `ocr/model.ts` uses one: `runFaceBlur` is called from a panel handler with no
- * dependency-injection seam of its own, and this is the shape the repo's other
- * test seams already take.
+ * The checks are not integrity checks in the download sense — nothing here
+ * came off the network — they are a build-time tripwire: a face-api upgrade
+ * that reshapes the model (more than one shard, or a shard whose length no
+ * longer matches the tensor shapes its manifest declares) fails loudly the
+ * first time the detector loads instead of producing a detector that silently
+ * finds nothing.
  */
-let baseOverride: string | null = null;
-
-export function setModelBaseOverride(base: string | null): void {
-  baseOverride = base;
-}
-
-export function getModelBaseOverride(): string | null {
-  return baseOverride;
-}
-
-/** Directory the manifest and its shards are resolved against, no trailing slash. */
-export function resolveModelBase(): string {
-  if (baseOverride) return baseOverride.replace(/\/$/, '');
-  return `https://${MODEL_HOST}/npm/${MODEL_PACKAGE}@${MODEL_PACKAGE_VERSION}/model`;
-}
-
-/**
- * The exact manifest URL that will be requested. Used by the confirmation copy
- * and by the tests that assert what is reachable, so the assertion is made
- * against the same string the fetch builds.
- */
-export function resolveManifestUrl(): string {
-  return `${resolveModelBase()}/${MANIFEST_FILE}`;
-}
-
-/**
- * A shard URL, from the relative path the manifest itself names.
- *
- * The path is taken from the manifest rather than hard-coded, because that is
- * what tfjs's own loader does — but it is *validated* first: a manifest is
- * remote data, and a `paths` entry of `../../../etc/passwd` or an absolute
- * `https://elsewhere.example/x` would turn one pinned download into a fetch of
- * the manifest author's choosing. Only a plain file name is accepted.
- */
-export function resolveShardUrl(relativePath: string): string {
-  if (!/^[A-Za-z0-9._-]+$/.test(relativePath) || relativePath.startsWith('.')) {
-    throw new Error(
-      `The face-detector weight manifest named a shard path Stapler will not fetch: ` +
-        `"${relativePath}". Only a plain file name alongside the manifest is allowed.`
+export async function loadBundledFaceModelWeights(): Promise<FaceModelWeights> {
+  const { BUNDLED_MANIFEST, BUNDLED_SHARD_DATA_URL } = await import('./bundledWeights');
+  const manifest = validateManifest(BUNDLED_MANIFEST);
+  const shard = dataUrlToBytes(BUNDLED_SHARD_DATA_URL);
+  const expected = expectedShardBytes(manifest);
+  if (expected !== shard.byteLength) {
+    throw internal(
+      `The bundled face-detector weights are ${shard.byteLength} bytes, but their manifest ` +
+        `describes ${expected ?? 'an unknown number of'} bytes. This build is broken; face blur ` +
+        'cannot run.'
     );
   }
-  return `${resolveModelBase()}/${relativePath}`;
+  return { manifest, shard };
+}
+
+function dataUrlToBytes(dataUrl: string): Uint8Array {
+  const comma = dataUrl.indexOf(',');
+  if (!dataUrl.startsWith('data:') || comma < 0 || !dataUrl.slice(0, comma).endsWith(';base64')) {
+    throw internal('The bundled face-detector weights are not a base64 data URI.');
+  }
+  const binary = atob(dataUrl.slice(comma + 1));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+function validateManifest(parsed: unknown): WeightManifest {
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw internal('The bundled face-detector weight manifest is not in the expected format.');
+  }
+  for (const group of parsed) {
+    const entry = group as { paths?: unknown; weights?: unknown };
+    if (!Array.isArray(entry.paths) || !Array.isArray(entry.weights)) {
+      throw internal('The bundled face-detector weight manifest is not in the expected format.');
+    }
+  }
+  const manifest = parsed as WeightManifest;
+  const paths = manifest.flatMap(group => group.paths);
+  if (paths.length !== 1) {
+    throw internal(
+      `The bundled face-detector weight manifest names ${paths.length} weight files; ` +
+        'Stapler expects exactly one.'
+    );
+  }
+  return manifest;
+}
+
+/** uint8/float32/int32/bool are the only dtypes a TF.js weight manifest can name. */
+const DTYPE_BYTES: Record<string, number> = {
+  uint8: 1,
+  float32: 4,
+  int32: 4,
+  bool: 1,
+  complex64: 8
+};
+
+/**
+ * The exact byte length the manifest's own tensor shapes predict for the
+ * shard, or `null` when a weight spec has a `shape`/`dtype` this cannot
+ * account for.
+ *
+ * `tinyFaceDetector`'s manifest is *quantized*: every weight's logical `dtype`
+ * reads `float32`, but what is actually in the shard — and what
+ * `quantization.dtype` names — is one `uint8` byte per element. When present,
+ * `quantization.dtype` is what describes the bytes and must win.
+ */
+export function expectedShardBytes(manifest: WeightManifest): number | null {
+  let total = 0;
+  for (const group of manifest) {
+    for (const raw of group.weights) {
+      const spec = raw as {
+        shape?: unknown;
+        dtype?: unknown;
+        quantization?: { dtype?: unknown };
+      };
+      const effectiveDtype =
+        typeof spec.quantization?.dtype === 'string' ? spec.quantization.dtype : spec.dtype;
+      const bytesPerElement =
+        typeof effectiveDtype === 'string' ? DTYPE_BYTES[effectiveDtype] : undefined;
+      if (!Array.isArray(spec.shape) || bytesPerElement === undefined) return null;
+      const elements = spec.shape.reduce(
+        (a: number, b: unknown) => a * (typeof b === 'number' ? b : NaN),
+        1
+      );
+      if (!Number.isFinite(elements)) return null;
+      total += elements * bytesPerElement;
+    }
+  }
+  return total;
 }

@@ -69,6 +69,24 @@ describe('shortcuts module (DS-09)', () => {
     expect(eventMatchesShortcut(newEvent, getEffectiveBinding('shortcuts'))).toBe(true);
   });
 
+  it('refuses bindings that would trap keyboard navigation (UI-5)', () => {
+    for (const [id, binding] of [
+      ['palette', { key: 'tab' }],
+      ['palette', { key: 'p' }],
+      ['deletePage', { key: 'arrowright' }],
+      ['rotatePage', { key: 'enter' }],
+      ['rotatePage', { key: ' ' }],
+      ['shortcuts', { key: 'tab', shift: true }]
+    ] as const) {
+      const result = setShortcutOverride(id, binding);
+      expect(result.success, `${id} → ${binding.key}`).toBe(false);
+      expect(result.reserved).toBeTruthy();
+    }
+    // A modifier makes a navigation key usable, and the palette may use Alt.
+    expect(setShortcutOverride('rotatePage', { key: 'arrowright', mod: true }).success).toBe(true);
+    expect(setShortcutOverride('palette', { key: 'p', alt: true }).success).toBe(true);
+  });
+
   it('resets all custom shortcuts to defaults', () => {
     setShortcutOverride('shortcuts', { key: 'h' });
     expect(getEffectiveBinding('shortcuts')).toEqual({ key: 'h' });

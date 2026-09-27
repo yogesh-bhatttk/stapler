@@ -53,7 +53,7 @@ function composeOnePage(bytes: Uint8Array) {
     [{ key: 'p0', sourceDocId: 'doc1', sourceIndex: 0, rotation: 0 }],
     { doc1: bytes },
     [],
-    null,
+    undefined,
     undefined,
     null,
     null,

@@ -33,6 +33,20 @@
   max-width: 760px;
 }
 
+/* GAP-3 — docked to the bottom edge, full width: the phone tools sheet. */
+.sheetScrim {
+  align-items: flex-end;
+  padding: var(--space-md) 0 0;
+}
+
+.dialog.sheet {
+  max-width: none;
+  max-height: 85vh;
+  border-bottom: 0;
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+  animation: slideUp var(--dur-base) var(--ease-smooth);
+}
+
 .header {
   display: flex;
   align-items: center;

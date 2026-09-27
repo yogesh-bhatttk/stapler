@@ -8,7 +8,7 @@
  */
 import { activeDoc, selectedPageKeys } from '../../../core/store';
 import { panelStyles } from '../../shell/panelStyles';
-import { useTranslation } from '../../../core/i18n';
+import { tPlural, useTranslation } from '../../../core/i18n';
 import { extractImagesReport, summarize } from './state';
 import { extractImagesSettings } from '../state';
 import { RadioGroup } from '../../components/Field';
@@ -28,8 +28,8 @@ export function ExtractImagesPanel() {
     <>
       <p className={panelStyles.description}>
         {selected > 0
-          ? `${pageCount} ${t('selected page(s).')}`
-          : `${t('All')} ${pageCount} ${t('pages.')}`}{' '}
+          ? tPlural('{count} selected pages.', pageCount)
+          : tPlural('All {count} pages.', pageCount)}{' '}
         {t(
           'Each embedded image is written to a ZIP at its original resolution, in the format it is stored in — JPEG stays the same bytes, never re-compressed.'
         )}
@@ -44,16 +44,21 @@ export function ExtractImagesPanel() {
       {summary && (
         <div className={panelStyles.section}>
           <p className={panelStyles.description}>
-            {`${summary.fileCount} ${t('file(s) written')}`}
-            {summary.maskCount > 0 && `, ${summary.maskCount} ${t('transparency mask(s)')}`}
-            {summary.duplicateCount > 0 &&
-              `, ${summary.duplicateCount} ${t('reuse(s) of an image already extracted')}`}
-            {summary.skippedCount > 0 && `, ${summary.skippedCount} ${t('left untouched')}`}.
+            {[
+              tPlural('{count} files written', summary.fileCount),
+              summary.maskCount > 0 && tPlural('{count} transparency masks', summary.maskCount),
+              summary.duplicateCount > 0 &&
+                tPlural('{count} reuses of an image already extracted', summary.duplicateCount),
+              summary.skippedCount > 0 && tPlural('{count} left untouched', summary.skippedCount)
+            ]
+              .filter(Boolean)
+              .join(', ')}
+            .
           </p>
           {summary.reasons.length > 0 && (
             <ul className={panelStyles.description}>
               {summary.reasons.map(reason => (
-                <li key={reason}>{reason}</li>
+                <li key={reason}>{t(reason)}</li>
               ))}
             </ul>
           )}
@@ -69,8 +74,8 @@ export function ExtractImagesPanel() {
             (extractImagesSettings.value = { ...extractImagesSettings.value, outputFormat: format })
           }
           options={[
-            { value: 'zip', label: 'ZIP Archive' },
-            { value: 'directory', label: 'Output Folder', hint: 'Save directly to a folder' }
+            { value: 'zip', label: t('ZIP Archive') },
+            { value: 'directory', label: t('Output Folder'), hint: t('Save directly to a folder') }
           ]}
         />
       )}

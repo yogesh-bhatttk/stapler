@@ -1,0 +1,124 @@
+name: Release
+
+# Audit 2026-09-25 GAP-8 — pushing a `v*` tag builds, verifies and publishes a
+# GitHub Release. The zips are made by `pnpm package` (scripts/package.mjs):
+# all three targets built, zero-permission and version invariants re-checked
+# on the built manifests, no sourcemaps, reproducible timestamps, and a
+# SHA256SUMS file. Nothing here needs a secret beyond the job's own
+# GITHUB_TOKEN, and nothing is uploaded anywhere but this repository's
+# Releases page — store submission stays a manual step (RELEASE_CHECKLIST.md).
+#
+#   git tag v0.3.0 && git push origin v0.3.0
+
+on:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint, types, tokens, invariants, unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          # package.json pins pnpm via devEngines, which action-setup doesn't read.
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Tag matches package.json version
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json ($expected)"
+            exit 1
+          fi
+      - run: pnpm check
+      - run: pnpm test
+
+  bundle-network:
+    name: Bundle zero-network scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm check:bundle-network
+
+  e2e:
+    name: E2E (web preview and packaged extension)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:e2e:web
+      - run: pnpm build:ext
+      - run: pnpm test:e2e:ext
+        env:
+          STAPLER_EXT_PREBUILT: '1'
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-release
+          path: playwright-report/
+          retention-days: 14
+
+  release:
+    name: Package and publish
+    needs: [check, bundle-network, e2e]
+    runs-on: ubuntu-latest
+    permissions:
+      # Creating a release and uploading its assets.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm package
+      - name: Verify checksums
+        working-directory: dist/release
+        run: sha256sum --check SHA256SUMS
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=()
+          # v1.2.3-beta.1 and the like are published as pre-releases.
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" \
+            dist/release/*.zip dist/release/SHA256SUMS \
+            --verify-tag \
+            --title "Stapler ${GITHUB_REF_NAME#v}" \
+            --generate-notes \
+            "${flags[@]}"

@@ -1,7 +1,7 @@
 import { panelStyles } from '../../shell/panelStyles';
 import { inputDirHandle, outputDirHandle, batchProgress } from './state';
 import { EmptyState } from '../../components/Feedback';
-import { useTranslation } from '../../../core/i18n';
+import { tPlural, useTranslation } from '../../../core/i18n';
 
 export function BatchView() {
   const t = useTranslation();
@@ -10,7 +10,7 @@ export function BatchView() {
     return (
       <EmptyState
         title={t('Batch Processing')}
-        body="Select an input folder from the Batch panel on the right to start."
+        body={t('Select an input folder from the Batch panel on the right to start.')}
       />
     );
   }
@@ -35,16 +35,14 @@ export function BatchView() {
         </p>
         <p>
           <strong>{t('Output Directory:')}</strong>{' '}
-          {outputDirHandle.value ? outputDirHandle.value.name : 'Not selected'}
+          {outputDirHandle.value ? outputDirHandle.value.name : t('Not selected')}
         </p>
       </div>
 
       {batchProgress.value.isProcessing && (
         <div className={panelStyles.section}>
           <h2>{t('Processing')}</h2>
-          <p>
-            {t('File:')} {batchProgress.value.currentFile}
-          </p>
+          <p>{t('File: {file}', { file: batchProgress.value.currentFile })}</p>
           <div
             style={{
               width: '100%',
@@ -64,11 +62,14 @@ export function BatchView() {
             />
           </div>
           <p>
-            {batchProgress.value.completed} / {batchProgress.value.total} {t('completed')}
+            {t('{completed} / {total} completed', {
+              completed: batchProgress.value.completed,
+              total: batchProgress.value.total
+            })}
           </p>
           {batchProgress.value.failed > 0 && (
             <p style={{ color: 'var(--danger)' }}>
-              {batchProgress.value.failed} {t('failed')}
+              {tPlural('{count} failed', batchProgress.value.failed)}
             </p>
           )}
         </div>

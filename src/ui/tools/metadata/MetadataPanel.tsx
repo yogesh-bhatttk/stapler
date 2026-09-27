@@ -11,7 +11,6 @@
  * about most and it hides in Producer, in a custom Info key, and in the XMP packet at
  * once, so each occurrence is listed with the item whose removal takes it with it.
  */
-import { useState } from 'preact/hooks';
 import { ScanSearch } from 'lucide-preact';
 import { activeDoc } from '../../../core/store';
 import { currentDocumentBytes } from '../../../core/operations';
@@ -21,31 +20,31 @@ import { Button } from '../../components/Button';
 import { panelStyles } from '../../shell/panelStyles';
 import { useJob } from '../../useJob';
 import { Checkbox } from '../../components/Field';
-import { scrubSettings, type ExtendedScrubSettings } from './state';
+import { metadataFindings, scrubSettings, type ExtendedScrubSettings } from './state';
 import { ProtectSection } from '../protect/ProtectSection';
 import { FontEmbeddingSection } from './FontEmbeddingSection';
 import { BarcodeScanSection } from './BarcodeScanSection';
-import { useTranslation } from '../../../core/i18n';
+import { tKey, translate, useTranslation } from '../../../core/i18n';
 
 const FLAGS: { key: keyof MetadataFindings; label: string }[] = [
-  { key: 'hasXmp', label: 'XMP metadata packet' },
-  { key: 'hasEmbeddedJavaScript', label: 'Embedded JavaScript' },
-  { key: 'hasOpenAction', label: 'Action on open' },
-  { key: 'hasAdditionalActions', label: 'Additional actions' },
-  { key: 'hasEmbeddedFiles', label: 'Embedded files' },
-  { key: 'hasPageThumbnails', label: 'Embedded page thumbnails' },
-  { key: 'hasOptionalContent', label: 'Hidden layers' }
+  { key: 'hasXmp', label: tKey('XMP metadata packet') },
+  { key: 'hasEmbeddedJavaScript', label: tKey('Embedded JavaScript') },
+  { key: 'hasOpenAction', label: tKey('Action on open') },
+  { key: 'hasAdditionalActions', label: tKey('Additional actions') },
+  { key: 'hasEmbeddedFiles', label: tKey('Embedded files') },
+  { key: 'hasPageThumbnails', label: tKey('Embedded page thumbnails') },
+  { key: 'hasOptionalContent', label: tKey('Hidden layers') }
 ];
 
 const FIELDS: { key: keyof MetadataFindings; label: string }[] = [
-  { key: 'title', label: 'Title' },
-  { key: 'author', label: 'Author' },
-  { key: 'subject', label: 'Subject' },
-  { key: 'creator', label: 'Creating application' },
-  { key: 'producer', label: 'Producer' },
-  { key: 'creationDate', label: 'Created' },
-  { key: 'modificationDate', label: 'Modified' },
-  { key: 'keywords', label: 'Keywords' }
+  { key: 'title', label: tKey('Title') },
+  { key: 'author', label: tKey('Author') },
+  { key: 'subject', label: tKey('Subject') },
+  { key: 'creator', label: tKey('Creating application') },
+  { key: 'producer', label: tKey('Producer') },
+  { key: 'creationDate', label: tKey('Created') },
+  { key: 'modificationDate', label: tKey('Modified') },
+  { key: 'keywords', label: tKey('Keywords') }
 ];
 
 /** Every scrub key this document actually offers, so select-all touches only real findings. */
@@ -60,31 +59,37 @@ function offeredKeys(findings: MetadataFindings): (keyof ExtendedScrubSettings)[
 export function MetadataPanel() {
   const t = useTranslation();
   const doc = activeDoc.value;
-  const [findings, setFindings] = useState<MetadataFindings | null>(null);
+  const findings = metadataFindings.value;
   const { run } = useJob();
   if (!doc) return null;
 
   const setAll = (checked: boolean) => {
     if (!findings) return;
-    const next: ExtendedScrubSettings = { ...scrubSettings.value };
+    const next: ExtendedScrubSettings = { ...(scrubSettings.value ?? {}) };
     for (const key of offeredKeys(findings)) next[key] = checked;
     scrubSettings.value = next;
   };
 
   const toggle = (key: keyof ExtendedScrubSettings, checked: boolean) => {
-    scrubSettings.value = { ...scrubSettings.value, [key]: checked };
+    scrubSettings.value = { ...(scrubSettings.value ?? {}), [key]: checked };
   };
 
   const inspect = () =>
-    run({ label: 'Reading metadata', scope: 'metadata.inspect' }, async job => {
+    run({ label: translate('Reading metadata'), scope: 'metadata.inspect' }, async job => {
+      const inspected = activeDoc.value;
       const bytes = await currentDocumentBytes(job);
       const res = await processWorker.lease(api => api.readMetadata(bytes));
-      setFindings(res);
-
+      // A result for a document or revision that is no longer on screen would
+      // be shown, and scrubbed with, against the wrong one.
+      const now = activeDoc.value;
+      if (!inspected || now?.id !== inspected.id || now.pages !== inspected.pages) return;
       // Everything found starts selected, so "Inspect then export" is still a
-      // one-click strip-all; unticking is the per-item opt-out.
+      // one-click strip-all; unticking is the per-item opt-out. Set after the
+      // await, so the reset effect in ./state (which fires on page edits) can't
+      // wipe a result for the revision it was taken from.
       const newSettings: ExtendedScrubSettings = {};
       for (const key of offeredKeys(res)) newSettings[key] = true;
+      metadataFindings.value = res;
       scrubSettings.value = newSettings;
     });
 
@@ -92,13 +97,13 @@ export function MetadataPanel() {
     ? [
         ...FIELDS.filter(field => Boolean(findings[field.key])).map(field => ({
           key: field.key,
-          label: field.label,
+          label: t(field.label),
           value: String(findings[field.key])
         })),
         ...FLAGS.filter(flag => findings[flag.key] === true).map(flag => ({
           key: flag.key,
-          label: flag.label,
-          value: 'present'
+          label: t(flag.label),
+          value: t('present')
         }))
       ]
     : [];
@@ -135,7 +140,7 @@ export function MetadataPanel() {
               <li className={panelStyles.listRow} key={item.key}>
                 <Checkbox
                   label={item.label}
-                  checked={scrubSettings.value[item.key] ?? false}
+                  checked={scrubSettings.value?.[item.key] ?? false}
                   onChange={checked => toggle(item.key, checked)}
                 />
                 <span className={panelStyles.listRowText} title={item.value}>
@@ -147,7 +152,7 @@ export function MetadataPanel() {
               <li className={panelStyles.listRow} key="customInfo">
                 <Checkbox
                   label={t('Custom properties and paths')}
-                  checked={scrubSettings.value.customInfo ?? false}
+                  checked={scrubSettings.value?.customInfo ?? false}
                   onChange={checked => toggle('customInfo', checked)}
                 />
                 <span

@@ -16,6 +16,7 @@ import { App } from './AppRoot';
 import { installErrorHooks } from './errorHooks';
 import { initTheme } from './theme';
 import { initLocale } from '../core/i18n';
+import { startWebApp } from './pwa';
 import './styles/tokens.css';
 
 const root = document.getElementById('app');
@@ -39,4 +40,5 @@ installErrorHooks();
 void (async () => {
   await initLocale();
   render(<App />, root);
+  startWebApp(); // GAP-2: web build only — offline service worker, "Open with", share target
 })();

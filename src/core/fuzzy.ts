@@ -38,10 +38,22 @@ export function fuzzyScore(haystack: string, needle: string): number {
 export function fuzzyRank<T>(
   items: readonly T[],
   needle: string,
-  textOf: (item: T) => string
+  textOf: (item: T) => string | readonly string[]
 ): T[] {
+  // Several haystacks score separately and the best one counts. Joining the
+  // translated and the English text into one string (so either language
+  // matches) diluted every score, since the scorer normalises by length —
+  // "red" + Enter in the palette ran Redo instead of opening Redact
+  // (regression review R-UI-2).
+  const scoreOf = (item: T) => {
+    const text = textOf(item);
+    if (typeof text === 'string') return fuzzyScore(text, needle);
+    let best = 0;
+    for (const candidate of text) best = Math.max(best, fuzzyScore(candidate, needle));
+    return best;
+  };
   return items
-    .map((item, index) => ({ item, index, score: fuzzyScore(textOf(item), needle) }))
+    .map((item, index) => ({ item, index, score: scoreOf(item) }))
     .filter(entry => entry.score > 0)
     .sort((a, b) => b.score - a.score || a.index - b.index)
     .map(entry => entry.item);

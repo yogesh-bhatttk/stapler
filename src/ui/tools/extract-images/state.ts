@@ -6,6 +6,7 @@
  * result, and they are siblings.
  */
 import { signal } from '@preact/signals';
+import { tKey } from '../../../core/i18n/key';
 import type { ExtractedImageEntry } from '../../../core/workers/process.worker';
 
 export interface ExtractImagesReport {
@@ -22,7 +23,7 @@ export function summarize(entries: ExtractedImageEntry[]) {
   const duplicates = entries.filter(entry => entry.status === 'duplicate');
   const skipped = entries.filter(entry => entry.status === 'skipped');
   const masks = extracted.filter(entry => entry.maskFileName).length;
-  const reasons = [...new Set(skipped.map(entry => entry.note ?? 'Left untouched.'))];
+  const reasons = [...new Set(skipped.map(entry => entry.note ?? tKey('Left untouched.')))];
   return {
     fileCount: extracted.length + masks,
     imageCount: extracted.length,

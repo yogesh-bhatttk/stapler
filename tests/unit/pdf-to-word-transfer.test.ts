@@ -66,7 +66,7 @@ const { port1, port2 } = new MessageChannel();
  * report what crossed; the real writer's behaviour is graded in
  * `pdf-to-word.test.ts`.
  */
-const endpoint: ConvertJob = {
+const endpoint: Pick<ConvertJob, 'buildDocx'> = {
   async buildDocx(_model, imageArchive, imageEntries): Promise<DocxBuildResult> {
     received.push({
       byteLength: imageArchive?.byteLength ?? -1,
@@ -78,7 +78,9 @@ const endpoint: ConvertJob = {
   }
 };
 Comlink.expose(endpoint, port2 as unknown as Comlink.Endpoint);
-const convertApi = Comlink.wrap<ConvertJob>(port1 as unknown as Comlink.Endpoint);
+const convertApi = Comlink.wrap<Pick<ConvertJob, 'buildDocx'>>(
+  port1 as unknown as Comlink.Endpoint
+);
 
 vi.mock('../../src/core/workers', async () => {
   const renderApi = {

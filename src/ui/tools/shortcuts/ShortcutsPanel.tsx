@@ -51,7 +51,9 @@ export function ShortcutsPanel() {
       // Ignore modifier-only presses
       if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return;
 
-      if (e.key === 'Escape') {
+      // Escape cancels; Tab leaves record mode rather than being recorded, so
+      // a keyboard user can always get out of the field.
+      if (e.key === 'Escape' || e.key === 'Tab') {
         setEditingId(null);
         setConflictMsg(null);
         return;
@@ -69,9 +71,11 @@ export function ShortcutsPanel() {
         setEditingId(null);
         setConflictMsg(null);
         notify('success', t('Shortcut updated'));
+      } else if (result.reserved) {
+        setConflictMsg(t('{reason} Choose another key.', { reason: t(result.reserved) }));
       } else if (result.conflict) {
         setConflictMsg(
-          `${t('Conflict with')} "${result.conflict.label}". ${t('Choose another key.')}`
+          t('Conflict with "{name}". Choose another key.', { name: t(result.conflict.label) })
         );
       }
     };
@@ -134,14 +138,14 @@ export function ShortcutsPanel() {
                   background: isEditing ? 'var(--surface-2)' : 'transparent',
                   color: 'inherit',
                   font: 'inherit',
-                  textAlign: 'left',
+                  textAlign: 'start',
                   width: '100%'
                 }}
                 data-testid={`shortcut-row-${def.id}`}
               >
                 <div>
-                  <div style={{ fontWeight: 500, fontSize: '0.9em' }}>{def.label}</div>
-                  <div style={{ fontSize: '0.75em', opacity: 0.6 }}>{def.category}</div>
+                  <div style={{ fontWeight: 500, fontSize: '0.9em' }}>{t(def.label)}</div>
+                  <div style={{ fontSize: '0.75em', opacity: 0.6 }}>{t(def.category)}</div>
                 </div>
                 <kbd
                   style={{

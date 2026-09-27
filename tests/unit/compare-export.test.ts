@@ -25,6 +25,7 @@ describe('exportComparePdf', () => {
     id: 'doc-a',
     name: 'base.pdf',
     pages: [],
+    baseline: [],
     annotations: [],
     dirty: false
   };
@@ -32,6 +33,7 @@ describe('exportComparePdf', () => {
     id: 'doc-b',
     name: 'compare.pdf',
     pages: [],
+    baseline: [],
     annotations: [],
     dirty: false
   };
@@ -39,7 +41,7 @@ describe('exportComparePdf', () => {
   it('routes text mode to the text diff exporter', async () => {
     const out = await exportComparePdf(docA, docB, { diffMode: 'text', sensitivity: 42 });
     expect(out).toEqual(new Uint8Array([1, 2, 3]));
-    expect(exportTextDiff).toHaveBeenCalledWith(docA, docB);
+    expect(exportTextDiff).toHaveBeenCalledWith(docA, docB, { onWarning: undefined });
     expect(exportVisualDiff).not.toHaveBeenCalled();
   });
 

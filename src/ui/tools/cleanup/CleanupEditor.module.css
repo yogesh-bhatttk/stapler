@@ -118,5 +118,5 @@
 .status {
   font: var(--text-small);
   color: var(--ink-subtle);
-  margin-right: auto;
+  margin-inline-end: auto;
 }

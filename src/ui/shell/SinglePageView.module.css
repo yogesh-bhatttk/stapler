@@ -61,7 +61,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-xxs);
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 
 .zoomLabel {
@@ -69,5 +69,33 @@
   letter-spacing: var(--text-mono-ls);
   color: var(--ink-subtle);
   min-width: 5ch;
-  text-align: right;
+  text-align: end;
+}
+
+/* UI-16 — over the page (and its tool overlay) until the page's own pixels are
+   drawn. Opaque on purpose: nothing may be marked against a stale image. */
+.status {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-md);
+  background: var(--surface-2);
+  color: var(--ink-subtle);
+  font: var(--text-small);
+  text-align: center;
+}
+
+.statusFailed {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+/* RT-10 — the zoom was clamped to the preview pixel ceiling. */
+.reduced {
+  font: var(--text-micro);
+  color: var(--ink-subtle);
+  white-space: nowrap;
 }

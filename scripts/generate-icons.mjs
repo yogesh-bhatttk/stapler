@@ -159,7 +159,9 @@ function drawIcon(size) {
   return pixels;
 }
 
-const SIZES = [16, 32, 48, 128];
+// 192 and 512 are the web app manifest's install icons (GAP-2, web build only —
+// `PUBLIC_ONLY_FOR` in vite.config.ts keeps them out of the extension).
+const SIZES = [16, 32, 48, 128, 192, 512];
 for (const size of SIZES) {
   const pixels = drawIcon(size);
   const png = encodePng(pixels, size, size);

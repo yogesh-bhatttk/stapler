@@ -1,4 +1,5 @@
 import { signal } from '@preact/signals';
+import { resetOnDocumentChange } from '../docScoped';
 
 export type TableExportFormat = 'csv' | 'tsv' | 'xlsx';
 
@@ -22,3 +23,7 @@ export const tableExtractFormat = signal<TableExportFormat>('csv');
 export function resetTableExtract(): void {
   tableExtractRows.value = null;
 }
+
+// The rows are one page of one revision of one document; exported after a tab
+// switch they went out under the other document's name (UI-3).
+resetOnDocumentChange(resetTableExtract, { onPageEdits: true });

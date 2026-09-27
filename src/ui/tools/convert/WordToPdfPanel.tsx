@@ -12,7 +12,7 @@ import { FilePlus, RefreshCw, Upload } from 'lucide-preact';
 import { platform } from '../../../platform/current';
 import { DOCX_ONLY } from '../../../platform/index';
 import { convertDocxToPdf } from '../../../core/operations';
-import { translate, useTranslation } from '../../../core/i18n';
+import { tKey, tPlural, translate, useTranslation } from '../../../core/i18n';
 import { notify } from '../../../core/notify';
 import { formatBytes } from '../../components/Feedback';
 import { Badge } from '../../components/Badge';
@@ -42,28 +42,38 @@ import {
  * documented at all.
  */
 const LIMITATIONS = [
-  'Word’s own pagination, fonts, columns, headers, footers and footnotes are not reproduced — ' +
-    'page size and 1" margins are chosen here, not read from the document.',
-  'Text is drawn in Helvetica. Characters outside the Latin-1 set (CJK, Cyrillic, most Arabic ' +
-    'and Hebrew) are replaced with "?", and the conversion says so when it happens.',
-  'Only PNG and JPEG images are embedded. Pasted vector art (EMF/WMF, as Word stores it) is ' +
-    'listed as left out rather than dropped quietly.',
-  'Underline, superscript and subscript are drawn as plain text.',
-  'An image inside a table cell is left out: cells hold text only.',
-  'A table split across pages does not repeat its header row, and a row taller than a page is ' +
-    'allowed to run over rather than have its text cut off.',
-  'Empty spacer paragraphs are dropped, so vertical spacing will not match line for line.',
-  'Lists nested more than eight levels deep are flattened to eight: their text is all there, ' +
-    'their deepest indentation is not.'
+  tKey(
+    'Word’s own pagination, fonts, columns, headers, footers and footnotes are not reproduced — ' +
+      'page size and 1" margins are chosen here, not read from the document.'
+  ),
+  tKey(
+    'Text is drawn in Helvetica. Characters outside the Latin-1 set (CJK, Cyrillic, most Arabic ' +
+      'and Hebrew) are replaced with "?", and the conversion says so when it happens.'
+  ),
+  tKey(
+    'Only PNG and JPEG images are embedded. Pasted vector art (EMF/WMF, as Word stores it) is ' +
+      'listed as left out rather than dropped quietly.'
+  ),
+  tKey('Underline, superscript and subscript are drawn as plain text.'),
+  tKey('An image inside a table cell is left out: cells hold text only.'),
+  tKey(
+    'A table split across pages does not repeat its header row, and a row taller than a page is ' +
+      'allowed to run over rather than have its text cut off.'
+  ),
+  tKey('Empty spacer paragraphs are dropped, so vertical spacing will not match line for line.'),
+  tKey(
+    'Lists nested more than eight levels deep are flattened to eight: their text is all there, ' +
+      'their deepest indentation is not.'
+  )
 ];
 
 /** What each block kind is called in the preview's left-hand gutter. */
 const KIND_LABEL: Record<string, string> = {
-  heading: 'Heading',
-  paragraph: 'Paragraph',
-  'list-item': 'List item',
-  table: 'Table',
-  image: 'Image'
+  heading: tKey('Heading'),
+  paragraph: tKey('Paragraph'),
+  'list-item': tKey('List item'),
+  table: tKey('Table'),
+  image: tKey('Image')
 };
 
 export function WordToPdfPanel() {
@@ -85,9 +95,10 @@ export function WordToPdfPanel() {
     const file = await opened[0].getFile();
     if (!/\.docx$/i.test(file.name)) {
       notify('warning', translate('That is not a .docx file.'), {
-        detail:
+        detail: translate(
           'This converter reads Word’s modern .docx format. A legacy .doc, or a document ' +
-          'exported as .rtf or .odt, has to be saved as .docx first.'
+            'exported as .rtf or .odt, has to be saved as .docx first.'
+        )
       });
       return;
     }
@@ -97,7 +108,7 @@ export function WordToPdfPanel() {
   const handlePreview = () => {
     const file = wordToPdfSource.value;
     if (!file) return;
-    run({ label: 'Converting to PDF', scope: 'convert.word-to-pdf' }, async job => {
+    run({ label: translate('Converting to PDF'), scope: 'convert.word-to-pdf' }, async job => {
       // Captured before the bytes are read, so a change made *during* the
       // conversion still invalidates its result.
       const revision = wordToPdfInputRevision.value;
@@ -110,16 +121,22 @@ export function WordToPdfPanel() {
       setWordToPdfPreview(result, file, revision);
       notify(
         'success',
-        translate('Converted to {pages} page(s). Review the preview, then save.', {
-          pages: result.pageCount
+        translate('Converted to {pages}. Review the preview, then save.', {
+          pages: tPlural('{count} pages', result.pageCount)
         }),
-        { detail: `${formatBytes(result.bytes.byteLength)} · ${result.outline.length} blocks` }
+        {
+          detail: translate('{size} · {blocks}', {
+            size: formatBytes(result.bytes.byteLength),
+            blocks: tPlural('{count} blocks', result.outline.length)
+          })
+        }
       );
       if (result.hadUnsupportedCharacters) {
         notify('warning', translate('Some characters could not be represented.'), {
-          detail:
+          detail: translate(
             'This export uses a fixed set of Latin fonts and replaced unsupported characters ' +
-            '(e.g. CJK, Cyrillic, Arabic) with "?". Check the affected text before sharing it.',
+              '(e.g. CJK, Cyrillic, Arabic) with "?". Check the affected text before sharing it.'
+          ),
           timeout: 0
         });
       }
@@ -214,9 +231,16 @@ export function WordToPdfPanel() {
       {preview && !stale ? (
         <div className={panelStyles.section}>
           <p className="text-small" style={{ margin: '0 0 var(--space-xs)', fontWeight: 600 }}>
-            {t('Preview')} · {preview.pageCount} {preview.pageCount === 1 ? t('page') : t('pages')}{' '}
-            · {preview.outline.length} {t('blocks')}
-            {preview.imageCount > 0 ? ` · ${preview.imageCount} ${t('images')}` : ''}
+            {preview.imageCount > 0
+              ? t('Preview · {pages} · {blocks} · {images}', {
+                  pages: tPlural('{count} pages', preview.pageCount),
+                  blocks: tPlural('{count} blocks', preview.outline.length),
+                  images: tPlural('{count} images', preview.imageCount)
+                })
+              : t('Preview · {pages} · {blocks}', {
+                  pages: tPlural('{count} pages', preview.pageCount),
+                  blocks: tPlural('{count} blocks', preview.outline.length)
+                })}
           </p>
 
           <ol className={panelStyles.list} aria-label={t('Blocks that will be written to the PDF')}>
@@ -231,10 +255,15 @@ export function WordToPdfPanel() {
                     fontVariantNumeric: 'tabular-nums'
                   }}
                 >
-                  p{item.pageIndex + 1} ·{' '}
-                  {item.kind === 'heading'
-                    ? `H${item.level ?? 2}`
-                    : (KIND_LABEL[item.kind] ?? item.kind)}
+                  {t('p{page} · {kind}', {
+                    page: item.pageIndex + 1,
+                    kind:
+                      item.kind === 'heading'
+                        ? `H${item.level ?? 2}`
+                        : KIND_LABEL[item.kind]
+                          ? t(KIND_LABEL[item.kind])
+                          : item.kind
+                  })}
                 </span>
                 <span
                   className={panelStyles.listRowText}

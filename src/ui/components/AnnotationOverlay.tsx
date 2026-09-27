@@ -1,4 +1,5 @@
 import { translate } from '../../core/i18n';
+import { refuseEditWhileBusy } from '../busy';
 /**
  * Placing and moving stamps on a page (SGN-02).
  *
@@ -10,7 +11,7 @@ import { translate } from '../../core/i18n';
  *    which SGN-02 requires explicitly.
  *  • `alert()` when nothing was armed.
  */
-import { useRef, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { forwardRef } from 'preact/compat';
 import { X, Copy } from 'lucide-preact';
 import {
@@ -64,6 +65,7 @@ export const AnnotationOverlay = forwardRef<HTMLDivElement, AnnotationOverlayPro
     const place = (x: number, y: number) => {
       const currentStamp = activeStamp.value;
       if (!currentStamp) return;
+      if (refuseEditWhileBusy()) return;
       const size = DEFAULT_SIZE[currentStamp.type];
       const existingCount =
         (doc?.annotations ?? []).filter(a => a.type === currentStamp.type).length + 1;
@@ -115,7 +117,9 @@ export const AnnotationOverlay = forwardRef<HTMLDivElement, AnnotationOverlayPro
         style={{ width: `${width}px`, height: `${height}px` }}
         tabIndex={armed ? 0 : -1}
         role={armed ? 'group' : undefined}
-        aria-label={armed ? 'Stamp placement area. Press Enter to place in the centre.' : undefined}
+        aria-label={
+          armed ? t('Stamp placement area. Press Enter to place in the centre.') : undefined
+        }
         onKeyDown={onLayerKeyDown}
         onClick={event => {
           const layer = layerRef.current;
@@ -143,7 +147,7 @@ export const AnnotationOverlay = forwardRef<HTMLDivElement, AnnotationOverlayPro
               event.stopPropagation();
               if (!armed) {
                 notify('info', translate('Pick a signature or stamp first.'), {
-                  detail: 'Choose one in the panel, then click here to place it.'
+                  detail: translate('Choose one in the panel, then click here to place it.')
                 });
                 return;
               }
@@ -170,6 +174,11 @@ function Stamp({
 }) {
   const t = useTranslation();
   const [dragging, setDragging] = useState(false);
+  // The drag in progress, ended on unmount: a page change by shortcut or a tab
+  // switch mid-drag used to leave window listeners attached and the history
+  // transaction open — undo blocked until a stray pointerup (AUDIT UI-26).
+  const dragEnd = useRef<(() => void) | null>(null);
+  useEffect(() => () => dragEnd.current?.(), []);
 
   /** Shared pointer drag for both moving and resizing. */
   const startDrag = (
@@ -209,6 +218,7 @@ function Stamp({
       updateAnnotation(docId, stamp.id, next);
     };
     const end = () => {
+      dragEnd.current = null;
       setDragging(false);
       tx.end();
       window.removeEventListener('pointermove', move);
@@ -216,6 +226,7 @@ function Stamp({
       window.removeEventListener('pointercancel', end);
     };
 
+    dragEnd.current = end;
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', end);
     window.addEventListener('pointercancel', end);
@@ -243,6 +254,7 @@ function Stamp({
       updateAnnotation(docId, stamp.id, { rotation: deg });
     };
     const end = () => {
+      dragEnd.current = null;
       setDragging(false);
       tx.end();
       window.removeEventListener('pointermove', move);
@@ -250,6 +262,7 @@ function Stamp({
       window.removeEventListener('pointercancel', end);
     };
 
+    dragEnd.current = end;
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', end);
     window.addEventListener('pointercancel', end);
@@ -321,7 +334,10 @@ function Stamp({
       }}
       tabIndex={0}
       role="group"
-      aria-label={`${stamp.type} stamp. Arrow keys move it; Control plus arrows resizes; Alt plus left or right rotates; Delete removes it.`}
+      aria-label={t(
+        '{type} stamp. Arrow keys move it; Control plus arrows resizes; Alt plus left or right rotates; Delete removes it.',
+        { type: stamp.type }
+      )}
       onKeyDown={onKeyDown}
       onPointerDown={event => {
         if ((event.target as HTMLElement).closest('button, input')) return;
@@ -333,7 +349,7 @@ function Stamp({
     >
       {stamp.type === 'signature' &&
         (signature ? (
-          <img className={styles.image} src={signaturePreviewUrl(signature)} alt="Signature" />
+          <img className={styles.image} src={signaturePreviewUrl(signature)} alt={t('Signature')} />
         ) : (
           <span className={styles.check}>{t('Signature unavailable')}</span>
         ))}
@@ -344,7 +360,7 @@ function Stamp({
         <input
           className={styles.text}
           value={stamp.data}
-          aria-label={stamp.type === 'date' ? 'Date text' : 'Stamp text'}
+          aria-label={stamp.type === 'date' ? t('Date text') : t('Stamp text')}
           onInput={event =>
             updateAnnotation(docId, stamp.id, {
               data: (event.target as HTMLInputElement).value

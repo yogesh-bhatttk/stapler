@@ -7,25 +7,37 @@
  * Named `AppRoot` rather than `App` so the file name doesn't collide with
  * `app.tsx` on a case-insensitive filesystem (TS1149) or in a directory listing.
  */
+import { lazy, Suspense } from 'preact/compat';
 import { Route, Router, Switch } from 'wouter-preact';
 import { useHashLocation } from 'wouter-preact/use-hash-location';
 import { AppShell } from './shell/AppShell';
 import { Canvas } from './shell/Canvas';
 import { HomeView } from './home/HomeView';
-import { ComponentGallery } from './dev/ComponentGallery';
+import { WhatsNewView } from './whats-new/WhatsNewView';
 import { EmptyState } from './components/Feedback';
 import { Button } from './components/Button';
 
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { ToolLinkParams } from './deepLink';
+import { useTranslation } from '../core/i18n';
+
+// DS-03's visual-review surface. Dev server only: in a store or web build it was
+// a live, unlocalised route statically bundled into the editor entry
+// (AUDIT-2026-09-25 UI-29). `import.meta.env.DEV` is a build-time constant, so
+// the gallery and its imports are dropped from production bundles entirely.
+const ComponentGallery = import.meta.env.DEV
+  ? lazy(() => import('./dev/ComponentGallery').then(m => ({ default: m.ComponentGallery })))
+  : null;
 
 function NotFound() {
+  const t = useTranslation();
   return (
     <EmptyState
-      title="Nothing here"
-      body="That route does not exist."
+      title={t('Nothing here')}
+      body={t('That route does not exist.')}
       action={
         <Button variant="secondary" onClick={() => (window.location.hash = '#/')}>
-          Go home
+          {t('Go home')}
         </Button>
       }
     />
@@ -35,12 +47,23 @@ function NotFound() {
 export function App() {
   return (
     <Router hook={useHashLocation}>
+      {/* GAP-4/5: `#/tool/compress?target=100KB` and friends pre-fill a tool. */}
+      <ToolLinkParams />
       <ErrorBoundary>
         <AppShell>
           <Switch>
             <Route path="/" component={HomeView} />
+            {/* The service worker opens these: first install, and GAP-7's update notes. */}
+            <Route path="/welcome" component={HomeView} />
+            <Route path="/whats-new" component={WhatsNewView} />
             {/* Not linked from the app; a visual-review surface for DS-03. */}
-            <Route path="/dev/components" component={ComponentGallery} />
+            {ComponentGallery && (
+              <Route path="/dev/components">
+                <Suspense fallback={null}>
+                  <ComponentGallery />
+                </Suspense>
+              </Route>
+            )}
             {/* Every tool shares one route; the tool registry decides what renders. */}
             <Route path="/tool/:toolId" component={Canvas} />
             <Route component={NotFound} />

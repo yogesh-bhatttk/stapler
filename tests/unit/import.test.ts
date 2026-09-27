@@ -157,7 +157,7 @@ describe('DOC-02: every fixture imports or gets its own accurate explanation', (
   it('a plain AcroForm is advertised as fillable', async () => {
     inspect = async () => ({ hasAcroForm: true, fieldCount: 4 });
     const outcome = await importFiles([pdfFile('cjk.pdf', fixtureBytes('cjk.pdf'))]);
-    expect(outcome.imported[0].warnings).toContain('Contains 4 fillable form field(s).');
+    expect(outcome.imported[0].warnings).toContain('Contains 4 fillable form fields.');
   });
 
   it('an encrypted document reports the password reason and does not abort the batch', async () => {

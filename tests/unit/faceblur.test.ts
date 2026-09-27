@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { PDFDict, PDFDocument, PDFName, PDFRawStream, StandardFonts } from 'pdf-lib';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -28,9 +28,8 @@ import { decodePng } from './helpers/png-decode';
  *     content stream is byte-identical, and the image's own samples changed
  *     only where the face was.
  *
- *  4. **The consent gate.** No fetch, no worker, no model load happens before
- *     the user says yes — asserted by mocking the worker pool and the network
- *     and showing neither is touched on the decline path.
+ *  4. **Offline by construction.** The weights are bundled; that no fetch
+ *     and no consent dialog is involved is proved in `faceblur-offline.test.ts`.
  */
 
 const FIXTURES = path.resolve(__dirname, '../fixtures');
@@ -48,66 +47,6 @@ const MANIFEST_FILE = 'tiny_face_detector_model-weights_manifest.json';
 beforeAll(() => {
   (globalThis as unknown as { WorkerGlobalScope: unknown }).WorkerGlobalScope =
     function WorkerGlobalScope() {};
-});
-
-/* ------------------------------------------------------------------ *
- * model.ts — the second (and last) network destination, and its seam
- * ------------------------------------------------------------------ */
-
-describe('faceblur/model', () => {
-  beforeEach(async () => {
-    const { setModelBaseOverride } = await import('../../src/core/faceblur/model');
-    setModelBaseOverride(null);
-  });
-
-  it('pins an exact package version rather than a floating tag', async () => {
-    const { resolveManifestUrl } = await import('../../src/core/faceblur/model');
-    const url = resolveManifestUrl();
-    expect(url).toMatch(
-      /^https:\/\/cdn\.jsdelivr\.net\/npm\/@vladmandic\/face-api@\d+\.\d+\.\d+\//
-    );
-    expect(url.endsWith(`/${MANIFEST_FILE}`)).toBe(true);
-    // A `@latest` or bare-package URL would let the weights change under a
-    // build that has already shipped and been audited — the exact thing
-    // "download once, then fully offline" is supposed to rule out.
-    expect(url).not.toMatch(/@latest|@next|face-api\/model/);
-  });
-
-  it('names the same version the bundled engine is', async () => {
-    const { resolveManifestUrl } = await import('../../src/core/faceblur/model');
-    const pkg = JSON.parse(readFileSync(path.resolve(__dirname, '../../package.json'), 'utf8')) as {
-      dependencies: Record<string, string>;
-    };
-    const installed = pkg.dependencies['@vladmandic/face-api'].replace(/^[^\d]*/, '');
-    // The bundled inference code and the fetched weights are two halves of one
-    // artefact; drifting apart produces a detector that silently finds nothing.
-    expect(resolveManifestUrl()).toContain(`@${installed}/`);
-  });
-
-  it('routes every URL through the override seam once it is set', async () => {
-    const { resolveManifestUrl, resolveShardUrl, setModelBaseOverride } =
-      await import('../../src/core/faceblur/model');
-    setModelBaseOverride('http://localhost:9999/weights/');
-    expect(resolveManifestUrl()).toBe(`http://localhost:9999/weights/${MANIFEST_FILE}`);
-    expect(resolveShardUrl('a.bin')).toBe('http://localhost:9999/weights/a.bin');
-    setModelBaseOverride(null);
-    expect(resolveManifestUrl()).toContain('cdn.jsdelivr.net');
-  });
-
-  it('refuses a shard path that would redirect the one pinned download', async () => {
-    const { resolveShardUrl } = await import('../../src/core/faceblur/model');
-    // The manifest is remote data. A `paths` entry pointing somewhere else
-    // would turn one audited URL into a fetch of the manifest author's choosing.
-    expect(() => resolveShardUrl('../../../etc/passwd')).toThrow();
-    expect(() => resolveShardUrl('https://elsewhere.example/x.bin')).toThrow();
-    expect(() => resolveShardUrl('./x.bin')).toThrow();
-    expect(() => resolveShardUrl('sub/dir.bin')).toThrow();
-  });
-
-  it('discloses a size', async () => {
-    const { APPROX_SIZE_MB } = await import('../../src/core/faceblur/model');
-    expect(APPROX_SIZE_MB).toBeGreaterThan(0);
-  });
 });
 
 /* ------------------------------------------------------------------ *

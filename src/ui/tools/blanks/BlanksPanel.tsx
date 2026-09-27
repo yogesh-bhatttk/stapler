@@ -12,7 +12,7 @@ import { Field, Slider } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
 import { removeBlanksThreshold } from '../state';
 import { useJob } from '../../useJob';
-import { useTranslation } from '../../../core/i18n';
+import { tPlural, translate, useTranslation } from '../../../core/i18n';
 
 export function BlanksPanel() {
   const t = useTranslation();
@@ -22,20 +22,20 @@ export function BlanksPanel() {
   if (!doc) return null;
 
   const detect = () =>
-    run({ label: 'Looking for blank pages', scope: 'blanks.detect' }, async job => {
+    run({ label: translate('Looking for blank pages'), scope: 'blanks.detect' }, async job => {
       const bytes = await currentDocumentBytes(job);
       const indices = await detectBlankPages(bytes, threshold, job);
       setPageSelection(indices.map(index => doc.pages[index]?.key).filter(Boolean) as string[]);
       notify(
         indices.length > 0 ? 'info' : 'warning',
         indices.length > 0
-          ? `Marked ${indices.length} page(s) as blank.`
-          : 'No blank pages at this sensitivity.',
+          ? tPlural('Marked {count} pages as blank.', indices.length)
+          : translate('No blank pages at this sensitivity.'),
         {
           detail:
             indices.length > 0
-              ? 'Review them in the grid before confirming. Nothing has been removed.'
-              : 'Move the slider towards Forgiving to allow more ink.'
+              ? translate('Review them in the grid before confirming. Nothing has been removed.')
+              : translate('Move the slider towards Forgiving to allow more ink.')
         }
       );
     });
@@ -49,7 +49,7 @@ export function BlanksPanel() {
             min={0}
             max={100}
             value={threshold}
-            scale={['Strict', 'Forgiving']}
+            scale={[t('Strict'), t('Forgiving')]}
             onChange={value => (removeBlanksThreshold.value = value)}
           />
         )}
@@ -61,9 +61,9 @@ export function BlanksPanel() {
 
       {selectedPageKeys.value.size > 0 && (
         <p className={panelStyles.note}>
-          {selectedPageKeys.value.size}{' '}
-          {t(
-            'page(s) marked. Check them in the grid, then use Delete selected — nothing is removed until you confirm.'
+          {tPlural(
+            '{count} pages marked. Check them in the grid, then use Delete selected — nothing is removed until you confirm.',
+            selectedPageKeys.value.size
           )}
         </p>
       )}

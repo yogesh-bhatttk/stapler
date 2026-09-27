@@ -6,6 +6,7 @@ import type { ComponentChildren } from 'preact';
 import { forwardRef } from 'preact/compat';
 import { X } from 'lucide-preact';
 import { Icon } from './Icon';
+import { translate } from '../../core/i18n';
 import styles from './Chip.module.css';
 
 export interface ChipProps {
@@ -51,7 +52,7 @@ export const Chip = forwardRef<HTMLButtonElement | HTMLSpanElement, ChipProps>(f
         <button
           type="button"
           className={styles.remove}
-          aria-label={removeLabel ?? 'Remove'}
+          aria-label={removeLabel ?? translate('Remove')}
           disabled={disabled}
           onClick={onRemove}
         >

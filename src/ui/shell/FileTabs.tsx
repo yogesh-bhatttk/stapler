@@ -28,9 +28,11 @@ export function FileTabs() {
     if (
       dirty &&
       !(await confirmAction({
-        title: `Close ${name}?`,
-        body: 'It has unsaved changes. Closing discards them — the original file on disk is untouched.',
-        confirmLabel: 'Discard changes',
+        title: translate('Close {name}?', { name }),
+        body: translate(
+          'It has unsaved changes. Closing discards them — the original file on disk is untouched.'
+        ),
+        confirmLabel: translate('Discard changes'),
         tone: 'danger'
       }))
     ) {
@@ -85,7 +87,7 @@ export function FileTabs() {
               role="button"
               aria-disabled={closeBlocked ? 'true' : undefined}
               tabIndex={closeBlocked ? -1 : 0}
-              aria-label={`Close ${doc.name}`}
+              aria-label={translate('Close {name}', { name: doc.name })}
               title={
                 closeBlocked
                   ? translate('Finish the current operation before closing this document.')

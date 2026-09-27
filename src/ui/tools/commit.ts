@@ -1,4 +1,4 @@
-import { translate } from '../../core/i18n';
+import { tKey, tPlural, translate } from '../../core/i18n';
 /**
  * What the action bar's primary button does, per tool.
  *
@@ -22,6 +22,7 @@ import {
   fillFormFields,
   flattenDocument,
   pagesToImageArchive,
+  pagesToSizedImageArchive,
   protectDocument,
   restrictDocument,
   scrubDocumentMetadata,
@@ -29,8 +30,12 @@ import {
   planSizeSplitBoundaries,
   sanitizeFileStem,
   splitBoundaries,
-  splitDocument
+  splitDocument,
+  grayscaleDocument,
+  repairDocument
 } from '../../core/operations';
+import { grayscaleReport, grayscaleSettings } from './grayscale/state';
+import { lastRepair, repairCandidate, repairedName } from './repair/state';
 import { processWorker } from '../../core/workers';
 import { imagesToPdfBytes } from '../../core/import';
 import {
@@ -49,7 +54,7 @@ import { formatBytes } from '../components/Feedback';
 import type { JobOptions } from '../../core/workers/protocol';
 import { createJobHandle } from '../../core/workers/protocol';
 import { findTool, type ToolId } from '../../core/tools';
-import { writeSourceBytes } from '../../core/opfs';
+import { readSourceBytes, writeSourceBytes } from '../../core/opfs';
 import {
   compressMode,
   compressSettings,
@@ -69,15 +74,18 @@ import {
   extractImagesSettings
 } from './state';
 import { extractSettings } from './extract/state';
+import { pdfToImageReport } from './convert/pdf-to-img-state';
+import { imageSizeRequest, imageSizeResult, imageSizeSettings } from './image-size/state';
+import { jpegPassthrough, resizeImageFile } from '../../core/image';
 import { extractImagesReport, summarize } from './extract-images/state';
 import { formFields, formValues, formulas } from './sign/state';
 import { applyFormulas } from '../../core/formula';
 import { XFA_MESSAGE } from '../../core/pdf/xfa';
 import { pendingRedactions, redactionReport } from './redact/state';
-import { faceBlurModelDeclined } from './redact/faceblur-state';
 import { protection, protectionActive, protectionIssue } from './protect/state';
 import { withInheritedRestrictions, type ProtectionSettings } from '../../core/pdf/encrypt';
 import { scrubSettings } from './metadata/state';
+import { batchIsConfigured, cancelBatch, startBatch } from './batch/runner';
 import { ocrReport, ocrSettings } from './ocr/state';
 import {
   PDF_TO_WORD_GATE,
@@ -167,7 +175,10 @@ async function applyProtection(
   const issue = protectionIssue();
   if (issue) {
     notify('danger', translate('Nothing was saved.'), {
-      detail: `${issue} Fix it in the Metadata & privacy panel, or turn password protection off.`,
+      detail: translate(
+        '{issue} Fix it in the Metadata & privacy panel, or turn password protection off.',
+        { issue }
+      ),
       timeout: 0
     });
     return null;
@@ -184,7 +195,7 @@ async function applyProtection(
     // ZIP, and a rasterised page could not carry one anyway.
     if (wantsPassword) {
       notify('warning', translate('This export is a ZIP, so no password was applied.'), {
-        detail: 'Export a single PDF to password-protect it.',
+        detail: translate('Export a single PDF to password-protect it.'),
         timeout: 0
       });
     }
@@ -242,7 +253,9 @@ async function applyProtection(
         ? translate('Could not password-protect the file — nothing was saved.')
         : translate('Could not reapply this document’s restrictions — nothing was saved.'),
       {
-        detail: `${err instanceof Error ? err.message : String(err)} Your document is unchanged.`,
+        detail: translate('{error} Your document is unchanged.', {
+          error: err instanceof Error ? err.message : String(err)
+        }),
         timeout: 0
       }
     );
@@ -263,7 +276,9 @@ async function applyProtection(
 export interface GrowthGuard {
   /** The original, pre-compression byte length — never the pre-restriction one. */
   maxBytes: number;
+  /** English key, marked with `tKey` at construction; translated when shown. */
   title: string;
+  /** English key, marked with `tKey` at construction; translated when shown. */
   detail: string;
 }
 
@@ -301,19 +316,25 @@ async function save(
   if (!result) return false;
   bytes = result.bytes;
   if (growthGuard && bytes.byteLength > growthGuard.maxBytes) {
-    notify('warning', translate(growthGuard.title), { detail: growthGuard.detail, timeout: 0 });
+    notify('warning', translate(growthGuard.title), {
+      detail: translate(growthGuard.detail),
+      timeout: 0
+    });
     return false;
   }
   onFinalBytes?.(bytes);
   const note = (size: string) => {
-    if (result.passwordApplied) return `${size} · password required to open`;
+    if (result.passwordApplied) return translate('{size} · password required to open', { size });
     // No password either before or after, but the restrictions this document
     // arrived with were carried through by re-encrypting under this handler's
     // one fixed algorithm (AES-256/R6) — worth a word, since a reader that
     // opened the input under an older/weaker handler is not guaranteed to
     // open this output.
     if (result.restrictionsPreserved) {
-      return `${size} · this document's restrictions were preserved (now AES-256-encrypted; needs a reader from the last decade or so)`;
+      return translate(
+        "{size} · this document's restrictions were preserved (now AES-256-encrypted; needs a reader from the last decade or so)",
+        { size }
+      );
     }
     return size;
   };
@@ -327,10 +348,10 @@ async function save(
   if (refreshesBaseline && doc.sourceHandle?.writable) {
     announceWaiting(job, translate('Waiting for confirmation…'));
     const overwrite = await confirmAction({
-      title: `Save changes to ${doc.name}?`,
-      body: 'Save over the original file, or keep it and save a new file instead.',
-      confirmLabel: 'Save over original',
-      cancelLabel: 'Save as new file'
+      title: translate('Save changes to {name}?', { name: doc.name }),
+      body: translate('Save over the original file, or keep it and save a new file instead.'),
+      confirmLabel: translate('Save over original'),
+      cancelLabel: translate('Save as new file')
     });
     if (overwrite) {
       const saved = await platform.saveOver(doc.sourceHandle.fileId, bytes);
@@ -341,7 +362,7 @@ async function save(
         });
       } else {
         notify('warning', translate('Could not save over the original file.'), {
-          detail: 'Nothing was overwritten. Try again to save a new file instead.'
+          detail: translate('Nothing was overwritten. Try again to save a new file instead.')
         });
       }
       return saved;
@@ -660,17 +681,26 @@ async function finalize(
 ): Promise<Uint8Array> {
   if (!flatten) return bytes;
   const result = await flattenDocument(bytes, job ?? {});
-  const parts: string[] = [];
-  if (result.fields > 0) parts.push(`${result.fields} form field${result.fields === 1 ? '' : 's'}`);
-  if (result.annotationsBaked > 0)
-    parts.push(`${result.annotationsBaked} annotation${result.annotationsBaked === 1 ? '' : 's'}`);
-  if (parts.length > 0 || result.annotationsDropped > 0) {
+  const fields = result.fields > 0 ? tPlural('{count} form fields', result.fields) : null;
+  const annotations =
+    result.annotationsBaked > 0 ? tPlural('{count} annotations', result.annotationsBaked) : null;
+  const drawn = fields ?? annotations;
+  const drew =
+    fields && annotations
+      ? translate('Drew {fields} and {annotations} into the page.', { fields, annotations })
+      : drawn
+        ? translate('Drew {items} into the page.', { items: drawn })
+        : null;
+  const dropped =
+    result.annotationsDropped > 0
+      ? tPlural(
+          '{count} annotations with nothing to draw (links, popups, hidden marks) were removed.',
+          result.annotationsDropped
+        )
+      : null;
+  if (drew || dropped) {
     notify('info', translate('Finalized: the export is no longer editable.'), {
-      detail:
-        (parts.length > 0 ? `Drew ${parts.join(' and ')} into the page. ` : '') +
-        (result.annotationsDropped > 0
-          ? `${result.annotationsDropped} annotation${result.annotationsDropped === 1 ? '' : 's'} with nothing to draw (links, popups, hidden marks) ${result.annotationsDropped === 1 ? 'was' : 'were'} removed.`
-          : '')
+      detail: [drew, dropped].filter(Boolean).join(' ')
     });
   }
   return result.bytes;
@@ -717,7 +747,10 @@ async function commitConvertedPreview<P extends { bytes: Uint8Array }>(input: {
 }): Promise<void> {
   const preview = input.preview;
   if (!preview || input.stale) {
-    notify('warning', translate('Nothing was saved.'), { detail: input.gate, timeout: 0 });
+    notify('warning', translate('Nothing was saved.'), {
+      detail: translate(input.gate),
+      timeout: 0
+    });
     return;
   }
 
@@ -738,9 +771,20 @@ async function commitConvertedPreview<P extends { bytes: Uint8Array }>(input: {
   notify('success', translate('Saved {name}', { name }), { detail: input.detail(preview, bytes) });
 }
 
-/** " · 3 item(s) could not be converted — see the panel", or nothing at all. */
-function unconvertedSuffix(items: readonly unknown[], phrase: string): string {
-  return items.length > 0 ? ` · ${items.length} item(s) ${phrase} — see the panel` : '';
+/**
+ * The parts of a conversion's "Saved" detail line, joined with " · ". Each part
+ * is a complete translated phrase; the separator is punctuation, not prose.
+ */
+function detailLine(...parts: (string | null)[]): string {
+  return parts.filter((part): part is string => Boolean(part)).join(' · ');
+}
+
+/** "3 items could not be converted — see the panel", or nothing at all. */
+function unconvertedNote(items: readonly unknown[], kind: 'failed' | 'omitted'): string | null {
+  if (items.length === 0) return null;
+  return kind === 'failed'
+    ? tPlural('{count} items could not be converted — see the panel', items.length)
+    : tPlural('{count} items were left out — see the panel', items.length);
 }
 
 const HANDLERS: Record<ToolId, CommitHandler> = {
@@ -752,7 +796,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     const doc = activeDoc.value;
     if (!doc) {
       notify('warning', translate('Nothing to export.'), {
-        detail: 'Add at least one PDF or image first.'
+        detail: translate('Add at least one PDF or image first.')
       });
       return;
     }
@@ -862,7 +906,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       const selected = doc.pages.filter(p => selectedPageKeys.value.has(p.key));
       if (selected.length === 0) {
         notify('warning', translate('Select the pages to extract first.'), {
-          detail: 'Click pages in the grid, or press Space to select the focused page.'
+          detail: translate('Click pages in the grid, or press Space to select the focused page.')
         });
         return;
       }
@@ -894,7 +938,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     const bookmarks = settings.mode === 'bookmarks' ? topLevelBookmarkSlices(doc, doc.pages) : null;
     if (settings.mode === 'bookmarks' && (!bookmarks || bookmarks.length === 0)) {
       notify('warning', translate('This document has no top-level bookmarks.'), {
-        detail: 'Add them in the Bookmarks tool, or choose another split mode.'
+        detail: translate('Add them in the Bookmarks tool, or choose another split mode.')
       });
       return;
     }
@@ -928,11 +972,11 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     if (boundaries.length === 0 && !bookmarks) {
       if (settings.mode === 'size') {
         notify('info', translate('The whole document already fits under the target size.'), {
-          detail: 'It will be exported as a single file.'
+          detail: translate('It will be exported as a single file.')
         });
       } else {
         notify('warning', translate('That produces a single file.'), {
-          detail: 'Choose split points inside the document, or use Extract instead.'
+          detail: translate('Choose split points inside the document, or use Extract instead.')
         });
         return;
       }
@@ -944,13 +988,17 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       // larger file than the user asked for.
       notify(
         'warning',
-        translate('{count} page(s) exceed the target size on their own.', {
-          count: oversizedPages.length
-        }),
+        tPlural('{count} pages exceed the target size on their own.', oversizedPages.length),
         {
-          detail: `Page${oversizedPages.length === 1 ? '' : 's'} ${oversizedPages
-            .map(p => `${p.pageIndex + 1} (${formatBytes(p.bytes)})`)
-            .join(', ')} could not be shrunk further by splitting alone.`,
+          detail: tPlural(
+            'Pages {pages} could not be shrunk further by splitting alone.',
+            oversizedPages.length,
+            {
+              pages: oversizedPages
+                .map(p => `${p.pageIndex + 1} (${formatBytes(p.bytes)})`)
+                .join(', ')
+            }
+          ),
           timeout: 0
         }
       );
@@ -1029,15 +1077,17 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     const selected = [...selectedPageKeys.value];
     if (selected.length === 0) {
       notify('warning', translate('Nothing is selected.'), {
-        detail: 'Run Detect blank pages, review what it found, then confirm.'
+        detail: translate('Run Detect blank pages, review what it found, then confirm.')
       });
       return;
     }
     // OPS-05: nothing is removed without explicit confirmation.
     const confirmed = await confirmAction({
-      title: `Delete ${selected.length} page${selected.length === 1 ? '' : 's'}?`,
-      body: 'They are removed from the workspace only. Undo with ⌘Z; the file on disk is untouched until you export.',
-      confirmLabel: 'Delete pages',
+      title: tPlural('Delete {count} pages?', selected.length),
+      body: translate(
+        'They are removed from the workspace only. Undo with ⌘Z; the file on disk is untouched until you export.'
+      ),
+      confirmLabel: translate('Delete pages'),
       tone: 'danger'
     });
     if (confirmed) deletePages(doc.id, selected);
@@ -1052,15 +1102,147 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       .filter(({ page }) => selected.size === 0 || selected.has(page.key))
       .map(({ index }) => index);
 
-    const archive = await pagesToImageArchive(bytes, indices, settings.format, settings.dpi, job);
-    await reviewAndSaveZip(doc, archive, `${stem(doc.name)}-${settings.dpi}dpi.zip`);
+    // GAP-5 — a pixel limit or a size target goes through the measured
+    // per-image search; plain resolution exports keep the original path.
+    const targetMode = settings.sizeMode === 'target';
+    if (!targetMode && settings.maxDimension === null) {
+      const archive = await pagesToImageArchive(bytes, indices, settings.format, settings.dpi, job);
+      await reviewAndSaveZip(doc, archive, `${stem(doc.name)}-${settings.dpi}dpi.zip`);
+      return;
+    }
+
+    const targetBytes = targetMode ? Math.round(settings.targetKb * 1000) : null;
+    const { archive, pages } = await pagesToSizedImageArchive(
+      bytes,
+      indices,
+      targetMode ? 'jpeg' : settings.format,
+      settings.dpi,
+      { targetBytes, maxDimension: settings.maxDimension },
+      job
+    );
+    pdfToImageReport.value = { docId: doc.id, targetBytes, pages };
+    const missed = pages.filter(page => !page.reached);
+    const suffix = targetMode ? `${settings.targetKb}kb` : `max${settings.maxDimension}px`;
+    const saved = await reviewAndSaveZip(doc, archive, `${stem(doc.name)}-${suffix}.zip`);
+    if (saved && missed.length > 0 && targetBytes !== null) {
+      // Never a silent miss: name the pages and their measured sizes.
+      notify(
+        'warning',
+        tPlural('{count} images are over {size}.', missed.length, {
+          size: formatBytes(targetBytes)
+        }),
+        {
+          detail: translate(
+            'Each was saved at the smallest size Stapler could make: {pages}. Lower the starting resolution or the page count, or raise the target.',
+            {
+              pages: missed
+                .map(page =>
+                  translate('page {page} ({size})', {
+                    page: page.pageIndex + 1,
+                    size: formatBytes(page.bytes)
+                  })
+                )
+                .join(', ')
+            }
+          ),
+          timeout: 0
+        }
+      );
+    }
+  },
+
+  /**
+   * GAP-5 — one image to a JPEG at or under a size and/or within a pixel box.
+   * The search runs in the image worker and every number it reports is
+   * measured on the bytes about to be written. A miss is never saved silently:
+   * the smallest file found is offered, with its size, for the person to accept.
+   */
+  'image-to-size': async ({ job }) => {
+    const settings = imageSizeSettings.value;
+    const file = settings.file;
+    if (!file) {
+      notify('warning', translate('Choose an image first.'), {
+        detail: translate('Pick a JPEG, PNG, WebP, GIF, HEIC or TIFF file in the options panel.')
+      });
+      return;
+    }
+    const request = imageSizeRequest(settings);
+    const resized = await resizeImageFile(file, request, job);
+
+    // A JPEG that already meets every limit is better left alone: re-encoding
+    // it can only lose quality, and could even make it bigger.
+    const original = new Uint8Array(await file.arrayBuffer());
+    const upright = jpegPassthrough(original)?.orientation === 1;
+    const fitsBox =
+      request.maxDimension === null ||
+      Math.max(resized.sourceWidth, resized.sourceHeight) <= request.maxDimension;
+    const fitsTarget = request.targetBytes === null || original.byteLength <= request.targetBytes;
+    const keepOriginal =
+      upright && fitsBox && fitsTarget && original.byteLength <= resized.bytes.byteLength;
+
+    const bytes = keepOriginal ? original : resized.bytes;
+    const reached = request.targetBytes === null || bytes.byteLength <= request.targetBytes;
+    imageSizeResult.value = {
+      source: file,
+      bytes,
+      width: keepOriginal ? resized.sourceWidth : resized.width,
+      height: keepOriginal ? resized.sourceHeight : resized.height,
+      sourceWidth: resized.sourceWidth,
+      sourceHeight: resized.sourceHeight,
+      quality: keepOriginal ? null : resized.quality,
+      targetBytes: request.targetBytes,
+      reached,
+      attempts: resized.attempts,
+      sourcePages: resized.sourcePages,
+      keptOriginal: keepOriginal
+    };
+
+    if (!reached && request.targetBytes !== null) {
+      announceWaiting(job, translate('Waiting for confirmation…'));
+      const proceed = await confirmAction({
+        title: translate('Could not reach {size}', { size: formatBytes(request.targetBytes) }),
+        body: translate(
+          'The smallest Stapler could make is {size}, at {width}×{height} px — measured, after {attempts}. Save it anyway?',
+          {
+            size: formatBytes(bytes.byteLength),
+            width: resized.width,
+            height: resized.height,
+            attempts: tPlural('{count} attempts', resized.attempts)
+          }
+        ),
+        confirmLabel: translate('Save at {size}', { size: formatBytes(bytes.byteLength) }),
+        cancelLabel: translate('Don’t save')
+      });
+      if (!proceed) return;
+    }
+
+    const suffix =
+      request.targetBytes !== null
+        ? `${settings.target.amount}${settings.target.unit.toLowerCase()}`
+        : `${request.maxDimension ?? 'resized'}px`;
+    const name = keepOriginal ? file.name : `${stem(file.name)}-${suffix}.jpg`;
+    const saved = await platform.saveFileAs(bytes, name);
+    if (!saved) return;
+    notify(
+      'success',
+      keepOriginal
+        ? translate('The original already fits, so it was saved unchanged ({size}).', {
+            size: formatBytes(bytes.byteLength)
+          })
+        : translate('Saved {name}: {size}, {width}×{height} px.', {
+            name,
+            size: formatBytes(bytes.byteLength),
+            width: resized.width,
+            height: resized.height
+          })
+    );
   },
 
   'images-to-pdf': async ({ job }) => {
     const settings = imagesToPdfSettings.value;
     if (settings.files.length === 0) {
       notify('warning', translate('Nothing to export.'), {
-        detail: 'Add at least one image first.'
+        detail: translate('Add at least one image first.')
       });
       return;
     }
@@ -1108,7 +1290,9 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       notify('warning', translate('No images could be extracted.'), {
         detail:
           result.entries.length === 0
-            ? 'These pages carry no embedded image XObjects — any pictures you can see are drawn as vectors or text.'
+            ? translate(
+                'These pages carry no embedded image XObjects — any pictures you can see are drawn as vectors or text.'
+              )
             : summary.reasons.join(' ')
       });
       return;
@@ -1132,9 +1316,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       if (saved && summary.skippedCount > 0) {
         notify(
           'warning',
-          translate('{count} image(s) were left in the document.', {
-            count: summary.skippedCount
-          }),
+          tPlural('{count} images were left in the document.', summary.skippedCount),
           {
             detail: summary.reasons.join(' ')
           }
@@ -1155,7 +1337,14 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       const targetBytes = targetSizeBytes(compressTarget.value);
       if (original.byteLength <= targetBytes) {
         notify('info', translate('Already under the target.'), {
-          detail: `${doc.name} is ${formatBytes(original.byteLength)}, which is already at or under ${formatBytes(targetBytes)}. Nothing was changed.`
+          detail: translate(
+            '{name} is {size}, which is already at or under {target}. Nothing was changed.',
+            {
+              name: doc.name,
+              size: formatBytes(original.byteLength),
+              target: formatBytes(targetBytes)
+            }
+          )
         });
         return;
       }
@@ -1185,9 +1374,10 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
 
       if (outcome.keptOriginal) {
         notify('warning', translate('Kept the original file.'), {
-          detail:
-            `Every setting Stapler tried produced a larger file than ${formatBytes(outcome.originalBytes)}, ` +
-            'so all of them were discarded and nothing was written. This document is already as small as it usefully gets.',
+          detail: translate(
+            'Every setting Stapler tried produced a larger file than {size}, so all of them were discarded and nothing was written. This document is already as small as it usefully gets.',
+            { size: formatBytes(outcome.originalBytes) }
+          ),
           timeout: 0
         });
         return;
@@ -1196,17 +1386,31 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       if (!outcome.reachedTarget) {
         const skipped =
           outcome.plan && outcome.plan.skipped.length > 0
-            ? ` Some content cannot be re-encoded safely and stays at full size: ${outcome.plan.skipped.join('; ')}.`
+            ? translate(
+                'Some content cannot be re-encoded safely and stays at full size: {items}.',
+                { items: outcome.plan.skipped.join('; ') }
+              )
             : '';
         announceWaiting(job, translate('Waiting for confirmation…'));
         const proceed = await confirmAction({
-          title: `Could not reach ${formatBytes(targetBytes)}`,
-          body:
-            `The smallest Stapler can produce without destroying this document is ${formatBytes(outcome.achievedBytes)}, ` +
-            `at ${outcome.settings?.dpi} DPI and ${Math.round((outcome.settings?.quality ?? 0) * 100)}% quality — ` +
-            `measured, after ${outcome.trials.length} attempt(s).${skipped} Save that file instead, or keep the original?`,
-          confirmLabel: `Save at ${formatBytes(outcome.achievedBytes)}`,
-          cancelLabel: 'Keep the original'
+          title: translate('Could not reach {size}', { size: formatBytes(targetBytes) }),
+          body: [
+            translate(
+              'The smallest Stapler can produce without destroying this document is {size}, at {dpi} DPI and {quality}% quality — measured, after {attempts}.',
+              {
+                size: formatBytes(outcome.achievedBytes),
+                dpi: String(outcome.settings?.dpi),
+                quality: Math.round((outcome.settings?.quality ?? 0) * 100),
+                attempts: tPlural('{count} attempts', outcome.trials.length)
+              }
+            ),
+            skipped,
+            translate('Save that file instead, or keep the original?')
+          ]
+            .filter(Boolean)
+            .join(' '),
+          confirmLabel: translate('Save at {size}', { size: formatBytes(outcome.achievedBytes) }),
+          cancelLabel: translate('Keep the original')
         });
         if (!proceed) return;
       }
@@ -1238,14 +1442,24 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
           ? undefined
           : {
               maxBytes: outcome.originalBytes,
-              title: 'Kept the original file.',
-              detail:
+              title: tKey('Kept the original file.'),
+              detail: tKey(
                 'Re-applying this document’s restrictions after compression would have produced a file no smaller than the original, so nothing was written. This document is already as small as it usefully gets.'
+              )
             }
       );
       if (savedTarget && outcome.reachedTarget) {
         notify('success', translate('Reached {size}', { size: formatBytes(finalSize) }), {
-          detail: `Target was ${formatBytes(targetBytes)}. ${formatBytes(outcome.originalBytes)} → ${formatBytes(finalSize)} at ${outcome.settings?.dpi} DPI, ${Math.round((outcome.settings?.quality ?? 0) * 100)}% quality.`
+          detail: translate(
+            'Target was {target}. {before} → {after} at {dpi} DPI, {quality}% quality.',
+            {
+              target: formatBytes(targetBytes),
+              before: formatBytes(outcome.originalBytes),
+              after: formatBytes(finalSize),
+              dpi: String(outcome.settings?.dpi),
+              quality: Math.round((outcome.settings?.quality ?? 0) * 100)
+            }
+          )
         });
       }
       return;
@@ -1256,13 +1470,23 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     if (report.alreadyOptimized) {
       announceWaiting(job, translate('Waiting for confirmation…'));
       const proceed = await confirmAction({
-        title: 'Already optimized',
-        body:
-          `Only about ${Math.max(0, Math.round(report.estimatedFraction * 100))}% could be saved from ` +
-          `${formatBytes(report.originalBytes)}. ${report.plan.skipped.length > 0 ? `Some content is left untouched: ${report.plan.skipped.join('; ')}. ` : ''}` +
-          'Compressing anyway will take time for little gain.',
-        confirmLabel: 'Compress anyway',
-        cancelLabel: 'Leave it alone'
+        title: translate('Already optimized'),
+        body: [
+          translate('Only about {percent}% could be saved from {size}.', {
+            percent: Math.max(0, Math.round(report.estimatedFraction * 100)),
+            size: formatBytes(report.originalBytes)
+          }),
+          report.plan.skipped.length > 0
+            ? translate('Some content is left untouched: {items}.', {
+                items: report.plan.skipped.join('; ')
+              })
+            : null,
+          translate('Compressing anyway will take time for little gain.')
+        ]
+          .filter(Boolean)
+          .join(' '),
+        confirmLabel: translate('Compress anyway'),
+        cancelLabel: translate('Leave it alone')
       });
       if (!proceed) return;
     }
@@ -1278,9 +1502,9 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     };
     if (result.keptOriginal) {
       notify('warning', translate('Kept the original file.'), {
-        detail:
-          'Re-encoding produced a larger file, so Stapler discarded it. Nothing was written. ' +
-          'This document is already as small as it usefully gets.',
+        detail: translate(
+          'Re-encoding produced a larger file, so Stapler discarded it. Nothing was written. This document is already as small as it usefully gets.'
+        ),
         timeout: 0
       });
       return;
@@ -1311,9 +1535,10 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         ? undefined
         : {
             maxBytes: result.originalBytes,
-            title: 'Kept the original file.',
-            detail:
+            title: tKey('Kept the original file.'),
+            detail: tKey(
               'Re-applying this document’s restrictions after compression would have produced a file no smaller than the original, so nothing was written. This document is already as small as it usefully gets.'
+            )
           }
     );
     if (saved) {
@@ -1338,7 +1563,9 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     const hasValues = Object.keys(formValues.value).length > 0;
     if (doc.annotations.length === 0 && !hasValues && formulas.value.length === 0) {
       notify('warning', translate('Nothing has been placed yet.'), {
-        detail: 'Pick a signature or stamp from the panel, or fill out a form field first.'
+        detail: translate(
+          'Pick a signature or stamp from the panel, or fill out a form field first.'
+        )
       });
       return;
     }
@@ -1348,7 +1575,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       // there should be no values — but if any exist, filling them would write to
       // shadow fields the viewer ignores. Refuse before anything is written.
       notify('danger', translate('This is an XFA form — nothing was saved.'), {
-        detail: XFA_MESSAGE,
+        detail: translate(XFA_MESSAGE),
         timeout: 0
       });
       return;
@@ -1399,7 +1626,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
           translate('A calculated field could not be computed — nothing was saved.'),
           {
             detail: Object.entries(errors)
-              .map(([name, message]) => `"${name}": ${message}`)
+              .map(([name, message]) => translate('"{name}": {message}', { name, message }))
               .join(' '),
             timeout: 0
           }
@@ -1445,22 +1672,11 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   redact: async ({ doc, job }) => {
     const regions = pendingRedactions.value;
 
-    // RED-08 — a declined detector download must never become a quiet nothing
-    // at export time. The panel already says face blur is off; this makes the
-    // export say it too, so a document cannot leave carrying faces the user
-    // believed had been blurred.
-    if (faceBlurModelDeclined.value) {
-      notify('warning', translate('Faces in this document were not blurred.'), {
-        detail:
-          'The one-time face-detector download was declined, so face blur never ran. Redaction ' +
-          'marks below are unaffected and will still be applied.',
-        timeout: 0
-      });
-    }
-
     if (regions.length === 0) {
       notify('warning', translate('No regions are marked.'), {
-        detail: 'Draw a rectangle on the page, or search for text to mark every occurrence.'
+        detail: translate(
+          'Draw a rectangle on the page, or search for text to mark every occurrence.'
+        )
       });
       return;
     }
@@ -1472,8 +1688,9 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // RED-03: saving is blocked when any region fails verification.
     if (!outcome.verified) {
       notify('danger', translate('Redaction could not be verified — nothing was saved.'), {
-        detail:
-          'The report lists which regions failed and why. Your original document is untouched.',
+        detail: translate(
+          'The report lists which regions failed and why. Your original document is untouched.'
+        ),
         timeout: 0
       });
       return;
@@ -1505,9 +1722,10 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     pendingRedactions.value = [];
     const regionCount = outcome.verdicts.length;
     notify('success', translate('Redaction verified and applied.'), {
-      detail:
-        `${regionCount} region${regionCount === 1 ? '' : 's'} removed from the page content and ` +
-        're-checked in the saved bytes. Export to save.',
+      detail: tPlural(
+        '{count} regions removed from the page content and re-checked in the saved bytes. Export to save.',
+        regionCount
+      ),
       timeout: 0
     });
   },
@@ -1519,7 +1737,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // document properties, not page content, so the review's diff isolates to
     // whatever Organize did since the baseline (via `alignment`).
     const current = await currentDocumentBytes(job);
-    const scrubbed = await scrubDocumentMetadata(current, scrubSettings.value, job);
+    const scrubbed = await scrubDocumentMetadata(current, scrubSettings.value ?? undefined, job);
     const original = await currentDocumentBytes(job, false, doc.baseline);
     const alignment = alignmentUnlessComposed(doc);
     await reviewAndSave(
@@ -1545,7 +1763,9 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         .filter(index => index >= 0);
       if (pageIndices.length === 0) {
         notify('warning', translate('Select the pages to run OCR on first.'), {
-          detail: 'Tick pages in the grid, or turn off "Only the pages selected in the grid".'
+          detail: translate(
+            'Tick pages in the grid, or turn off "Only the pages selected in the grid".'
+          )
         });
         return;
       }
@@ -1580,20 +1800,22 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     if (result.skippedPages.length > 0) {
       notify(
         'warning',
-        translate('{count} page(s) could not be scanned for text', {
-          count: result.skippedPages.length
-        }),
+        tPlural('{count} pages could not be scanned for text', result.skippedPages.length),
         {
-          detail: result.skippedPages.map(p => `Page ${p.pageIndex + 1}: ${p.reason}`).join(' ')
+          detail: result.skippedPages
+            .map(p =>
+              translate('Page {page}: {reason}', { page: p.pageIndex + 1, reason: p.reason })
+            )
+            .join(' ')
         }
       );
     }
 
     if (result.wordsAdded === 0) {
       notify('warning', translate('OCR found no text on those pages.'), {
-        detail:
-          'Nothing was exported, and your document is unchanged. A blank, very low-resolution, ' +
-          'or heavily skewed scan is the usual cause — try Scan cleanup first.'
+        detail: translate(
+          'Nothing was exported, and your document is unchanged. A blank, very low-resolution, or heavily skewed scan is the usual cause — try Scan cleanup first.'
+        )
       });
       return;
     }
@@ -1645,9 +1867,9 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         'warning',
         translate('No structured table data found on page {page}.', { page: pageIndex + 1 }),
         {
-          detail:
-            'Nothing was exported. Table extraction reads text positions, so a scanned page ' +
-            'needs OCR first, and a page with no tabular text has nothing to infer.'
+          detail: translate(
+            'Nothing was exported. Table extraction reads text positions, so a scanned page needs OCR first, and a page with no tabular text has nothing to infer.'
+          )
         }
       );
       return;
@@ -1675,7 +1897,11 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     const saved = await platform.saveFileAs(out.bytes, out.name);
     if (saved) {
       notify('success', translate('Saved {name}', { name: out.name }), {
-        detail: `${grid.rowCount} rows x ${grid.columnCount} columns from page ${pageIndex + 1}`
+        detail: translate('{rows} x {columns} from page {page}', {
+          rows: tPlural('{count} rows', grid.rowCount),
+          columns: tPlural('{count} columns', grid.columnCount),
+          page: pageIndex + 1
+        })
       });
     }
   },
@@ -1704,13 +1930,150 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     );
   },
   compare: async () => {},
-  batch: async () => {},
+  // The action bar's "Run Batch" used to be a no-op next to a real button in
+  // the panel (UI-9). It now runs the same batch; the action bar's Cancel
+  // reaches it through the job signal.
+  batch: async ({ job }) => {
+    if (!batchIsConfigured()) {
+      notify('warning', translate('Choose an input folder and an output first.'));
+      return;
+    }
+    job.signal?.addEventListener('abort', cancelBatch, { once: true });
+    await startBatch();
+  },
   // ACC-02/ACC-03 — pure reading aids, same as `compare`: nothing here produces
   // a modified document, so there is nothing to export.
   'read-aloud': async () => {},
   reflow: async () => {},
   history: async () => {},
   'side-by-side': async () => {},
+
+  // GAP-6 — greyscale / black-and-white.
+  grayscale: async ({ doc, job }) => {
+    const settings = grayscaleSettings.value;
+    const pageIndices =
+      settings.scope === 'selected'
+        ? doc.pages
+            .map((page, index) => (selectedPageKeys.value.has(page.key) ? index : -1))
+            .filter(index => index >= 0)
+        : doc.pages.map((_, index) => index);
+    if (pageIndices.length === 0) {
+      notify('warning', translate('Select the pages to convert first.'), {
+        detail: translate('Tick pages in the grid, or choose "All pages".')
+      });
+      return;
+    }
+
+    // Conversion runs on the *current* pages — the file actually being saved.
+    const current = await currentDocumentBytes(job);
+    const result = await grayscaleDocument(
+      current,
+      pageIndices,
+      doc.pages.length,
+      { mode: settings.mode, rasterDpi: settings.rasterDpi },
+      job
+    );
+    if (result.nothingToDo) {
+      grayscaleReport.value = null;
+      notify('info', translate('Already grey.'), {
+        detail: translate(
+          'Nothing on those pages carries colour, so there is nothing to convert. Nothing was saved.'
+        )
+      });
+      return;
+    }
+    grayscaleReport.value = {
+      pages: result.pages,
+      undecodable: result.undecodable,
+      originalBytes: result.originalBytes,
+      resultBytes: result.bytes.byteLength,
+      mode: settings.mode
+    };
+
+    // Proven, not asserted: the output was re-read, and a converted page that
+    // still has colour on it blocks the save.
+    if (result.colourLeft.length > 0) {
+      notify('danger', translate('The conversion could not be verified — nothing was saved.'), {
+        detail: translate(
+          'Colour was still found on pages {pages} after converting. Your document is unchanged.',
+          { pages: result.colourLeft.map(i => i + 1).join(', ') }
+        ),
+        timeout: 0
+      });
+      return;
+    }
+
+    const rastered = result.pages.filter(p => p.route === 'raster').length;
+    if (rastered > 0) {
+      notify('warning', tPlural('{count} pages were rendered as images.', rastered), {
+        detail: translate(
+          'They contain something that cannot be converted directly; their text is no longer selectable. The Grayscale panel lists them with the reason.'
+        )
+      });
+    }
+    // Never a silent size increase: B&W is meant to shrink scans, so a file
+    // that grew is said out loud before it is written.
+    if (result.bytes.byteLength > result.originalBytes) {
+      notify('warning', translate('The converted file is larger than the original.'), {
+        detail: translate(
+          '{before} → {after}. Re-encoding the images as grey cost more than it saved; Compress may help afterwards.',
+          { before: formatBytes(result.originalBytes), after: formatBytes(result.bytes.byteLength) }
+        ),
+        timeout: 0
+      });
+    }
+    await reviewAndSave(
+      doc,
+      current,
+      result.bytes,
+      `${stem(doc.name)}-${settings.mode === 'bw' ? 'bw' : 'grayscale'}.pdf`,
+      job
+    );
+  },
+
+  // GAP-6 — repair. `worksWithoutDocument`: the file is often one that never
+  // opened, so `context.doc` is not trusted.
+  repair: async ({ job }) => {
+    const doc = activeDoc.value;
+    const candidate = repairCandidate.value;
+    let bytes: Uint8Array;
+    let name: string;
+    if (candidate) {
+      bytes = new Uint8Array(await candidate.arrayBuffer());
+      name = candidate.name;
+    } else if (doc) {
+      // A document drawn from one file is repaired from that file's own bytes;
+      // a merge has no single file, so its current composition is used.
+      const sourceIds = new Set(doc.pages.map(p => p.sourceDocId));
+      bytes =
+        sourceIds.size === 1
+          ? await readSourceBytes([...sourceIds][0])
+          : await currentDocumentBytes(job);
+      name = doc.name;
+    } else {
+      notify('warning', translate('Choose a PDF to repair first.'), {
+        detail: translate('Use "Choose a PDF…" in the Repair panel.')
+      });
+      return;
+    }
+
+    const result = await repairDocument(bytes, job);
+    const outName = repairedName(name);
+    lastRepair.value = { name: outName, result };
+    if (!result.changed) {
+      notify('info', translate('No damage found.'), {
+        detail: translate('{name} opens cleanly as it is, so nothing was saved.', { name })
+      });
+      return;
+    }
+    if (!(await reviewOnly(result.bytes, outName, job))) return;
+    const saved = await platform.saveFileAs(result.bytes, outName);
+    if (saved) {
+      notify('success', translate('Saved {name}', { name: outName }), {
+        detail: tPlural('{count} pages recovered and verified.', result.pageCount)
+      });
+    }
+  },
   // CNV-06 — panel only configures the Markdown source (`tools/state.ts`); this is
   // the actual commit, reached the same way every other tool's is: the action
   // bar's single primary CTA (DESIGN-ADAPTATION §4.2). `worksWithoutDocument` on
@@ -1720,12 +2083,13 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     const markdown = markdownToPdfSource.value;
     if (!markdown.trim()) {
       notify('warning', translate('Nothing to export.'), {
-        detail: 'Type or paste some Markdown first.'
+        detail: translate('Type or paste some Markdown first.')
       });
       return;
     }
-    const { bytes, hadUnsupportedCharacters } = await processWorker.lease(api =>
-      api.markdownToPdf(markdown)
+    // CONV-12: cancellable, with progress, like every other long operation.
+    const { bytes, hadUnsupportedCharacters, notes } = await processWorker.lease(api =>
+      api.markdownToPdf(markdown, createJobHandle(job))
     );
     // UX-04: built from scratch, no "before" PDF to compare against.
     if (!(await reviewOnly(bytes, 'document.pdf', job))) return;
@@ -1734,8 +2098,13 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     if (hadUnsupportedCharacters) {
       notify('warning', translate('PDF saved, but some characters could not be represented.'), {
         detail:
-          'This export uses a fixed set of Latin fonts and replaced unsupported characters (e.g. CJK, Cyrillic, Arabic) with "?". Affected text will need to be checked manually.'
+          translate(
+            'This export uses a fixed set of Latin fonts and replaced unsupported characters (e.g. CJK, Cyrillic, Arabic) with "?". Affected text will need to be checked manually.'
+          ) + (notes.length > 0 ? ` ${notes.join(' ')}` : '')
       });
+    } else if (notes.length > 0) {
+      // CONV-11/12: dropped links and omitted images are reported, not silent.
+      notify('warning', translate('PDF saved with notes.'), { detail: notes.join(' ') });
     } else {
       notify('success', translate('PDF saved successfully.'));
     }
@@ -1759,8 +2128,11 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       gate: PDF_TO_WORD_GATE,
       name: () => `${stem(doc.name)}.docx`,
       detail: (result, bytes) =>
-        `${formatBytes(bytes.byteLength)} · ${result.pageCount} page(s)` +
-        unconvertedSuffix(result.skipped, 'could not be converted')
+        detailLine(
+          formatBytes(bytes.byteLength),
+          tPlural('{count} pages', result.pageCount),
+          unconvertedNote(result.skipped, 'failed')
+        )
     });
   },
   /**
@@ -1781,8 +2153,11 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       name: () => `${stem(source?.name ?? 'document')}.pdf`,
       protectAsPdf: job,
       detail: (result, bytes) =>
-        `${formatBytes(bytes.byteLength)} · ${result.pageCount} page(s)` +
-        unconvertedSuffix(result.notes, 'could not be converted')
+        detailLine(
+          formatBytes(bytes.byteLength),
+          tPlural('{count} pages', result.pageCount),
+          unconvertedNote(result.notes, 'failed')
+        )
     });
   },
   /**
@@ -1801,9 +2176,12 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       gate: PDF_TO_EXCEL_GATE,
       name: () => `${stem(doc.name)}.xlsx`,
       detail: (result, bytes) =>
-        `${formatBytes(bytes.byteLength)} · ${result.sheetCount} sheet(s) · ` +
-        `${result.tableCount} detected table(s)` +
-        unconvertedSuffix(result.skipped, 'were left out')
+        detailLine(
+          formatBytes(bytes.byteLength),
+          tPlural('{count} sheets', result.sheetCount),
+          tPlural('{count} detected tables', result.tableCount),
+          unconvertedNote(result.skipped, 'omitted')
+        )
     });
   },
   /**
@@ -1821,9 +2199,12 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       name: () => `${stem(source?.name ?? 'document')}.pdf`,
       protectAsPdf: job,
       detail: (result, bytes) =>
-        `${formatBytes(bytes.byteLength)} · ${result.sheets.length} sheet(s) · ` +
-        `${result.pageCount} page(s)` +
-        unconvertedSuffix(result.notes, 'could not be converted')
+        detailLine(
+          formatBytes(bytes.byteLength),
+          tPlural('{count} sheets', result.sheets.length),
+          tPlural('{count} pages', result.pageCount),
+          unconvertedNote(result.notes, 'failed')
+        )
     });
   },
   /**
@@ -1842,9 +2223,12 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       gate: PDF_TO_PPT_GATE,
       name: () => `${stem(doc.name)}.pptx`,
       detail: (result, bytes) =>
-        `${formatBytes(bytes.byteLength)} · ${result.slideCount} slide(s) · ` +
-        `${result.textBoxCount} text box(es)` +
-        unconvertedSuffix(result.notes, 'were left out')
+        detailLine(
+          formatBytes(bytes.byteLength),
+          tPlural('{count} slides', result.slideCount),
+          tPlural('{count} text boxes', result.textBoxCount),
+          unconvertedNote(result.notes, 'omitted')
+        )
     });
   },
   /**
@@ -1861,9 +2245,12 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       name: () => `${stem(source?.name ?? 'document')}.pdf`,
       protectAsPdf: job,
       detail: (result, bytes) =>
-        `${formatBytes(bytes.byteLength)} · ${result.slideCount} slide(s) · ` +
-        `${result.pageCount} page(s)` +
-        unconvertedSuffix(result.notes, 'could not be converted')
+        detailLine(
+          formatBytes(bytes.byteLength),
+          tPlural('{count} slides', result.slideCount),
+          tPlural('{count} pages', result.pageCount),
+          unconvertedNote(result.notes, 'failed')
+        )
     });
   },
   shortcuts: async () => {}
@@ -1903,7 +2290,9 @@ export const TOOLS_WITH_EXPORT_REVIEW: ReadonlySet<ToolId> = new Set([
   'extract-img',
   'images-to-pdf',
   'md-to-pdf',
-  'contact-sheet'
+  'contact-sheet',
+  'grayscale',
+  'repair'
 ]);
 
 export async function commitTool(toolId: ToolId, job: JobOptions): Promise<void> {
@@ -1920,7 +2309,7 @@ export async function commitTool(toolId: ToolId, job: JobOptions): Promise<void>
   // would otherwise hit it a different way.
   if (doc && doc.pages.length === 0) {
     notify('warning', translate('Nothing to export.'), {
-      detail: 'This document has no pages. Undo the deletion, or open a different file.'
+      detail: translate('This document has no pages. Undo the deletion, or open a different file.')
     });
     return;
   }

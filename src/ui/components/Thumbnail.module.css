@@ -55,7 +55,7 @@
 .tools {
   position: absolute;
   top: var(--space-xxs);
-  right: var(--space-xxs);
+  inset-inline-end: var(--space-xxs);
   display: flex;
   gap: 2px;
   padding: 2px;
@@ -80,7 +80,7 @@
 .checkbox {
   position: absolute;
   top: var(--space-xxs);
-  left: var(--space-xxs);
+  inset-inline-start: var(--space-xxs);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -100,7 +100,7 @@
 .rotationBadge {
   position: absolute;
   bottom: var(--space-xxs);
-  left: var(--space-xxs);
+  inset-inline-start: var(--space-xxs);
   padding: 0 var(--space-xxs);
   border-radius: var(--radius-sm);
   background: var(--surface-overlay);

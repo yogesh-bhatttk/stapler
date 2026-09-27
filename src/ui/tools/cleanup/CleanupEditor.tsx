@@ -1,4 +1,4 @@
-import { translate } from '../../../core/i18n';
+import { tKey, translate, useTranslation } from '../../../core/i18n';
 /**
  * Scan cleanup: before/after compare, draggable corners, and apply (SCN-01..03).
  *
@@ -44,6 +44,13 @@ const WORK_DPI = 150;
 
 const CORNERS: (keyof Quad)[] = ['tl', 'tr', 'br', 'bl'];
 
+const CORNER_LABELS: Record<keyof Quad, string> = {
+  tl: tKey('Top-left page corner'),
+  tr: tKey('Top-right page corner'),
+  br: tKey('Bottom-right page corner'),
+  bl: tKey('Bottom-left page corner')
+};
+
 /**
  * The corners to hand `processScan`, or `null` to skip de-warping entirely.
  *
@@ -79,6 +86,9 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
   const boxRef = useRef<HTMLDivElement>(null);
   const [split, setSplit] = useState(0.5);
   const [ready, setReady] = useState(false);
+  // A render or detection failure used to leave the editor on its loading
+  // state forever with only a log line (AUDIT-2026-09-25 UI-23).
+  const [loadError, setLoadError] = useState<string | null>(null);
   // Tracks whether afterRef.current reflects the *current* settings/quad rather
   // than a stale or nonexistent preview — apply() must never ship what this page
   // hasn't actually rendered yet (SCN-03 regression: Apply was gated on `ready`
@@ -92,6 +102,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
   // degenerate rather than on every pointermove of the drag that got it there.
   const warnedDegenerate = useRef(false);
   const { run } = useJob();
+  const t = useTranslation();
 
   const page = pages[pageIndex];
   const source = page ? sources.value[page.sourceDocId] : undefined;
@@ -103,6 +114,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
     if (!page || !source) return;
     let cancelled = false;
     setReady(false);
+    setLoadError(null);
 
     void (async () => {
       try {
@@ -123,7 +135,11 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
           swapped ? bitmap.width : bitmap.height
         );
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        if (!ctx) return;
+        if (!ctx) {
+          bitmap.close();
+          setLoadError(translate('This browser could not prepare the page for cleaning.'));
+          return;
+        }
 
         ctx.translate(canvas.width / 2, canvas.height / 2);
         ctx.rotate((rotation * Math.PI) / 180);
@@ -135,21 +151,25 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         if (!cornerOverrides.value[page.key]) {
           isDetectingCorners.value = true;
           const detection = await cvWorker.lease(api => api.detectCorners(beforeRef.current!));
-          isDetectingCorners.value = false;
+          // Only the run still on screen clears the indicator; a cancelled
+          // older detection finishing late used to switch it off mid-detection.
           if (cancelled) return;
+          isDetectingCorners.value = false;
           cornerOverrides.value = { ...cornerOverrides.value, [page.key]: detection.quad };
           if (!detection.confident) {
             // SCN-01: when detection is not trustworthy, say so and hand over the
             // handles rather than silently cropping to a guess.
             notify('info', translate('Could not find the page edges confidently.'), {
-              detail: 'Drag the four corner handles to mark the page yourself.'
+              detail: translate('Drag the four corner handles to mark the page yourself.')
             });
           }
         }
         setReady(true);
       } catch (err) {
+        if (cancelled) return;
         isDetectingCorners.value = false;
         logEvent('warn', 'cleanup', String(err));
+        setLoadError(translate('This page could not be loaded for cleaning.'));
       }
     })();
 
@@ -178,8 +198,9 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
       !isFrameQuad(quad, before.width, before.height) && isDegenerateQuad(quad, before);
     if (degenerate && !warnedDegenerate.current) {
       notify('warning', translate('Those corners do not outline a page.'), {
-        detail:
+        detail: translate(
           'Three of them are on one line, or they enclose almost nothing, so the page is shown uncorrected. Drag them back into a quadrilateral.'
+        )
       });
     }
     warnedDegenerate.current = degenerate;
@@ -241,7 +262,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
   useEffect(paint, [split]);
 
   const apply = () =>
-    run({ label: 'Applying cleanup to the page', scope: 'cleanup.apply' }, async job => {
+    run({ label: translate('Applying cleanup to the page'), scope: 'cleanup.apply' }, async job => {
       const after = afterRef.current;
       if (!after || !page || !source) return;
 
@@ -290,8 +311,6 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         resultPageIndex = 0;
       }
 
-      notify('success', translate('Page cleaned.'));
-
       // pin() keeps load and close on the same pool instance — two independent
       // lease() calls could land on different instances and leave the close a
       // silent no-op on the wrong one.
@@ -318,7 +337,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         replaceWithSource(docId, newSource);
       } else {
         notify('info', translate('Applied to this page.'), {
-          detail: 'Move to the next page to clean it, then export when you are done.'
+          detail: translate('Move to the next page to clean it, then export when you are done.')
         });
         repointPage(docId, page.key, newSource.id, resultPageIndex);
       }
@@ -326,7 +345,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
     });
 
   const applyToAll = () =>
-    run({ label: 'Cleaning all pages', scope: 'cleanup.applyToAll' }, async job => {
+    run({ label: translate('Cleaning all pages'), scope: 'cleanup.applyToAll' }, async job => {
       // Flatten (OPS-13) has to run against the original vector pages — it keeps
       // foreground text/vector content and only replaces the background layer,
       // which does not exist any more once a page has been rasterized to a single
@@ -344,7 +363,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         }
         const firstSource = sources.value[firstSourceId];
         if (!firstSource) throw new Error('Source not found');
-        job.onProgress?.(0.05, 'Flattening the background');
+        job.onProgress?.(0.05, translate('Flattening the background'));
         const firstSourceBytes = await readSourceBytes(firstSource.id);
         const flattened = await processWorker.lease(api =>
           api.flattenBackground(firstSourceBytes, 'all', settings.flattenTint, createJobHandle(job))
@@ -360,7 +379,10 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
 
         for (let i = 0; i < pages.length; i++) {
           if (job.signal?.aborted) throw cancelled();
-          job.onProgress?.(i / pages.length, `Cleaning page ${i + 1} of ${pages.length}`);
+          job.onProgress?.(
+            i / pages.length,
+            translate('Cleaning page {n} of {total}', { n: i + 1, total: pages.length })
+          );
 
           const p = pages[i];
           const s = sources.value[p.sourceDocId];
@@ -480,14 +502,10 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
             setSplit(Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)));
           }}
         >
-          <canvas
-            ref={canvasRef}
-            className={styles.canvas}
-            aria-label={translate('Before and after')}
-          />
+          <canvas ref={canvasRef} className={styles.canvas} aria-label={t('Before and after')} />
 
-          <span className={styles.label + ' ' + styles.labelBefore}>Original</span>
-          <span className={styles.label + ' ' + styles.labelAfter}>Cleaned</span>
+          <span className={styles.label + ' ' + styles.labelBefore}>{t('Original')}</span>
+          <span className={styles.label + ' ' + styles.labelAfter}>{t('Cleaned')}</span>
           <span className={styles.divider} style={{ left: `${split * 100}%` }}>
             <span className={styles.grip} />
           </span>
@@ -507,8 +525,9 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
 
       <div className={styles.bar}>
         <span className={styles.status}>
-          Page {pageIndex + 1} of {pages.length}
-          {isDetectingCorners.value ? ' · finding edges…' : ''}
+          {t('Page {n} of {total}', { n: pageIndex + 1, total: pages.length })}
+          {isDetectingCorners.value ? ` · ${t('finding edges…')}` : ''}
+          {loadError ? ` · ${loadError}` : ''}
         </span>
         <Button
           variant="tertiary"
@@ -528,7 +547,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
             }
           }}
         >
-          Detect edges again
+          {t('Detect edges again')}
         </Button>
         <Button
           variant="tertiary"
@@ -541,7 +560,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
             };
           }}
         >
-          Use the whole page
+          {t('Use the whole page')}
         </Button>
         <Button
           variant="tertiary"
@@ -549,7 +568,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
           disabled={pageIndex === 0}
           onClick={() => onPageIndexChange(pageIndex - 1)}
         >
-          Previous
+          {t('Previous')}
         </Button>
         <Button
           variant="tertiary"
@@ -557,10 +576,10 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
           disabled={pageIndex >= pages.length - 1}
           onClick={() => onPageIndexChange(pageIndex + 1)}
         >
-          Next
+          {t('Next')}
         </Button>
         <Button variant="secondary" icon={Check} onClick={apply} disabled={!ready || !previewReady}>
-          Apply to this page
+          {t('Apply to this page')}
         </Button>
         <Button
           variant="secondary"
@@ -568,7 +587,7 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
           onClick={applyToAll}
           disabled={!ready || !previewReady}
         >
-          Apply to all pages
+          {t('Apply to all pages')}
         </Button>
       </div>
     </div>
@@ -587,6 +606,7 @@ function CornerHandles({
   imageHeight: number;
   onChange: (quad: Quad) => void;
 }) {
+  const t = useTranslation();
   const cleanupDrag = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -649,7 +669,7 @@ function CornerHandles({
           }}
           role="slider"
           tabIndex={0}
-          aria-label={`${corner.toUpperCase()} page corner`}
+          aria-label={t(CORNER_LABELS[corner])}
           aria-valuetext={`${Math.round(quad[corner].x)}, ${Math.round(quad[corner].y)}`}
           onPointerDown={drag(corner)}
           onKeyDown={event => {

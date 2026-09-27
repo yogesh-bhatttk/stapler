@@ -55,7 +55,8 @@ export async function readClipboardImage(): Promise<File | null> {
 /** Handles from this session, so `saveOver` can find the one a file came from. */
 const session = new Map<string, FsaFileHandle>();
 
-function wrap(handle: FsaFileHandle): OpenedFile {
+/** A picker's (or a PWA launch's, GAP-2) file handle as an `OpenedFile`. */
+export function wrapFileHandle(handle: FsaFileHandle): OpenedFile {
   const id = crypto.randomUUID();
   session.set(id, handle);
   return {
@@ -73,7 +74,7 @@ export async function openFilesViaPicker(options?: OpenOptions): Promise<OpenedF
       multiple: options?.multiple,
       types: pickerTypes(options?.accept, 'PDFs and images')
     });
-    return handles.map(wrap);
+    return handles.map(wrapFileHandle);
   } catch (err) {
     if (isAbort(err)) return [];
     throw err;
@@ -245,6 +246,20 @@ export async function revokePersisted(id: string): Promise<void> {
   await deleteHandle(id);
 }
 
+/**
+ * How long the focus heuristic waits after the window regains focus before it
+ * gives up on a `change` event. Only used where the `cancel` event does not
+ * exist. Audit 2026-09-25 PLT-19: this was 300 ms and applied everywhere, so a
+ * slow selection (a cloud-backed file, a network share) whose `change` event
+ * arrived later was reported as a cancel and silently dropped.
+ */
+export const FOCUS_CANCEL_FALLBACK_MS = 3_000;
+
+/** Whether this browser fires `cancel` on a dismissed `<input type=file>`. */
+function supportsInputCancelEvent(): boolean {
+  return typeof HTMLInputElement !== 'undefined' && 'oncancel' in HTMLInputElement.prototype;
+}
+
 /** Fallback: `<input type=file>`, for browsers without the picker (Firefox). */
 export function openFilesViaInput(options?: OpenOptions): Promise<OpenedFile[]> {
   return new Promise(resolve => {
@@ -257,12 +272,15 @@ export function openFilesViaInput(options?: OpenOptions): Promise<OpenedFile[]> 
         .join(',');
     }
 
-    // A dismissed picker fires no `change` event in most browsers, so without this
-    // the promise never settles and the calling job hangs forever.
+    const pickedFiles = (): FileList | null =>
+      input.files && input.files.length > 0 ? input.files : null;
+
     let settled = false;
+    let focusTimer: ReturnType<typeof setTimeout> | undefined;
     const settle = (files: FileList | null) => {
       if (settled) return;
       settled = true;
+      if (focusTimer !== undefined) clearTimeout(focusTimer);
       window.removeEventListener('focus', onWindowFocus);
       resolve(
         Array.from(files ?? []).map(file => ({
@@ -276,15 +294,19 @@ export function openFilesViaInput(options?: OpenOptions): Promise<OpenedFile[]> 
       input.remove();
     };
 
-    // `cancel` only exists from Firefox 91 on; some Android WebViews fire
-    // neither `change` nor `cancel` when the picker is dismissed, which would
-    // otherwise hang this Promise (and the job awaiting it) forever. The
-    // native picker reliably steals window focus while open on every browser
-    // tested, so refocusing is a cross-browser signal the picker closed.
-    // `change` always fires before focus returns, so a short delay lets it
-    // win that race; if it hasn't fired by then, treat this as a cancel.
+    // A dismissed picker fires `cancel` (Chrome 113+, Firefox 91+, Safari 16.4+
+    // — every browser at or above the manifest floors). It is the only reliable
+    // "closed without a choice" signal, so it is authoritative wherever it
+    // exists. Even then, re-check `input.files`: a selection that has landed is
+    // never thrown away because of event ordering.
+    //
+    // Only where `cancel` does not exist (some Android WebViews) is window focus
+    // used instead, since without *some* signal the Promise — and the job
+    // awaiting it — would hang forever. It waits several seconds, re-checks the
+    // input, and any `change` that fires first still wins.
     const onWindowFocus = () => {
-      setTimeout(() => settle(input.files && input.files.length > 0 ? input.files : null), 300);
+      if (focusTimer !== undefined) clearTimeout(focusTimer);
+      focusTimer = setTimeout(() => settle(pickedFiles()), FOCUS_CANCEL_FALLBACK_MS);
     };
 
     input.style.position = 'fixed';
@@ -295,9 +317,9 @@ export function openFilesViaInput(options?: OpenOptions): Promise<OpenedFile[]> 
     input.style.opacity = '0';
     input.style.pointerEvents = 'none';
     document.body.append(input);
-    input.addEventListener('change', () => settle(input.files), { once: true });
-    input.addEventListener('cancel', () => settle(null), { once: true });
-    window.addEventListener('focus', onWindowFocus);
+    input.addEventListener('change', () => settle(pickedFiles()), { once: true });
+    input.addEventListener('cancel', () => settle(pickedFiles()), { once: true });
+    if (!supportsInputCancelEvent()) window.addEventListener('focus', onWindowFocus);
     input.click();
   });
 }

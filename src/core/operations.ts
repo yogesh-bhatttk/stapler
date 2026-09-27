@@ -43,6 +43,7 @@ import {
 import {
   activeDoc,
   bytesForPages,
+  documents,
   sources,
   activePageIndex,
   type Annotation,
@@ -60,7 +61,10 @@ import {
   type WatermarkSettings
 } from '../ui/tools/watermark/state';
 import type { WatermarkData } from './workers/process.worker';
-import { internal, unsupported, cancelled, isCancellation, fromUnknown } from './errors';
+import { internal, unsupported, cancelled, isCancellation, fromUnknown, corrupt } from './errors';
+import type { GrayImageData, GrayMode, GrayPageOutcome, GrayRaster } from './pdf/grayscale';
+import type { RepairOutcome } from './pdf/repair';
+import { translate } from './i18n';
 import { hasXfaMarker, xfaConvertMessage } from './pdf/xfa';
 import type { DocxModel, DocxPage, DocxPreviewItem } from './convert/blocks';
 import {
@@ -133,6 +137,23 @@ function toWatermarkData(settings: WatermarkSettings): WatermarkData {
  * Use this only on bytes that came out of a worker one line earlier and die at
  * this call.
  */
+/**
+ * Hands a `{ sourceId: bytes }` record to a worker without copying it.
+ *
+ * `Comlink.transfer` registers a transfer list only for the exact object it is
+ * given, and Comlink looks transfer lists up for top-level call arguments only.
+ * Wrapping each value inside the record (what compose and split did) therefore
+ * transferred nothing: every source was structured-cloned on the main thread —
+ * about 50 ms blocked for a 10 × 5 MB merge (AUDIT-2026-09-25 PLT-18 perf
+ * budget). The record itself carries the list here. Safe because
+ * `bytesForPages` reads a fresh buffer per source that no one else holds.
+ */
+function transferSourceBytes(bytes: Record<string, Uint8Array>): Record<string, Uint8Array> {
+  const buffers = new Set<ArrayBuffer>();
+  for (const buf of Object.values(bytes)) buffers.add(buf.buffer as ArrayBuffer);
+  return Comlink.transfer(bytes, [...buffers]);
+}
+
 function handOver(bytes: Uint8Array): Uint8Array {
   return Comlink.transfer(bytes, [bytes.buffer as ArrayBuffer]);
 }
@@ -260,10 +281,7 @@ export async function composeDocument(
     ...p,
     cropBox: request.cropBoxes?.[p.key]
   }));
-  const bytes = await bytesForPages(request.pages);
-  for (const [id, buf] of Object.entries(bytes)) {
-    bytes[id] = Comlink.transfer(buf, [buf.buffer as ArrayBuffer]);
-  }
+  const bytes = transferSourceBytes(await bytesForPages(request.pages));
 
   return processWorker.lease(api =>
     api.compose(
@@ -307,10 +325,7 @@ export async function splitDocument(request: SplitRequest, options: JobOptions =
     ...p,
     cropBox: request.cropBoxes?.[p.key]
   }));
-  const bytes = await bytesForPages(request.pages);
-  for (const [id, buf] of Object.entries(bytes)) {
-    bytes[id] = Comlink.transfer(buf, [buf.buffer as ArrayBuffer]);
-  }
+  const bytes = transferSourceBytes(await bytesForPages(request.pages));
 
   return processWorker.lease(api =>
     api.composeSplit(
@@ -1285,6 +1300,23 @@ async function verifyRedaction(
   // the whole-document check below untouched.
   const offPageText = await processWorker.lease(api => api.collectOffPageText(output));
 
+  // M7 — what an extraction tool sees rather than what a viewer reaches: every
+  // string and decoded text-bearing stream in the file (an orphan page's
+  // content, a stale appearance stream, an outline title), and any page
+  // dictionary that exists outside the page tree. Either finding fails the
+  // redaction, whatever the rendered page looks like.
+  const searchTerms = regions.map(r => r.text).filter((t): t is string => !!t && !!t.trim());
+  const markedPages = [...new Set(regions.map(r => r.pageIndex))];
+  const residual = await processWorker.lease(api =>
+    api.scanResidualText(output, searchTerms, markedPages)
+  );
+  const residualFound = new Set(residual.found.map(t => t.toLowerCase()));
+  // N-4: a page whose own content could not be decoded cannot be proven clean.
+  // Only pages that carry a mark are held to this — an undecodable stream
+  // elsewhere cannot hold what a mark on another page removed, and failing on
+  // it would block ordinary files for no reason.
+  const undecodablePages = new Set(residual.undecodablePages ?? []);
+
   // Which images the *output* still draws under a mark, and which of their pixels
   // the mark covers — the same plan the redaction worked from, recomputed against
   // what was actually written. A throw here is a refusal to answer, so it is
@@ -1369,11 +1401,38 @@ async function verifyRedaction(
       }
 
       return regionChecks.map(({ region, foundText }, index) => {
+        if (residual.orphanPages > 0) {
+          return {
+            region,
+            pass: false,
+            detail: translate(
+              'The output still contains {count} page object(s) outside its page tree, which can carry the original, unredacted content. The redaction is unproven.',
+              { count: residual.orphanPages }
+            )
+          };
+        }
+
+        if (undecodablePages.has(region.pageIndex)) {
+          return {
+            region,
+            pass: false,
+            detail: translate('The redaction on page {page} is not proven: {reason}', {
+              page: region.pageIndex + 1,
+              reason: translate('its stream could not be decoded ({message})', {
+                message: residual.undecodableFilters?.[region.pageIndex] || '?'
+              })
+            })
+          };
+        }
+
         if (foundText.trim().length > 0) {
           return {
             region,
             pass: false,
-            detail: `The redacted region on page ${region.pageIndex + 1} still contains extractable text: "${foundText}".`
+            detail: translate(
+              'The redacted region on page {page} still contains extractable text: "{text}".',
+              { page: region.pageIndex + 1, text: foundText }
+            )
           };
         }
 
@@ -1381,7 +1440,24 @@ async function verifyRedaction(
           return {
             region,
             pass: false,
-            detail: `The text "${region.text}" is still present elsewhere in the document.`
+            detail: translate('The text "{text}" is still present elsewhere in the document.', {
+              text: region.text
+            })
+          };
+        }
+
+        // Checked after the visible-text checks, so "no page shows it" is only
+        // said when that is true: the whole-file scan also matches text still
+        // drawn on another page, and ran first, so a word left on page 2 was
+        // reported as hidden file data (regression review U1).
+        if (region.text && residualFound.has(region.text.toLowerCase())) {
+          return {
+            region,
+            pass: false,
+            detail: translate(
+              'The text "{text}" is still present inside the file\'s data, even though no page shows it.',
+              { text: region.text }
+            )
           };
         }
 
@@ -1389,9 +1465,10 @@ async function verifyRedaction(
           return {
             region,
             pass: false,
-            detail:
-              `The redacted region on page ${region.pageIndex + 1} carries no extractable text, but it ` +
-              `could not be rendered to check its pixels, so the redaction is unproven. ${pixelError ?? ''}`.trim()
+            detail: translate(
+              'The redacted region on page {page} carries no extractable text, but it could not be rendered to check its pixels, so the redaction is unproven. {error}',
+              { page: region.pageIndex + 1, error: pixelError ?? '' }
+            ).trim()
           };
         }
 
@@ -1402,9 +1479,10 @@ async function verifyRedaction(
           return {
             region,
             pass: false,
-            detail:
-              `The pixel check returned no result for the region on page ${region.pageIndex + 1}, ` +
-              'so the redaction is unproven.'
+            detail: translate(
+              'The pixel check returned no result for the region on page {page}, so the redaction is unproven.',
+              { page: region.pageIndex + 1 }
+            )
           };
         }
 
@@ -1413,7 +1491,13 @@ async function verifyRedaction(
           return {
             region,
             pass: false,
-            detail: `The redacted region on page ${region.pageIndex + 1} does not render blank: ${residueDetail}`
+            detail: translate(
+              'The redacted region on page {page} does not render blank: {reason}',
+              {
+                page: region.pageIndex + 1,
+                reason: residueDetail
+              }
+            )
           };
         }
 
@@ -1425,7 +1509,10 @@ async function verifyRedaction(
           return {
             region,
             pass: false,
-            detail: `The redaction on page ${region.pageIndex + 1} is not proven: ${imageDetail}`
+            detail: translate('The redaction on page {page} is not proven: {reason}', {
+              page: region.pageIndex + 1,
+              reason: imageDetail
+            })
           };
         }
 
@@ -1433,8 +1520,14 @@ async function verifyRedaction(
           region,
           pass: true,
           detail: region.text
-            ? `"${region.text}" is absent, the redacted region is geometrically clear, it renders as solid fill, and any image underneath it has had its covered pixels destroyed.`
-            : `The redacted region on page ${region.pageIndex + 1} is geometrically clear, renders as solid fill, and any image underneath it has had its covered pixels destroyed.`
+            ? translate(
+                '"{text}" is absent, the redacted region is geometrically clear, it renders as solid fill, and any image underneath it has had its covered pixels destroyed.',
+                { text: region.text }
+              )
+            : translate(
+                'The redacted region on page {page} is geometrically clear, renders as solid fill, and any image underneath it has had its covered pixels destroyed.',
+                { page: region.pageIndex + 1 }
+              )
         };
       });
     } finally {
@@ -1664,6 +1757,84 @@ export async function pagesToImageArchive(
   // Store, not deflate: PNG and JPEG are already compressed, so deflating them
   // costs seconds and saves nothing.
   return zipSync(files, { level: 0 });
+}
+
+/** GAP-5 — how one page came out of {@link pagesToSizedImageArchive}. */
+export interface SizedPageImage {
+  pageIndex: number;
+  fileName: string;
+  bytes: number;
+  width: number;
+  height: number;
+  /** JPEG quality used (0..1), or 1 for PNG. */
+  quality: number;
+  targetBytes: number | null;
+  /** Measured: `bytes <= targetBytes`, or true when there was no target. */
+  reached: boolean;
+}
+
+export interface SizedImageArchive {
+  archive: Uint8Array;
+  pages: SizedPageImage[];
+}
+
+/**
+ * GAP-5 — PDF pages as images within a longest-side pixel box and, for JPEG,
+ * at or under a per-image file size. Each page is rendered once in the render
+ * worker and the measured quality/scale search runs there (`image-target.ts`),
+ * so nothing heavy touches the main thread. The per-page report is measured on
+ * the bytes that go into the ZIP: a page that could not reach the target is
+ * still included, at the smallest size found, and marked `reached: false` for
+ * the caller to say so.
+ */
+export async function pagesToSizedImageArchive(
+  bytes: Uint8Array,
+  pageIndices: number[],
+  format: 'png' | 'jpeg',
+  dpi: number,
+  request: { targetBytes: number | null; maxDimension: number | null },
+  options: JobOptions = {}
+): Promise<SizedImageArchive> {
+  const { zipSync } = await import('fflate');
+  const files: Record<string, Uint8Array> = {};
+  const pages: SizedPageImage[] = [];
+  const pad = Math.max(2, String(Math.max(...pageIndices, 1) + 1).length);
+  const total = Math.max(1, pageIndices.length);
+
+  await renderWorker.lease(async api => {
+    const { handle } = await api.loadDocument(bytes);
+    try {
+      for (let i = 0; i < pageIndices.length; i++) {
+        if (options.signal?.aborted) throw cancelled();
+        const pageIndex = pageIndices[i];
+        const label = translate('Rendering page {page}', { page: pageIndex + 1 });
+        options.onProgress?.(i / total, label);
+        const job = createJobHandle({
+          signal: options.signal,
+          onProgress: fraction => options.onProgress?.((i + 0.95 * (fraction ?? 0)) / total, label)
+        });
+        const result = await api.pageToSizedImage(handle, pageIndex, format, dpi, request, job);
+        const fileName = `page-${String(pageIndex + 1).padStart(pad, '0')}.${format === 'jpeg' ? 'jpg' : 'png'}`;
+        files[fileName] = result.bytes;
+        pages.push({
+          pageIndex,
+          fileName,
+          bytes: result.bytes.byteLength,
+          width: result.width,
+          height: result.height,
+          quality: result.quality,
+          targetBytes: request.targetBytes,
+          reached: request.targetBytes === null || result.bytes.byteLength <= request.targetBytes
+        });
+      }
+    } finally {
+      await api.closeDocument(handle).catch(() => {});
+    }
+  });
+
+  if (options.signal?.aborted) throw cancelled();
+  options.onProgress?.(0.97, translate('Compressing archive'));
+  return { archive: zipSync(files, { level: 0 }), pages };
 }
 
 /**
@@ -2062,7 +2233,7 @@ export async function convertPdfToXlsx(
   });
 
   if (jobOptions.signal?.aborted) throw cancelled();
-  if (hasNoText(pages)) throw unsupported(NO_TEXT_LAYER_MESSAGE);
+  if (hasNoText(pages)) throw unsupported(translate(NO_TEXT_LAYER_MESSAGE));
 
   const built = await convertWorker.lease(api =>
     api.buildXlsx(
@@ -2660,7 +2831,10 @@ export async function autoTrimDocument(
     });
   }
 
-  commit();
+  // GAP-11a — recorded in the history of the document these pages belong to
+  // (the one passed in), not whichever happens to be active by now.
+  const owner = documents.value.find(d => d.pages.some(p => p.key === pagesToTrim[0].key));
+  commit(owner?.id);
   cropBoxes.value = { ...cropBoxes.value, ...updates };
 }
 
@@ -2741,3 +2915,245 @@ export {
   type PageDiffResult,
   type ExportVisualDiffOptions
 } from './visual-diff-export';
+/* ------------------------------------------------------------------ *
+ * GAP-6 — greyscale / black-and-white, and repair
+ * ------------------------------------------------------------------ */
+
+/** Maps a job's progress into `[from, to]` of the caller's bar. */
+function progressBand(options: JobOptions, from: number, to: number): JobOptions {
+  return {
+    signal: options.signal,
+    onProgress: (fraction, label) =>
+      options.onProgress?.(
+        fraction === null ? null : from + (to - from) * Math.min(1, Math.max(0, fraction)),
+        label
+      )
+  };
+}
+
+export interface GrayscaleSettings {
+  mode: GrayMode;
+  /** Resolution for pages that cannot be converted as vectors. */
+  rasterDpi: number;
+}
+
+export interface GrayscaleResult {
+  bytes: Uint8Array;
+  originalBytes: number;
+  /** One entry per requested page. */
+  pages: GrayPageOutcome[];
+  /** Colour images pdf.js could not decode, left untouched, by page. */
+  undecodable: { pageIndex: number; count: number }[];
+  /** Pages the verification re-read still found colour on (should be empty). */
+  colourLeft: number[];
+  /** True when there was no colour to convert: `bytes` is the input, unchanged. */
+  nothingToDo: boolean;
+}
+
+/**
+ * GAP-6 — converts `pageIndices` of `bytes` to greyscale (or 1-bit B&W).
+ *
+ * plan (process worker) → decode colour images and render the pages that
+ * cannot be converted as vectors (render worker, one lease so the handle stays
+ * on its instance) → apply + save + re-plan the output (process worker).
+ */
+export async function grayscaleDocument(
+  bytes: Uint8Array,
+  pageIndices: number[],
+  totalPages: number,
+  settings: GrayscaleSettings,
+  options: JobOptions = {}
+): Promise<GrayscaleResult> {
+  const plans = await processWorker.lease(api =>
+    api.grayscalePlan(
+      bytes,
+      pageIndices,
+      settings.mode,
+      createJobHandle(progressBand(options, 0, 0.15))
+    )
+  );
+  // "Already grey" means nothing *visible* would change — black text written as
+  // `0 0 0 rg` is not a reason to rewrite a document.
+  const nothingToDo = plans.every(p => p.chromaticConstructs === 0 && p.rasterReasons.length === 0);
+  if (nothingToDo) {
+    return {
+      bytes,
+      originalBytes: bytes.byteLength,
+      pages: plans.map(p => ({
+        pageIndex: p.pageIndex,
+        route: 'unchanged',
+        reasons: [],
+        imagesConverted: 0,
+        imagesLeftInColour: 0
+      })),
+      undecodable: [],
+      colourLeft: [],
+      nothingToDo: true
+    };
+  }
+
+  const rasterPages = new Set(plans.filter(p => p.rasterReasons.length > 0).map(p => p.pageIndex));
+  const images: GrayImageData[] = [];
+  const rasters: GrayRaster[] = [];
+  await renderWorker.lease(async api => {
+    const { handle } = await api.loadDocument(bytes.slice());
+    try {
+      const requests = plans
+        .filter(p => !rasterPages.has(p.pageIndex) && p.images.length > 0)
+        .map(p => ({ pageIndex: p.pageIndex, objectNumbers: p.images }));
+      if (requests.length > 0) {
+        images.push(
+          ...(await api.decodeImagesGray(
+            handle,
+            requests,
+            settings.mode,
+            createJobHandle(progressBand(options, 0.15, 0.55))
+          ))
+        );
+      }
+      // An image pdf.js did not deliver that is *not* in an encoding it lacks
+      // a decoder for (an image inside a tiling pattern, say) is still drawn
+      // by its renderer — so that page is rendered instead of left in colour.
+      const decoded = new Set(images.map(i => i.objectNumber));
+      for (const plan of plans) {
+        if (rasterPages.has(plan.pageIndex)) continue;
+        const missing = plan.images.filter(n => !decoded.has(n) && !plan.undecodable.includes(n));
+        if (missing.length > 0) {
+          rasterPages.add(plan.pageIndex);
+          plan.rasterReasons.push(
+            translate('has an image that could only be converted by rendering the page')
+          );
+        }
+      }
+      const toRender = [...rasterPages];
+      for (let i = 0; i < toRender.length; i++) {
+        if (options.signal?.aborted) throw cancelled();
+        options.onProgress?.(
+          0.55 + (0.2 * i) / toRender.length,
+          translate('Rendering page {page}', { page: toRender[i] + 1 })
+        );
+        rasters.push(
+          await api.renderPageGray(handle, toRender[i], settings.rasterDpi, settings.mode)
+        );
+      }
+    } finally {
+      await api.closeDocument(handle).catch(() => {});
+    }
+  });
+  if (options.signal?.aborted) throw cancelled();
+
+  const applied = await processWorker.lease(api =>
+    api.grayscaleApply(
+      bytes,
+      {
+        pageIndices,
+        mode: settings.mode,
+        images,
+        rasters,
+        wholeDocument: pageIndices.length === totalPages
+      },
+      createJobHandle(progressBand(options, 0.75, 1))
+    )
+  );
+
+  // Raster reasons are known from the plan; the apply pass skipped that content.
+  const reasonsByPage = new Map(plans.map(p => [p.pageIndex, p.rasterReasons]));
+  const pages = applied.outcomes.map(o =>
+    o.route === 'raster' ? { ...o, reasons: reasonsByPage.get(o.pageIndex) ?? o.reasons } : o
+  );
+  const decodedNumbers = new Set(images.map(i => i.objectNumber));
+  const undecodable = plans
+    .filter(p => !rasterPages.has(p.pageIndex))
+    .map(p => ({
+      pageIndex: p.pageIndex,
+      count: p.undecodable.filter(n => !decodedNumbers.has(n)).length
+    }))
+    .filter(u => u.count > 0);
+  const allowed = new Map(undecodable.map(u => [u.pageIndex, u.count]));
+  const colourLeft = applied.verification
+    .filter(v => v.colourConstructs > (allowed.get(v.pageIndex) ?? 0))
+    .map(v => v.pageIndex);
+
+  return {
+    bytes: applied.bytes,
+    originalBytes: bytes.byteLength,
+    pages,
+    undecodable,
+    colourLeft,
+    nothingToDo: false
+  };
+}
+
+export interface RepairResult extends RepairOutcome {
+  originalBytes: number;
+  /** Pages pdf.js could see in the damaged original, or null when it could not open it. */
+  pagesBefore: number | null;
+}
+
+/**
+ * GAP-6 — repairs `bytes` and proves the result opens in *both* parsers.
+ * pdf-lib's half of the proof is inside the worker (`pdf/repair.ts`); this
+ * adds the renderer's. Throws — nothing to save — when either refuses.
+ */
+export async function repairDocument(
+  bytes: Uint8Array,
+  options: JobOptions = {}
+): Promise<RepairResult> {
+  let pagesBefore: number | null;
+  options.onProgress?.(0, translate('Checking the file'));
+  const client = renderWorker.pin();
+  try {
+    try {
+      const info = await client.lease(api => api.loadDocument(bytes.slice()));
+      pagesBefore = info.pageCount;
+      await client.lease(api => api.closeDocument(info.handle)).catch(() => {});
+    } catch {
+      pagesBefore = null;
+    }
+    if (options.signal?.aborted) throw cancelled();
+
+    const outcome = await processWorker.lease(api =>
+      api.repairDocument(bytes.slice(), createJobHandle(progressBand(options, 0.05, 0.9)))
+    );
+
+    options.onProgress?.(0.95, translate('Verifying the repaired file'));
+    let pagesAfter: number;
+    try {
+      const info = await client.lease(api => api.loadDocument(outcome.bytes.slice()));
+      pagesAfter = info.pageCount;
+      await client.lease(api => api.closeDocument(info.handle)).catch(() => {});
+    } catch (err) {
+      throw corrupt(
+        translate('The repaired file did not pass verification ({message}), so it was not saved.', {
+          message: fromUnknown(err).message
+        })
+      );
+    }
+    if (pagesAfter !== outcome.pageCount) {
+      throw corrupt(
+        translate('The repaired file did not pass verification ({message}), so it was not saved.', {
+          message: `${pagesAfter} ≠ ${outcome.pageCount}`
+        })
+      );
+    }
+    // A file pdf.js could not open at all *was* damaged, even when the
+    // tolerant parser found nothing specific to fix.
+    const findings =
+      pagesBefore === null && !outcome.changed
+        ? [
+            translate(
+              'The file could not be opened as it was; it has been re-saved in a form both readers accept.'
+            )
+          ]
+        : outcome.findings;
+    return {
+      ...outcome,
+      findings,
+      changed: outcome.changed || pagesBefore === null,
+      originalBytes: bytes.byteLength,
+      pagesBefore
+    };
+  } finally {
+    client.release();
+  }
+}

@@ -76,10 +76,12 @@ function previewResult() {
 }
 
 function openDocument(id: string, name: string) {
+  const docPages = [{ key: `${id}-p1`, sourceDocId: 'src-1', sourceIndex: 0, rotation: 0 }];
   const doc = {
     id,
     name,
-    pages: [{ key: `${id}-p1`, sourceDocId: 'src-1', sourceIndex: 0, rotation: 0 }],
+    pages: docPages,
+    baseline: docPages,
     annotations: [],
     dirty: false
   };

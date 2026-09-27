@@ -7,10 +7,45 @@
   background: var(--surface-overlay);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  border-left: 1px solid var(--hairline);
+  border-inline-start: 1px solid var(--hairline);
   flex-shrink: 0;
   overflow-y: auto;
   z-index: 100;
+}
+
+/* Wraps the tool body so the sheet can fold it away; lays out like the panel. */
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+}
+
+.titleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+/* Only meaningful for the bottom sheet; the side panel never covers the canvas. */
+.sheetToggle {
+  display: none;
+  flex-shrink: 0;
+  height: var(--control-h-compact);
+  padding: 0 var(--space-sm);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--ink);
+  font: var(--text-small);
+  cursor: pointer;
+}
+
+.sheetToggle:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--canvas),
+    0 0 0 4px var(--primary-focus);
 }
 
 .title {
@@ -64,7 +99,7 @@
  */
 .proseList {
   margin: var(--space-xs) 0 0;
-  padding-left: var(--space-md);
+  padding-inline-start: var(--space-md);
   list-style: disc;
 }
 
@@ -121,14 +156,70 @@
 @media (max-width: 1100px) {
   .panel {
     position: absolute;
-    left: 0;
-    right: 0;
+    /* Starts after the rail rather than covering its lower half (GAP-3); the
+       shell's layout box is the containing block, so on a landing page the
+       sheet stays inside the embedded app instead of the first viewport. */
+    inset-inline-start: var(--rail-w);
+    inset-inline-end: 0;
     bottom: var(--actionbar-h);
     width: auto;
     max-height: 45vh;
-    border-left: 0;
+    border-inline-start: 0;
     border-top: 1px solid var(--hairline);
     border-radius: var(--radius-xl) var(--radius-xl) 0 0;
     box-shadow: var(--shadow-3);
+    /* Opaque: over the canvas, the translucent side-panel surface let the
+       preview's own text show through the options (AUDIT GAP-3). The blur is
+       pointless under an opaque fill and made its own stacking layer. */
+    background: var(--surface-1);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    /* Above every canvas overlay (crop, redact, compare slider: z 1–10). */
+    z-index: 100;
+  }
+
+  /* The title row and its Hide/Show toggle stay reachable however far the
+     options are scrolled. The negative offset cancels the panel's padding. */
+  .titleRow {
+    position: sticky;
+    top: calc(-1 * var(--space-lg));
+    z-index: 1;
+    margin: calc(-1 * var(--space-xs)) 0;
+    padding: var(--space-xs) 0;
+    background: var(--surface-1);
+  }
+
+  .sheetToggle {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .collapsed {
+    gap: 0;
+  }
+
+  .collapsed .body,
+  .collapsed .description {
+    display: none;
+  }
+}
+
+@media (max-width: 800px) {
+  .panel {
+    inset-inline-start: var(--rail-w-collapsed);
+  }
+}
+
+/* GAP-3 — no rail below 600px, so the sheet spans the width, with tighter
+   side padding to give the options the room. */
+@media (max-width: 599px) {
+  .panel {
+    inset-inline-start: 0;
+    padding: var(--space-md);
+    max-height: 50vh;
+  }
+
+  .titleRow {
+    top: calc(-1 * var(--space-md));
   }
 }

@@ -5,6 +5,8 @@
  * threshold pass touches every pixel twice — far past the 50ms main-thread budget.
  */
 import * as Comlink from 'comlink';
+import { loadLocale, translate } from '../i18n';
+import type { LocaleAware } from './client';
 import {
   detectCorners,
   isDegenerateQuad,
@@ -22,6 +24,7 @@ import {
 } from '../cv/enhance';
 import { checkpoint, releaseJobHandlesAfterCall, type JobHandle } from './protocol';
 import { internal } from '../errors';
+import { diffText, type DiffChunk } from '../diff';
 
 export interface ScanSettings {
   preset: Preset;
@@ -35,11 +38,17 @@ export interface ScanSettings {
   despeckle: boolean;
 }
 
-export interface CVJob {
+export interface CVJob extends LocaleAware {
   detectCorners(imageData: ImageData): CornerDetection;
   processScan(imageData: ImageData, settings: ScanSettings, job?: JobHandle): Promise<ImageData>;
   trimBox(imageData: ImageData): { x: number; y: number; width: number; height: number } | null;
   cleanupForOcr(bitmap: ImageBitmap, job?: JobHandle): Promise<ImageBitmap>;
+  /**
+   * CONV-14 — the Compare view's and the text-diff export's word diff. Pure
+   * CPU work with no DOM, so it lives with the other pure maths here rather
+   * than on the main thread (it used to cost ~217 ms per page switch there).
+   */
+  diffText(oldText: string, newText: string): DiffChunk[];
 }
 
 function bitmapToImageData(bitmap: ImageBitmap): ImageData {
@@ -50,13 +59,17 @@ function bitmapToImageData(bitmap: ImageBitmap): ImageData {
   const { width, height } = bitmap;
   const canvas = new OffscreenCanvas(width, height);
   const ctx = canvas.getContext('2d');
-  if (!ctx) throw internal('Could not create a canvas to clean up the scan for OCR.');
+  if (!ctx) throw internal(translate('Could not create a canvas to clean up the scan for OCR.'));
   ctx.drawImage(bitmap, 0, 0);
   bitmap.close();
   return ctx.getImageData(0, 0, width, height);
 }
 
 const api: CVJob = {
+  setLocale: loadLocale,
+  diffText(oldText, newText) {
+    return diffText(oldText, newText);
+  },
   detectCorners(imageData) {
     return detectCorners(imageData);
   },
@@ -121,7 +134,7 @@ const api: CVJob = {
     // computed off it too. The UI decides what to tell the user (`CleanupEditor`'s
     // `cornersFor`); the worker's job is to leave the page untouched.
     if (settings.corners && !isDegenerateQuad(settings.corners, current)) {
-      await checkpoint(job, 0.1, 'Correcting perspective');
+      await checkpoint(job, 0.1, translate('Correcting perspective'));
       // `current` is still the frame the corners were detected in, which is what
       // fixes the principal point the aspect-ratio recovery needs. Sizing has to
       // happen before any pass that changes the pixel dimensions.
@@ -130,15 +143,19 @@ const api: CVJob = {
     }
 
     if (settings.deskew) {
-      await checkpoint(job, 0.4, 'Measuring skew');
+      await checkpoint(job, 0.4, translate('Measuring skew'));
       const straightened = deskew(current);
       if (straightened.angle !== 0) {
-        await checkpoint(job, 0.5, `Straightening ${straightened.angle.toFixed(1)}°`);
+        await checkpoint(
+          job,
+          0.5,
+          translate('Straightening {angle}°', { angle: straightened.angle.toFixed(1) })
+        );
       }
       current = straightened.image;
     }
 
-    await checkpoint(job, 0.7, 'Enhancing');
+    await checkpoint(job, 0.7, translate('Enhancing'));
     switch (settings.preset) {
       case 'bw':
         // Aggressive window and margin: pure white paper, solid black text.
@@ -159,7 +176,7 @@ const api: CVJob = {
         break;
     }
 
-    await checkpoint(job, 1, 'Done');
+    await checkpoint(job, 1, translate('Done'));
     return Comlink.transfer(current, [current.data.buffer]);
   },
 
@@ -185,18 +202,18 @@ const api: CVJob = {
    * thresholding them away.
    */
   async cleanupForOcr(bitmap, job) {
-    await checkpoint(job, 0, 'Preparing the scan');
+    await checkpoint(job, 0, translate('Preparing the scan'));
     let current = bitmapToImageData(bitmap);
 
-    await checkpoint(job, 0.3, 'Correcting for lighting and shadow');
+    await checkpoint(job, 0.3, translate('Correcting for lighting and shadow'));
     current = applyAdaptiveThreshold(current, 25, 10);
 
-    await checkpoint(job, 0.7, 'Removing noise');
+    await checkpoint(job, 0.7, translate('Removing noise'));
     current = applyDespeckle(current);
 
-    await checkpoint(job, 0.9, 'Finalising');
+    await checkpoint(job, 0.9, translate('Finalising'));
     const cleaned = await createImageBitmap(current);
-    await checkpoint(job, 1, 'Done');
+    await checkpoint(job, 1, translate('Done'));
     return Comlink.transfer(cleaned, [cleaned]);
   }
 };

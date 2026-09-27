@@ -15,9 +15,18 @@ import { forwardRef } from 'preact/compat';
 import { unzipSync } from 'fflate';
 import { ChevronLeft, ChevronRight } from 'lucide-preact';
 import { exportReviewRequest } from '../../core/notify';
-import { diffPage, documentPageCount, renderPage, type PageDiff } from '../../core/diff-preview';
+import {
+  createPreviewSession,
+  diffPage,
+  documentPageCount,
+  releasePreviewDocument,
+  releasePreviewDocuments,
+  renderPage,
+  type PageDiff,
+  type PreviewSession
+} from '../../core/diff-preview';
 import type { PageAlignment } from '../../core/page-alignment';
-import { Modal } from './Modal';
+import { Modal, requestKey } from './Modal';
 import { Button } from './Button';
 import { IconButton } from './IconButton';
 import { CompareSlider } from './CompareSlider';
@@ -62,10 +71,12 @@ function DiffCanvas({
 
 /** A single removed page, rendered alone — reuses the existing after-only render path. */
 function RemovedPagePreview({
+  session,
   bytes,
   beforeIndex,
   onBack
 }: {
+  session: PreviewSession;
   bytes: Uint8Array;
   beforeIndex: number;
   onBack: () => void;
@@ -79,7 +90,7 @@ function RemovedPagePreview({
     let cancelled = false;
     setLoading(true);
     setRenderError(false);
-    renderPage(bytes, beforeIndex)
+    renderPage(session, bytes, beforeIndex)
       .then(result => {
         if (!cancelled) setImage(result);
       })
@@ -95,7 +106,7 @@ function RemovedPagePreview({
     return () => {
       cancelled = true;
     };
-  }, [bytes, beforeIndex]);
+  }, [session, bytes, beforeIndex]);
 
   return (
     <div className={styles.body}>
@@ -182,10 +193,12 @@ function AlignmentSummary({
 }
 
 function SinglePageReview({
+  session,
   originalBytes,
   resultBytes,
   alignment
 }: {
+  session: PreviewSession;
   originalBytes: Uint8Array | null;
   resultBytes: Uint8Array;
   alignment?: PageAlignment;
@@ -203,7 +216,7 @@ function SinglePageReview({
 
   useEffect(() => {
     let active = true;
-    documentPageCount(resultBytes)
+    documentPageCount(session, resultBytes)
       .then(count => {
         if (active) setPageCount(count);
       })
@@ -213,7 +226,7 @@ function SinglePageReview({
     return () => {
       active = false;
     };
-  }, [resultBytes]);
+  }, [session, resultBytes]);
 
   const align = alignment?.entries[pageIndex];
   // Falls back to the shared `pageIndex` when there's no alignment — the same
@@ -227,6 +240,7 @@ function SinglePageReview({
     (async () => {
       if (originalBytes) {
         const result = await diffPage(
+          session,
           originalBytes,
           resultBytes,
           beforeIndex,
@@ -237,7 +251,7 @@ function SinglePageReview({
         setDiff(result);
         setAfterOnly(null);
       } else {
-        const result = await renderPage(resultBytes, pageIndex);
+        const result = await renderPage(session, resultBytes, pageIndex);
         if (requestId.current !== id) return;
         setDiff(null);
         setAfterOnly(result);
@@ -256,11 +270,12 @@ function SinglePageReview({
       .finally(() => {
         if (requestId.current === id) setLoading(false);
       });
-  }, [originalBytes, resultBytes, beforeIndex, pageIndex, align?.afterRotation]);
+  }, [session, originalBytes, resultBytes, beforeIndex, pageIndex, align?.afterRotation]);
 
   if (viewingRemoved !== null && originalBytes) {
     return (
       <RemovedPagePreview
+        session={session}
         bytes={originalBytes}
         beforeIndex={viewingRemoved}
         onBack={() => setViewingRemoved(null)}
@@ -412,7 +427,7 @@ interface ZipEntry {
   bytes: Uint8Array;
 }
 
-function ZipReview({ resultBytes }: { resultBytes: Uint8Array }) {
+function ZipReview({ session, resultBytes }: { session: PreviewSession; resultBytes: Uint8Array }) {
   const t = useTranslation();
   const [entries] = useState<ZipEntry[]>(() =>
     Object.entries(unzipSync(resultBytes)).map(([name, bytes]) => ({ name, bytes }))
@@ -435,7 +450,7 @@ function ZipReview({ resultBytes }: { resultBytes: Uint8Array }) {
     }
     if (entry.name.toLowerCase().endsWith('.pdf')) {
       let cancelled = false;
-      renderPage(entry.bytes, 0)
+      renderPage(session, entry.bytes, 0)
         .then(image => {
           if (!cancelled) setPreview({ kind: 'pdf', image });
         })
@@ -444,11 +459,13 @@ function ZipReview({ resultBytes }: { resultBytes: Uint8Array }) {
         });
       return () => {
         cancelled = true;
+        // Only the member on screen stays loaded in the render worker.
+        void releasePreviewDocument(session, entry.bytes);
       };
     }
     setPreview(null);
     return undefined;
-  }, [entries, selected]);
+  }, [session, entries, selected]);
 
   return (
     <div className={styles.zipLayout}>
@@ -498,10 +515,20 @@ export const ExportReviewModal = forwardRef<HTMLDivElement, Record<string, never
   function ExportReviewModal(_props, ref) {
     const t = useTranslation();
     const request = exportReviewRequest.value;
-    if (!request) return null;
+    // The previews keep each document loaded in the render worker for the
+    // length of one review; close them when that review ends or is replaced.
+    // The cache is this review's own (R-PDF-3): releasing it can never close
+    // documents a replacement review has already started loading.
+    const session = useMemo(() => (request ? createPreviewSession() : null), [request]);
+    useEffect(() => {
+      if (!session) return;
+      return () => void releasePreviewDocuments(session);
+    }, [session]);
+    if (!request || !session) return null;
 
     return (
       <Modal
+        key={requestKey(request)}
         ref={ref}
         title={t('Review before saving')}
         size="lg"
@@ -518,9 +545,10 @@ export const ExportReviewModal = forwardRef<HTMLDivElement, Record<string, never
         }
       >
         {request.kind === 'zip' ? (
-          <ZipReview resultBytes={request.resultBytes} />
+          <ZipReview session={session} resultBytes={request.resultBytes} />
         ) : (
           <SinglePageReview
+            session={session}
             originalBytes={request.originalBytes}
             resultBytes={request.resultBytes}
             alignment={request.alignment}

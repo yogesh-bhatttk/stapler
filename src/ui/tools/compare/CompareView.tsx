@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { type PageRef, sources } from '../../../core/store';
 import { compareSettings } from './state';
-import { renderWorker } from '../../../core/workers';
+import { cvWorker, renderWorker } from '../../../core/workers';
 import { CompareSlider } from '../../components/CompareSlider';
 import { EmptyState } from '../../components/Feedback';
 import { isCancellation, logEvent, fromUnknown } from '../../../core/errors';
 import { pixelDiff } from '../../../core/pixel-diff';
-import { diffText, DiffChunk } from '../../../core/diff';
+import type { DiffChunk } from '../../../core/diff';
 import styles from './CompareView.module.css';
 import { useTranslation } from '../../../core/i18n';
 import { readSourceBytes } from '../../../core/opfs';
@@ -74,9 +74,10 @@ export function CompareView({ pages, pageIndex }: CompareViewProps) {
             api.extractText(compareHandle!, comparePageIndex, 'text')
           );
 
-          if (!cancelled) {
-            setDiffChunks(diffText(baseText, compareText));
-          }
+          if (cancelled) return;
+          // CONV-14: the word diff runs in the cv worker, not on the main thread.
+          const chunks = await cvWorker.lease(api => api.diffText(baseText, compareText));
+          if (!cancelled) setDiffChunks(chunks);
         } else {
           // Visual diff
           const scale = Number(
@@ -182,13 +183,13 @@ export function CompareView({ pages, pageIndex }: CompareViewProps) {
     return (
       <EmptyState
         title={t('Compare PDFs')}
-        body="Open a second PDF from the panel on the left to compare."
+        body={t('Open a second PDF from the panel on the left to compare.')}
       />
     );
   }
 
   if (!page) {
-    return <EmptyState title={t('No page')} body="There are no pages to preview." />;
+    return <EmptyState title={t('No page')} body={t('There are no pages to preview.')} />;
   }
 
   return (

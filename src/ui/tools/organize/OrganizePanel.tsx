@@ -3,6 +3,7 @@
  * keyboard equivalent documented in the shortcut sheet.
  */
 import { useLocation } from 'wouter-preact';
+import { refuseEditWhileBusy } from '../../busy';
 import { Copy, Crop as CropIcon, RotateCcw, RotateCw, Trash2 } from 'lucide-preact';
 import {
   activeDoc,
@@ -18,7 +19,8 @@ import { toolRoute } from '../../../core/tools';
 import { cropSettings } from '../crop/state';
 import { Button } from '../../components/Button';
 import { panelStyles } from '../../shell/panelStyles';
-import { useTranslation } from '../../../core/i18n';
+import { DuplexSection } from './DuplexSection';
+import { tPlural, useTranslation } from '../../../core/i18n';
 
 export function OrganizePanel() {
   const t = useTranslation();
@@ -30,7 +32,6 @@ export function OrganizePanel() {
   // With nothing ticked, a bulk action applies to the whole document — which is what
   // "rotate all" means, and it saves selecting 300 pages first.
   const targets = selection.size > 0 ? [...selection] : doc.pages.map(p => p.key);
-  const scope = selection.size > 0 ? `${selection.size} selected` : `all ${doc.pages.length}`;
 
   // UX-06: a shortcut into the Crop tool, honestly scoped — Crop's scope model
   // (current/all/odd/even) has no notion of an arbitrary multi-page selection, so
@@ -50,25 +51,31 @@ export function OrganizePanel() {
   return (
     <>
       <p className={panelStyles.description}>
-        {t('Acting on')} {scope} {t('page(s).')}
+        {selection.size > 0
+          ? tPlural('Acting on {count} selected pages.', selection.size)
+          : tPlural('Acting on all {count} pages.', doc.pages.length)}
       </p>
 
       <div className={panelStyles.section}>
         <Button
           variant="secondary"
           icon={RotateCw}
-          onClick={() => rotatePages(doc.id, targets, 90)}
+          onClick={() => !refuseEditWhileBusy() && rotatePages(doc.id, targets, 90)}
         >
           {t('Rotate right')}
         </Button>
         <Button
           variant="secondary"
           icon={RotateCcw}
-          onClick={() => rotatePages(doc.id, targets, -90)}
+          onClick={() => !refuseEditWhileBusy() && rotatePages(doc.id, targets, -90)}
         >
           {t('Rotate left')}
         </Button>
-        <Button variant="secondary" icon={Copy} onClick={() => duplicatePages(doc.id, targets)}>
+        <Button
+          variant="secondary"
+          icon={Copy}
+          onClick={() => !refuseEditWhileBusy() && duplicatePages(doc.id, targets)}
+        >
           {t('Duplicate')}
         </Button>
         <Button
@@ -83,11 +90,15 @@ export function OrganizePanel() {
           variant="danger"
           icon={Trash2}
           disabled={targets.length >= doc.pages.length && selection.size === 0}
-          onClick={() => deletePages(doc.id, targets)}
+          onClick={() => !refuseEditWhileBusy() && deletePages(doc.id, targets)}
         >
           {t('Delete')}
         </Button>
       </div>
+
+      <hr className={panelStyles.divider} />
+
+      <DuplexSection />
 
       <hr className={panelStyles.divider} />
 

@@ -32,6 +32,27 @@ if (typeof globalThis.ImageData === 'undefined') {
   (globalThis as unknown as { ImageData: typeof NodeImageData }).ImageData = NodeImageData;
 }
 
+/*
+ * The English plural forms, as production always has them (the main thread
+ * loads `en.json` at start-up; every worker loads it with its locale — AUDIT
+ * UI-8). Without them `tPlural` falls back to its key, the "other" form, and a
+ * count of one would read "1 pages". Only the suffixed plural entries are
+ * installed, so `translate()` of any plain key still returns the key itself,
+ * exactly as before.
+ */
+{
+  const { registerDictionary } = await import('../../src/core/i18n');
+  const { default: en } = await import('../../src/core/i18n/locales/en.json');
+  registerDictionary(
+    'en',
+    Object.fromEntries(
+      Object.entries(en as Record<string, string>).filter(([key]) =>
+        /_(zero|one|two|few|many|other)$/.test(key)
+      )
+    )
+  );
+}
+
 if (typeof globalThis.crypto?.randomUUID !== 'function') {
   const { webcrypto } = await import('node:crypto');
   (globalThis as unknown as { crypto: Crypto }).crypto = webcrypto as unknown as Crypto;

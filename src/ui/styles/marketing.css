@@ -14,7 +14,7 @@
 .landingSkipLink {
   position: absolute;
   top: -48px;
-  left: var(--space-md);
+  inset-inline-start: var(--space-md);
   z-index: 10;
   padding: var(--space-xs) var(--space-md);
   background: var(--surface-1);

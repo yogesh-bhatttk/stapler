@@ -10,7 +10,17 @@
  * already use for structures pdf-lib's own high-level API cannot produce.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { PDFDocument, PDFName, PDFDict, PDFArray, type PDFPage } from 'pdf-lib';
+import {
+  PDFDocument,
+  PDFName,
+  PDFDict,
+  PDFArray,
+  PDFNumber,
+  PDFRawStream,
+  StandardFonts,
+  decodePDFRawStream,
+  type PDFPage
+} from 'pdf-lib';
 import { readFile } from 'node:fs/promises';
 
 vi.mock('comlink', () => ({
@@ -193,5 +203,233 @@ describe('embedMissingFont (DOC-12)', () => {
     const bytes = await doc.save();
 
     await expect(processWorkerImpl.embedMissingFont(bytes, 'Arial-BoldMT')).rejects.toThrow();
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * AUDIT-2026-09-25 PDF-2 / PDF-15 — the substitute must keep the text.
+ *
+ * The first implementation wrote a Type0/Identity-H font behind a content
+ * stream of one-byte WinAnsi codes, so every run became `.notdef` garbage while
+ * the check above (which only looks for a /FontFile*) passed. These assertions
+ * read the text back out of the output with pdf.js, and check that every shown
+ * code lands on a real glyph in the embedded program.
+ * ------------------------------------------------------------------ */
+
+type PdfjsModule = typeof import('pdfjs-dist/legacy/build/pdf.mjs');
+let pdfjsCached: PdfjsModule | undefined;
+async function pdfjsText(bytes: Uint8Array): Promise<string[]> {
+  pdfjsCached ??= await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const pdf = await pdfjsCached.getDocument({ data: bytes.slice(), useSystemFonts: false }).promise;
+  const pages: string[] = [];
+  for (let n = 1; n <= pdf.numPages; n++) {
+    const content = await (await pdf.getPage(n)).getTextContent();
+    pages.push(
+      content.items
+        .map(item => ('str' in item ? item.str : ''))
+        .join('')
+        .trim()
+    );
+  }
+  await pdf.cleanup();
+  return pages;
+}
+
+function contentText(doc: PDFDocument, page: PDFPage): string {
+  const contents = page.node.Contents()!;
+  const streams =
+    contents instanceof PDFArray
+      ? contents.asArray().map(ref => doc.context.lookup(ref) as PDFRawStream)
+      : [contents as PDFRawStream];
+  return streams
+    .map(s => new TextDecoder('latin1').decode(decodePDFRawStream(s).decode()))
+    .join('\n');
+}
+
+async function helveticaHelloWorld(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage([600, 800]);
+  page.drawText('Hello World', { x: 50, y: 700, size: 20, font });
+  return doc.save();
+}
+
+/** A page drawing `show` (raw content) with a hand-built non-embedded font. */
+async function rawFontDoc(
+  fontEntries: Record<string, unknown>,
+  show: string,
+  inForm = false
+): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([400, 400]);
+  const ctx = doc.context;
+  const fontRef = ctx.register(ctx.obj({ Type: 'Font', ...fontEntries } as never));
+  if (!inForm) {
+    ensureFontsDict(page).set(PDFName.of('F1'), fontRef);
+    page.node.set(PDFName.of('Contents'), ctx.register(ctx.flateStream(show)));
+  } else {
+    // The font lives only in a Form XObject's resources, and the page's own
+    // /Resources are *inherited* from the page-tree root: PDF-15's two blind
+    // spots at once.
+    const form = ctx.flateStream(show, {
+      Type: 'XObject',
+      Subtype: 'Form',
+      BBox: [0, 0, 400, 400],
+      Resources: ctx.obj({ Font: ctx.obj({ F1: fontRef }) })
+    });
+    doc.catalog
+      .Pages()
+      .set(PDFName.of('Resources'), ctx.obj({ XObject: ctx.obj({ Fm0: ctx.register(form) }) }));
+    page.node.delete(PDFName.of('Resources'));
+    page.node.set(PDFName.of('Contents'), ctx.register(ctx.flateStream('/Fm0 Do')));
+  }
+  return doc.save();
+}
+
+async function outputFont(bytes: Uint8Array, resource = 'F1') {
+  const doc = await PDFDocument.load(bytes);
+  const fonts = doc.getPages()[0].node.Resources()!.lookup(PDFName.of('Font'), PDFDict);
+  const font = doc.context.lookup(fonts.get(PDFName.of(resource)), PDFDict);
+  return { doc, font };
+}
+
+interface FontkitFont {
+  unitsPerEm: number;
+  glyphForCodePoint(cp: number): { id: number; advanceWidth: number };
+}
+
+describe('embedMissingFont keeps the text (PDF-2)', () => {
+  it('keeps "Hello World" readable: simple TrueType, WinAnsi, real glyphs, content untouched', async () => {
+    const bytes = await helveticaHelloWorld();
+    const beforeDoc = await PDFDocument.load(bytes);
+    const beforeContent = contentText(beforeDoc, beforeDoc.getPages()[0]);
+    const fontName = [
+      ...beforeDoc.getPages()[0].node.Resources()!.lookup(PDFName.of('Font'), PDFDict).keys()
+    ][0]
+      .asString()
+      .slice(1);
+
+    const fixed = await processWorkerImpl.embedMissingFont(bytes, 'Helvetica');
+
+    expect(await pdfjsText(fixed)).toEqual(['Hello World']);
+
+    const { doc, font } = await outputFont(fixed, fontName);
+    expect(font.get(PDFName.of('Subtype'))).toBe(PDFName.of('TrueType'));
+    expect(font.get(PDFName.of('Encoding'))).toBe(PDFName.of('WinAnsiEncoding'));
+    expect(contentText(doc, doc.getPages()[0])).toBe(beforeContent);
+
+    // Every code the page shows maps to a real (non-.notdef) glyph in the
+    // embedded program, and /Widths are that glyph's advance.
+    const descriptor = doc.context.lookup(font.get(PDFName.of('FontDescriptor')), PDFDict);
+    const fontFile = doc.context.lookup(descriptor.get(PDFName.of('FontFile2')));
+    expect(fontFile).toBeInstanceOf(PDFRawStream);
+    const file = fontFile as PDFRawStream;
+    const fontkit = (await import('fontkit')) as unknown as {
+      default?: { create(b: Uint8Array): FontkitFont };
+      create(b: Uint8Array): FontkitFont;
+    };
+    const program = (fontkit.default ?? fontkit).create(decodePDFRawStream(file).decode());
+    const first = font.lookup(PDFName.of('FirstChar'), PDFNumber).asNumber();
+    const widths = font.lookup(PDFName.of('Widths'), PDFArray);
+    for (const ch of 'Hello World') {
+      const glyph = program.glyphForCodePoint(ch.charCodeAt(0));
+      expect(glyph.id).not.toBe(0);
+      const width = (widths.get(ch.charCodeAt(0) - first) as PDFNumber).asNumber();
+      expect(width).toBe(Math.round((glyph.advanceWidth * 1000) / program.unitsPerEm));
+    }
+
+    // And the checker agrees the font is now embedded.
+    expect((await processWorkerImpl.checkFontEmbedding(fixed)).findings).toEqual([]);
+  });
+
+  it("keeps a StandardEncoding font's own glyph at 0x27 (quoteright) via /Differences", async () => {
+    // No /Encoding: a Type1 Helvetica's built-in encoding is Standard, where
+    // code 0x27 is ’ (quoteright), not WinAnsi's ' (quotesingle).
+    const bytes = await rawFontDoc(
+      { Subtype: 'Type1', BaseFont: 'Helvetica' },
+      'BT /F1 12 Tf 20 300 Td (It\\047s) Tj ET'
+    );
+    const beforeText = await pdfjsText(bytes);
+    expect(beforeText).toEqual(['It’s']);
+
+    const fixed = await processWorkerImpl.embedMissingFont(bytes, 'Helvetica');
+    expect(await pdfjsText(fixed)).toEqual(beforeText);
+    const { doc, font } = await outputFont(fixed);
+    const encoding = doc.context.lookup(font.get(PDFName.of('Encoding')), PDFDict);
+    const diffs = encoding.lookup(PDFName.of('Differences'), PDFArray).asArray().map(String);
+    expect(diffs.slice(0, 2)).toEqual(['39', '/quoteright']);
+  });
+
+  it('carries an original /Differences through', async () => {
+    const bytes = await rawFontDoc(
+      {
+        Subtype: 'TrueType',
+        BaseFont: 'Arial',
+        Encoding: { Type: 'Encoding', BaseEncoding: 'WinAnsiEncoding', Differences: [65, 'Euro'] }
+      },
+      'BT /F1 12 Tf 20 300 Td (AB) Tj ET'
+    );
+    const fixed = await processWorkerImpl.embedMissingFont(bytes, 'Arial');
+    expect(await pdfjsText(fixed)).toEqual(['€B']);
+  });
+
+  it('refuses (throws, so the caller keeps the original) when a shown glyph has no substitute', async () => {
+    const bytes = await rawFontDoc(
+      {
+        Subtype: 'TrueType',
+        BaseFont: 'Arial',
+        Encoding: {
+          Type: 'Encoding',
+          BaseEncoding: 'WinAnsiEncoding',
+          Differences: [65, 'noSuchGlyph']
+        }
+      },
+      'BT /F1 12 Tf 20 300 Td (A) Tj ET'
+    );
+    await expect(processWorkerImpl.embedMissingFont(bytes, 'Arial')).rejects.toThrow(
+      /no glyph for noSuchGlyph.*untouched/
+    );
+  });
+
+  it('refuses a non-embedded composite (Type0) Arial instead of guessing its CIDs', async () => {
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([200, 200]);
+    const ctx = doc.context;
+    const cid = ctx.register(
+      ctx.obj({ Type: 'Font', Subtype: 'CIDFontType2', BaseFont: 'Arial' } as never)
+    );
+    const type0 = ctx.register(
+      ctx.obj({
+        Type: 'Font',
+        Subtype: 'Type0',
+        BaseFont: 'Arial',
+        Encoding: 'Identity-H',
+        DescendantFonts: [cid]
+      } as never)
+    );
+    ensureFontsDict(page).set(PDFName.of('F1'), type0);
+    page.node.set(
+      PDFName.of('Contents'),
+      ctx.register(ctx.flateStream('BT /F1 12 Tf 20 100 Td <0024> Tj ET'))
+    );
+    await expect(processWorkerImpl.embedMissingFont(await doc.save(), 'Arial')).rejects.toThrow(
+      /composite/
+    );
+  });
+});
+
+describe('font inventory reaches inherited resources and forms (PDF-15)', () => {
+  it('finds, and fixes, a non-embedded font used only inside a form on a page that inherits /Resources', async () => {
+    const bytes = await rawFontDoc(
+      { Subtype: 'TrueType', BaseFont: 'Arial', Encoding: 'WinAnsiEncoding' },
+      'BT /F1 12 Tf 20 300 Td (Form text) Tj ET',
+      true
+    );
+    const report = await processWorkerImpl.checkFontEmbedding(bytes);
+    expect(report.findings.map(f => f.baseFont)).toEqual(['Arial']);
+
+    const fixed = await processWorkerImpl.embedMissingFont(bytes, 'Arial');
+    expect(await pdfjsText(fixed)).toEqual(['Form text']);
+    expect((await processWorkerImpl.checkFontEmbedding(fixed)).findings).toEqual([]);
   });
 });

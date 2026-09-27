@@ -3,6 +3,11 @@
   <url><loc>https://stapler.app/</loc></url>
   <url><loc>https://stapler.app/merge-pdf</loc></url>
   <url><loc>https://stapler.app/compress-pdf</loc></url>
+  <url><loc>https://stapler.app/compress-pdf-to-100kb</loc></url>
+  <url><loc>https://stapler.app/compress-pdf-to-200kb</loc></url>
+  <url><loc>https://stapler.app/compress-pdf-to-500kb</loc></url>
+  <url><loc>https://stapler.app/compress-pdf-to-1mb</loc></url>
+  <url><loc>https://stapler.app/compress-pdf-to-size</loc></url>
   <url><loc>https://stapler.app/sign-pdf</loc></url>
   <url><loc>https://stapler.app/scan-cleanup</loc></url>
   <url><loc>https://stapler.app/redact-pdf</loc></url>

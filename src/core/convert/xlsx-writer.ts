@@ -24,7 +24,9 @@
 import { strToU8, zipSync } from 'fflate';
 import { columnRef } from './column-ref';
 import { isRtlRunGroup } from './text-direction';
+import { stripInvalidXmlChars } from './xml-chars';
 import { internal } from '../errors';
+import { translate } from '../i18n';
 
 /** One worksheet: a name and a rectangular-ish grid of already-stringified cells. */
 export interface XlsxSheet {
@@ -120,7 +122,7 @@ export function uniqueSheetNames(names: readonly string[]): string[] {
  */
 export function buildXlsx(sheets: readonly XlsxSheet[], options: XlsxOptions = {}): Uint8Array {
   if (sheets.length === 0) {
-    throw internal('A spreadsheet needs at least one sheet; nothing was written.');
+    throw internal(translate('A spreadsheet needs at least one sheet; nothing was written.'));
   }
 
   const names = uniqueSheetNames(sheets.map(sheet => sheet.name));
@@ -275,39 +277,10 @@ function sheetXml(
 
 /**
  * Escapes for XML text and attribute content, and drops the code points XML 1.0
- * has no representation for at all.
- *
- * The strip matters more than the escape here. A PDF's text layer can carry NUL,
- * BEL or a stray form feed — a producer bug, or a font with an odd `/ToUnicode`
- * map — and a literal control character in the part makes the whole workbook
- * unparseable, which Excel reports as a corrupt file rather than as a bad cell.
- * Tab, newline and carriage return are legal and kept.
+ * has no representation for at all (see `xml-chars.ts` — the strip matters more
+ * than the escape: one literal control character makes Excel call the whole
+ * workbook corrupt rather than flag a bad cell).
  */
-function stripInvalidXmlChars(str: string): string {
-  // Written as a code-point scan rather than a regex character class because the
-  // class would have to be spelled with escapes for characters that must never
-  // appear literally in this source file in the first place.
-  let out = '';
-  let clean = true;
-  for (const ch of str) {
-    const code = ch.codePointAt(0) as number;
-    const valid =
-      code === 0x9 ||
-      code === 0xa ||
-      code === 0xd ||
-      (code >= 0x20 && code <= 0xd7ff) ||
-      // 0xD800–0xDFFF are surrogates. A well-formed pair arrives from `for…of`
-      // as one code point above 0xFFFF and passes on the last clause; a *lone*
-      // surrogate lands in this gap and is dropped, which is the only correct
-      // answer — it is not a character.
-      (code >= 0xe000 && code <= 0xfffd) ||
-      code >= 0x10000;
-    if (valid) out += ch;
-    else clean = false;
-  }
-  return clean ? str : out;
-}
-
 export function xmlEscape(str: string): string {
   return stripInvalidXmlChars(str)
     .replace(/&/g, '&amp;')

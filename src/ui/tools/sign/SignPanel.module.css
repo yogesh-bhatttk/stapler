@@ -39,7 +39,7 @@
 .cardRemove {
   position: absolute;
   top: var(--space-xxs);
-  right: var(--space-xxs);
+  inset-inline-end: var(--space-xxs);
   opacity: 0;
 }
 

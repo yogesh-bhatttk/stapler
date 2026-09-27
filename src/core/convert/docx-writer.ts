@@ -2,7 +2,7 @@
  * CNV-08 — the block model → a real `.docx`.
  *
  * The `docx` package is loaded with a dynamic `import()`, never a static one, for
- * the same reason `heic2any` (CNV-03) and `tesseract.js` (OCR) are: nothing in its
+ * the same reason the HEIC decoder (CNV-03) and `tesseract.js` (OCR) are: nothing in its
  * dependency tree (jszip, xml-js, hash.js, nanoid) is parsed or evaluated until
  * someone actually converts a document, and it stays out of the 900KB initial
  * bundle `scripts/check-bundle-size.js` measures. It is a real bundled
@@ -14,9 +14,11 @@
  */
 
 import { internal } from '../errors';
+import { translate } from '../i18n';
 import { checkpoint, type JobHandle } from '../workers/protocol';
 import type { DocxModel, DocxRun } from './blocks';
 import { isRtlRunGroup, isRtlText } from './text-direction';
+import { stripInvalidXmlChars as xmlSafe } from './xml-chars';
 
 /**
  * Tables fill the text column. Given `WidthType.PERCENTAGE`, `docx` turns a plain
@@ -31,7 +33,7 @@ const FULL_WIDTH_PCT = 100;
  * and is reported to the user rather than silently dropped here.
  */
 export async function buildDocx(model: DocxModel, job?: JobHandle): Promise<Uint8Array> {
-  await checkpoint(job, 0, 'Building the Word document');
+  await checkpoint(job, 0, translate('Building the Word document'));
 
   const {
     Document,
@@ -70,7 +72,10 @@ export async function buildDocx(model: DocxModel, job?: JobHandle): Promise<Uint
     runs.map(
       run =>
         new TextRun({
-          text: run.text,
+          // Every string handed to `docx` goes through `xmlSafe`: the package
+          // escapes `& < >` but not the control characters XML 1.0 forbids,
+          // and one of those makes Word refuse the file (CONV-3).
+          text: xmlSafe(run.text),
           bold: run.bold,
           italics: run.italic,
           ...(isRtlText(run.text, paragraphRtl) ? { rightToLeft: true } : {})
@@ -97,7 +102,10 @@ export async function buildDocx(model: DocxModel, job?: JobHandle): Promise<Uint
       await checkpoint(
         job,
         totalBlocks === 0 ? 0.9 : (done / totalBlocks) * 0.9,
-        `Writing page ${page.pageIndex + 1} of ${model.pages.length}`
+        translate('Writing page {n} of {total}', {
+          n: page.pageIndex + 1,
+          total: model.pages.length
+        })
       );
 
       const breakHere = pageBreakBefore && first;
@@ -159,7 +167,7 @@ export async function buildDocx(model: DocxModel, job?: JobHandle): Promise<Uint
                       // Every row is padded to the widest row's column count.
                       // A short `<w:tr>` is what makes Word report the file as
                       // needing repair, and a repaired table is not an intact one.
-                      const cell = row[c] ?? '';
+                      const cell = xmlSafe(row[c] ?? '');
                       const cellRtl = isRtlText(cell, tableRtl);
                       return new TableCell({
                         children: [
@@ -194,7 +202,11 @@ export async function buildDocx(model: DocxModel, job?: JobHandle): Promise<Uint
                   type: block.format,
                   data: block.data,
                   transformation: { width: block.width, height: block.height },
-                  altText: { name: block.altText, description: block.altText, title: block.altText }
+                  altText: {
+                    name: xmlSafe(block.altText),
+                    description: xmlSafe(block.altText),
+                    title: xmlSafe(block.altText)
+                  }
                 })
               ]
             })
@@ -208,15 +220,15 @@ export async function buildDocx(model: DocxModel, job?: JobHandle): Promise<Uint
   // user a file that will not open is worse than telling them the conversion
   // found nothing.
   if (children.length === 0) {
-    throw internal('This PDF produced no text or images to convert.');
+    throw internal(translate('This PDF produced no text or images to convert.'));
   }
 
   const doc = new Document({
-    title: model.title,
+    title: xmlSafe(model.title),
     sections: [{ children }]
   });
 
-  await checkpoint(job, 0.95, 'Packing the Word document');
+  await checkpoint(job, 0.95, translate('Packing the Word document'));
   const packed = await Packer.toArrayBuffer(doc);
   return new Uint8Array(packed);
 }

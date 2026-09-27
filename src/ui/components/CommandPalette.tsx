@@ -11,7 +11,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/ho
 import { forwardRef } from 'preact/compat';
 import { useLocation } from 'wouter-preact';
 import { Home, Moon, Search, Sun } from 'lucide-preact';
-import { TOOLS, toolRoute } from '../../core/tools';
+import { TOOLS, toolGroupLabel, toolRoute } from '../../core/tools';
 import { isCommandPaletteOpen, isShortcutSheetOpen } from '../../core/ui';
 import { activeDoc, selectAllPages } from '../../core/store';
 import { canRedo, canUndo, redo, undo } from '../../core/history';
@@ -25,7 +25,11 @@ interface Command {
   id: string;
   title: string;
   group: string;
+  /** Untranslated title and group, so an English query still matches in any locale. */
+  english?: string;
   hint?: string;
+  /** True when `hint` is a key chord — hidden on touch screens (GAP-3). */
+  hintIsShortcut?: boolean;
   icon: ReturnType<typeof toolIconComponent>;
   run: () => void;
   enabled?: () => boolean;
@@ -45,24 +49,26 @@ export const CommandPalette = forwardRef<HTMLDivElement, Record<string, never>>(
       () => [
         ...TOOLS.map(tool => ({
           id: `tool-${tool.id}`,
-          title: tool.title,
-          group: 'Tools',
-          hint: tool.group,
+          title: t(tool.title),
+          english: `${tool.title} ${tool.group}`,
+          group: t('Tools'),
+          hint: t(toolGroupLabel(tool.group)),
           icon: toolIconComponent(tool.icon),
           run: () => setLocation(toolRoute(tool.id))
         })),
         {
           id: 'home',
-          title: 'Go home',
-          group: 'Navigate',
+          title: t('Go home'),
+          group: t('Navigate'),
           icon: Home,
           run: () => setLocation('/')
         },
         {
           id: 'select-all',
-          title: 'Select all pages',
-          group: 'Document',
+          title: t('Select all pages'),
+          group: t('Document'),
           hint: '⌘A',
+          hintIsShortcut: true,
           icon: toolIconComponent('LayoutGrid'),
           enabled: () => activeDoc.value !== null,
           run: () => {
@@ -72,39 +78,44 @@ export const CommandPalette = forwardRef<HTMLDivElement, Record<string, never>>(
         },
         {
           id: 'undo',
-          title: 'Undo',
-          group: 'Document',
+          title: t('Undo'),
+          group: t('Document'),
           hint: '⌘Z',
+          hintIsShortcut: true,
           icon: toolIconComponent('Eraser'),
           enabled: canUndo,
           run: undo
         },
         {
           id: 'redo',
-          title: 'Redo',
-          group: 'Document',
+          title: t('Redo'),
+          group: t('Document'),
           hint: '⇧⌘Z',
+          hintIsShortcut: true,
           icon: toolIconComponent('Eraser'),
           enabled: canRedo,
           run: redo
         },
         {
           id: 'theme',
-          title: resolvedTheme.value === 'dark' ? 'Switch to light theme' : 'Switch to dark theme',
-          group: 'Settings',
+          title: t(
+            resolvedTheme.value === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'
+          ),
+          group: t('Settings'),
           icon: resolvedTheme.value === 'dark' ? Sun : Moon,
           run: toggleTheme
         },
         {
           id: 'shortcuts',
-          title: 'Keyboard shortcuts',
-          group: 'Settings',
+          title: t('Keyboard shortcuts'),
+          group: t('Settings'),
           hint: '?',
+          hintIsShortcut: true,
           icon: toolIconComponent('FileText'),
           run: () => (isShortcutSheetOpen.value = true)
         }
       ],
-      [setLocation, location, resolvedTheme.value]
+      [setLocation, location, resolvedTheme.value, t]
     );
 
     const results = useMemo(
@@ -113,7 +124,10 @@ export const CommandPalette = forwardRef<HTMLDivElement, Record<string, never>>(
           commands.filter(command => command.enabled?.() ?? true),
           query,
           // The group is searchable too, so "document" surfaces everything in it.
-          command => `${command.title} ${command.group}`
+          command =>
+            command.english
+              ? [`${command.title} ${command.group}`, command.english]
+              : `${command.title} ${command.group}`
         ),
       [commands, query]
     );
@@ -207,10 +221,7 @@ export const CommandPalette = forwardRef<HTMLDivElement, Record<string, never>>(
 
           <ul className={styles.list} id="palette-results" role="listbox">
             {results.length === 0 && (
-              <li className={styles.empty}>
-                {t('Nothing matches “')}
-                {query}”.
-              </li>
+              <li className={styles.empty}>{t('Nothing matches “{query}”.', { query })}</li>
             )}
             {results.map((command, index) => {
               const header = command.group !== lastGroup ? command.group : null;
@@ -237,7 +248,13 @@ export const CommandPalette = forwardRef<HTMLDivElement, Record<string, never>>(
                   >
                     <Icon size={16} aria-hidden="true" />
                     {command.title}
-                    {command.hint && <span className={styles.itemHint}>{command.hint}</span>}
+                    {command.hint && (
+                      <span
+                        className={`${styles.itemHint} ${command.hintIsShortcut ? styles.shortcutHint : ''}`}
+                      >
+                        {command.hint}
+                      </span>
+                    )}
                   </li>
                 </>
               );

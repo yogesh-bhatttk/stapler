@@ -2,35 +2,34 @@
  * OCR-01 — the language-model catalogue and the one URL Stapler is ever allowed
  * to fetch at runtime.
  *
- * PLAN §5.4 item 5 makes the OCR *language model* one of two documented exceptions
- * to the zero-network invariant — the other is RED-08's face-detector weights in
- * `src/core/faceblur/model.ts`, which follows this file's shape deliberately: same
- * host, same pin-an-exact-version rule, same `setModelBaseOverride` test seam.
- * This file adds one thing that one does not — a hardcoded SHA-256 per language,
- * checked in `download.ts` against every byte actually received — because a
- * `.traineddata` file is loaded straight into the recognition engine with no
- * further parsing to catch a corrupted or substituted download, where the
- * face-detector's weight manifest at least gets a shape/size sanity check first.
- * Everything else OCR needs — the tesseract.js worker script and the WASM engine —
- * is vendored into the bundle by the `stapler:tesseract-assets` Vite plugin,
- * because engine code is remote code execution and no amount of user consent makes
- * that acceptable (PLAN §5.4 item 2).
+ * PLAN §5.4 item 5 makes the OCR *language model* the one documented exception
+ * to the zero-network invariant. (RED-08's face-detector weights used to be a
+ * second one; they are bundled now — audit 2026-09-25 CNV-6 / PLT-8.) Every
+ * downloaded byte is checked against a hardcoded SHA-256 per language in
+ * `download.ts`, because a `.traineddata` file is loaded straight into the
+ * recognition engine with no further parsing to catch a corrupted or
+ * substituted download. Everything else OCR needs — the tesseract.js worker
+ * script and the WASM engine — is vendored into the bundle by the
+ * `stapler:tesseract-assets` Vite plugin, because engine code is remote code
+ * execution and no amount of user consent makes that acceptable (PLAN §5.4
+ * item 2).
  *
  * The actual `fetch()` call lives in `download.ts`, not here — this file only
- * resolves URLs and holds the pinned hashes, exactly as `faceblur/model.ts` holds
- * URLs while `faceblur/download.ts` does the one fetch. Auditing "what can OCR
+ * resolves URLs and holds the pinned hashes and sizes. Auditing "what can OCR
  * request?" means reading this file and `download.ts`, and nothing else in
- * `src/core/ocr/`.
+ * `src/core/ocr/`. The extension and web CSP (`scripts/csp.mjs`) allow exactly
+ * the pinned directories `resolveModelBase` builds, nothing else on the host.
  *
  * The invariant hook (`.claude/hooks/check-invariants.mjs`) and `scripts/
- * check-invariants.mjs` both carve `src/core/ocr/` (and, identically,
- * `src/core/faceblur/`) out of their `REMOTE_HOSTS` check for `model.ts` and
- * `download.ts` only — so the host can be named in full here instead of being
- * assembled to dodge the scanner — and out of their network-API check for those
- * two files plus `devanagariFont.ts`'s narrower, pre-existing, same-origin
- * `fetch()` of a bundled asset. A stray `fetch()` or remote-host reference
- * anywhere else in either directory still trips the guard.
+ * check-invariants.mjs` both exempt `model.ts` and `download.ts` from their
+ * `REMOTE_HOSTS` check — so the host can be named in full here instead of being
+ * assembled to dodge the scanner — and those two files plus
+ * `devanagariFont.ts`'s narrower, same-origin `fetch()` of a bundled asset from
+ * their network-API check (ESLint's `no-restricted-globals` mirrors this). A
+ * stray `fetch()` or remote-host reference anywhere else still trips the guard.
  */
+
+import { tKey } from '../i18n/key';
 
 /** Host the model is fetched from. Named out loud in the confirmation dialog. */
 export const MODEL_HOST = 'cdn.jsdelivr.net';
@@ -68,6 +67,24 @@ export const MODEL_SHA256: Readonly<Record<string, string>> = {
   eng: '45b4cb346724ac1774f1c36f42f182b887bcdb28ebe63e6fff90ac41f3fcff91',
   hin: 'f3b6a0d320df38d886178cdd727b90dbf9df3db053adb32bd9cf73f0463cda07'
 };
+
+/**
+ * Exact byte length of each pinned file (the gzip bytes `MODEL_SHA256` is
+ * computed over), from the CDN's own `Content-Length` for the pinned URL.
+ * `download.ts` refuses a response larger than twice this *while streaming*
+ * (audit 2026-09-25 CNV-16), so a wrong or huge response is cut off early
+ * instead of being buffered in full before the hash check rejects it, and uses
+ * it as the progress denominator when the server sends no `Content-Length`.
+ */
+export const MODEL_BYTES: Readonly<Record<string, number>> = {
+  eng: 2_952_873,
+  hin: 1_389_692
+};
+
+/** The most bytes `download.ts` will accept for `lang` before aborting. */
+export function maxModelDownloadBytes(lang: string): number {
+  return 2 * (MODEL_BYTES[lang] ?? 16 * 1024 * 1024);
+}
 
 /**
  * Test seam for `MODEL_SHA256`, the same shape as `baseOverride` below: point it
@@ -114,9 +131,9 @@ export interface OcrLanguage {
  * library's own convention never disagree.
  */
 export const OCR_LANGUAGES: readonly OcrLanguage[] = [
-  { code: 'eng', label: 'English', approxSizeMb: 12 },
-  { code: 'hin', label: 'Hindi', approxSizeMb: 2 },
-  { code: 'eng+hin', label: 'English + Hindi (mixed)', approxSizeMb: 14 }
+  { code: 'eng', label: tKey('English'), approxSizeMb: 12 },
+  { code: 'hin', label: tKey('Hindi'), approxSizeMb: 2 },
+  { code: 'eng+hin', label: tKey('English + Hindi (mixed)'), approxSizeMb: 14 }
 ];
 
 export const DEFAULT_OCR_LANGUAGE = 'eng';

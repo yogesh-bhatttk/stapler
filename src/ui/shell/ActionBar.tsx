@@ -18,7 +18,7 @@ import { commitGate } from '../tools/commit-gate';
 import { confirmAndDiscardAllChanges, hasAnythingToDiscard } from '../discardAllChanges';
 import { useJob } from '../useJob';
 import styles from './ActionBar.module.css';
-import { useTranslation } from '../../core/i18n';
+import { tPlural, useTranslation } from '../../core/i18n';
 
 export function ActionBar() {
   const t = useTranslation();
@@ -37,7 +37,9 @@ export function ActionBar() {
    * as well as put on the button, because a disabled control with no explanation
    * is not an accessible one; the panel states it at length too.
    */
-  const gate = commitGate(tool.id);
+  // Gate reasons are stored as English keys (tKey) and translated here.
+  const rawGate = commitGate(tool.id);
+  const gate = rawGate === null ? null : t(rawGate);
   // A tool whose commit routes through a review step first. The compose-only
   // tools say so on the button itself ("View changes…" — see `core/tools.ts`);
   // the rest still do real work first (Compress, OCR, Sign…) and keep a
@@ -48,8 +50,8 @@ export function ActionBar() {
   return (
     <div className={styles.actionBar}>
       <span className={styles.status}>
-        {doc ? `${doc.pages.length} page${doc.pages.length === 1 ? '' : 's'}` : 'No document'}
-        {selected > 0 && ` · ${selected} selected`}
+        {doc ? tPlural('{count} pages', doc.pages.length) : t('No document')}
+        {selected > 0 && ` · ${t('{count} selected', { count: selected })}`}
       </span>
 
       {job ? (
@@ -92,12 +94,12 @@ export function ActionBar() {
           title={gate ?? undefined}
           aria-describedby={gate ? `commit-gate-${tool.id}` : undefined}
           onClick={() =>
-            run({ label: tool.commitLabel, scope: `commit.${tool.id}` }, jobOptions =>
+            run({ label: t(tool.commitLabel), scope: `commit.${tool.id}` }, jobOptions =>
               commitTool(tool.id, jobOptions)
             )
           }
         >
-          {busy ? 'Working…' : tool.commitLabel}
+          {busy ? t('Working…') : t(tool.commitLabel)}
         </Button>
       </div>
     </div>

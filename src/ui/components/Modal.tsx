@@ -8,7 +8,7 @@ import { translate } from '../../core/i18n';
  * screen-reader user was never told the dialog had opened.
  */
 import type { ComponentChildren } from 'preact';
-import { useEffect, useId, useRef } from 'preact/hooks';
+import { useId, useLayoutEffect, useRef } from 'preact/hooks';
 import { forwardRef } from 'preact/compat';
 import { X } from 'lucide-preact';
 import { IconButton } from './IconButton';
@@ -25,30 +25,81 @@ export interface ModalProps {
   /** Set false for a dialog that must be answered, e.g. a confirmation. */
   dismissible?: boolean;
   icon?: ComponentChildren;
+  /** `sheet` docks the dialog to the bottom edge at full width (GAP-3's phone tools sheet). */
+  placement?: 'center' | 'sheet';
+}
+
+/**
+ * Open dialogs, oldest first. Every Modal listens on `document` in the capture
+ * phase, and `stopPropagation` does not stop other listeners on the same node —
+ * so with two dialogs stacked, one Escape closed both. On the session-restore
+ * prompt that meant "Start fresh", and the saved session was gone
+ * (AUDIT-2026-09-25 UI-7). Only the top entry answers keys now.
+ */
+const openModals: symbol[] = [];
+
+const requestKeys = new WeakMap<object, number>();
+let nextRequestKey = 1;
+
+/**
+ * A stable React `key` for a queued request object. The Modal's setup (focus,
+ * key handling) runs once per mount, so a dialog that shows the *next* queued
+ * request in the same component instance must remount — otherwise focus stays
+ * on the previous dialog's button and a double Enter can confirm the second
+ * (a danger confirmation) unseen (regression review R-UI-4).
+ */
+export function requestKey(request: object): number {
+  let key = requestKeys.get(request);
+  if (key === undefined) {
+    key = nextRequestKey++;
+    requestKeys.set(request, key);
+  }
+  return key;
+}
+
+/** True while any dialog is open; global shortcuts stand down so nothing acts behind it. */
+export function isModalOpen(): boolean {
+  return openModals.length > 0;
 }
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 export const Modal = forwardRef<HTMLDivElement, ModalProps>(function Modal(
-  { title, onClose, children, footer, size = 'md', dismissible = true, icon },
+  { title, onClose, children, footer, size = 'md', dismissible = true, icon, placement = 'center' },
   ref
 ) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
+  // Callers pass inline arrows. With `onClose` in the effect's deps, every
+  // parent re-render tore the effect down and set it up again — restoring focus
+  // behind the dialog, then yanking it to the first control (UI-22).
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const dismissibleRef = useRef(dismissible);
+  dismissibleRef.current = dismissible;
 
-  useEffect(() => {
+  // A layout effect, so the key listener is attached before the dialog is
+  // painted: with `useEffect`, an Escape pressed the moment the dialog became
+  // visible could arrive before anything was listening for it.
+  useLayoutEffect(() => {
     const previouslyFocused = document.activeElement as HTMLElement | null;
     const dialog = dialogRef.current;
+    const token = Symbol('modal');
+    openModals.push(token);
 
     // Move focus into the dialog so the first Tab stays inside it.
     const first = dialog?.querySelector<HTMLElement>(FOCUSABLE);
     (first ?? dialog)?.focus();
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && dismissible) {
-        event.stopPropagation();
-        onClose();
+      if (openModals[openModals.length - 1] !== token) return;
+      if (event.key === 'Escape') {
+        // Swallowed even when not dismissible, so it can't reach a handler
+        // behind a dialog that must be answered.
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (dismissibleRef.current) onCloseRef.current();
         return;
       }
       if (event.key !== 'Tab' || !dialog) return;
@@ -70,22 +121,24 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(function Modal(
     document.addEventListener('keydown', onKeyDown, true);
     return () => {
       document.removeEventListener('keydown', onKeyDown, true);
+      const index = openModals.indexOf(token);
+      if (index !== -1) openModals.splice(index, 1);
       // Returning focus to where it came from is what makes the dialog feel
       // keyboard-native rather than a dead end.
       previouslyFocused?.focus?.();
     };
-  }, [dismissible, onClose]);
+  }, []);
 
   return (
     <div
-      className={styles.scrim}
+      className={`${styles.scrim} ${placement === 'sheet' ? styles.sheetScrim : ''}`}
       onMouseDown={event => {
         if (dismissible && event.target === event.currentTarget) onClose();
       }}
     >
       <div
         ref={mergeRefs(dialogRef, ref)}
-        className={`${styles.dialog} ${styles[`size-${size}`]}`}
+        className={`${styles.dialog} ${styles[`size-${size}`]} ${placement === 'sheet' ? styles.sheet : ''}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}

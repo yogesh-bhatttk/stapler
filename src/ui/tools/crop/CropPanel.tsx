@@ -7,20 +7,20 @@ import { panelStyles } from '../../shell/panelStyles';
 import { cropBoxes, cropSettings, pagesForScope, type CropScope } from './state';
 import { useJob } from '../../useJob';
 import { autoTrimDocument } from '../../../core/operations';
-import { useTranslation } from '../../../core/i18n';
+import { tKey, translate, useTranslation } from '../../../core/i18n';
 
 const SCOPE_OPTIONS: { value: CropScope; label: string }[] = [
-  { value: 'current', label: 'Current page only' },
-  { value: 'all', label: 'All pages' },
-  { value: 'odd', label: 'Odd pages' },
-  { value: 'even', label: 'Even pages' }
+  { value: 'current', label: tKey('Current page only') },
+  { value: 'all', label: tKey('All pages') },
+  { value: 'odd', label: tKey('Odd pages') },
+  { value: 'even', label: tKey('Even pages') }
 ];
 
 const SCOPE_LABEL: Record<CropScope, string> = {
-  current: 'current page',
-  all: 'all pages',
-  odd: 'odd pages',
-  even: 'even pages'
+  current: tKey('current page'),
+  all: tKey('all pages'),
+  odd: tKey('odd pages'),
+  even: tKey('even pages')
 };
 
 export function CropPanel() {
@@ -32,7 +32,7 @@ export function CropPanel() {
   if (!doc) return null;
 
   const handleAutoTrim = () => {
-    run({ label: 'Auto-trimming pages', scope: 'crop.autotrim' }, async job => {
+    run({ label: translate('Auto-trimming pages'), scope: 'crop.autotrim' }, async job => {
       await autoTrimDocument(doc, settings.scope, job);
     });
   };
@@ -53,7 +53,7 @@ export function CropPanel() {
           <Select
             id={id}
             value={settings.scope}
-            options={SCOPE_OPTIONS}
+            options={SCOPE_OPTIONS.map(option => ({ ...option, label: t(option.label) }))}
             onChange={val => (cropSettings.value = { ...settings, scope: val })}
           />
         )}
@@ -63,12 +63,12 @@ export function CropPanel() {
         <h2 className={panelStyles.title}>{t('Manual crop')}</h2>
         <p className={panelStyles.description}>
           {t(
-            'Drag on the page to draw a crop box, drag its handles to resize, or drag inside it to move it. The box applies to'
-          )}{' '}
-          {SCOPE_LABEL[settings.scope]}.
+            'Drag on the page to draw a crop box, drag its handles to resize, or drag inside it to move it. The box applies to {scope}.',
+            { scope: t(SCOPE_LABEL[settings.scope]) }
+          )}
         </p>
         <Button variant="secondary" icon={RotateCcw} onClick={handleReset}>
-          {t('Reset crop on')} {SCOPE_LABEL[settings.scope]}
+          {t('Reset crop on {scope}', { scope: t(SCOPE_LABEL[settings.scope]) })}
         </Button>
       </div>
 
@@ -80,7 +80,7 @@ export function CropPanel() {
           )}
         </p>
         <Button variant="secondary" icon={Scissors} onClick={handleAutoTrim}>
-          {t('Auto-trim')} {SCOPE_LABEL[settings.scope]}
+          {t('Auto-trim {scope}', { scope: t(SCOPE_LABEL[settings.scope]) })}
         </Button>
       </div>
     </>

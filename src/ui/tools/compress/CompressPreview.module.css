@@ -75,7 +75,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-xxs);
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 
 .zoomLabel {
@@ -83,5 +83,5 @@
   letter-spacing: var(--text-mono-ls);
   color: var(--ink-subtle);
   min-width: 5ch;
-  text-align: right;
+  text-align: end;
 }

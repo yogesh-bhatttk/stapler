@@ -18,7 +18,7 @@
 }
 
 .panes > *:first-child {
-  border-right: 1px solid var(--hairline);
+  border-inline-end: 1px solid var(--hairline);
 }
 
 .stage {
@@ -73,7 +73,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-xxs);
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 
 .zoomLabel {
@@ -81,5 +81,37 @@
   letter-spacing: var(--text-mono-ls);
   color: var(--ink-subtle);
   min-width: 5ch;
-  text-align: right;
+  text-align: end;
+}
+
+/* UI-16 — over the page until its own pixels are drawn. */
+.status {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-md);
+  background: var(--surface-2);
+  color: var(--ink-subtle);
+  font: var(--text-small);
+  text-align: center;
+}
+
+.statusFailed {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+/* RT-10 — the zoom was clamped to the preview pixel ceiling. */
+.reduced {
+  position: absolute;
+  top: var(--space-xxs);
+  right: var(--space-xxs);
+  padding: var(--space-xxs) var(--space-xs);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--ink-subtle);
+  font: var(--text-micro);
 }

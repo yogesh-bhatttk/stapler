@@ -68,7 +68,7 @@ async function runsOf(bytes: Uint8Array): Promise<{ runs: PatternRun[]; w: numbe
   const page = await pdf.getPage(1);
   const viewport = page.getViewport({ scale: 1 });
   const content = await page.getTextContent();
-  const runs = content.items.filter((item): item is PatternRun & { str: string } => 'str' in item);
+  const runs: PatternRun[] = content.items.flatMap(item => ('str' in item ? [item] : []));
   return { runs, w: viewport.width, h: viewport.height };
 }
 
@@ -131,7 +131,7 @@ describe('RED-05 scanning a fixture', () => {
     );
     expect(regions.length).toBeGreaterThan(0);
 
-    const output = await processWorkerImpl.applyRedactions(bytes, regions, silentJob);
+    const output = await processWorkerImpl.applyRedactions(bytes, regions, undefined, silentJob);
     const text = await textOf(output);
 
     expect(text).not.toContain(SSN);
@@ -151,6 +151,7 @@ describe('RED-05 scanning a fixture', () => {
     const output = await processWorkerImpl.applyRedactions(
       bytes,
       ssn.flatMap(item => item.boxes.map(box => ({ pageIndex: 0, ...box }))),
+      undefined,
       silentJob
     );
     const text = await textOf(output);

@@ -1,0 +1,22 @@
+.bubble {
+  position: fixed;
+  /* Above the shell (rail/top bar/sheet are 100–101), below dialogs (1000+). */
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+  max-width: min(280px, calc(100vw - var(--space-lg)));
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--ink);
+  color: var(--canvas);
+  font: var(--text-small);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  pointer-events: none;
+  animation: fadeIn var(--dur-fast) var(--ease-snappy);
+}
+
+.title {
+  font: var(--text-body-strong);
+  letter-spacing: var(--text-body-strong-ls);
+}

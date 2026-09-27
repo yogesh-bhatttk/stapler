@@ -1,4 +1,5 @@
 import { signal } from '@preact/signals';
+import { resetOnDocumentChange } from '../docScoped';
 import type { CompressionReport } from '../../../core/operations';
 import type { CompressionPlan } from '../../../core/compress-plan';
 import type { ImageResultStat } from '../../../core/compress-report';
@@ -72,6 +73,20 @@ export const compressReport = signal<CompressionReport | null>(null);
 export interface CompressMeasurement extends PreviewMeasurement, CompressSettings {}
 
 export const compressMeasurement = signal<CompressMeasurement | null>(null);
+
+// The report, the measured re-anchor and the target outcome all describe one
+// revision of one document. Carried over, the panel showed doc A's original
+// size, projection and "Reached X" sentence for doc B (UI-11). Export re-plans,
+// so this was wrong numbers rather than wrong output — but CMP-04/05's premise
+// is honest numbers.
+resetOnDocumentChange(
+  () => {
+    compressReport.value = null;
+    compressMeasurement.value = null;
+    compressTargetOutcome.value = null;
+  },
+  { onPageEdits: true }
+);
 
 export interface Projection {
   bytes: number;

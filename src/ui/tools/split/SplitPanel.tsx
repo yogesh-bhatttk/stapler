@@ -8,7 +8,7 @@ import { panelStyles } from '../../shell/panelStyles';
 import { splitSettings, type SplitMode } from '../state';
 import { outlineDocId, outlineLoading, outlineTree, topLevelSlices } from '../outline/state';
 import { useDocumentOutline } from '../outline/useOutline';
-import { useTranslation } from '../../../core/i18n';
+import { tPlural, useTranslation } from '../../../core/i18n';
 import { hasDirectoryPicker } from '../../../platform/fsa';
 
 export function SplitPanel() {
@@ -45,19 +45,19 @@ export function SplitPanel() {
         value={settings.mode}
         onChange={mode => update({ mode })}
         options={[
-          { value: 'extract', label: 'Extract selected pages', hint: 'One new file' },
-          { value: 'individual', label: 'Split into single pages' },
-          { value: 'every_n', label: 'Split every N pages' },
-          { value: 'custom', label: 'Split at chosen pages' },
+          { value: 'extract', label: t('Extract selected pages'), hint: t('One new file') },
+          { value: 'individual', label: t('Split into single pages') },
+          { value: 'every_n', label: t('Split every N pages') },
+          { value: 'custom', label: t('Split at chosen pages') },
           {
             value: 'bookmarks',
-            label: 'Split at bookmarks',
-            hint: 'One file per top-level bookmark, named after it'
+            label: t('Split at bookmarks'),
+            hint: t('One file per top-level bookmark, named after it')
           },
           {
             value: 'size',
-            label: 'Split by target file size',
-            hint: 'Consecutive pages per file, each at or under a size limit'
+            label: t('Split by target file size'),
+            hint: t('Consecutive pages per file, each at or under a size limit')
           }
         ]}
       />
@@ -83,7 +83,9 @@ export function SplitPanel() {
       {settings.mode === 'custom' && (
         <Field
           label={t('Split after page')}
-          hint={`Comma-separated page numbers between 1 and ${doc.pages.length - 1}.`}
+          hint={t('Comma-separated page numbers between 1 and {max}.', {
+            max: doc.pages.length - 1
+          })}
         >
           {id => (
             <TextInput
@@ -121,22 +123,22 @@ export function SplitPanel() {
             ? t('Reading bookmarks…')
             : bookmarks.length === 0
               ? t('This document has no top-level bookmarks to split at.')
-              : `${bookmarks.length} top-level bookmark(s): ${bookmarks
-                  .map(bookmark => bookmark.title)
-                  .join(', ')}`}
+              : tPlural('{count} top-level bookmarks: {titles}', bookmarks.length, {
+                  titles: bookmarks.map(bookmark => bookmark.title).join(', ')
+                })}
         </p>
       )}
 
       <p className={panelStyles.description}>
         {settings.mode === 'extract'
-          ? `${selectedPageKeys.value.size} page(s) selected.`
+          ? tPlural('{count} pages selected.', selectedPageKeys.value.size)
           : settings.mode === 'size'
             ? t(
                 'File count is determined when you run the split, from each page’s actual composed size.'
               )
-            : `Produces ${boundaries.length + 1} file(s).` +
+            : tPlural('Produces {count} files.', boundaries.length + 1) +
               (boundaries.length > 0 && settings.outputFormat === 'zip'
-                ? ' Multiple files are delivered as a ZIP.'
+                ? ' ' + t('Multiple files are delivered as a ZIP.')
                 : '')}
       </p>
 
@@ -147,8 +149,8 @@ export function SplitPanel() {
           value={settings.outputFormat}
           onChange={format => update({ outputFormat: format })}
           options={[
-            { value: 'zip', label: 'ZIP Archive' },
-            { value: 'directory', label: 'Output Folder', hint: 'Save directly to a folder' }
+            { value: 'zip', label: t('ZIP Archive') },
+            { value: 'directory', label: t('Output Folder'), hint: t('Save directly to a folder') }
           ]}
         />
       )}

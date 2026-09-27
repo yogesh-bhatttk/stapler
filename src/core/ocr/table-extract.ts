@@ -200,11 +200,73 @@ export function extractTableFromPage(pageTextItems: TableTextItem[]): TableGridD
   };
 }
 
+/**
+ * A signed amount: digits with grouping/decimal separators, optionally a
+ * currency symbol or three-letter code before, an exponent, and a `%`,
+ * currency symbol or short unit after — `-12.5`, `-$1,234.56`, `-€5`,
+ * `-5 USD`, `-1.5e3`, `+3%`.
+ */
+const SIGNED_AMOUNT =
+  /^[+-]\s?(?:[$€£¥₹]\s?|[A-Z]{3}\s)?\d[\d.,\s]*(?:[eE][+-]?\d+)?\s?(?:%|[$€£¥₹]|[A-Za-z]{1,4})?$/;
+
+/** An international phone number: `+`, then digits, spaces, dots, dashes and parentheses. */
+const PHONE_NUMBER = /^\+\d[\d\s().-]*\d$/;
+
+/** A cell reference such as `A1`, `$B$2` or `XFD1048576`. */
+const CELL_REF = String.raw`\$?[A-Za-z]{1,3}\$?\d+`;
+
+/**
+ * What makes text after a leading `+`, `-` or `@` executable rather than
+ * merely odd-looking:
+ *  - a function call — a name immediately followed by `(` (`SUM(`, `HYPERLINK(`);
+ *  - `|`, the DDE separator (`cmd|' /C calc'!A0`);
+ *  - a sheet or external reference, `!` followed by a cell (`Sheet1!A1`);
+ *  - `=` (a comparison inside the formula);
+ *  - an arithmetic or concatenation operator written directly between two
+ *    operands, as a formula is typed (`-2+3`, `+1+cmd`, `A1&B1`);
+ *  - a cell reference straight after the sign (`-A1`, `+$B$2`).
+ */
+const FORMULA_SYNTAX = new RegExp(
+  [
+    String.raw`[A-Za-z_][A-Za-z0-9_.]*\(`,
+    String.raw`\|`,
+    String.raw`!${CELL_REF}`,
+    '=',
+    String.raw`(?:[\d)]|${CELL_REF})[-+*/^&](?:[\d(A-Za-z_$])`,
+    String.raw`^${CELL_REF}(?![A-Za-z0-9])`
+  ].join('|')
+);
+
+/**
+ * Neutralises spreadsheet formula injection (AUDIT-2026-09-25 CONV-7).
+ *
+ * The table text comes from the PDF, i.e. from whoever wrote the document; the
+ * person at risk is whoever opens the export. A leading apostrophe makes a cell
+ * literal text (OWASP's guidance) — but spreadsheets *show* that apostrophe
+ * when they import a CSV, so it is only added where the cell would really run
+ * (regression review R-CONV-5):
+ *
+ *  - a cell starting with `=`, TAB or CR — always a formula;
+ *  - a cell starting with `+`, `-` or `@` only when what follows contains
+ *    formula syntax ({@link FORMULA_SYNTAX}: a function call, DDE `|`, a
+ *    sheet reference, `=`, an operator between operands, or a cell
+ *    reference). Signed amounts (`-12.5`, `-$1,234.56`, `-5 USD`), phone
+ *    numbers (`+1 (555) 123-4567`), a lone `-`, list text (`- item`) and
+ *    `@mentions` are data, not formulas, and are left exactly as they are.
+ */
+export function neutralizeFormula(cell: string): string {
+  if (/^[=\t\r]/.test(cell)) return `'${cell}`;
+  if (!/^[+\-@]/.test(cell)) return cell;
+  if (SIGNED_AMOUNT.test(cell) || PHONE_NUMBER.test(cell)) return cell;
+  return FORMULA_SYNTAX.test(cell.slice(1)) ? `'${cell}` : cell;
+}
+
 export function exportTableToCsv(grid: TableGridData): string {
   return grid.rows
     .map(row =>
       row
-        .map(cell => {
+        .map(raw => {
+          const cell = neutralizeFormula(raw);
           if (
             cell.includes(',') ||
             cell.includes('"') ||
@@ -222,7 +284,11 @@ export function exportTableToCsv(grid: TableGridData): string {
 
 export function exportTableToTsv(grid: TableGridData): string {
   return grid.rows
-    .map(row => row.map(cell => cell.replace(/\t/g, ' ').replace(/[\r\n]+/g, ' ')).join('\t'))
+    .map(row =>
+      row
+        .map(cell => neutralizeFormula(cell.replace(/\t/g, ' ').replace(/[\r\n]+/g, ' ')))
+        .join('\t')
+    )
     .join('\n');
 }
 

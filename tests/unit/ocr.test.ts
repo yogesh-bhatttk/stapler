@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { PDFArray, PDFDocument, PDFName, PDFStream, StandardFonts } from 'pdf-lib';
 
 /**
@@ -164,6 +166,142 @@ describe('ocr/download — the one verified fetch (OCR-01 Defect 1)', () => {
     >('../../src/core/ocr/download');
     await expect(fetchVerifiedModel('eng')).rejects.toThrow(/could not be downloaded/i);
   });
+
+  /** A streaming Response double: `chunks` arrive one `read()` at a time. */
+  function streamingResponse(chunks: Uint8Array[], contentLength?: number) {
+    let index = 0;
+    const cancel = vi.fn(async () => {});
+    return {
+      cancel,
+      response: {
+        ok: true,
+        headers: new Headers(
+          contentLength === undefined ? {} : { 'content-length': String(contentLength) }
+        ),
+        body: {
+          getReader: () => ({
+            read: async () =>
+              index < chunks.length
+                ? { done: false, value: chunks[index++] }
+                : { done: true, value: undefined },
+            cancel
+          })
+        },
+        arrayBuffer: async () => {
+          throw new Error('the body must be streamed, not buffered whole (CNV-16)');
+        }
+      } as unknown as Response
+    };
+  }
+
+  it('streams the body, reporting bytes received against the expected total (CNV-16)', async () => {
+    const { setModelHashOverride } = await import('../../src/core/ocr/model');
+    const a = new Uint8Array(1000).fill(1);
+    const b = new Uint8Array(500).fill(2);
+    const whole = new Uint8Array([...a, ...b]);
+    setModelHashOverride({ eng: createHash('sha256').update(whole).digest('hex') });
+    const { response } = streamingResponse([a, b], 1500);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => response)
+    );
+
+    const { fetchVerifiedModel } = await vi.importActual<
+      typeof import('../../src/core/ocr/download')
+    >('../../src/core/ocr/download');
+    const progress: [number, number][] = [];
+    const result = await fetchVerifiedModel('eng', {
+      onProgress: (received, total) => progress.push([received, total])
+    });
+    expect(Array.from(result)).toEqual(Array.from(whole));
+    expect(progress).toEqual([
+      [1000, 1500],
+      [1500, 1500]
+    ]);
+  });
+
+  it('cuts off a body past twice the pinned size mid-stream, before hashing or buffering it all (CNV-16)', async () => {
+    const { MODEL_BYTES, setModelHashOverride } = await import('../../src/core/ocr/model');
+    setModelHashOverride({ eng: '0'.repeat(64) });
+    const chunk = new Uint8Array(MODEL_BYTES.eng); // three of these is 3x the pinned size
+    const { response, cancel } = streamingResponse([chunk, chunk, chunk, chunk]);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => response)
+    );
+
+    const { fetchVerifiedModel } = await vi.importActual<
+      typeof import('../../src/core/ocr/download')
+    >('../../src/core/ocr/download');
+    await expect(fetchVerifiedModel('eng')).rejects.toThrow(/was refused/);
+    expect(cancel).toHaveBeenCalled();
+  });
+
+  it('refuses a declared Content-Length past the cap before reading any body (CNV-16)', async () => {
+    const { MODEL_BYTES } = await import('../../src/core/ocr/model');
+    const { response } = streamingResponse([], MODEL_BYTES.eng * 3);
+    const read = vi.spyOn(response.body!, 'getReader');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => response)
+    );
+
+    const { fetchVerifiedModel } = await vi.importActual<
+      typeof import('../../src/core/ocr/download')
+    >('../../src/core/ocr/download');
+    await expect(fetchVerifiedModel('eng')).rejects.toThrow(/was refused/);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('counts a completed, verified download for the top-bar chip, and a failed one not at all (PLT-16)', async () => {
+    const { disclosedDownloads } = await import('../../src/core/disclosedDownloads');
+    const { setModelHashOverride } = await import('../../src/core/ocr/model');
+    const bytes = new TextEncoder().encode('verified');
+    setModelHashOverride({ eng: createHash('sha256').update(bytes).digest('hex') });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () => ({ ok: true, arrayBuffer: async () => bytes.buffer }) as unknown as Response
+      )
+    );
+    const { fetchVerifiedModel } = await vi.importActual<
+      typeof import('../../src/core/ocr/download')
+    >('../../src/core/ocr/download');
+
+    const before = disclosedDownloads.value;
+    await fetchVerifiedModel('eng');
+    expect(disclosedDownloads.value).toBe(before + 1);
+
+    setModelHashOverride({ eng: '0'.repeat(64) });
+    await expect(fetchVerifiedModel('eng')).rejects.toThrow();
+    expect(disclosedDownloads.value).toBe(before + 1);
+  });
+});
+
+describe('ocr.worker — a tesseract cache miss can never fetch (CNV-2)', () => {
+  const source = () =>
+    // Source-level, because the worker module calls `Comlink.expose` on import
+    // and cannot be loaded under Node; tesseract's own loader behaviour for
+    // these two options was verified against tesseract.js 7.0.0's
+    // `worker-script/index.js` (readOnly: no writeCache, no deleteCache).
+    readFileSync(path.resolve(__dirname, '../../src/core/workers/ocr.worker.ts'), 'utf8');
+
+  it("starts every engine with cacheMethod 'readOnly' and the no-network langPath", () => {
+    const text = source();
+    const createCalls = text.match(/createWorker\(/g) ?? [];
+    expect(createCalls).toHaveLength(1); // one construction site: startEngine
+    expect(text).toMatch(/langPath: NO_NETWORK_LANG_PATH/);
+    expect(text).toMatch(/cacheMethod: 'readOnly'/);
+  });
+
+  it('uses a langPath whose scheme fetch() rejects without making any request', async () => {
+    const match = /NO_NETWORK_LANG_PATH = '([^']+)'/.exec(source());
+    expect(match).not.toBeNull();
+    const langPath = match![1];
+    expect(langPath).not.toMatch(/^(https?|blob|data|file|chrome-extension|moz-extension):/);
+    // The exact URL tesseract builds on a cache miss (`${path}/${lang}.traineddata.gz`).
+    await expect(fetch(`${langPath}/eng.traineddata.gz`)).rejects.toThrow();
+  });
 });
 
 /* ------------------------------------------------------------------ *
@@ -175,6 +313,10 @@ const settings = new Map<string, unknown>();
 
 vi.mock('../../src/core/db', () => ({
   readSetting: vi.fn(async (key: string) => settings.get(key)),
+  readSettingResult: vi.fn(async (key: string) => ({
+    ok: true,
+    value: await (await import('../../src/core/db')).readSetting(key)
+  })),
   writeSetting: vi.fn(async (key: string, value: unknown) => {
     settings.set(key, value);
   })
@@ -182,10 +324,11 @@ vi.mock('../../src/core/db', () => ({
 
 const confirmAction = vi.fn();
 const requestOcrConsent = vi.fn();
+const notifySpy = vi.fn();
 vi.mock('../../src/core/notify', () => ({
   confirmAction: (...args: unknown[]) => confirmAction(...args),
   requestOcrConsent: (...args: unknown[]) => requestOcrConsent(...args),
-  notify: vi.fn()
+  notify: (...args: unknown[]) => notifySpy(...args)
 }));
 
 /**
@@ -200,6 +343,9 @@ vi.mock('../../src/core/ocr/tesseractCache', () => ({
   hasCachedModel: vi.fn(async (lang: string) => tesseractCacheStore.has(lang)),
   writeCachedModel: vi.fn(async (lang: string, bytes: Uint8Array) => {
     tesseractCacheStore.set(lang, bytes);
+  }),
+  deleteCachedModel: vi.fn(async (lang: string) => {
+    tesseractCacheStore.delete(lang);
   })
 }));
 
@@ -211,7 +357,7 @@ vi.mock('../../src/core/ocr/tesseractCache', () => ({
  */
 const fetchVerifiedModel = vi.fn();
 vi.mock('../../src/core/ocr/download', () => ({
-  fetchVerifiedModel: (...args: [string, AbortSignal?]) => fetchVerifiedModel(...args)
+  fetchVerifiedModel: (...args: [string, unknown?]) => fetchVerifiedModel(...args)
 }));
 
 /**
@@ -396,6 +542,7 @@ describe('ocr/runOcr — the confirmation gate', () => {
     let capturedOptions: unknown;
     ocrLease.mockImplementation(async (fn: (api: unknown) => unknown) =>
       fn({
+        validateModel: async () => {},
         recognizePage: async (_bitmap: unknown, options: unknown) => {
           capturedOptions = options;
           return { words: [], text: '' };
@@ -527,6 +674,118 @@ describe('ocr/runOcr — a failing page does not lose the rest of the run (§2.3
     const { runOcr } = await import('../../src/core/ocr/runOcr');
     await expect(runOcr(new Uint8Array([1]), 1)).rejects.toMatchObject({ name: 'AbortError' });
   });
+
+  it('treats an engine that cannot load the model as fatal for the whole run, not a page skip (CNV-2)', async () => {
+    const { OCR_ENGINE_INIT_FAILED } = await import('../../src/core/ocr/types');
+    const { writeModelBytes, hasModelBytes } = await import('../../src/core/opfs');
+    // An uploaded copy from before this fix: kept in OPFS and re-seeded.
+    await writeModelBytes('eng', new Uint8Array([6, 6]));
+    renderPin.lease.mockImplementation(async (fn: (api: unknown) => unknown) =>
+      fn({
+        loadDocument: async () => ({ handle: 'h' }),
+        renderPage: async () => ({ width: 100, height: 100, close() {} }),
+        closeDocument: async () => {}
+      })
+    );
+    cvLease.mockImplementation(async (fn: (api: unknown) => unknown) =>
+      fn({ cleanupForOcr: async (bitmap: unknown) => bitmap })
+    );
+    ocrLease.mockRejectedValue(
+      // What Comlink hands back: message and name only.
+      Object.assign(
+        new Error(`${OCR_ENGINE_INIT_FAILED}: Error opening data file ./eng.traineddata`),
+        {
+          name: 'StaplerError(InternalError)'
+        }
+      )
+    );
+
+    const { runOcr } = await import('../../src/core/ocr/runOcr');
+    await expect(runOcr(new Uint8Array([1]), 3)).rejects.toThrow(/OCR stopped/);
+    // Stopped at the first page — pages 2 and 3 were never attempted, so
+    // nothing could have fallen into tesseract's CDN fallback.
+    expect(ocrLease).toHaveBeenCalledTimes(1);
+    expect(processLease).not.toHaveBeenCalled();
+    // The uploaded copy is gone from OPFS and from tesseract's cache, so the
+    // next run asks again instead of re-seeding it.
+    expect(await hasModelBytes('eng')).toBe(false);
+    expect(tesseractCacheStore.has('eng')).toBe(false);
+  });
+});
+
+describe('ocr/runOcr — an uploaded model is trial-loaded before it is kept (CNV-8)', () => {
+  beforeEach(async () => {
+    settings.clear();
+    tesseractCacheStore.clear();
+    requestOcrConsent.mockReset();
+    notifySpy.mockReset();
+    renderPin.lease.mockReset();
+    cvLease.mockReset();
+    ocrLease.mockReset();
+    processLease.mockReset();
+    fetchVerifiedModel.mockReset();
+    const { __memoryFallback } = await import('../../src/core/opfs');
+    __memoryFallback.clear();
+  });
+
+  it('removes a file the engine cannot load, says so, and shows the dialog again', async () => {
+    const { OCR_ENGINE_INIT_FAILED } = await import('../../src/core/ocr/types');
+    const { writeModelBytes, hasModelBytes } = await import('../../src/core/opfs');
+    let asked = 0;
+    requestOcrConsent.mockImplementation(async () => {
+      asked += 1;
+      if (asked === 1) {
+        await writeModelBytes('eng', new Uint8Array([1, 2, 3])); // the wrong file
+        return 'upload';
+      }
+      return 'cancel';
+    });
+    ocrLease.mockImplementation(async (fn: (api: unknown) => unknown) =>
+      fn({
+        validateModel: async () => {
+          throw new Error(`${OCR_ENGINE_INIT_FAILED}: Failed loading language 'eng'`);
+        }
+      })
+    );
+
+    const { runOcr } = await import('../../src/core/ocr/runOcr');
+    const result = await runOcr(new Uint8Array([1]), 1);
+
+    expect(result).toBeNull(); // the second dialog was declined
+    expect(requestOcrConsent).toHaveBeenCalledTimes(2);
+    expect(await hasModelBytes('eng')).toBe(false);
+    expect(tesseractCacheStore.has('eng')).toBe(false);
+    // The re-shown dialog itself says why — not a toast over its buttons.
+    expect(requestOcrConsent.mock.calls[1][2]).toMatch(/not a usable OCR language model/);
+    expect(requestOcrConsent.mock.calls[0][2]).not.toMatch(/not a usable/);
+    expect(renderPin.lease).not.toHaveBeenCalled();
+    expect(fetchVerifiedModel).not.toHaveBeenCalled();
+  });
+});
+
+describe('ocr/modelState — removing stored models (CNV-8)', () => {
+  beforeEach(async () => {
+    settings.clear();
+    tesseractCacheStore.clear();
+    const { __memoryFallback } = await import('../../src/core/opfs');
+    __memoryFallback.clear();
+  });
+
+  it('lists and removes every stored model, downloaded or uploaded, and clears the consent flag', async () => {
+    const { writeModelBytes, hasModelBytes } = await import('../../src/core/opfs');
+    const { listStoredOcrModels, removeAllOcrModels, isModelDownloaded, markModelDownloaded } =
+      await import('../../src/core/ocr/modelState');
+    tesseractCacheStore.set('eng', new Uint8Array([1]));
+    await markModelDownloaded('eng');
+    await writeModelBytes('hin', new Uint8Array([2]));
+
+    expect(await listStoredOcrModels()).toEqual(['eng', 'hin']);
+    await removeAllOcrModels();
+    expect(await listStoredOcrModels()).toEqual([]);
+    expect(tesseractCacheStore.size).toBe(0);
+    expect(await hasModelBytes('hin')).toBe(false);
+    expect(await isModelDownloaded('eng')).toBe(false);
+  });
 });
 
 /*
@@ -598,8 +857,14 @@ describe('ocr/runOcr — combined-language download', () => {
     // OCR-01 Defects 1 & 3: Stapler fetches (and, in the real module, verifies)
     // every missing component itself, rather than leaving tesseract's own
     // loader to do it — so both land in its cache before the worker ever runs.
-    expect(fetchVerifiedModel).toHaveBeenCalledWith('eng', undefined);
-    expect(fetchVerifiedModel).toHaveBeenCalledWith('hin', undefined);
+    expect(fetchVerifiedModel).toHaveBeenCalledWith(
+      'eng',
+      expect.objectContaining({ signal: undefined })
+    );
+    expect(fetchVerifiedModel).toHaveBeenCalledWith(
+      'hin',
+      expect.objectContaining({ signal: undefined })
+    );
     expect(tesseractCacheStore.has('eng')).toBe(true);
     expect(tesseractCacheStore.has('hin')).toBe(true);
     expect(result?.downloadedModel).toBe(true);
@@ -617,8 +882,11 @@ describe('ocr/runOcr — combined-language download', () => {
     await runOcr(new Uint8Array([1]), 1, { lang: 'eng+hin' });
 
     expect(requestOcrConsent).toHaveBeenCalledWith(['hin'], expect.any(String), expect.any(String));
-    expect(fetchVerifiedModel).toHaveBeenCalledWith('hin', undefined);
-    expect(fetchVerifiedModel).not.toHaveBeenCalledWith('eng', undefined);
+    expect(fetchVerifiedModel).toHaveBeenCalledWith(
+      'hin',
+      expect.objectContaining({ signal: undefined })
+    );
+    expect(fetchVerifiedModel).not.toHaveBeenCalledWith('eng', expect.anything());
   });
 
   it('asks for nothing once every component is already cached', async () => {

@@ -431,8 +431,12 @@ export function evaluateFormulas(
   fields: readonly FormulaField[],
   overrides: Readonly<Record<string, string | string[] | boolean>> = {}
 ): FormulaEvaluation {
-  const values: Record<string, string> = {};
-  const errors: Record<string, string> = {};
+  // Field names come from the document. On a plain `{}`, a field called
+  // `__proto__` wrote its error to the prototype (invisible to the save gate)
+  // and `constructor`/`toString` read inherited functions back as values
+  // (AUDIT-2026-09-25 CONV-15), so these carry no prototype at all.
+  const values: Record<string, string> = Object.create(null);
+  const errors: Record<string, string> = Object.create(null);
 
   const byName = new Map(fields.map(field => [field.name, field]));
   const fieldNames = fields.map(field => field.name);
@@ -480,7 +484,9 @@ export function evaluateFormulas(
         // A referenced field that is itself calculated is computed, not read:
         // otherwise a chain of two formulas would use last render's value.
         if (byTarget.has(node.name)) return resolveTarget(node.name, [...stack, target]);
-        const source = overrides[node.name] ?? byName.get(node.name)?.value;
+        const source =
+          (Object.hasOwn(overrides, node.name) ? overrides[node.name] : undefined) ??
+          byName.get(node.name)?.value;
         const parsedValue = parseFieldNumber(source);
         if (!parsedValue.ok) {
           return { ok: false, error: `Field "${node.name}" ${parsedValue.error}.` };

@@ -1,4 +1,4 @@
-import { translate } from '../../../core/i18n';
+import { useTranslation } from '../../../core/i18n';
 /**
  * Drawing redaction marks on a page — rectangles (RED-01) and freehand shapes
  * (RED-07).
@@ -65,6 +65,7 @@ function thinTrace(points: Point[]): Point[] {
 }
 
 export function RedactOverlay({ pageIndex, width, height, rotation }: RedactOverlayProps) {
+  const t = useTranslation();
   const layerRef = useRef<HTMLDivElement>(null);
   const pendingFocusIndex = useRef<number | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -263,7 +264,7 @@ export function RedactOverlay({ pageIndex, width, height, rotation }: RedactOver
       }}
       tabIndex={0}
       role="group"
-      aria-label={translate(
+      aria-label={t(
         freehand
           ? 'Redaction drawing area, freehand mode. Drag to trace a shape around the content to remove, or press Enter to add a rectangular mark at a default size and position, then use arrow keys to move it and Control plus arrows to resize it.'
           : 'Redaction drawing area. Drag to mark a region, or press Enter to add one at a default size and position, then use arrow keys to move it and Control plus arrows to resize it.'
@@ -297,8 +298,14 @@ export function RedactOverlay({ pageIndex, width, height, rotation }: RedactOver
             role="group"
             aria-label={
               mark.points
-                ? `Redaction shape ${index + 1} on page ${pageIndex + 1}. Arrow keys move it, Control plus arrows resize it, Delete removes it.`
-                : `Redaction region ${index + 1} on page ${pageIndex + 1}. Arrow keys move it, Control plus arrows resize it, Delete removes it.`
+                ? t(
+                    'Redaction shape {n} on page {page}. Arrow keys move it, Control plus arrows resize it, Delete removes it.',
+                    { n: index + 1, page: pageIndex + 1 }
+                  )
+                : t(
+                    'Redaction region {n} on page {page}. Arrow keys move it, Control plus arrows resize it, Delete removes it.',
+                    { n: index + 1, page: pageIndex + 1 }
+                  )
             }
             onKeyDown={event => onMarkKeyDown(event, index, mark)}
             ref={el => {
@@ -331,7 +338,10 @@ export function RedactOverlay({ pageIndex, width, height, rotation }: RedactOver
             <button
               type="button"
               className={styles.remove}
-              aria-label={`Remove redaction ${index + 1} on page ${pageIndex + 1}`}
+              aria-label={t('Remove redaction {n} on page {page}', {
+                n: index + 1,
+                page: pageIndex + 1
+              })}
               onClick={event => {
                 event.stopPropagation();
                 pendingRedactions.value = marks.filter((_, i) => i !== index);

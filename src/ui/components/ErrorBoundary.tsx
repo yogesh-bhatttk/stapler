@@ -1,6 +1,7 @@
 import { Component, type ComponentChildren } from 'preact';
 import { EmptyState } from './Feedback';
 import { Button } from './Button';
+import { translate } from '../../core/i18n';
 
 export interface ErrorBoundaryProps {
   children: ComponentChildren;
@@ -22,11 +23,14 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     if (this.state.hasError) {
       return (
         <EmptyState
-          title="Something went wrong"
-          body={this.state.error?.message || 'An unexpected error caused the editor to crash.'}
+          title={translate('Something went wrong')}
+          body={
+            this.state.error?.message ||
+            translate('An unexpected error caused the editor to crash.')
+          }
           action={
             <Button variant="primary" onClick={() => window.location.reload()}>
-              Reload App
+              {translate('Reload App')}
             </Button>
           }
         />

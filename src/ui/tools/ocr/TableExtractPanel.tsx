@@ -1,4 +1,3 @@
-import { translate } from '../../../core/i18n';
 import { useState } from 'preact/hooks';
 import { Download, Table, RefreshCw } from 'lucide-preact';
 import { activeDoc } from '../../../core/store';
@@ -10,7 +9,7 @@ import { Badge } from '../../components/Badge';
 import { Field, Select } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
 import { useJob } from '../../useJob';
-import { useTranslation } from '../../../core/i18n';
+import { tPlural, translate, useTranslation } from '../../../core/i18n';
 import {
   extractTableFromPage,
   exportTableToCsv,
@@ -43,11 +42,11 @@ export function TableExtractPanel() {
 
   const pageOptions = doc.pages.map((_, idx) => ({
     value: String(idx),
-    label: `Page ${idx + 1}`
+    label: t('Page {page}', { page: idx + 1 })
   }));
 
   const handleExtract = () => {
-    run({ label: 'Extracting table', scope: 'extract' }, async job => {
+    run({ label: translate('Extracting table'), scope: 'extract' }, async job => {
       const bytes = await currentDocumentBytes(job);
       const items = await extractPageTextItems(bytes, pageIndex);
       const extracted = extractTableFromPage(items);
@@ -125,7 +124,7 @@ export function TableExtractPanel() {
         <h2 className="text-section" style={{ margin: 0 }}>
           {t('Table extraction')}
         </h2>
-        <Badge variant="neutral">(Beta)</Badge>
+        <Badge variant="neutral">{t('(Beta)')}</Badge>
       </div>
 
       <p className={panelStyles.description}>
@@ -162,8 +161,10 @@ export function TableExtractPanel() {
             }}
           >
             <span className="text-small" style={{ fontWeight: 600 }}>
-              {t('Interactive Preview Grid')} ({editedRows.length} rows,{' '}
-              {editedRows[0]?.length || 0} cols)
+              {t('Interactive Preview Grid ({rows}, {cols})', {
+                rows: tPlural('{count} rows', editedRows.length),
+                cols: tPlural('{count} cols', editedRows[0]?.length || 0)
+              })}
             </span>
             <Button
               variant="tertiary"
@@ -207,12 +208,12 @@ export function TableExtractPanel() {
                       key={cIdx}
                       style={{
                         padding: '4px 8px',
-                        textAlign: 'left',
-                        borderLeft: '1px solid var(--hairline-strong)',
+                        textAlign: 'start',
+                        borderInlineStart: '1px solid var(--hairline-strong)',
                         fontWeight: 600
                       }}
                     >
-                      Col {cIdx + 1}
+                      {t('Col {n}', { n: cIdx + 1 })}
                     </th>
                   ))}
                 </tr>
@@ -241,7 +242,7 @@ export function TableExtractPanel() {
                         key={cIdx}
                         style={{
                           padding: '2px 4px',
-                          borderLeft: '1px solid var(--hairline)'
+                          borderInlineStart: '1px solid var(--hairline)'
                         }}
                       >
                         <input

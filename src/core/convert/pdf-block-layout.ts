@@ -24,8 +24,12 @@
 import { PDFDocument, PDFFont, PDFImage, PDFPage, StandardFonts, rgb } from 'pdf-lib';
 import { DOC_HAIRLINE_RGB, SUMMARY_ACCENT_RGB } from '../doc-colors';
 import { corrupt } from '../errors';
+import { tPlural, translate } from '../i18n';
 import {
-  addLinkAnnotation,
+  annotateLinkGroup,
+  droppedLinksNote,
+  isInternalLink,
+  type LinkWrapState,
   newSubstitutionTally,
   sanitizeWinAnsiText,
   type SubstitutionTally
@@ -288,8 +292,10 @@ export function clampPageBox(
     Number.isFinite(box.width) && box.width > 0 && Number.isFinite(box.height) && box.height > 0;
   if (!usable) {
     notes.push(
-      'The document did not state a usable page size, so the pages are ' +
-        `${Math.round(fallback[0])} × ${Math.round(fallback[1])} pt.`
+      translate(
+        'The document did not state a usable page size, so the pages are {width} × {height} pt.',
+        { width: Math.round(fallback[0]), height: Math.round(fallback[1]) }
+      )
     );
     return [fallback[0], fallback[1]];
   }
@@ -297,9 +303,17 @@ export function clampPageBox(
   const height = Math.min(MAX_PAGE_POINTS, Math.max(MIN_PAGE_POINTS, box.height));
   if (Math.abs(width - box.width) > 0.01 || Math.abs(height - box.height) > 0.01) {
     notes.push(
-      `The document states a page of ${Math.round(box.width)} × ${Math.round(box.height)} pt, ` +
-        `which is outside what a PDF page may be; it was clamped to ${Math.round(width)} × ` +
-        `${Math.round(height)} pt and the content scaled to fit.`
+      translate(
+        'The document states a page of {width} × {height} pt, ' +
+          'which is outside what a PDF page may be; it was clamped to {clampedWidth} × ' +
+          '{clampedHeight} pt and the content scaled to fit.',
+        {
+          width: Math.round(box.width),
+          height: Math.round(box.height),
+          clampedWidth: Math.round(width),
+          clampedHeight: Math.round(height)
+        }
+      )
     );
   }
   return [width, height];
@@ -326,17 +340,22 @@ export async function layoutBlocksToPdf(
     // conditions — an empty file, and a `.docx` with no `word/document.xml`
     // ("there is nothing to convert") — so the two agree.
     throw corrupt(
-      'This document produced no text or images to convert, so no PDF was written. It may be ' +
-        'empty, or hold only content this converter cannot read (text boxes, shapes or SmartArt).'
+      translate(
+        'This document produced no text or images to convert, so no PDF was written. It may be ' +
+          'empty, or hold only content this converter cannot read (text boxes, shapes or ' +
+          'SmartArt).'
+      )
     );
   }
 
-  await checkpoint(job, 0, 'Laying out the PDF');
+  await checkpoint(job, 0, translate('Laying out the PDF'));
   // Call-local, so a second conversion on this same pooled worker cannot reset
   // it mid-layout and have this document reported as substitution-free.
   const tally = newSubstitutionTally();
 
   const notes: string[] = [];
+  /** Links `addLinkAnnotation` refused (unsafe scheme or unparseable) — CONV-11. */
+  let droppedLinks = 0;
   const named = PAGE_SIZES[options.pageSize] ?? PAGE_SIZES.a4;
   const [pageWidth, pageHeight] = options.pageBox
     ? clampPageBox(options.pageBox, named, notes)
@@ -383,12 +402,28 @@ export async function layoutBlocksToPdf(
     if (y - height < MARGIN && y < pageHeight - MARGIN) newPage();
   };
 
-  const drawLine = (pieces: readonly Piece[], x: number, baseline: number, size: number) => {
+  /**
+   * Draws one line of pieces. `wrap` carries the link the previous line of the
+   * same block ended in, so a refused link that wraps is counted once
+   * (R-CONV-7); a fresh object means "no previous line".
+   */
+  const drawLine = (
+    pieces: readonly Piece[],
+    x: number,
+    baseline: number,
+    size: number,
+    wrap: LinkWrapState = {}
+  ) => {
     if (pieces.length > 0) pageUsed = true;
     let cursor = x;
     let index = 0;
+    let lastHref: string | undefined;
     while (index < pieces.length) {
+      const atLineStart = index === 0;
       const href = pieces[index].href;
+      // An in-document link (`#_Toc…` from a Word table of contents) has
+      // nowhere to point in this PDF: plain text, and not a refusal.
+      const linkHref = isInternalLink(href) ? undefined : href;
       const groupStart = cursor;
       while (index < pieces.length && pieces[index].href === href) {
         const piece = pieces[index];
@@ -397,15 +432,23 @@ export async function layoutBlocksToPdf(
           y: baseline,
           size,
           font: fontFor(fonts, piece.bold, piece.italic),
-          ...(href ? { color: LINK_COLOR } : {})
+          ...(linkHref ? { color: LINK_COLOR } : {})
         });
         cursor += piece.width;
         index += 1;
       }
-      if (href) {
-        addLinkAnnotation(page, [groupStart, baseline - 2, cursor, baseline + size], href);
+      if (linkHref) {
+        droppedLinks += annotateLinkGroup(
+          page,
+          [groupStart, baseline - 2, cursor, baseline + size],
+          linkHref,
+          wrap,
+          atLineStart
+        );
       }
+      lastHref = linkHref;
     }
+    wrap.carried = lastHref;
   };
 
   /**
@@ -425,6 +468,7 @@ export async function layoutBlocksToPdf(
     const lineHeight = size * LINE_RATIO;
     let firstPage = pageIndex;
     let drawnAny = false;
+    const wrap: LinkWrapState = {};
 
     for (const pieces of lines) {
       ensure(lineHeight);
@@ -438,7 +482,7 @@ export async function layoutBlocksToPdf(
           font: fonts.regular
         });
       }
-      drawLine(pieces, x, y, size);
+      drawLine(pieces, x, y, size, wrap);
       drawnAny = true;
     }
 
@@ -521,12 +565,14 @@ export async function layoutBlocksToPdf(
           borderWidth: RULE_WIDTH
         });
         const lines = wrapped[column] ?? [];
+        const wrap: LinkWrapState = {};
         lines.forEach((pieces, lineIndex) => {
           drawLine(
             pieces,
             x + CELL_PADDING_X,
             top - CELL_PADDING_Y - (lineIndex + 1) * lineHeight,
-            TABLE_FONT_SIZE
+            TABLE_FONT_SIZE,
+            wrap
           );
         });
       }
@@ -563,9 +609,11 @@ export async function layoutBlocksToPdf(
       return embedded;
     } catch (err) {
       notes.push(
-        `An image could not be embedded and was left out (${
-          err instanceof Error ? err.message : 'unreadable image data'
-        }).`
+        err instanceof Error
+          ? translate('An image could not be embedded and was left out ({message}).', {
+              message: err.message
+            })
+          : translate('An image could not be embedded and was left out (unreadable image data).')
       );
       return null;
     }
@@ -624,7 +672,11 @@ export async function layoutBlocksToPdf(
     let overflowing = 0;
 
     if (!(block.width > 0) || !(block.height > 0)) {
-      notes.push(`${block.label} states no size, so it was drawn as an empty page.`);
+      notes.push(
+        translate('{label} states no size, so it was drawn as an empty page.', {
+          label: block.label
+        })
+      );
       y = MARGIN;
       pageUsed = true;
       return { pageIndex: at, images, overflowing };
@@ -650,12 +702,13 @@ export async function layoutBlocksToPdf(
     ): boolean => {
       const lines = wrapRuns(runs, fonts, size, width, tally);
       const lineHeight = size * LINE_RATIO;
+      const wrap: LinkWrapState = {};
       lines.forEach((pieces, index) => {
         if (pieces.length === 0) return;
         const lineWidth = pieces.reduce((sum, piece) => sum + piece.width, 0);
         const slack = Math.max(0, width - lineWidth);
         const x = left + (align === 'center' ? slack / 2 : align === 'right' ? slack : 0);
-        drawLine(pieces, x, top - (index + 1) * lineHeight, size);
+        drawLine(pieces, x, top - (index + 1) * lineHeight, size, wrap);
       });
       // Text taller than its own box is *drawn anyway*, overrunning downward,
       // and counted. Clipping it would delete words the deck contains; shrinking
@@ -734,12 +787,14 @@ export async function layoutBlocksToPdf(
             borderColor: RULE_COLOR,
             borderWidth: RULE_WIDTH
           });
+          const wrap: LinkWrapState = {};
           (wrapped[column] ?? []).forEach((pieces, lineIndex) => {
             drawLine(
               pieces,
               x + CELL_PADDING_X,
               top - CELL_PADDING_Y - (lineIndex + 1) * lineHeight,
-              size
+              size,
+              wrap
             );
           });
           x += widths[column];
@@ -763,7 +818,7 @@ export async function layoutBlocksToPdf(
     await checkpoint(
       job,
       (index / blocks.length) * 0.9,
-      `Laying out block ${index + 1} of ${blocks.length}`
+      translate('Laying out block {n} of {total}', { n: index + 1, total: blocks.length })
     );
 
     switch (block.kind) {
@@ -860,13 +915,19 @@ export async function layoutBlocksToPdf(
     // it, and the fonts here are not the fonts the deck asked for — which is
     // the usual reason a box that fitted in PowerPoint does not fit here.
     notes.push(
-      `${overflowingBoxes} text box${overflowingBoxes === 1 ? '' : 'es'} hold more text than ` +
-        'the original sized them for, because this converter draws with its own fonts. All of ' +
-        'that text is in the PDF, but it overruns its box and may overlap what is below it.'
+      tPlural(
+        '{count} text boxes hold more text than ' +
+          'the original sized them for, because this converter draws with its own fonts. All of ' +
+          'that text is in the PDF, but it overruns its box and may overlap what is below it.',
+        overflowingBoxes
+      )
     );
   }
 
-  await checkpoint(job, 0.95, 'Saving the PDF');
+  const linkNote = droppedLinksNote(droppedLinks);
+  if (linkNote) notes.push(linkNote);
+
+  await checkpoint(job, 0.95, translate('Saving the PDF'));
   const bytes = await doc.save();
 
   return {

@@ -4,7 +4,7 @@ import type { ImagesToPdfOptions } from '../../core/operations';
 import { Button } from './Button';
 import { Modal } from './Modal';
 import { Field, Select } from './Field';
-import { useTranslation } from '../../core/i18n';
+import { tPlural, useTranslation } from '../../core/i18n';
 import styles from './ImageOptionsDialog.module.css';
 
 export interface ImageOptionsDialogProps {
@@ -24,7 +24,7 @@ export const ImageOptionsDialog = forwardRef<HTMLDivElement, ImageOptionsDialogP
     return (
       <Modal
         ref={ref}
-        title={t('Import {count} image{plural}', { count, plural: count === 1 ? '' : 's' })}
+        title={tPlural('Import {count} images', count)}
         onClose={onCancel}
         footer={
           <>
@@ -88,14 +88,23 @@ export const ImageOptionsDialog = forwardRef<HTMLDivElement, ImageOptionsDialogP
             )}
           </Field>
 
-          <Field label={t('Quality')}>
+          <Field
+            label={t('Quality')}
+            hint={
+              quality >= 1
+                ? t(
+                    'JPEG photos are embedded exactly as they are, and PNG and GIF images stay lossless. HEIC, TIFF and lossy WebP photos are saved as 95% JPEG when that is smaller.'
+                  )
+                : undefined
+            }
+          >
             {id => (
               <Select
                 id={id}
                 value={quality}
                 onChange={val => setQuality(Number(val))}
                 options={[
-                  { value: 1.0, label: t('100% (Lossless)') },
+                  { value: 1.0, label: t('Maximum (originals kept where possible)') },
                   { value: 0.9, label: t('90% (High)') },
                   { value: 0.75, label: t('75% (Medium)') },
                   { value: 0.5, label: t('50% (Low)') }

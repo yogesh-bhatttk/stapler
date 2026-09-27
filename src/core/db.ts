@@ -111,60 +111,101 @@ function setMemorySearchIndexRecord(rec: SearchIndexRecord): void {
   memorySearchIndexStore.set(rec.id, rec);
 }
 
+/**
+ * RT-11 — how long a call waits for the connection before giving up and
+ * taking the same degraded path as any other storage failure. An upgrade
+ * blocked by an older tab that never closes its connection used to leave
+ * `openDB` pending forever, and with it every storage call: the recovery
+ * check (so autosave never armed), shortcuts, signatures, recents, presets.
+ */
+export const DB_OPEN_TIMEOUT_MS = 4000;
+
 function open(): Promise<IDBPDatabase<StaplerSchema>> {
   if (typeof globalThis.indexedDB === 'undefined') {
     return Promise.reject(new Error('IndexedDB unavailable in this environment'));
   }
   if (!dbPromise) {
-    dbPromise = openDB<StaplerSchema>(DB_NAME, DB_VERSION, {
-      upgrade(db, oldVersion) {
-        // Each version's migration is additive and independent, so a user on any
-        // past version lands on the same schema.
-        if (oldVersion < 1) {
-          if (!db.objectStoreNames.contains('handles')) {
-            const handles = db.createObjectStore('handles', { keyPath: 'id' });
-            handles.createIndex('by-openedAt', 'openedAt');
+    const opening: Promise<IDBPDatabase<StaplerSchema>> = openDB<StaplerSchema>(
+      DB_NAME,
+      DB_VERSION,
+      {
+        upgrade(db, oldVersion) {
+          // Each version's migration is additive and independent, so a user on any
+          // past version lands on the same schema.
+          if (oldVersion < 1) {
+            if (!db.objectStoreNames.contains('handles')) {
+              const handles = db.createObjectStore('handles', { keyPath: 'id' });
+              handles.createIndex('by-openedAt', 'openedAt');
+            }
+            if (!db.objectStoreNames.contains('signatures')) {
+              const signatures = db.createObjectStore('signatures', { keyPath: 'id' });
+              signatures.createIndex('by-createdAt', 'createdAt');
+            }
+            if (!db.objectStoreNames.contains('presets')) {
+              db.createObjectStore('presets', { keyPath: 'id' });
+            }
+            if (!db.objectStoreNames.contains('settings')) {
+              db.createObjectStore('settings');
+            }
           }
-          if (!db.objectStoreNames.contains('signatures')) {
-            const signatures = db.createObjectStore('signatures', { keyPath: 'id' });
-            signatures.createIndex('by-createdAt', 'createdAt');
+          if (oldVersion < 2) {
+            if (!db.objectStoreNames.contains('searchIndex')) {
+              const searchIndex = db.createObjectStore('searchIndex', { keyPath: 'id' });
+              searchIndex.createIndex('by-token', 'token');
+              searchIndex.createIndex('by-type', 'type');
+              searchIndex.createIndex('by-fileId', 'fileId');
+            }
           }
-          if (!db.objectStoreNames.contains('presets')) {
-            db.createObjectStore('presets', { keyPath: 'id' });
+          if (oldVersion < 3) {
+            if (!db.objectStoreNames.contains('recipes')) {
+              db.createObjectStore('recipes', { keyPath: 'id' });
+            }
           }
-          if (!db.objectStoreNames.contains('settings')) {
-            db.createObjectStore('settings');
-          }
+        },
+        blocked() {
+          logEvent('warn', 'db', 'Upgrade blocked by another tab');
+        },
+        blocking() {
+          // RT-11 — a newer tab wants to upgrade the schema, and this tab's open
+          // connection is what blocks it. Close it (and forget it, so the next
+          // call here reopens — at which point this older tab will itself be
+          // the one refused, which is the correct outcome) instead of making
+          // the new tab wait until this one is closed.
+          logEvent('warn', 'db', 'Closing connection so another tab can upgrade');
+          void opening.then(db => db.close()).catch(() => {});
+          if (dbPromise === opening) dbPromise = null;
+        },
+        terminated() {
+          // The connection can be killed by the browser; drop the cached promise so
+          // the next call reopens instead of using a dead handle forever.
+          logEvent('warn', 'db', 'Connection terminated; will reopen on next use');
+          if (dbPromise === opening) dbPromise = null;
         }
-        if (oldVersion < 2) {
-          if (!db.objectStoreNames.contains('searchIndex')) {
-            const searchIndex = db.createObjectStore('searchIndex', { keyPath: 'id' });
-            searchIndex.createIndex('by-token', 'token');
-            searchIndex.createIndex('by-type', 'type');
-            searchIndex.createIndex('by-fileId', 'fileId');
-          }
-        }
-        if (oldVersion < 3) {
-          if (!db.objectStoreNames.contains('recipes')) {
-            db.createObjectStore('recipes', { keyPath: 'id' });
-          }
-        }
-      },
-      blocked() {
-        logEvent('warn', 'db', 'Upgrade blocked by another tab');
-      },
-      terminated() {
-        // The connection can be killed by the browser; drop the cached promise so
-        // the next call reopens instead of using a dead handle forever.
-        logEvent('warn', 'db', 'Connection terminated; will reopen on next use');
-        dbPromise = null;
       }
-    }).catch(err => {
-      dbPromise = null;
+    ).catch(err => {
+      if (dbPromise === opening) dbPromise = null;
       throw err;
     });
+    dbPromise = opening;
   }
   return dbPromise;
+}
+
+/**
+ * {@link open}, bounded by {@link DB_OPEN_TIMEOUT_MS}. The pending open itself
+ * is kept (not restarted per call), so once whatever blocked it goes away,
+ * later calls get the real connection.
+ */
+function openBounded(): Promise<IDBPDatabase<StaplerSchema>> {
+  const opening = open();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error('Timed out opening IndexedDB (upgrade blocked by another tab?)')),
+      DB_OPEN_TIMEOUT_MS
+    );
+  });
+  return Promise.race([opening, timeout]).finally(() => clearTimeout(timer));
 }
 
 function isQuotaError(err: unknown): boolean {
@@ -175,17 +216,34 @@ function isQuotaError(err: unknown): boolean {
  * Runs a database operation, converting quota exhaustion into a message and a
  * `false` return rather than a crash (F-06 acceptance criterion).
  */
+/**
+ * RT-21 — the quota toast is shown at most once per this window. Session
+ * autosave writes on every edit (debounced 500ms), so with storage full each
+ * edit stacked another identical warning.
+ */
+export const QUOTA_TOAST_INTERVAL_MS = 60_000;
+let lastQuotaToastAt = -Infinity;
+
+/** Test hook: forget when the quota toast was last shown. */
+export function __resetQuotaToastForTests(): void {
+  lastQuotaToastAt = -Infinity;
+}
+
 async function guard<T>(scope: string, fn: (db: IDBPDatabase<StaplerSchema>) => Promise<T>) {
   try {
-    return { ok: true as const, value: await fn(await open()) };
+    return { ok: true as const, value: await fn(await openBounded()) };
   } catch (err) {
     if (isQuotaError(err)) {
       logEvent('error', scope, 'Storage quota exceeded');
-      notify('warning', translate('Local storage is full.'), {
-        detail:
-          'Stapler could not save to browser storage. Your document is unaffected — delete ' +
-          'saved signatures or clear site data to free space.'
-      });
+      const now = Date.now();
+      if (now - lastQuotaToastAt >= QUOTA_TOAST_INTERVAL_MS) {
+        lastQuotaToastAt = now;
+        notify('warning', translate('Local storage is full.'), {
+          detail: translate(
+            'Stapler could not save to browser storage. Your document is unaffected. Open the privacy panel from the top bar to see what is stored and free space.'
+          )
+        });
+      }
       return { ok: false as const, value: undefined };
     }
     logEvent('error', scope, err instanceof Error ? err.message : String(err));
@@ -240,12 +298,26 @@ export async function deleteStoredSignature(id: string) {
 
 /* ---------------- settings ---------------- */
 
+/**
+ * A setting read that says whether storage answered at all. `readSetting`
+ * folds "storage unavailable or timed out" into `undefined`, which a caller
+ * that must not act on a missing record — session recovery — cannot tell
+ * apart from "no such record" (regression review R-RT-4).
+ */
+export async function readSettingResult<T>(
+  key: string
+): Promise<{ ok: boolean; value: T | undefined }> {
+  const result = await guard('db.readSetting', db => db.get('settings', key));
+  return { ok: result.ok, value: result.value as T | undefined };
+}
+
 export async function readSetting<T>(key: string): Promise<T | undefined> {
   return (await guard('db.readSetting', db => db.get('settings', key))).value as T | undefined;
 }
 
-export async function writeSetting(key: string, value: unknown) {
-  await guard('db.writeSetting', db => db.put('settings', value, key));
+/** Resolves `false` when storage refused the write (quota, unavailable), `true` otherwise. */
+export async function writeSetting(key: string, value: unknown): Promise<boolean> {
+  return (await guard('db.writeSetting', db => db.put('settings', value, key))).ok;
 }
 
 /* ---------------- searchIndex ---------------- */
@@ -381,4 +453,65 @@ export async function listRecipes(): Promise<Recipe[]> {
 
 export async function deleteRecipe(id: string) {
   await guard('db.deleteRecipe', db => db.delete('recipes', id));
+}
+
+/* ---------------- GAP-12: what is stored, and clearing it ---------------- */
+
+/** Every object store in the `stapler` database. */
+export const STAPLER_STORES = [
+  'handles',
+  'signatures',
+  'presets',
+  'settings',
+  'searchIndex',
+  'recipes'
+] as const;
+export type StaplerStore = (typeof STAPLER_STORES)[number];
+
+export interface StaplerDbStats {
+  signatures: { count: number; bytes: number };
+  recents: number;
+  presets: number;
+  recipes: number;
+  /** Files the folder-search index covers (its `doc` records). */
+  indexedFiles: number;
+  settings: number;
+}
+
+/**
+ * GAP-12 — counts for the trust panel's "Stored on this device" list. `null`
+ * when IndexedDB could not be read at all (the panel then says so instead of
+ * claiming nothing is stored).
+ */
+export async function readStaplerDbStats(): Promise<StaplerDbStats | null> {
+  const result = await guard('db.stats', async db => {
+    const signatures = await db.getAll('signatures');
+    return {
+      signatures: {
+        count: signatures.length,
+        bytes: signatures.reduce((sum, s) => sum + (s.png?.byteLength ?? 0), 0)
+      },
+      recents: await db.count('handles'),
+      presets: await db.count('presets'),
+      recipes: await db.count('recipes'),
+      indexedFiles: await db.countFromIndex('searchIndex', 'by-type', 'doc'),
+      settings: await db.count('settings')
+    };
+  });
+  return result.ok ? result.value : null;
+}
+
+/**
+ * GAP-12 — empties the named stores in one transaction. The database itself is
+ * kept (deleting it would block on this tab's own open connection); an empty
+ * store holds nothing. Returns whether the clear committed.
+ */
+export async function clearStaplerStores(stores: readonly StaplerStore[]): Promise<boolean> {
+  if (stores.includes('searchIndex')) memorySearchIndexStore.clear();
+  const result = await guard('db.clearStores', async db => {
+    const tx = db.transaction([...stores], 'readwrite');
+    await Promise.all(stores.map(name => tx.objectStore(name).clear()));
+    await tx.done;
+  });
+  return result.ok;
 }

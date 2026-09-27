@@ -1,8 +1,8 @@
 /**
  * OCR-01 — the *only* place in this feature that touches the network.
  *
- * Mirrors `faceblur/download.ts` on purpose: `model.ts` resolves URLs and holds
- * the pinned hashes, and cannot fetch; the OCR worker recognises pages and
+ * `model.ts` resolves URLs and holds the pinned hashes and sizes, and cannot
+ * fetch; the OCR worker recognises pages and
  * cannot fetch; `runOcr.ts` sequences consent and caching and cannot fetch;
  * this file fetches one pinned URL, verifies it, and does nothing else.
  * Auditing "what can OCR request?" means reading this file and `model.ts`.
@@ -15,7 +15,14 @@
  * finds a cache hit and never makes a request of its own.
  */
 import { cancelled, internal } from '../errors';
-import { expectedModelHash, resolveModelUrl } from './model';
+import { recordDisclosedDownload } from '../disclosedDownloads';
+import { MODEL_BYTES, expectedModelHash, maxModelDownloadBytes, resolveModelUrl } from './model';
+
+export interface ModelDownloadOptions {
+  signal?: AbortSignal;
+  /** Bytes received so far and the expected total, as the body streams in. */
+  onProgress?: (received: number, total: number) => void;
+}
 
 /** Hex-encoded SHA-256, the same encoding `MODEL_SHA256` in `model.ts` uses. */
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -31,8 +38,13 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
  * unverified bytes: a subresource-integrity check that can be silently
  * skipped is not a check.
  */
-export async function fetchVerifiedModel(lang: string, signal?: AbortSignal): Promise<Uint8Array> {
+export async function fetchVerifiedModel(
+  lang: string,
+  options: ModelDownloadOptions = {}
+): Promise<Uint8Array> {
+  const { signal } = options;
   const url = resolveModelUrl(lang);
+  const maxBytes = maxModelDownloadBytes(lang);
 
   let response: Response;
   try {
@@ -54,7 +66,7 @@ export async function fetchVerifiedModel(lang: string, signal?: AbortSignal): Pr
     );
   }
 
-  const bytes = new Uint8Array(await response.arrayBuffer());
+  const bytes = await readCapped(response, lang, maxBytes, options);
 
   const expected = expectedModelHash(lang);
   if (!expected) {
@@ -80,5 +92,68 @@ export async function fetchVerifiedModel(lang: string, signal?: AbortSignal): Pr
     );
   }
 
+  recordDisclosedDownload();
+  return bytes;
+}
+
+function tooLarge(lang: string, size: number, maxBytes: number) {
+  return internal(
+    `The "${lang}" OCR language model download was refused: the server sent ${size} bytes or ` +
+      `more, but the pinned file is about ${Math.round(maxBytes / 2)} bytes. Nothing was saved.`,
+    { lang, size, maxBytes }
+  );
+}
+
+/**
+ * Audit 2026-09-25 CNV-16 — streams the body instead of `arrayBuffer()`, so
+ * the progress bar moves during a slow download and a response past
+ * `maxBytes` (twice the pinned file's size) is cut off as soon as it crosses
+ * the line rather than buffered in full first. A declared `Content-Length`
+ * over the cap is refused before a single body byte is read.
+ */
+async function readCapped(
+  response: Response,
+  lang: string,
+  maxBytes: number,
+  options: ModelDownloadOptions
+): Promise<Uint8Array> {
+  const declared = Number(response.headers?.get('content-length') ?? NaN);
+  if (Number.isFinite(declared) && declared > maxBytes) throw tooLarge(lang, declared, maxBytes);
+  const total = Number.isFinite(declared) && declared > 0 ? declared : (MODEL_BYTES[lang] ?? 0);
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    // No streaming body (some test doubles, very old engines): fall back to a
+    // whole-body read, still size-checked before it is used.
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength > maxBytes) throw tooLarge(lang, bytes.byteLength, maxBytes);
+    options.onProgress?.(bytes.byteLength, total || bytes.byteLength);
+    return bytes;
+  }
+
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (options.signal?.aborted) throw cancelled();
+      received += value.byteLength;
+      if (received > maxBytes) throw tooLarge(lang, received, maxBytes);
+      chunks.push(value);
+      options.onProgress?.(received, Math.max(total, received));
+    }
+  } catch (err) {
+    await reader.cancel().catch(() => {});
+    if (options.signal?.aborted) throw cancelled();
+    throw err;
+  }
+
+  const bytes = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
   return bytes;
 }

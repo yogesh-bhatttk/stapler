@@ -1,4 +1,4 @@
-import { translate } from '../../../core/i18n';
+import { tPlural, translate, useTranslation } from '../../../core/i18n';
 /**
  * OPS-04 — insert pages from another document at a chosen position.
  *
@@ -8,6 +8,7 @@ import { translate } from '../../../core/i18n';
  * no way to choose where the pages landed short of appending, then dragging
  * them into place in the grid by hand.
  */
+import { tryToRepairAction } from '../repair/state';
 import { useState } from 'preact/hooks';
 import { FilePlus } from 'lucide-preact';
 import { platform } from '../../../platform/current';
@@ -22,7 +23,6 @@ import { isSupportedImage } from '../../../core/image';
 import { Field, NumberStepper } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
 import { useJob } from '../../useJob';
-import { useTranslation } from '../../../core/i18n';
 
 /** Right after the last selected page, or the end of the document if none. */
 function defaultInsertIndex(doc: { pages: { key: string }[] }, selected: Set<string>): number {
@@ -65,7 +65,7 @@ export function InsertPanel() {
         imageOptions = opts;
       }
 
-      await run({ label: 'Importing', scope: 'insert.add' }, async job => {
+      await run({ label: translate('Importing'), scope: 'insert.add' }, async job => {
         const outcome = await importFiles(files, job, imageOptions);
         let at = clampedIndex;
         const insertedKeys: string[] = [];
@@ -80,7 +80,8 @@ export function InsertPanel() {
         // A failure on one file never stops the others, and each says why.
         for (const failure of outcome.failures) {
           notify('danger', translate('Could not add {name}', { name: failure.name }), {
-            detail: failure.message
+            detail: failure.message,
+            ...(failure.repairable ? { action: tryToRepairAction(failure.repairable) } : {})
           });
         }
         if (insertedKeys.length > 0) {
@@ -91,8 +92,7 @@ export function InsertPanel() {
           setManualIndex(null);
           notify(
             'success',
-            translate('Inserted {count} page(s) at position {position}.', {
-              count: insertedKeys.length,
+            tPlural('Inserted {count} pages at position {position}.', insertedKeys.length, {
               position: clampedIndex + 1
             })
           );
@@ -109,7 +109,7 @@ export function InsertPanel() {
     <>
       <Field
         label={t('Insert at position')}
-        hint={clampedIndex === 0 ? 'At the start' : `After page ${clampedIndex}`}
+        hint={clampedIndex === 0 ? t('At the start') : t('After page {n}', { n: clampedIndex })}
       >
         {id => (
           <NumberStepper
@@ -118,7 +118,7 @@ export function InsertPanel() {
             min={0}
             max={pageCount}
             onChange={setManualIndex}
-            ariaLabel="Insert at position"
+            ariaLabel={t('Insert at position')}
           />
         )}
       </Field>

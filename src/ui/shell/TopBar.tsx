@@ -1,15 +1,24 @@
-import { translate } from '../../core/i18n';
-import { House, Moon, Search, Sun } from 'lucide-preact';
-import { useState } from 'preact/hooks';
+import { House, Menu, Moon, Search, ShieldCheck, Sun } from 'lucide-preact';
+import { useId, useState } from 'preact/hooks';
 import { Badge } from '../components/Badge';
 import { Button } from '../components/Button';
 import { Icon } from '../components/Icon';
 import { IconButton } from '../components/IconButton';
 import { TrustModal } from '../components/TrustModal';
+import { FloatingTooltip, useTooltipTrigger } from '../components/FloatingTooltip';
 import { FileTabs } from './FileTabs';
+import { ToolsSheet } from './ToolsSheet';
 import { isCommandPaletteOpen } from '../../core/ui';
+import { disclosedDownloads } from '../../core/disclosedDownloads';
 import { resolvedTheme, toggleTheme } from '../theme';
-import { useTranslation, currentLocale, setLocale, locales } from '../../core/i18n';
+import {
+  useTranslation,
+  currentLocale,
+  setLocale,
+  locales,
+  tPlural,
+  translate
+} from '../../core/i18n';
 import styles from './TopBar.module.css';
 
 /** ⌘ on Apple platforms, Ctrl everywhere else — the hint must match the key. */
@@ -20,8 +29,18 @@ const MOD_LABEL =
 
 export function TopBar() {
   const [showTrust, setShowTrust] = useState(false);
+  const [showTools, setShowTools] = useState(false);
+  const trustTooltip = useTooltipTrigger();
+  const trustTooltipId = useId();
   const isDark = resolvedTheme.value === 'dark';
   const t = useTranslation();
+  // PLT-16 — the chip counts this page's disclosed, consented model downloads
+  // (the only request Stapler can ever make) instead of always claiming zero.
+  const downloads = disclosedDownloads.value;
+  const trustText =
+    downloads === 0
+      ? t('Offline · 0 requests')
+      : tPlural('Offline · {count} disclosed downloads', downloads);
 
   return (
     <header className={styles.topBar}>
@@ -34,8 +53,22 @@ export function TopBar() {
        */}
       <a href="#/" className={styles.logo} title={t('Home')}>
         <Icon icon={House} size={20} />
-        {t('header.title')}
+        {/* Visually hidden below 600px, where the top bar has no room for it. */}
+        <span className={styles.wordmark}>{t('header.title')}</span>
       </a>
+
+      {/* GAP-3 — replaces the tool rail below 600px (CSS shows it only there). */}
+      <Button
+        variant="secondary"
+        size="compact"
+        icon={Menu}
+        className={styles.toolsButton}
+        aria-haspopup="dialog"
+        aria-expanded={showTools}
+        onClick={() => setShowTools(true)}
+      >
+        {t('Tools')}
+      </Button>
 
       <FileTabs />
 
@@ -47,14 +80,20 @@ export function TopBar() {
           // This control had no handler at all before: it rendered the shortcut
           // hint as decoration and could not open anything.
           onClick={() => (isCommandPaletteOpen.value = true)}
+          // The visible hint is only the key chord, and it is hidden on touch
+          // screens (GAP-3), so the name has to come from here.
+          aria-label={translate('Command palette')}
+          aria-keyshortcuts={MOD_LABEL === '⌘K' ? 'Meta+K' : 'Control+K'}
         >
-          <span className={styles.shortcut}>{MOD_LABEL}</span>
+          <span className={styles.shortcut} aria-hidden="true">
+            {MOD_LABEL}
+          </span>
         </Button>
         <IconButton
           icon={isDark ? Sun : Moon}
           onClick={toggleTheme}
           size="compact"
-          aria-label={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
+          aria-label={isDark ? t('Switch to light theme') : t('Switch to dark theme')}
         />
         <select
           value={currentLocale.value}
@@ -98,13 +137,33 @@ export function TopBar() {
           type="button"
           className={styles.trustChip}
           onClick={() => setShowTrust(true)}
-          aria-label={translate('Offline, zero network requests. Read how to verify this.')}
+          aria-label={
+            downloads === 0
+              ? translate('Offline, zero network requests. Read how to verify this.')
+              : tPlural(
+                  'Offline except {count} disclosed model downloads you approved. Read how to verify this.',
+                  downloads
+                )
+          }
+          aria-describedby={trustTooltip.anchor ? trustTooltipId : undefined}
+          {...trustTooltip.triggerProps}
         >
-          <Badge variant="success">{t('Offline · 0 requests')}</Badge>
+          {/* Below 600px the chip collapses to its shield (GAP-3); the full
+              claim stays in the accessible name and the tooltip. */}
+          <Badge variant="success" className={styles.trustFull}>
+            {trustText}
+          </Badge>
+          <Badge variant="success" className={styles.trustCompact}>
+            <Icon icon={ShieldCheck} size={14} />
+          </Badge>
         </button>
+        <FloatingTooltip anchor={trustTooltip.anchor} id={trustTooltipId} side="block-end">
+          {trustText}
+        </FloatingTooltip>
       </div>
 
       {showTrust && <TrustModal onClose={() => setShowTrust(false)} />}
+      {showTools && <ToolsSheet onClose={() => setShowTools(false)} />}
     </header>
   );
 }

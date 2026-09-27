@@ -112,7 +112,7 @@ test.describe('DOC-02 import and validation', () => {
   /**
    * DOC-02 requires PNG, JPEG, WebP, TIFF and HEIC to be accepted. Each of these is a
    * different decode path — the browser's own decoder for PNG/JPEG/WebP, `utif` for
-   * TIFF, and `heic2any` for HEIC — and none of them had been run through the real pipeline before.
+   * TIFF, and libheif (WASM, in the image worker) for HEIC — and none of them had been run through the real pipeline before.
    */
   for (const { file, format } of [
     { file: 'tests/fixtures/sample.png', format: 'PNG' },
@@ -176,7 +176,7 @@ test.describe('DOC-02 import and validation', () => {
    * correct reader to rotate it back — the same shape of bug CNV-01's own
    * `imageOrientation: 'from-image'` comment describes for JPEG ("a sideways
    * photo must not stay sideways"), never previously proven for HEIC
-   * specifically since heic2any decodes to an intermediate PNG blob first.
+   * specifically since the HEIC decoder (libheif) applies the HEIF rotation itself.
    */
   test('a rotated .heic photo with EXIF orientation imports right-side up', async ({ page }) => {
     await openApp(page);
@@ -261,9 +261,18 @@ test.describe('DOC-02 import and validation', () => {
     // first dismissal a plain reload is enough — and waiting 10s per fixture for a
     // dialog that will never reappear is what made this sweep time out.
     await openApp(page);
+    const recovery = page.getByRole('dialog', { name: 'Restore your previous session?' });
     for (const name of names) {
       await page.goto('/');
       await expect(page.locator('header')).toBeVisible();
+      // The previous fixture's import was autosaved, so the reload offers to
+      // restore it. Imports are refused until that prompt is answered
+      // (AUDIT-2026-09-25 RT-14) — answer it the way a user would.
+      await recovery.waitFor({ state: 'visible', timeout: 2_000 }).catch(() => {});
+      if (await recovery.isVisible().catch(() => false)) {
+        await page.getByRole('button', { name: 'Start fresh' }).click();
+        await expect(recovery).toBeHidden();
+      }
       await page.locator('input[type="file"]').setInputFiles(`${FIXTURES_DIR}/${name}`);
 
       const grid = page.getByRole('listbox', { name: /Pages of/ });

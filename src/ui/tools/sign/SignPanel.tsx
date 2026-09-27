@@ -4,7 +4,7 @@
  * `Detect signature lines` previously passed the store document id to the render
  * worker, which expects its own handle, so it threw on every use.
  */
-import { useEffect } from 'preact/hooks';
+import { useEffect, useRef } from 'preact/hooks';
 import {
   Calendar,
   Check,
@@ -30,6 +30,7 @@ import {
   signatures
 } from '../../../core/signatures';
 import { notify } from '../../../core/notify';
+import { fromUnknown, logEvent } from '../../../core/errors';
 import { parseFormula } from '../../../core/formula';
 import { Button } from '../../components/Button';
 import { IconButton } from '../../components/IconButton';
@@ -48,18 +49,32 @@ import {
 } from './state';
 import { useJob } from '../../useJob';
 import styles from './SignPanel.module.css';
-import { useTranslation } from '../../../core/i18n';
+import { tKey, tPlural, translate, useTranslation } from '../../../core/i18n';
 
 const FORM_FIELDS: { type: StampType; labelKey: string; icon: typeof Type }[] = [
-  { type: 'form-text', labelKey: 'Text field', icon: Type },
-  { type: 'form-checkbox', labelKey: 'Checkbox', icon: CheckSquare },
-  { type: 'form-radio', labelKey: 'Radio button', icon: CircleDot }
+  { type: 'form-text', labelKey: tKey('Text field'), icon: Type },
+  { type: 'form-checkbox', labelKey: tKey('Checkbox'), icon: CheckSquare },
+  { type: 'form-radio', labelKey: tKey('Radio button'), icon: CircleDot }
 ];
 
+type SignatureKind = 'draw' | 'type' | 'image';
+
+const USE_SIGNATURE_LABELS: Record<SignatureKind, string> = {
+  draw: tKey('Use this drawn signature'),
+  type: tKey('Use this typed signature'),
+  image: tKey('Use this imported signature')
+};
+
+const USE_INITIALS_LABELS: Record<SignatureKind, string> = {
+  draw: tKey('Use these drawn initials'),
+  type: tKey('Use these typed initials'),
+  image: tKey('Use these imported initials')
+};
+
 const STAMPS: { type: StampType; labelKey: string; icon: typeof Type }[] = [
-  { type: 'text', labelKey: 'tool.sign.stampText', icon: Type },
-  { type: 'date', labelKey: 'tool.sign.stampDate', icon: Calendar },
-  { type: 'check', labelKey: 'tool.sign.stampCheck', icon: Check }
+  { type: 'text', labelKey: tKey('tool.sign.stampText'), icon: Type },
+  { type: 'date', labelKey: tKey('tool.sign.stampDate'), icon: Calendar },
+  { type: 'check', labelKey: tKey('tool.sign.stampCheck'), icon: Check }
 ];
 
 export function SignPanel() {
@@ -73,6 +88,18 @@ export function SignPanel() {
     void loadSignatures();
   }, []);
 
+  const fetchedFor = useRef<string | null>(null);
+  const formFieldKey = (doc?.annotations ?? [])
+    .filter(a => a.type.startsWith('form-'))
+    // Geometry included: a moved or resized field must move its typeable
+    // input too (regression review R-UI-1).
+    .map(
+      a =>
+        `${a.id}:${a.pageKey}:${a.fieldName ?? ''}:${a.exportValue ?? ''}:` +
+        `${a.x}:${a.y}:${a.width}:${a.height}:${a.rotation ?? 0}`
+    )
+    .join('|');
+
   useEffect(() => {
     if (!doc) {
       formFields.value = null;
@@ -81,37 +108,63 @@ export function SignPanel() {
     }
     // Only query fields if the document properties imply they exist
     let cancelled = false;
-    void currentDocumentBytes().then(bytes => {
-      getFormFields(bytes)
-        .then(fields => {
-          // Discard a response that resolves after `doc` has already moved on
-          // (switched tabs, or an edit landed) — otherwise a slow fetch for a
-          // document the user has left can clobber the fields shown/filled for
-          // whatever document is active now.
-          if (cancelled) return;
-          formFields.value = fields;
-        })
-        .catch(() => {
-          if (cancelled) return;
-          formFields.value = null;
-        });
-      // SGN-09 — a structural check only, independent of whether the document
-      // has *fillable* fields, so it runs alongside rather than inside the
-      // form-fields fetch above.
-      checkSignatureIntegrity(bytes)
-        .then(report => {
-          if (cancelled) return;
-          signatureIntegrity.value = report;
-        })
-        .catch(() => {
-          if (cancelled) return;
-          signatureIntegrity.value = null;
-        });
-    });
+    // Cleared up front only for a *different* document, so its fields are never
+    // shown (or filled) while this one's are fetched. For the same document the
+    // current fields stay until the refetch lands: clearing them unmounted any
+    // open input mid-typing (regression review R-UI-8).
+    if (fetchedFor.current !== doc.id) {
+      formFields.value = null;
+      signatureIntegrity.value = null;
+    }
+    fetchedFor.current = doc.id;
+    // Debounced, so dragging a field refetches once when it settles rather
+    // than recomposing the document on every pointer move.
+    const timer = setTimeout(
+      () =>
+        void currentDocumentBytes().then(
+          bytes => {
+            getFormFields(bytes)
+              .then(fields => {
+                // Discard a response that resolves after `doc` has already moved on
+                // (switched tabs, or an edit landed) — otherwise a slow fetch for a
+                // document the user has left can clobber the fields shown/filled for
+                // whatever document is active now.
+                if (cancelled) return;
+                formFields.value = fields;
+              })
+              .catch(() => {
+                if (cancelled) return;
+                formFields.value = null;
+              });
+            // SGN-09 — a structural check only, independent of whether the document
+            // has *fillable* fields, so it runs alongside rather than inside the
+            // form-fields fetch above.
+            checkSignatureIntegrity(bytes)
+              .then(report => {
+                if (cancelled) return;
+                signatureIntegrity.value = report;
+              })
+              .catch(() => {
+                if (cancelled) return;
+                signatureIntegrity.value = null;
+              });
+          },
+          err => {
+            if (!cancelled) logEvent('warn', 'sign.fields', fromUnknown(err).message);
+          }
+        ),
+      250
+    );
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
-  }, [doc]);
+    // Keyed on what can change the field list — the document, its pages, and
+    // the form-field annotations it creates — not the whole `doc`: every
+    // signature placed or dragged is a new `doc` object, and re-composing a
+    // 300-page PDF to re-read fields on each one was pure waste
+    // (AUDIT-2026-09-25 UI-25).
+  }, [doc?.id, doc?.pages, formFieldKey]);
 
   useEffect(() => {
     formValues.value = {};
@@ -119,20 +172,20 @@ export function SignPanel() {
   }, [doc?.id]);
 
   const detect = () =>
-    run({ label: 'Looking for signature lines', scope: 'sign.detect' }, async job => {
+    run({ label: translate('Looking for signature lines'), scope: 'sign.detect' }, async job => {
       const bytes = await currentDocumentBytes(job);
       const found = await detectSignatureLines(bytes, job);
       signatureSuggestions.value = found;
       notify(
         found.length > 0 ? 'info' : 'warning',
         found.length > 0
-          ? `Suggested ${found.length} place(s) to sign.`
-          : 'No signature lines found.',
+          ? tPlural('Suggested {count} places to sign.', found.length)
+          : translate('No signature lines found.'),
         {
           detail:
             found.length > 0
-              ? 'Pick a signature, then click a highlighted box on the page.'
-              : 'Place your signature by clicking the page directly.'
+              ? translate('Pick a signature, then click a highlighted box on the page.')
+              : translate('Place your signature by clicking the page directly.')
         }
       );
     });
@@ -186,7 +239,7 @@ export function SignPanel() {
                   role="button"
                   tabIndex={0}
                   aria-pressed={active}
-                  aria-label={`${t('tool.sign.useThisPrefix')} ${signature.kind} ${t('tool.sign.signatureSuffix')}`}
+                  aria-label={t(USE_SIGNATURE_LABELS[signature.kind])}
                   onClick={() =>
                     (activeStamp.value = active
                       ? null
@@ -235,7 +288,7 @@ export function SignPanel() {
                   role="button"
                   tabIndex={0}
                   aria-pressed={active}
-                  aria-label={`${t('tool.sign.useThisPrefix')} ${signature.kind} ${t('tool.sign.initialSuffix')}`}
+                  aria-label={t(USE_INITIALS_LABELS[signature.kind])}
                   onClick={() =>
                     (activeStamp.value = active
                       ? null

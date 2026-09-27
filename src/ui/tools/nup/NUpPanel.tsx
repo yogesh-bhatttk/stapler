@@ -2,12 +2,12 @@ import { useEffect } from 'preact/hooks';
 import { Field } from '../../components/Field';
 import { nupSettings, type NUpLayout } from './state';
 import styles from './NUpPanel.module.css';
-import { useTranslation } from '../../../core/i18n';
+import { tKey, useTranslation } from '../../../core/i18n';
 
 const LAYOUTS: { value: NUpLayout; label: string }[] = [
-  { value: '2-up', label: '2-up' },
-  { value: '4-up', label: '4-up' },
-  { value: 'booklet', label: 'Booklet' }
+  { value: '2-up', label: tKey('2-up') },
+  { value: '4-up', label: tKey('4-up') },
+  { value: 'booklet', label: tKey('Booklet') }
 ];
 
 export function NUpPanel() {
@@ -47,14 +47,14 @@ export function NUpPanel() {
           >
             {LAYOUTS.map(l => (
               <option key={l.value} value={l.value}>
-                {l.label}
+                {t(l.label)}
               </option>
             ))}
           </select>
         )}
       </Field>
 
-      <Field label={`Margin (${settings.margin}px)`}>
+      <Field label={t('Margin ({value}px)', { value: settings.margin })}>
         {id => (
           <input
             id={id}
@@ -69,7 +69,7 @@ export function NUpPanel() {
         )}
       </Field>
 
-      <Field label={`Gutter (${settings.gutter}px)`}>
+      <Field label={t('Gutter ({value}px)', { value: settings.gutter })}>
         {id => (
           <input
             id={id}

@@ -251,7 +251,7 @@ async function sharedImagePdf(): Promise<Uint8Array> {
 describe('CNV-06: extracting embedded images', () => {
   it('writes a DCTDecode image out byte-for-byte, with no decode step at all', async () => {
     const bytes = await jpegAndRasterPdf();
-    const result = await processWorkerImpl.extractImages(bytes);
+    const result = await processWorkerImpl.extractImages(bytes, null);
     const files = unzipSync(result.bytes);
 
     const jpegName = Object.keys(files).find(name => name.endsWith('.jpg'));
@@ -273,7 +273,7 @@ describe('CNV-06: extracting embedded images', () => {
 
   it('re-frames a Flate raster into PNG with the samples unchanged', async () => {
     const bytes = await jpegAndRasterPdf();
-    const result = await processWorkerImpl.extractImages(bytes);
+    const result = await processWorkerImpl.extractImages(bytes, null);
     const files = unzipSync(result.bytes);
 
     const pngName = Object.keys(files).find(name => name.endsWith('.png'));
@@ -297,7 +297,7 @@ describe('CNV-06: extracting embedded images', () => {
 
   it('yields one file per image on a page with N images', async () => {
     const bytes = await jpegAndRasterPdf();
-    const result = await processWorkerImpl.extractImages(bytes);
+    const result = await processWorkerImpl.extractImages(bytes, null);
     const files = unzipSync(result.bytes);
 
     expect((await imageStreams(bytes)).length).toBe(2);
@@ -309,7 +309,7 @@ describe('CNV-06: extracting embedded images', () => {
 
   it('preserves an Indexed image as a palette PNG, palette and bit depth intact', async () => {
     const { bytes, indexed } = await handBuiltRastersPdf();
-    const result = await processWorkerImpl.extractImages(bytes);
+    const result = await processWorkerImpl.extractImages(bytes, null);
     const files = unzipSync(result.bytes);
 
     const entry = result.entries.find(e => e.name === 'ImIndexed');
@@ -326,7 +326,7 @@ describe('CNV-06: extracting embedded images', () => {
 
   it('writes an SMask beside the image it belongs to, rather than baking it in', async () => {
     const { bytes } = await handBuiltRastersPdf();
-    const result = await processWorkerImpl.extractImages(bytes);
+    const result = await processWorkerImpl.extractImages(bytes, null);
     const files = unzipSync(result.bytes);
 
     const entry = result.entries.find(e => e.name === 'ImGray');
@@ -347,7 +347,7 @@ describe('CNV-06: extracting embedded images', () => {
 
   it('refuses a truncated raster instead of writing a short file', async () => {
     const { bytes } = await handBuiltRastersPdf();
-    const result = await processWorkerImpl.extractImages(bytes);
+    const result = await processWorkerImpl.extractImages(bytes, null);
     const files = unzipSync(result.bytes);
 
     const entry = result.entries.find(e => e.name === 'ImTruncated');
@@ -359,7 +359,7 @@ describe('CNV-06: extracting embedded images', () => {
 
   it('extracts a reused image object once and reports the reuse', async () => {
     const bytes = await sharedImagePdf();
-    const result = await processWorkerImpl.extractImages(bytes);
+    const result = await processWorkerImpl.extractImages(bytes, null);
     const files = unzipSync(result.bytes);
 
     expect(Object.keys(files)).toEqual(['page-001-image-01.jpg']);
@@ -382,7 +382,7 @@ describe('CNV-06: extracting embedded images', () => {
     // over. Converting it to RGB would be the re-encode this ticket exists to
     // avoid, and would flatten the very colour the fixture is about.
     const bytes = fixture('cmyk.pdf');
-    const result = await processWorkerImpl.extractImages(bytes);
+    const result = await processWorkerImpl.extractImages(bytes, null);
 
     expect(result.entries).toHaveLength(1);
     expect(result.entries[0].status).toBe('skipped');
@@ -412,7 +412,7 @@ describe('CNV-06: extracting embedded images', () => {
     page.node.set(PDFName.of('Resources'), context.obj({ XObject: context.obj({ Im0: ref }) }));
     const bytes = await doc.save();
 
-    const result = await processWorkerImpl.extractImages(bytes);
+    const result = await processWorkerImpl.extractImages(bytes, null);
     const files = unzipSync(result.bytes);
     const entry = result.entries[0];
 
@@ -425,8 +425,8 @@ describe('CNV-06: extracting embedded images', () => {
   });
 
   it('writes a JPXDecode image as .jp2 without decoding it, and refuses JBIG2', async () => {
-    const jpx = await processWorkerImpl.extractImages(fixture('jpx.pdf'));
-    const jbig2 = await processWorkerImpl.extractImages(fixture('jbig2.pdf'));
+    const jpx = await processWorkerImpl.extractImages(fixture('jpx.pdf'), null);
+    const jbig2 = await processWorkerImpl.extractImages(fixture('jbig2.pdf'), null);
 
     // The jpx fixture's stream is deliberately zero-length (see the corpus
     // README), so this asserts the routing and the byte-for-byte handover, not
@@ -464,14 +464,14 @@ describe('CNV-06: extracting embedded images', () => {
     );
     page.node.set(PDFName.of('Resources'), context.obj({ XObject: context.obj({ Im0: ref }) }));
 
-    const result = await processWorkerImpl.extractImages(await doc.save());
+    const result = await processWorkerImpl.extractImages(await doc.save(), null);
     const files = unzipSync(result.bytes);
     expect(result.entries[0].status).toBe('extracted');
     expect(files['page-001-image-01.jpg']).toEqual(source);
   });
 
   it('refuses an encrypted document with an explanation, extracting nothing', async () => {
-    await expect(processWorkerImpl.extractImages(fixture('encrypted.pdf'))).rejects.toThrow(
+    await expect(processWorkerImpl.extractImages(fixture('encrypted.pdf'), null)).rejects.toThrow(
       /encrypted/i
     );
   });
@@ -489,12 +489,12 @@ describe('CNV-06: extracting embedded images', () => {
       }
     };
 
-    await processWorkerImpl.extractImages(bytes, undefined, job);
+    await processWorkerImpl.extractImages(bytes, null, job);
     expect(progress.length).toBeGreaterThanOrEqual(3);
     expect(progress.every((value, i) => i === 0 || value >= progress[i - 1])).toBe(true);
 
     cancelled = true;
-    await expect(processWorkerImpl.extractImages(bytes, undefined, job)).rejects.toThrow(/cancel/i);
+    await expect(processWorkerImpl.extractImages(bytes, null, job)).rejects.toThrow(/cancel/i);
   });
 });
 

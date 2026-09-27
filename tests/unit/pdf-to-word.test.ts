@@ -155,11 +155,13 @@ async function convert(
   outline: Awaited<ReturnType<typeof convertPdfToDocx>>['outline'];
   progress: number[];
 }> {
+  // A `null` (indeterminate) report is recorded as NaN so it fails every
+  // determinate-progress assertion below rather than being silently dropped.
   const progress: number[] = [];
   const result = await convertPdfToDocx(
     bytes,
     { includeImages, documentName },
-    { onProgress: fraction => progress.push(fraction) }
+    { onProgress: fraction => progress.push(fraction ?? NaN) }
   );
   return {
     docx: result.bytes,
@@ -708,10 +710,12 @@ describe('CNV-08 — the mandatory-preview gate', () => {
     const store = await import('../../src/core/store');
 
     const pageKey = 'page-1';
+    const docPages = [{ key: pageKey, sourceDocId: 'src-1', sourceIndex: 0, rotation: 0 }];
     const doc = {
       id: 'doc-edit',
       name: 'edited.pdf',
-      pages: [{ key: pageKey, sourceDocId: 'src-1', sourceIndex: 0, rotation: 0 }],
+      pages: docPages,
+      baseline: docPages,
       annotations: [],
       dirty: false
     };

@@ -18,6 +18,7 @@
  *    fetches; `download.ts` does that and nothing else.
  */
 import type { UnitRect } from '../pdf/image-redaction';
+import { translate } from '../i18n';
 
 export type DetectionKind = 'face' | 'logo';
 
@@ -254,7 +255,7 @@ async function selectBackend(faceapi: FaceApiLike): Promise<void> {
       // Try the next one; a headless or GPU-blocked context has no WebGL.
     }
   }
-  throw new Error('No TensorFlow.js backend could be started for face detection.');
+  throw new Error(translate('No TensorFlow.js backend could be started for face detection.'));
 }
 
 /**

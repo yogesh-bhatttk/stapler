@@ -1,10 +1,9 @@
-import { translate } from '../../../core/i18n';
 import { useState } from 'preact/hooks';
 import { Search, FileText } from 'lucide-preact';
 import { platform } from '../../../platform/current';
 import { exportAnnotationSummary, type SummaryAnnotation } from '../../../core/annotation-summary';
 import { pageAnnotations } from './state';
-import { useTranslation } from '../../../core/i18n';
+import { tKey, translate, useTranslation } from '../../../core/i18n';
 import { ANNOTATION_COLORS } from '../../../core/doc-colors';
 import { notify } from '../../../core/notify';
 import { activeDoc } from '../../../core/store';
@@ -22,12 +21,12 @@ import {
 } from './state';
 
 const COLOR_NAME_KEYS: Record<string, string> = {
-  [ANNOTATION_COLORS[0]]: 'tool.annotate.colorYellow',
-  [ANNOTATION_COLORS[1]]: 'tool.annotate.colorRed',
-  [ANNOTATION_COLORS[2]]: 'tool.annotate.colorGreen',
-  [ANNOTATION_COLORS[3]]: 'tool.annotate.colorBlue',
-  [ANNOTATION_COLORS[4]]: 'tool.annotate.colorBlack',
-  [ANNOTATION_COLORS[5]]: 'tool.annotate.colorWhite'
+  [ANNOTATION_COLORS[0]]: tKey('tool.annotate.colorYellow'),
+  [ANNOTATION_COLORS[1]]: tKey('tool.annotate.colorRed'),
+  [ANNOTATION_COLORS[2]]: tKey('tool.annotate.colorGreen'),
+  [ANNOTATION_COLORS[3]]: tKey('tool.annotate.colorBlue'),
+  [ANNOTATION_COLORS[4]]: tKey('tool.annotate.colorBlack'),
+  [ANNOTATION_COLORS[5]]: tKey('tool.annotate.colorWhite')
 };
 
 export function AnnotatePanel() {
@@ -89,9 +88,15 @@ export function AnnotatePanel() {
   };
 
   const highlightMatches = () =>
-    run({ label: `Searching for "${query.trim()}"`, scope: 'annotate.search' }, async job => {
-      await searchAndHighlightMatches(query, matchCase, job);
-    });
+    run(
+      {
+        label: translate('Searching for "{query}"', { query: query.trim() }),
+        scope: 'annotate.search'
+      },
+      async job => {
+        await searchAndHighlightMatches(query, matchCase, job);
+      }
+    );
 
   return (
     <>
@@ -163,7 +168,7 @@ export function AnnotatePanel() {
                   backgroundColor: color,
                   cursor: 'pointer'
                 }}
-                aria-label={`${t('tool.annotate.selectColor')} ${t(COLOR_NAME_KEYS[color])}`}
+                aria-label={t('Select color {color}', { color: t(COLOR_NAME_KEYS[color]) })}
               />
             );
           })}
@@ -185,7 +190,7 @@ export function AnnotatePanel() {
 
       <hr className={panelStyles.divider} />
       <Button variant="secondary" icon={FileText} disabled={!doc} onClick={handleExportSummary}>
-        Export annotation summary
+        {t('Export annotation summary')}
       </Button>
 
       <FlattenOption mode="annotate" />

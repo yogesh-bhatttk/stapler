@@ -7,6 +7,9 @@
 import { signal } from '@preact/signals';
 import { readSetting, writeSetting } from './db';
 import { logEvent } from './errors';
+import { tKey } from './i18n/key';
+import { translate } from './i18n';
+import { notify } from './notify';
 
 export interface ShortcutBinding {
   key: string; // Normalized lowercase, e.g. 'k', 'z', 'y', 'a', 'r', 'delete', 'backspace', '?'
@@ -30,49 +33,127 @@ function normalizedShortcutKey(key: string): string {
 export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
   {
     id: 'palette',
-    label: 'Command palette',
-    category: 'Global',
+    label: tKey('Command palette'),
+    category: tKey('Global'),
     defaultBinding: { key: 'k', mod: true }
   },
   {
     id: 'shortcuts',
-    label: 'Keyboard shortcuts',
-    category: 'Global',
+    label: tKey('Keyboard shortcuts'),
+    category: tKey('Global'),
     defaultBinding: { key: '?' }
   },
   {
     id: 'undo',
-    label: 'Undo',
-    category: 'Document',
+    label: tKey('Undo'),
+    category: tKey('Document'),
     defaultBinding: { key: 'z', mod: true }
   },
   {
     id: 'redo',
-    label: 'Redo',
-    category: 'Document',
+    label: tKey('Redo'),
+    category: tKey('Document'),
     defaultBinding: { key: 'y', mod: true }
   },
   {
     id: 'selectAll',
-    label: 'Select all pages',
-    category: 'Document',
+    label: tKey('Select all pages'),
+    category: tKey('Document'),
     defaultBinding: { key: 'a', mod: true }
   },
   {
     id: 'rotatePage',
-    label: 'Rotate page',
-    category: 'Page grid',
+    label: tKey('Rotate page'),
+    category: tKey('Page grid'),
     defaultBinding: { key: 'r' }
   },
   {
     id: 'deletePage',
-    label: 'Delete page',
-    category: 'Page grid',
+    label: tKey('Delete page'),
+    category: tKey('Page grid'),
     defaultBinding: { key: 'delete' }
   }
 ];
 
 const STORAGE_KEY = 'custom_shortcuts';
+
+/** Keys that move focus or activate controls; binding them breaks keyboard use. */
+const NAVIGATION_KEYS = new Set([
+  'tab',
+  'enter',
+  ' ',
+  'spacebar',
+  'escape',
+  'arrowup',
+  'arrowdown',
+  'arrowleft',
+  'arrowright',
+  'home',
+  'end',
+  'pageup',
+  'pagedown'
+]);
+
+/**
+ * Why a binding can't be used, or null if it can (AUDIT-2026-09-25 UI-5).
+ *
+ * The recorder accepted anything. Binding the palette to Tab — the natural key
+ * for leaving the field — took Tab over app-wide (the palette is checked before
+ * the typing guard), survived reloads, and left Reset reachable only by mouse.
+ * Binding Delete page to ArrowRight made grid navigation delete pages.
+ */
+export function reservedBindingReason(id: string, binding: ShortcutBinding): string | null {
+  const key = binding.key.toLowerCase();
+  if (!key) return tKey('No key was pressed.');
+  if (key === 'tab') return tKey('Tab moves focus and cannot be used as a shortcut.');
+  if (NAVIGATION_KEYS.has(key) && !binding.mod && !binding.alt) {
+    return tKey('Arrow, Enter, Space, Escape, Home/End and Page keys are needed for navigation.');
+  }
+  // The palette answers even while typing in a field, so a plain letter would
+  // make that letter untypeable everywhere.
+  if (id === 'palette' && !binding.mod && !binding.alt) {
+    return tKey('The command palette needs Ctrl/⌘ or Alt, because it works while typing.');
+  }
+  return null;
+}
+
+/** Drops persisted overrides a user recorded before `reservedBindingReason` existed. */
+function usableOverrides(saved: unknown): Record<string, ShortcutBinding> {
+  if (!saved || typeof saved !== 'object') return {};
+  const out: Record<string, ShortcutBinding> = {};
+  let dropped = 0;
+  for (const [id, binding] of Object.entries(saved as Record<string, ShortcutBinding>)) {
+    if (!binding || typeof binding.key !== 'string') continue;
+    if (reservedBindingReason(id, binding)) {
+      dropped += 1;
+      continue;
+    }
+    out[id] = binding;
+  }
+  if (dropped > 0) {
+    // Said out loud, and the cleaned set saved, rather than a binding the user
+    // chose silently vanishing (regression review R-UI-9).
+    notify(
+      'info',
+      translate('Some saved shortcuts were reset because they would block keyboard navigation.'),
+      { detail: translate('Set them again under Custom shortcuts.') }
+    );
+    persistShortcuts(out);
+    mirrorToLocalStorage(out);
+  }
+  return out;
+}
+
+/** localStorage throws in Safari private mode and when full; it is only a mirror. */
+function mirrorToLocalStorage(value: Record<string, ShortcutBinding> | null): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    if (value === null) localStorage.removeItem(STORAGE_KEY);
+    else localStorage.setItem(STORAGE_KEY, JSON.stringify(value));
+  } catch (err) {
+    logEvent('warn', 'shortcuts', `localStorage mirror failed: ${String(err)}`);
+  }
+}
 
 export const customShortcuts = signal<Record<string, ShortcutBinding>>({});
 
@@ -81,17 +162,22 @@ if (typeof window !== 'undefined') {
   void readSetting<Record<string, ShortcutBinding>>(STORAGE_KEY)
     .then(saved => {
       if (saved && typeof saved === 'object') {
-        customShortcuts.value = saved;
+        customShortcuts.value = usableOverrides(saved);
         return;
       }
       // `localStorage.getItem` can throw in Safari private browsing and
       // similar hardened environments — this whole callback has no `.catch`
       // below it purely as a backstop, but this specific call is the one
       // realistic way it would actually be needed.
-      const local = localStorage.getItem(STORAGE_KEY);
+      let local: string | null;
+      try {
+        local = localStorage.getItem(STORAGE_KEY);
+      } catch {
+        return;
+      }
       if (local) {
         try {
-          customShortcuts.value = JSON.parse(local);
+          customShortcuts.value = usableOverrides(JSON.parse(local));
         } catch {
           // Ignore invalid JSON
         }
@@ -169,7 +255,9 @@ function persistShortcuts(next: Record<string, ShortcutBinding>): void {
 export function setShortcutOverride(
   id: string,
   newBinding: ShortcutBinding
-): { success: boolean; conflict?: ShortcutDefinition } {
+): { success: boolean; conflict?: ShortcutDefinition; reserved?: string } {
+  const reserved = reservedBindingReason(id, newBinding);
+  if (reserved) return { success: false, reserved };
   const conflict = findConflict(id, newBinding);
   if (conflict) {
     return { success: false, conflict };
@@ -178,18 +266,14 @@ export function setShortcutOverride(
   const next = { ...customShortcuts.value, [id]: newBinding };
   customShortcuts.value = next;
   persistShortcuts(next);
-  if (typeof localStorage !== 'undefined') {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-  }
+  mirrorToLocalStorage(next);
   return { success: true };
 }
 
 export function resetShortcuts() {
   customShortcuts.value = {};
   persistShortcuts({});
-  if (typeof localStorage !== 'undefined') {
-    localStorage.removeItem(STORAGE_KEY);
-  }
+  mirrorToLocalStorage(null);
 }
 
 export function formatBinding(binding: ShortcutBinding): string {

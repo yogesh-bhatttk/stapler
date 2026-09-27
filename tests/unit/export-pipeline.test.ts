@@ -29,6 +29,7 @@ import {
   documents,
   makePageRefs,
   sources,
+  type PageRef,
   type StaplerDoc
 } from '../../src/core/store';
 import { resetHistory } from '../../src/core/history';
@@ -62,9 +63,21 @@ function registerPdf(bytes: Uint8Array): string {
   __memoryFallback.set(id, bytes);
   sources.value = {
     ...sources.value,
-    [id]: { id, name: `${id}.pdf`, pageCount: 1, pageSizes: [] } as any
+    [id]: { id, name: `${id}.pdf`, pageCount: 1, pageSizes: [] }
   };
   return id;
+}
+
+/** A clean (just-imported) workspace document over `pages` of source `srcId`. */
+function docOf(srcId: string, pages: PageRef[]): StaplerDoc {
+  return {
+    id: `doc-${srcId}`,
+    name: `${srcId}.pdf`,
+    pages,
+    baseline: pages,
+    annotations: [],
+    dirty: false
+  };
 }
 
 /** Compose the pages of a doc through the process worker (same path as export). */
@@ -89,7 +102,7 @@ async function composeCurrent(doc: StaplerDoc): Promise<Uint8Array> {
 describe('DOC-05: export pipeline', () => {
   beforeEach(() => {
     sources.value = {};
-    documents.value = {};
+    documents.value = [];
     activeDocId.value = null;
     resetHistory();
     counter = 0;
@@ -119,13 +132,7 @@ describe('DOC-05: export pipeline', () => {
     it('compose preserves page count for a 3-page source', async () => {
       const srcBytes = await makePdf(3, 'Compose');
       const srcId = registerPdf(srcBytes);
-      const doc: StaplerDoc = {
-        id: `doc-${srcId}`,
-        pages: makePageRefs(srcId, 3),
-        annotations: {},
-        name: `${srcId}.pdf`,
-        compressionSettings: undefined
-      };
+      const doc = docOf(srcId, makePageRefs(srcId, 3));
       const out = await composeCurrent(doc);
       expect(await countPages(out)).toBe(3);
     });
@@ -133,13 +140,7 @@ describe('DOC-05: export pipeline', () => {
     it('compose over a 2-page subset produces exactly 2 pages', async () => {
       const srcBytes = await makePdf(5, 'Subset');
       const srcId = registerPdf(srcBytes);
-      const doc: StaplerDoc = {
-        id: `doc-${srcId}`,
-        pages: makePageRefs(srcId, 5).slice(0, 2),
-        annotations: {},
-        name: `${srcId}.pdf`,
-        compressionSettings: undefined
-      };
+      const doc = docOf(srcId, makePageRefs(srcId, 5).slice(0, 2));
       const out = await composeCurrent(doc);
       expect(await countPages(out)).toBe(2);
     });
@@ -147,13 +148,7 @@ describe('DOC-05: export pipeline', () => {
     it('compose output starts with %PDF header', async () => {
       const srcBytes = await makePdf(1, 'Header');
       const srcId = registerPdf(srcBytes);
-      const doc: StaplerDoc = {
-        id: `doc-${srcId}`,
-        pages: makePageRefs(srcId, 1),
-        annotations: {},
-        name: `${srcId}.pdf`,
-        compressionSettings: undefined
-      };
+      const doc = docOf(srcId, makePageRefs(srcId, 1));
       const out = await composeCurrent(doc);
       expect(new TextDecoder('ascii').decode(out.slice(0, 5))).toBe('%PDF-');
     });

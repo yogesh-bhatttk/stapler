@@ -7,6 +7,8 @@ import { exportRedlinePdf, type ExportRedlineOptions } from './redline-export';
 export interface ExportCompareOptions extends ExportVisualDiffOptions {
   diffMode: 'visual' | 'text' | 'redline';
   unchangedPages?: ExportRedlineOptions['unchangedPages'];
+  /** Non-fatal problems with the produced report (CONV-13). */
+  onWarning?: (message: string) => void;
 }
 
 export async function exportComparePdf(
@@ -15,7 +17,7 @@ export async function exportComparePdf(
   options: ExportCompareOptions
 ): Promise<Uint8Array> {
   if (options.diffMode === 'text') {
-    return exportTextDiff(docA, docB);
+    return exportTextDiff(docA, docB, { onWarning: options.onWarning });
   }
 
   if (options.diffMode === 'redline') {

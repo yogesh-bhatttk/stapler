@@ -8,6 +8,7 @@
 import { signal, effect } from '@preact/signals';
 import { activeDocId } from '../../../core/store';
 import { DEFAULT_PROTECTION, type ProtectionSettings } from '../../../core/pdf/encrypt';
+import { tKey } from '../../../core/i18n';
 
 export interface ProtectionState extends ProtectionSettings {
   enabled: boolean;
@@ -40,8 +41,8 @@ effect(() => {
 export function protectionIssue(): string | null {
   const state = protection.value;
   if (!state.enabled) return null;
-  if (!state.userPassword) return 'Password protection is on, but no password has been set.';
-  if (state.userPassword !== state.confirmPassword) return 'The two passwords do not match.';
+  if (!state.userPassword) return tKey('Password protection is on, but no password has been set.');
+  if (state.userPassword !== state.confirmPassword) return tKey('The two passwords do not match.');
   return null;
 }
 

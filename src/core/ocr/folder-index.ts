@@ -1,4 +1,4 @@
-import { translate } from '../i18n';
+import { tPlural, translate } from '../i18n';
 /**
  * OCR-02 — Folder Index and Search.
  *
@@ -16,7 +16,7 @@ import {
   type SearchIndexRecord
 } from '../db';
 import { renderWorker } from '../workers';
-import { fromUnknown, logEvent } from '../errors';
+import { cancelled, fromUnknown, logEvent } from '../errors';
 import { notify } from '../notify';
 import { createJobHandle } from '../workers/protocol';
 import type { FsaDirectoryHandle, FsaFileHandle } from '../../platform/fsa';
@@ -269,7 +269,7 @@ export async function indexDirectory(
   options?: FolderIndexOptions
 ): Promise<FolderIndexStats> {
   const startTime = performance.now();
-  options?.onProgress?.(0, 'Scanning directory for PDFs...');
+  options?.onProgress?.(0, translate('Scanning directory for PDFs...'));
 
   const pdfFiles = await collectPdfFilesFromDir(dirHandle);
 
@@ -292,12 +292,19 @@ export async function indexDirectory(
 
   for (let i = 0; i < pdfFiles.length; i++) {
     if (options?.signal?.aborted) {
-      throw new Error('Indexing operation aborted');
+      throw cancelled();
     }
 
     const { fileId, fileName, handle, file } = pdfFiles[i];
     const progressFrac = (i + 1) / (pdfFiles.length || 1);
-    options?.onProgress?.(progressFrac, `Indexing ${fileName} (${i + 1}/${pdfFiles.length})`);
+    options?.onProgress?.(
+      progressFrac,
+      translate('Indexing {name} ({n}/{total})', {
+        name: fileName,
+        n: i + 1,
+        total: pdfFiles.length
+      })
+    );
 
     // Incremental check
     const docKey = `doc:${fileId}`;
@@ -324,7 +331,18 @@ export async function indexDirectory(
       onProgress: (localFrac, localLabel) => {
         options?.onProgress?.(
           fileBaseFrac + fileWeight * (localFrac ?? 0),
-          `Indexing ${fileName} (${i + 1}/${pdfFiles.length})${localLabel ? ` — ${localLabel}` : ''}`
+          localLabel
+            ? translate('Indexing {name} ({n}/{total}) — {detail}', {
+                name: fileName,
+                n: i + 1,
+                total: pdfFiles.length,
+                detail: localLabel
+              })
+            : translate('Indexing {name} ({n}/{total})', {
+                name: fileName,
+                n: i + 1,
+                total: pdfFiles.length
+              })
         );
       }
     });
@@ -415,19 +433,26 @@ export async function indexDirectory(
   }
 
   const durationMs = Math.round(performance.now() - startTime);
-  options?.onProgress?.(1, `Indexed ${filesIndexed} PDFs in ${durationMs}ms`);
+  options?.onProgress?.(
+    1,
+    tPlural('Indexed {count} PDFs in {ms}ms', filesIndexed, { ms: durationMs })
+  );
 
   if (skipped.length > 0) {
     // Surfaced, not swallowed: a file missing from search results is invisible
     // unless we say so. One toast for the run, naming the files.
     const names = skipped.map(s => s.fileName);
-    notify(
-      'warning',
-      translate('{count} file(s) could not be indexed', { count: skipped.length }),
-      {
-        detail: `${names.slice(0, 3).join(', ')}${names.length > 3 ? `, and ${names.length - 3} more` : ''} — ${skipped[0].reason} These files will not appear in search results.`
-      }
-    );
+    const shown = names.slice(0, 3).join(', ');
+    const files =
+      names.length > 3
+        ? translate('{names}, and {count} more', { names: shown, count: names.length - 3 })
+        : shown;
+    notify('warning', tPlural('{count} files could not be indexed', skipped.length), {
+      detail: translate('{files} — {reason} These files will not appear in search results.', {
+        files,
+        reason: skipped[0].reason
+      })
+    });
     for (const entry of skipped) {
       logEvent('warn', 'folder-index', `${entry.fileId}: ${entry.reason}`);
     }

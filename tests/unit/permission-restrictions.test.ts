@@ -173,10 +173,12 @@ async function openDocument(id: string, bytes: Uint8Array) {
     pageSizes: Array.from({ length: facts.pageCount }, () => ({ width: 200, height: 200 })),
     ...(facts.permissionRestrictions !== null ? { restrictions: facts.permissionRestrictions } : {})
   });
+  const docPages = makePageRefs(id, facts.pageCount);
   const doc = {
     id: `${id}-doc`,
     name: `${id}.pdf`,
-    pages: makePageRefs(id, facts.pageCount),
+    pages: docPages,
+    baseline: docPages,
     annotations: [],
     dirty: false
   };
@@ -266,14 +268,12 @@ describe('when the raw /Encrypt re-parse itself fails', () => {
     // distinct from the main `ignoreEncryption: false` call (which is what
     // actually throws first, routing here) and the empty-password decrypt
     // retry (which has a `password` key). Only that one is made to fail.
-    const spy = vi
-      .spyOn(PDFDocument, 'load')
-      .mockImplementation(async (input: Uint8Array, options?: Record<string, unknown>) => {
-        if (options?.ignoreEncryption === true && !('password' in (options ?? {}))) {
-          throw new Error('simulated malformed /Encrypt dictionary');
-        }
-        return realLoad(input, options as never);
-      });
+    const spy = vi.spyOn(PDFDocument, 'load').mockImplementation(async (input, options) => {
+      if (options?.ignoreEncryption === true && !('password' in options)) {
+        throw new Error('simulated malformed /Encrypt dictionary');
+      }
+      return realLoad(input, options);
+    });
     try {
       const result = await loadPdfDocumentWithRestrictions(bytes);
       // Still opens and decrypts normally — a probe failure must not block
@@ -325,11 +325,9 @@ describe('exporting a permission-restricted document', () => {
     const { PDFName, PDFNumber } = await import('pdf-lib');
     const encryptRef = reparsed.context.trailerInfo.Encrypt;
     const encryptDict = reparsed.context.lookup(encryptRef);
-    const p = (encryptDict as InstanceType<typeof import('pdf-lib').PDFDict>).lookup(
-      PDFName.of('P')
-    );
+    const p = (encryptDict as PDFDict).lookup(PDFName.of('P'));
     expect(p).toBeInstanceOf(PDFNumber);
-    expect((p as InstanceType<typeof PDFNumber>).asNumber() | 0).toBe(NO_PRINT_P);
+    expect((p as PDFNumber).asNumber() | 0).toBe(NO_PRINT_P);
   });
 
   it('keeps the restriction when the restricted document is merged into another', async () => {
@@ -740,10 +738,8 @@ describe('turning Protect on never loosens an inherited restriction (§1.5)', ()
       updateMetadata: false
     });
     const { PDFName } = await import('pdf-lib');
-    const encryptDict = reparsed.context.lookup(
-      reparsed.context.trailerInfo.Encrypt
-    ) as InstanceType<typeof PDFDict>;
-    const p = encryptDict.lookup(PDFName.of('P')) as InstanceType<typeof PDFNumber>;
+    const encryptDict = reparsed.context.lookup(reparsed.context.trailerInfo.Encrypt) as PDFDict;
+    const p = encryptDict.lookup(PDFName.of('P')) as PDFNumber;
     expect(p.asNumber() | 0).toBe(inherited);
 
     // And a real reader agrees the permission is gone.

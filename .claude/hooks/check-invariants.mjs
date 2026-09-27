@@ -5,9 +5,10 @@
  * Enforces the four constraints that the product's core claim depends on, at the
  * moment code is written rather than at review time. See docs/PLAN.md §5.4.
  *
- *   1. Zero network      — no CDN imports, no fetch/XHR/WebSocket in src/, except
- *                          the two disclosed model downloads (src/core/ocr/,
- *                          src/core/faceblur/)
+ *   1. Zero network      — no CDN imports, no fetch/XHR/WebSocket, no remote URL
+ *                          sinks in src/ or the root entry pages, except the one
+ *                          disclosed model download (src/core/ocr/model.ts +
+ *                          download.ts). AST-based: scripts/network-guard.mjs.
  *   2. Design tokens     — no raw hex/rgb colours outside tokens.css
  *   3. Layer boundary    — no chrome.* outside src/platform/
  *   4. Zero permissions  — manifest.json permissions arrays stay empty
@@ -18,81 +19,61 @@
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 
-const NETWORK_APIS = [
-  [/\bfetch\s*\(/, 'fetch() — no runtime network requests are permitted'],
-  [/\bXMLHttpRequest\b/, 'XMLHttpRequest — no runtime network requests are permitted'],
-  [/new\s+WebSocket\b/, 'WebSocket — no runtime network requests are permitted'],
-  [/\bnavigator\.sendBeacon\b/, 'sendBeacon — telemetry is forbidden'],
-  [/new\s+EventSource\b/, 'EventSource — no runtime network requests are permitted'],
-  [/importScripts\s*\(\s*['"`]https?:/, 'remote importScripts — MV3 forbids remote code']
-];
-
-const REMOTE_HOSTS =
-  /(fonts\.googleapis|fonts\.gstatic|cdn\.jsdelivr|unpkg\.com|cdnjs\.cloudflare|googletagmanager|google-analytics|sentry\.io)/;
-
-// §4 (docs/AUDIT-EDGE-CASES-2026-09-15.md) — the manifest's own
-// `content_security_policy` had no check at all here, only its `permissions`
-// arrays did. `connect-src` is the one directive allowed to name an external
-// host, and only the single pinned model host both OCR-01 and RED-08 fetch
-// from — everywhere else (script-src, style-src, …) must stay 'self' and the
-// couple of MV3 keyword sources. Kept in sync with `scripts/check-invariants.mjs`
-// and with `MODEL_HOST` in `src/core/ocr/model.ts` / `src/core/faceblur/model.ts`.
-const CSP_ALLOWED_HOSTS = new Set(['cdn.jsdelivr.net']);
-const CSP_ALLOWED_KEYWORDS = new Set(["'self'", "'none'", "'wasm-unsafe-eval'"]);
+// §4 (docs/AUDIT-EDGE-CASES-2026-09-15.md), tightened by audit 2026-09-25
+// PLT-3: the manifest CSP is checked directive by directive against an
+// allowlist. Every directive may only carry the sources listed here; the only
+// remote source anywhere is the exact, path-scoped pinned OCR model
+// directories in connect-src — a bare `https://cdn.jsdelivr.net` would allow
+// every npm package on that CDN and is refused. DUPLICATED from
+// `scripts/csp.mjs` (the source of truth) so the manifest check never depends
+// on anything but this file; `tests/unit/csp.test.ts` keeps them in sync.
+const CSP_ALLOWED_SOURCES = {
+  'default-src': ["'self'"],
+  'script-src': ["'self'", "'wasm-unsafe-eval'"],
+  'worker-src': ["'self'"],
+  'connect-src': [
+    "'self'",
+    'blob:',
+    'data:',
+    'https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int/',
+    'https://cdn.jsdelivr.net/npm/@tesseract.js-data/hin@1.0.0/4.0.0_best_int/'
+  ],
+  'img-src': ["'self'", 'blob:', 'data:'],
+  'style-src': ["'self'", "'unsafe-inline'"],
+  'font-src': ["'self'", 'data:'],
+  'object-src': ["'none'"],
+  'frame-src': ["'none'"],
+  'base-uri': ["'none'"],
+  'form-action': ["'none'"]
+};
+const CSP_REQUIRED_DIRECTIVES = ['default-src', 'script-src', 'object-src', 'base-uri'];
 
 /** Every CSP violation in one `content_security_policy.extension_pages` string. */
 function cspFindings(csp) {
   const out = [];
+  const seen = new Set();
   for (const directive of csp.split(';').map(d => d.trim()).filter(Boolean)) {
     const [name, ...sources] = directive.split(/\s+/);
+    seen.add(name);
+    const allowed = CSP_ALLOWED_SOURCES[name];
+    if (!allowed) {
+      out.push(`CSP directive "${name}" is not in the allowlist (scripts/csp.mjs).`);
+      continue;
+    }
     for (const source of sources) {
-      if (CSP_ALLOWED_KEYWORDS.has(source)) continue;
-      const host = /^https?:\/\/([^/]+)\/?$/.exec(source)?.[1];
-      if (host && name === 'connect-src' && CSP_ALLOWED_HOSTS.has(host)) continue;
+      if (allowed.includes(source)) continue;
       out.push(
-        `CSP directive "${name}" allows "${source}" — only 'self'/'wasm-unsafe-eval'/'none' and, ` +
-          `in connect-src only, the pinned model host are permitted. See PLAN §5.4 item 5.`
+        `CSP directive "${name}" allows "${source}" — not in the allowlist (scripts/csp.mjs). ` +
+          `Only connect-src may name a remote source, and only the exact pinned OCR model paths. ` +
+          `See PLAN §5.4 item 5.`
       );
     }
   }
+  for (const name of CSP_REQUIRED_DIRECTIVES) {
+    if (!seen.has(name)) out.push(`CSP is missing the required "${name}" directive.`);
+  }
   return out;
 }
-
-// OCR-01 Defect 4: this used to carve out `src/core/ocr/` and
-// `src/core/faceblur/` *wholesale*, so a `fetch()` or a remote-host reference
-// added anywhere in either directory — not just the one legitimate
-// model-download module — would never be caught. Narrowed to the specific
-// files that are actually allowed to do each thing; kept in sync with
-// `scripts/check-invariants.mjs`.
-const NETWORK_API_ALLOWED_FILES = new Set([
-  'src/core/ocr/model.ts',
-  'src/core/ocr/download.ts',
-  'src/core/faceblur/model.ts',
-  'src/core/faceblur/download.ts',
-  // Pre-existing, narrower exception: reads a bundled font file, same-origin,
-  // via `fetch(new URL('./assets/...', import.meta.url))`. Never names a
-  // remote host — see `REMOTE_HOST_ALLOWED_FILES` below, which does not
-  // include it.
-  'src/core/ocr/devanagariFont.ts'
-]);
-const REMOTE_HOST_ALLOWED_FILES = new Set([
-  'src/core/ocr/model.ts',
-  'src/core/ocr/download.ts',
-  'src/core/faceblur/model.ts',
-  'src/core/faceblur/download.ts'
-]);
-
-const REMOTE_IMPORT = [
-  [
-    /\b(?:import|from|require\s*\()\s*['"`]https?:\/\//,
-    'remote module import — bundle it locally instead'
-  ],
-  [
-    /<(?:script|link)[^>]+(?:src|href)\s*=\s*['"]https?:\/\//i,
-    'remote <script>/<link> — bundle it locally instead'
-  ],
-  [/@import\s+(?:url\()?['"]?https?:\/\//i, 'remote CSS @import — bundle it locally instead']
-];
 
 // Colour keyword, restricted to properties that actually carry a colour. A bare
 // keyword check (any quoted 'gray') would false-positive on things like the
@@ -149,7 +130,9 @@ const ext = path.extname(rel);
 const findings = [];
 
 // Only guard project source. Docs, config, and this hook itself are exempt.
-const inSrc = rel.startsWith('src/');
+// Audit 2026-09-25 PLT-6: the root entry pages (editor.html and the landing
+// pages) ship in the build too, so they are guarded like source.
+const inSrc = rel.startsWith('src/') || (!rel.includes('/') && ext === '.html');
 const isSource = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.css', '.html'].includes(ext);
 const isTest = /(^|\/)tests?\//.test(rel) || /\.(test|spec)\.[tj]sx?$/.test(rel);
 
@@ -164,14 +147,23 @@ const lines = text.split('\n');
 const flag = (i, msg) => findings.push(`${rel}:${i + 1} — ${msg}`);
 
 if (inSrc && isSource) {
-  // The two documented model downloads (PLAN §5.4 item 5): the OCR language
-  // model and RED-08's face-detector weights. Both are fetched once, on an
-  // explicit confirmation, from a pinned URL — and nothing else in src/ may
-  // name a remote host or call a network API. Narrowed to the specific files
-  // named above rather than the two directories wholesale, so a stray
-  // `fetch()` elsewhere in either directory still trips this guard.
-  const networkApiAllowed = NETWORK_API_ALLOWED_FILES.has(rel);
-  const remoteHostAllowed = REMOTE_HOST_ALLOWED_FILES.has(rel);
+  // Zero network (audit 2026-09-25 PLT-6): an AST analysis of this one file,
+  // shared with `scripts/check-invariants.mjs` and the bundle scan — aliased
+  // or computed network APIs, remote imports/workers, URL sinks, CSS url() and
+  // HTML resource attributes. The one documented model download (PLAN §5.4
+  // item 5, `src/core/ocr/model.ts` + `download.ts`) is allowlisted there.
+  // Loaded lazily so a manifest edit never pays for the TypeScript import.
+  try {
+    const guardUrl = new URL('../../scripts/network-guard.mjs', import.meta.url);
+    const { analyzeNetwork } = await import(guardUrl.href);
+    for (const f of analyzeNetwork(text, rel)) findings.push(`${rel}:${f.line} — ${f.message}`);
+  } catch (err) {
+    // Failing closed: a guard that cannot run must not look like a pass.
+    findings.push(
+      `${rel} — the zero-network analyzer (scripts/network-guard.mjs) could not run: ` +
+        `${err instanceof Error ? err.message : String(err)}. Run \`pnpm install\`.`
+    );
+  }
 
   // Document colours (a PDF page is white; redaction fill is black) are numbers
   // handed to canvas/pdf-lib, not theme colours, so they cannot be CSS vars. They
@@ -184,13 +176,9 @@ if (inSrc && isSource) {
     rel.startsWith('src/platform/') || rel === 'src/background/service-worker.ts';
 
   lines.forEach((line, i) => {
-    if (/^\s*(\/\/|\*|<!--)/.test(line)) return; // skip comment lines
-
-    for (const [re, msg] of REMOTE_IMPORT) if (re.test(line)) flag(i, msg);
-    if (!remoteHostAllowed && REMOTE_HOSTS.test(line))
-      flag(i, 'reference to a remote host — breaks the zero-network guarantee');
-    if (!networkApiAllowed)
-      for (const [re, msg] of NETWORK_APIS) if (re.test(line)) flag(i, msg);
+    // Comment lines are skipped for the line-based checks below only; the
+    // network analysis above works on the syntax tree, not on lines.
+    if (/^\s*(\/\/|\*|<!--)/.test(line)) return;
 
     // Design tokens: colour literals belong in tokens.css only.
     if (

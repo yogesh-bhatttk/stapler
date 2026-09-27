@@ -4,6 +4,7 @@
  */
 import { forwardRef } from 'preact/compat';
 import styles from './Tabs.module.css';
+import { isRightToLeft, logicalArrowKey } from '../../core/reorder';
 
 export interface TabItem {
   id: string;
@@ -15,10 +16,15 @@ export interface TabsProps {
   activeId: string;
   onChange: (id: string) => void;
   ariaLabel: string;
+  /**
+   * When the caller renders panels with ids `${panelIdPrefix}${item.id}`, each
+   * tab gets `aria-controls` pointing at its panel (WAI-ARIA tabs pattern).
+   */
+  panelIdPrefix?: string;
 }
 
 export const Tabs = forwardRef<HTMLDivElement, TabsProps>(function Tabs(
-  { items, activeId, onChange, ariaLabel },
+  { items, activeId, onChange, ariaLabel, panelIdPrefix },
   ref
 ) {
   const move = (from: number, delta: number) => {
@@ -42,14 +48,17 @@ export const Tabs = forwardRef<HTMLDivElement, TabsProps>(function Tabs(
             role="tab"
             type="button"
             aria-selected={active}
+            aria-controls={panelIdPrefix ? `${panelIdPrefix}${item.id}` : undefined}
             tabIndex={active ? 0 : -1}
             className={`${styles.tab} ${active ? styles.active : ''}`}
             onClick={() => onChange(item.id)}
             onKeyDown={event => {
-              if (event.key === 'ArrowRight') {
+              // In a right-to-left layout the next tab is to the left.
+              const key = logicalArrowKey(event.key, isRightToLeft(event.currentTarget as Element));
+              if (key === 'ArrowRight') {
                 event.preventDefault();
                 move(index, 1);
-              } else if (event.key === 'ArrowLeft') {
+              } else if (key === 'ArrowLeft') {
                 event.preventDefault();
                 move(index, -1);
               } else if (event.key === 'Home') {
