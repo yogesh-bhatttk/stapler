@@ -43,6 +43,14 @@ const escape = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  */
 export const URL_ALLOWLIST = [
   {
+    pattern: /^https:\/\/schema\.org$/,
+    file: /(?:^|\/)compress-pdf-to-[\w-]+\.html$/,
+    reason:
+      'GAP-4 landing pages: the `@context` of their <script type="application/ld+json"> SEO ' +
+      'block. A vocabulary identifier in an inert data block (never executed, never fetched — ' +
+      'network-guard.mjs treats ld+json as data), confined to those pages by `file`.'
+  },
+  {
     pattern: new RegExp(`^(?:${OCR_MODEL_CONNECT_SOURCES.map(escape).join('|')})`),
     reason:
       'The pinned OCR model directories (OCR-01) — the one sanctioned download, requested only ' +
