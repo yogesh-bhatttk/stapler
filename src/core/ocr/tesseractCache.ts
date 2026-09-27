@@ -90,6 +90,76 @@ export async function writeCachedModel(lang: string, bytes: Uint8Array): Promise
   }
 }
 
+function isModelKey(key: IDBValidKey): key is string {
+  return typeof key === 'string' && key.endsWith('.traineddata');
+}
+
+/**
+ * GAP-12 — the language models in tesseract's cache and their sizes, for the
+ * trust panel. Only `*.traineddata` keys are counted: `keyval-store` is
+ * idb-keyval's default name, so on a shared web origin another page could own
+ * other keys in it. Never throws.
+ */
+export async function listCachedModels(): Promise<{ lang: string; bytes: number }[]> {
+  if (typeof indexedDB === 'undefined') return [];
+  try {
+    const db = await openDb();
+    try {
+      return await new Promise((resolve, reject) => {
+        const out: { lang: string; bytes: number }[] = [];
+        const tx = db.transaction(STORE_NAME, 'readonly');
+        const request = tx.objectStore(STORE_NAME).openCursor();
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) return resolve(out);
+          if (isModelKey(cursor.key)) {
+            const value = cursor.value as { byteLength?: number; length?: number } | undefined;
+            out.push({
+              lang: cursor.key.replace(/^.*\//, '').replace(/\.traineddata$/, ''),
+              bytes: value?.byteLength ?? value?.length ?? 0
+            });
+          }
+          cursor.continue();
+        };
+        request.onerror = () => reject(request.error);
+      });
+    } finally {
+      db.close();
+    }
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * GAP-12 — removes every language model from tesseract's cache (and nothing
+ * else in that store). Returns how many were removed.
+ */
+export async function clearCachedModels(): Promise<number> {
+  if (typeof indexedDB === 'undefined') return 0;
+  const db = await openDb();
+  try {
+    return await new Promise<number>((resolve, reject) => {
+      let removed = 0;
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const request = tx.objectStore(STORE_NAME).openCursor();
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return;
+        if (isModelKey(cursor.key)) {
+          cursor.delete();
+          removed += 1;
+        }
+        cursor.continue();
+      };
+      tx.oncomplete = () => resolve(removed);
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
 /**
  * Removes `lang`'s bytes from tesseract's cache. The OCR worker runs tesseract
  * with `cacheMethod: 'readOnly'` (audit 2026-09-25 CNV-2), so tesseract itself

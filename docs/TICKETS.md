@@ -200,7 +200,15 @@ from the Crop side.
 
 ### DS-07 · Offline badge and trust page — `S` `P0`
 
-**Status: Done** — A real button on every route; the trust copy matches what the tests verify.
+**Status: Done (re-verified 2026-09-26)** — A real button on every route; the trust copy matches what the tests verify.
+
+**Reopened by AUDIT-2026-09-25 §4, now closed again.** The audit found the chip was a
+hardcoded "0 requests" string that stayed at 0 after a consented OCR model download
+(PLT-16). It is now driven by `core/disclosedDownloads.ts`, which `ocr/download.ts`
+increments once per completed, verified download (`tests/unit/ocr.test.ts` asserts the
+count). The panel also links to the shipped `privacy.html` and `THIRD_PARTY_LICENSES.txt`
+(`tests/e2e/a11y-and-perf.spec.ts`). What is *kept* on the device — the other half of the
+trust claim — is DS-12 (in progress). The chip's mobile presentation is DS-10.
 
 - **Requirements:** Persistent `Offline · 0 requests` chip in the top bar. Click opens a
   panel explaining no upload / no account / no limits, with instructions to verify in
@@ -456,7 +464,26 @@ a later pass; the image-watermark and header/footer AC below reflect what shippe
 
 ### CNV-03 · HEIC decoding — `S` `P0`
 
-**Status: Done** — Lazy-loaded WASM HEIC decoder via heic2any allows importing iPhone HEIC photos.
+**Status: Done in the web build; one AC is not automated for the extension** (re-audited 2026-09-26).
+
+**Reopened by AUDIT-2026-09-25 (CONV-1).** The original "Done" rested on the web preview
+only: heic2any compiles its libheif bindings with `new Function`, which the extension's
+MV3 CSP blocks, so HEIC import hung forever in both extension builds. Now:
+
+- The decoder is `libheif-js`'s WebAssembly build (no `eval`/`new Function`), run in the
+  image worker (`core/raster-decode.ts`, `core/workers/image.worker.ts`) with a timeout and
+  cancellation (`tests/unit/image-import.test.ts`). heic2any is gone from `package.json`.
+- Absent from the initial bundle: **met** — in a web build, libheif appears only in
+  `assets/libheif-*.js` and the image-worker chunk, not in `editor.js`
+  (`scripts/check-bundle-size.js` enforces the initial-chunk budget but does not name
+  libheif specifically).
+- Colour and orientation: **met in the web build** — `tests/e2e/import.spec.ts` imports
+  `tests/fixtures/sample.heic` and `photo-rotated.heic` (right-side up).
+- In the loaded extension: the audit reports a manual check that HEIC imports there, but
+  `tests/e2e/extension/extension.spec.ts` has **no HEIC case** (it covers PNG, merge and
+  face blur). Until one is added, "works in the shipped extension" is a manual claim.
+- libheif is LGPL-3.0; it ships as a separate, replaceable chunk and its licence is in
+  `THIRD_PARTY_LICENSES.txt`.
 
 - **Requirements:** Lazy-loaded WASM HEIC decoder, used only when a HEIC file is imported.
 - **AC:** Decoder is absent from the initial bundle (verified in a bundle report). iPhone
@@ -993,6 +1020,18 @@ merge finished in time. Initial chunk 226KB/74KB gzipped against the 900KB budge
 claiming a 500ms budget — that comment was already stale by the time this pass started; the
 current test actually asserts `< 500`.
 
+**Re-audited 2026-09-26 (AUDIT-2026-09-25 §4, PLT-2 / PLT-18): Done, with one caveat.**
+"Fails CI" was not true when this was marked Done — CI had never run (the workflow
+triggered on a branch that did not exist). `.github/workflows/ci.yml` now triggers on
+push/PR to `master`, and the budgets run in their own `perf` job (`pnpm test:perf`,
+`tests/e2e/perf.spec.ts`), never retried, so a slow run fails instead of being retried
+green. Caveats, stated rather than hidden: (1) CI runs the budgets with
+`STAPLER_PERF_SLACK=1.5`, i.e. 1.5× PLAN §5.1's numbers, to allow for shared runners —
+every run records measured vs budget as a test annotation; (2) from this environment we
+can confirm the workflow file, not that a GitHub run has happened. The merge
+main-thread budget, which failed 4/4 during the audit because Comlink transfers were
+silently structured-clones, now passes locally.
+
 - **AC:** Automated Playwright perf test asserts every budget in PLAN §5.1 and fails CI on
   regression. Bundle-size report fails the build above 900KB gzipped for the initial chunk.
 
@@ -1005,7 +1044,22 @@ current test actually asserts `< 500`.
 
 ### NFR-04 · i18n framework and 10 locales — `M` `P1`
 
-**Status: Done** — [x] **NFR-04** — Implement an i18n framework.
+**Status: Done for coverage; RTL layout and translation review are not verified** (re-audited 2026-09-26).
+
+**Reopened by AUDIT-2026-09-25 (UI-8), now largely closed.** When this was marked Done,
+383 keys passed to `t()` existed in no locale file (English only rendered correctly
+because keys are English text), and messages generated in workers were never translated.
+Now `tests/unit/i18n-coverage.test.ts` statically extracts every key passed to
+`t`/`translate`/`tPlural`/`tKey` in `src/` and fails if any locale lacks it, lacks a
+plural category its language needs (CLDR, via `Intl.PluralRules`), or drops a
+`{placeholder}`; workers load their locale and translate their own messages
+(`tests/unit/worker-locale.test.ts`). All ten non-English locales now carry real
+translations, including the CNV-08..13 disclaimers the 2026-09-05 note below deferred.
+Still open against the AC as written: (1) the translations have not been reviewed by
+native speakers; (2) "Arabic shifts the UI layout seamlessly" has no automated check —
+`dir="rtl"` is set, but the tool canvases have not been walked through in Arabic.
+
+Original entry: [x] **NFR-04** — Implement an i18n framework.
   - *Context*: Some users speak Spanish. The team wants to expand globally, so we need RTL support.
   - *AC*: No hard-coded user-facing strings remain in English; Arabic shifts the UI layout seamlessly without breaking the unified canvas tools.
   - **Correction found in a later audit:** `initLocale()` was dead code — nothing called it, so no dictionary ever loaded on boot and the only way one loaded at all was the user manually touching the language `<select>`. Strings keyed by their own English text (most of them) rendered correctly by accident; strings keyed symbolically (`header.title`, `tool.batch`, `tool.compare`, and the `tool.annotate.*`/`tool.sign.*` keys added in this pass) rendered their literal dotted key. Fixed by calling `initLocale()` at bootstrap in `src/ui/app.tsx`, alongside a related signal-reactivity fix (`dictionaryVersion`) needed for translated strings to actually re-render on language change.
@@ -1039,7 +1093,29 @@ to end by `tests/e2e/tool-flows.spec.ts` instead.
 
 ### QA-03 · Zero-network CI test — `S` `P0`
 
-**Status: Done** — Runs against the built preview server, sweeps every tool plus a render, fails on any non-local request. pdf.js data files are bundled.
+**Status: Done (re-audited 2026-09-26)** — Runs against the built preview server, sweeps every tool plus a render, fails on any non-local request. pdf.js data files are bundled.
+
+**Reopened by AUDIT-2026-09-25 §4 (PLT-2, PLT-6, PLT-7), now closed again.** "CI fails if…"
+was not true when this was marked Done: CI had never run, the sweep only ever ran against
+the web preview (never the extension), and the invariant guards missed most of 30 bypass
+payloads. Now, layered:
+
+- `tests/e2e/zero-network.spec.ts` (web preview) plus the `extension` Playwright project
+  (`tests/e2e/extension/`), which loads the real `dist/ext` under its MV3 CSP and fails on
+  any request outside the package, any CSP violation or any page error.
+- An AST-based static guard (`scripts/network-guard.mjs`, used by both the write hook and
+  `scripts/check-invariants.mjs`); `tests/unit/network-guard.test.ts` covers 69 bypass
+  payloads (aliased/computed `fetch`, remote `import()`, `new Image().src`, CSS `url()`,
+  HTML resource attributes, …) and 26 negatives — the "deliberately add a Google Fonts
+  link / CDN import" AC is exercised there on every run.
+- A post-build scan of both builds for remote URLs (`pnpm check:bundle-network`, CI job
+  `bundle-network`), and a strict CSP in both builds (`default-src 'self'`).
+- CI (`.github/workflows/ci.yml`) triggers on push/PR to `master` and runs `e2e`,
+  `e2e-extension` and `bundle-network`. Whether a GitHub run has happened cannot be
+  confirmed from here.
+
+Known gap: the extension project covers load, licence file, PNG import, merge and face
+blur; the per-tool sweep (every tool route) runs against the web preview only.
 
 The test that protects the entire product claim.
 
@@ -1054,6 +1130,18 @@ The test that protects the entire product claim.
 (text stamp, AcroForm fill, XFA refusal), redact (drawn-region removal, keyboard-only
 marking), and cleanup (B&W preset alters the page, verified by re-import and pixel sample) —
 each has its own QA-01 fixture. Full suite: 55 tests, ~3 minutes headless.
+
+**Re-audited 2026-09-26 (AUDIT-2026-09-25 §4, PLT-2 / PLT-7 / M4): Done, with the scope
+stated.** "Runs headless in CI" was not true when this was marked Done — CI had never run —
+and every flow tested the web preview, which is how HEIC shipped dead in the extension
+(CONV-1). Now the `e2e` CI job runs the web functional suite on push/PR to `master` (one
+retry, and `failOnFlakyTests` fails a run that only passed on the retry), and a separate
+`e2e-extension` job runs the packaged-extension project against the `dist/ext` it just
+built. After the audit fixes the suite was 160/160 across the web, extension and perf
+projects. The per-tool import → operate → export flows are still web-preview flows; the
+extension project is a smoke set (load, PNG import, merge + export, face blur), not a
+per-tool copy of the suite. Several flows that raced the UI were fixed to wait on
+conditions (audit §7).
 
 - **AC:** Each P0 tool has an import → operate → export test asserting real output bytes.
   Suite runs headless in CI in under 10 minutes.
@@ -1107,7 +1195,21 @@ this ticket's AC.
 
 ### DIST-03 · Website twin with per-tool landing pages — `L` `P1`
 
-**Status: Done** — `pnpm build:web` now emits eleven real static HTML entry points,
+**Status: Partly done — Lighthouse ≥95 is unverified on a real deploy** (re-audited 2026-09-26).
+
+**Reopened by AUDIT-2026-09-25 §4 (PLT-4, PLT-17).** Two claims below did not hold: the
+site is deployed to **GitHub Pages**, not Cloudflare Pages, and the deployed twin had **no
+CSP at all** (GitHub Pages cannot set response headers). Now the web build injects the
+same CSP the extension manifest carries as the first `<meta http-equiv>` of every page
+(`vite.config.ts` `stapler:web-csp`, from `scripts/csp.mjs`; `tests/unit/csp.test.ts`),
+and PLAN notes the real GitHub Pages deploy. Still unmet: the AC's "Lighthouse ≥95 on all
+four categories" has never been measured on the deployed site — the only numbers are the
+local 2026-08-16 run below (90–92 performance, index SEO 91), which is **below** the AC's
+95. `frame-ancestors`/`X-Frame-Options` cannot be expressed in a `<meta>` CSP, so
+clickjacking protection on the web twin depends on the host. The offline/installable
+twin is DIST-06; compress-to-size landing pages are DIST-08.
+
+Original entry: `pnpm build:web` now emits eleven real static HTML entry points,
 and all twelve landing pages (index + 11 tool pages) serve HTTP 200 from `vite preview`.
 Lighthouse scores measured locally against `http://localhost:4173` (2026-08-16), for the
 original five tool pages:
@@ -1458,7 +1560,19 @@ bookmark (OPS-12)".
 
 ### OPS-13 · Flatten page background — `S` `P2`
 
-**Status: Done**
+**Status: Done (re-audited 2026-09-26)**
+
+**Reopened by AUDIT-2026-09-25 (PDF-3, 🔴 Critical), now closed again.** The flatten
+dropped only the paint operator (`f`) of the background fill and left its path
+construction (`0 0 612 792 re`) in the stream, so the *next* fill on the page — often
+text or a small rectangle — painted the whole page in its colour (a black page). The
+earlier e2e passed because its fixture drew nothing after the background with a fill.
+Now the whole path-construction run is dropped together with its painter, a fill-and-
+stroke background keeps its stroke, a page-sized path that is also a clip is refused,
+and a full-page scan is never mistaken for a background
+(`tests/unit/flatten-background.test.ts`, re-parsing real output content streams). The
+pixel-sampled e2e (`tests/e2e/tool-flows.spec.ts` › "cleanup: flatten background
+preserves text") still runs.
 
 - **Requirements:** Replace a page's background with solid white (a scan-cleanup-adjacent
   operation for e.g. a coloured letterhead sheet re-scanned repeatedly) or apply a flat
@@ -1816,7 +1930,20 @@ a large model fetched once on explicit user confirmation, not a standing network
 
 ### ACC-02 · Read-aloud mode — `S` `P2`
 
-**Status: Done** — A new `read-aloud` tool (`src/ui/tools/read-aloud/`), grid canvas mode
+**Status: Done (re-audited 2026-09-26)**
+
+**Reopened by AUDIT-2026-09-25 (PLT-5), now closed again.** "On-device OS/browser voices
+only" was not guaranteed: Chrome's default voices include "Google …" voices with
+`localService === false`, which synthesise on Google's servers — page text would have
+left the device. The tool now only ever speaks with a voice whose `localService` is
+`true` (`src/ui/tools/read-aloud/voices.ts`); when every voice is a network voice the tool
+is disabled with an explanation rather than falling back
+(`tests/unit/read-aloud-voices.test.ts`: never offers a network voice, does not follow a
+network default, keeps the user's pick only while it is local). It also stops when the
+user leaves the tool (UI-15). Voice picker, sentence highlighting and remembered
+voice/rate are ACC-04.
+
+Original entry: a new `read-aloud` tool (`src/ui/tools/read-aloud/`), grid canvas mode
 so the existing page thumbnails stay usable while listening. `extractPageText` (a new
 thin wrapper in `src/core/operations.ts` around the render worker's existing `extractText`,
 factored out so a single-page read doesn't carry `extractDocumentText`'s multi-page
@@ -2808,7 +2935,23 @@ arrangement.
 ### DOC-12 · Font-embedding checker — `S` `P2`
 
 **Status: Done, with "any matching locally-available system font" deliberately narrowed**
-**— see below.** `checkFontEmbedding` in `src/core/workers/process.worker.ts` walks every
+**— see below** (re-audited 2026-09-26).
+
+**Reopened by AUDIT-2026-09-25 (PDF-2, 🔴 Critical), now closed again.** The fix below
+was reported as working while it turned every run of text in the fixed font into
+garbage: pdf-lib's `embedFont` writes a `Type0/Identity-H` font (2-byte CIDs) but the
+content kept its 1-byte WinAnsi codes, so "Hello" was read as CIDs 0x4865… and rendered
+as `.notdef`, and `/Widths` were lost. The tests below only checked that a `/FontFile*`
+existed — never that the text still read the same. Now the fix writes a *simple*
+`/TrueType` font with the original encoding (including an original `/Differences`),
+`/FirstChar`/`/LastChar`/`/Widths` and `/FontFile2`; content streams are untouched; a
+glyph with no substitute, or a non-embedded composite (Type0) font, is refused and the
+original bytes kept; fonts used only inside forms with inherited `/Resources` are found
+too (`tests/unit/font-embedding.test.ts` › "embedMissingFont keeps the text (PDF-2)",
+which re-extracts the text from the output bytes). The paragraphs below describe the
+first implementation; where they say `embedFont` / Type0, that is what PDF-2 replaced.
+
+Original entry: `checkFontEmbedding` in `src/core/workers/process.worker.ts` walks every
 page's `/Resources/Font` (reusing the existing `pageFontDictOf`/`asDict`/`asArray` helpers
 `fontInfoFor` already established for RED-02's width lookups), grouping by `/BaseFont`
 with any subset tag (`ABCDEF+`) stripped. A `/Type0` composite font's embedding question
@@ -5497,6 +5640,239 @@ one page selected, and the disabled in-between state.
 - **AC:** Nothing selected scopes to all pages; exactly one page selected scopes to and
   visibly lands on that page; any other selection size disables the shortcut rather than
   guessing.
+
+---
+
+## EPIC-18 · Product gaps from AUDIT-2026-09-25
+
+The product gaps in [`AUDIT-2026-09-25.md`](AUDIT-2026-09-25.md) §5, turned into tickets
+(2026-09-26). GAP-1 ("Done means works in the shipped build") is not a ticket of its own:
+it is the extension e2e project, CI on `master` and the post-build network scan that
+already landed with the audit fixes, and it is recorded on the tickets it reopened (DS-07,
+CNV-03, NFR-02, NFR-04, QA-03, QA-04, DIST-03, ACC-02, DOC-12, OPS-13). Every ticket here
+respects PLAN §1.1 — nothing below edits text in place, removes a password, adds an
+account or phones home. Same hard invariants and definition of done as every other epic;
+in particular **no new manifest permission** (the omnibox key and the web app manifest
+are checked against Chrome's install dialog) and **no new runtime network request** (the
+web twin's service worker precaches same-origin build output only).
+
+### DIST-06 · Installable, offline-capable web twin (PWA) — `M` `P1` · GAP-2
+
+**Status: Done (2026-09-27)** — service worker precaches the web build (same-origin only, cross-origin requests untouched), `manifest.webmanifest` with `file_handlers` + `launchQueue` and a `share_target`; offline reload + import, share POST and manifest checks pass in e2e. Not verified here: a real OS "Open with" launch, a real Android share sheet, the update toast in a live browser.
+
+The web twin is branded "Offline PDF tools" and is the only path for locked-down
+machines and phones, yet it has no service worker and no web app manifest.
+
+- **Requirements:** A same-origin precaching service worker whose file list is generated
+  at build time (no Workbox CDN, no runtime fetch to any other origin); a
+  `manifest.webmanifest` with icons, `file_handlers` + `launchQueue` ("Open with Stapler"
+  for PDFs and images) and `share_target` (Android share sheet); an update flow that
+  never swaps code under an open document without asking. Web build only — the extension
+  build ships neither file.
+- **AC:** After one online visit, the web twin loads and runs a merge and a compress with
+  the network disabled (Playwright `context.setOffline(true)`). Lighthouse's installability
+  check passes. Opening a PDF via the OS "Open with" / share sheet lands it in the
+  workspace. The zero-network e2e still passes (the service worker makes no cross-origin
+  request). `dist/ext` contains no service-worker registration or web manifest.
+
+### DIST-07 · Automated release packaging — `S` `P1` · GAP-8
+
+**Status: Done (2026-09-27)** — `.github/workflows/release.yml` on `v*` tags: version check, check/test, builds + bundle network scan, web and extension e2e, `pnpm package`, checksum verify, GitHub Release with zips + SHA256SUMS. Not yet exercised by a real tag push.
+
+Release packaging was a 277-line manual checklist with a hand-made zip that included
+sourcemaps. `pnpm package` (build ext / firefox / web → strip maps → zip → SHA-256) landed
+with the audit fixes (PLT-13); the tag-triggered workflow did not.
+
+- **Requirements:** A GitHub Actions workflow triggered by a `v*` tag that runs the full
+  CI gates, then `pnpm package`, and attaches the Chrome, Firefox and web zips plus their
+  SHA-256 sums to a draft GitHub release. The manifest `version` must equal the tag.
+- **AC:** Pushing a test tag produces a draft release whose zips contain no `*.map` file,
+  whose checksums match the attached `.sha256` files, and whose manifest version matches
+  the tag; a mismatched version fails the workflow. `RELEASE_CHECKLIST.md` points at the
+  workflow instead of the manual zip steps.
+
+### DS-10 · Phone-width layout — `M` `P1` · GAP-3
+
+**Status: Done (2026-09-27)** — tools sheet below 600px, icon trust chip, opaque pinned options sheet, shortcut hints hidden on coarse pointers; `tests/e2e/mobile.spec.ts` (360/390/414px, four locales, axe on key screens, light + dark) passes.
+
+At 390px the trust chip is clipped, the icon rail takes ~15% of the width, the Compress
+options sheet overlaps the preview with text showing through, the ⌘K hint shows on touch
+devices — and the trust panel itself renders *under* the options sheet (seen while
+building DS-12).
+
+- **Requirements:** Below 600px, tools in a sheet instead of a permanent rail; an opaque
+  options sheet with correct z-order under every modal; the trust chip collapsed to an
+  icon with the same accessible name and tooltip; shortcut hints hidden on
+  `(pointer: coarse)`. Both themes, keyboard operable.
+- **AC:** A mobile Playwright project (390×844, touch) walks Home → a tool → options →
+  export with no horizontal scroll, no overlap between the options sheet and the preview,
+  every modal above every sheet, and an axe pass with no serious violations.
+
+### DIST-08 · Compress-to-size landing pages — `S` `P1` · GAP-4
+
+**Status: Done (2026-09-27)** — five web-only pages (100 KB, 200 KB, 500 KB, 1 MB, custom) deep-link into Compress "Aim for a size" via `#/tool/compress?target=…`; the same link works in the extension editor. Landing-page copy is English only, like the existing landing pages.
+
+"Compress PDF to 100 KB" is the top search intent and has no landing page, although
+DOC-07 already compresses to a target size.
+
+- **Requirements:** 2–4 static landing pages (100 KB, 200 KB, 1 MB, custom) in the DIST-03
+  pattern that deep-link into Compress with the target pre-filled via a URL parameter;
+  the parameter is validated (bounds, units) and ignored when malformed. Copy follows
+  PLAN §5.5: it says when a target cannot be reached instead of promising it.
+- **AC:** Each page builds into `dist/web` only, has its own title/description/canonical
+  and a sitemap entry, and opening it with a PDF selected lands in Compress with that
+  target set; an unreachable target reports the smallest size achieved and never emits a
+  file larger than the input (CMP-04).
+
+### CNV-14 · Image target size and resize output — `M` `P2` · GAP-5
+
+**Status: Done (2026-09-27)** — PDF→Images "Aim for a file size" + longest-side limit, and a new "Image to size" tool; bounded JPEG quality/scale search in workers, cancellable, per-image fits/over report; e2e measures outputs byte-for-byte.
+
+Portals ask for "a photo under 20 KB" or a fixed pixel size.
+
+- **Requirements:** Reuse DOC-07's search loop over JPEG quality and scale to hit a byte
+  target, plus an explicit width/height (aspect-locked) option, in PDF → Images and as a
+  single-image mode. Work in a worker, cancellable, with determinate progress.
+- **AC:** A fixture photo exported with a 20 KB target comes out ≤ 20 KB (bytes checked),
+  or the tool says the target is unreachable and by how much; requested pixel dimensions
+  are exact; EXIF orientation is applied before resizing.
+
+### OPS-19 · Grayscale / black-and-white — `S` `P2` · GAP-6
+
+**Status: Done (2026-09-27)** — vector-preserving grayscale (colour operators, images, patterns, forms, annotations) with per-page raster fallback that is reported, 1-bit B&W for scans; output re-verified for leftover colour. Batch recipes don't include it yet.
+
+- **Requirements:** Convert pages to grayscale, or threshold to 1-bit black and white, as
+  a page tool; images are re-encoded, vector/text colours mapped to gray; also offered as a
+  compression lever for scans.
+- **AC:** On a colour fixture every sampled output pixel has R = G = B (grayscale) or is
+  pure black/white (B&W); text stays extractable; a "compress" use never outputs a file
+  larger than its input.
+
+### OPS-20 · Duplex interleave — `XS` `P2` · GAP-6
+
+**Status: Done (2026-09-27)** — "Duplex scan" in Merge and Organize, reverse-backs on by default, unequal counts warned and nothing dropped; undoable.
+
+- **Requirements:** Merge an odd-pages scan and an even-pages scan into one document, with
+  a "reverse the even pages" option (sheet-feeder order). Pure page-order logic on page
+  refs — no re-encode, undoable.
+- **AC:** 5 odd + 5 even pages (even reversed) produce pages 1–10 in order, verified by
+  text on each output page; unequal counts are explained, not silently padded.
+
+### DOC-13 · Repair — `S` `P2` · GAP-6
+
+**Status: Done (2026-09-27)** — tolerant re-save with salvage, verified in pdf.js and pdf-lib before it is offered; a PDF refused as corrupt gets a "Try to repair" toast action. Encrypted files are refused.
+
+- **Requirements:** Re-save a damaged PDF through the tolerant parser (xref rebuild,
+  dropped broken objects) and report what was fixed. Never claims success for a file it
+  could not load; never alters page content beyond what the report lists.
+- **AC:** The QA-01 truncated/corrupt fixtures either come out loadable by pdf-lib *and*
+  pdf.js with a report naming the repairs, or are refused with a specific reason; an
+  intact file round-trips with an "already valid" report and unchanged page text.
+
+### DS-11 · Discoverability: omnibox, What's new, rail labels — `S` `P2` · GAP-7
+
+**Status: Done (2026-09-27)** — `pdf` omnibox keyword (no permission, `permissions: []` asserted), What's-new page on version update (stored outside `chrome.storage`), rail tooltips on hover and focus with grouped sections. Omnibox suggestions are English only (the service worker cannot load locale chunks).
+
+- **Requirements:** An `omnibox` keyword that opens a tool by name (manifest key, no
+  permission); a "What's new" page opened from `onInstalled` with reason `update`
+  (never on install, which already opens the welcome); rail labels shown on hover and
+  keyboard focus, grouped like the home page.
+- **AC:** `manifest.json` still has empty `permissions` and Chrome's install dialog shows
+  no warning (F-02's e2e still passes); typing the keyword + a tool name opens that tool;
+  an update (not an install) opens What's new once; every rail item exposes its label on
+  focus to a screen reader and visually.
+
+### DOC-14 · Storage persistence and quota warnings — `S` `P2` · GAP-9
+
+**Status: Done (2026-09-27)** — persistence requested once after the first real save or model download, usage/quota and persistence state in the trust panel, one-time warnings when denied or near quota.
+
+Everything kept between visits (the session-recovery record and the OPFS bytes it points
+at, downloaded OCR models, signatures) lives in best-effort storage the browser may evict.
+
+- **Requirements:** Request `navigator.storage.persist()` once — after the first
+  successful session save or OCR model download — and remember the outcome in the
+  `settings` store so the browser is never asked again on its own; skip the request when
+  `persisted()` is already true (typical for extension pages); treat a non-boolean answer
+  as "unsupported". Show `storage.estimate()` usage/quota and the persistence state in
+  the trust panel, with a manual "Ask the browser to keep this data" retry. Warn (toast,
+  translated) once when persistence is denied, and once per session when usage reaches
+  80% of the quota.
+- **AC:** Unit tests prove: one request per profile (concurrent triggers share it, a
+  remembered denial is reused in a later session with no prompt and no toast), no
+  request when already persistent or unsupported, the first *non-empty* session save
+  triggers it, the manual retry asks even after a denial, and the quota warning fires
+  once at ≥80% and is rate-limited.
+- **Implementation:** `src/core/storage-persistence.ts` (`requestPersistenceOnce`,
+  `requestPersistenceNow`, `checkStorageHeadroom`, `noteSessionSaved`,
+  `noteModelStored`), called from `session-recovery.ts` `saveSession` (only when the
+  record write succeeded — `writeSetting` now returns whether it did) and from
+  `ocr/runOcr.ts` after a model is recorded. Tests: `tests/unit/local-data.test.ts`.
+  Known limit: Chrome decides `persist()` silently from site engagement, so most
+  first-time web visitors get "denied" and see the one-time warning.
+
+### ACC-04 · Read-aloud basics — `S` `P2` · GAP-10
+
+**Status: Done (2026-09-27)** — one utterance per sentence with sentence highlight (word highlight when the voice fires `boundary`), remembered voice and rate, in-panel keyboard control, polite live status; local voices only. Real voices' `boundary` behaviour checked only with a scripted voice.
+
+- **Requirements:** A voice picker listing only local voices (`localService === true`,
+  ACC-02/PLT-5); sentence highlighting driven by the utterance `boundary` event; the
+  chosen voice and rate remembered locally (and removed by DS-12's clear-all).
+- **AC:** No network voice is ever offered or used; the highlighted sentence tracks
+  playback on a multi-sentence fixture; voice and rate survive a reload; a remembered
+  voice that is no longer installed falls back to the default local voice with a notice.
+
+### DOC-15 · Per-document undo and an open-document cap — `M` `P1` · GAP-11
+
+**Status: Done (2026-09-27)** — each document has its own undo/redo stack (50 steps per document, 400 total); opening and closing are no longer undo steps; history-aware source liveness and recovery kept (old records migrate by dropping history); 20-document cap and a 1.5 GiB soft-limit confirmation.
+
+G1/G2 from earlier audits. RT-2, RT-3 and RT-6 all came from one global undo stack shared
+by every open document.
+
+- **Requirements:** One undo/redo history per document, serialised per document in the
+  session-recovery record; closing a document drops only its own history and bytes;
+  opening a file never touches another document's history. A ceiling on open documents
+  (and/or total pages) with a clear message instead of an out-of-memory tab.
+- **AC:** Edit A, edit B, Ctrl+Z on A undoes only A's edit and B's history is intact;
+  closing B leaves A fully undoable; a restored session restores each document's own
+  history; opening past the cap is refused with a message naming the limit; the RT-2/RT-3/
+  RT-6 regression tests still pass.
+
+### DS-12 · "Stored on this device" and Clear all local data — `M` `P1` · GAP-12
+
+**Status: Done (2026-09-27)** — "Stored on this device" list with per-category clear, and "Clear all local data" (refused while a job runs or another tab is open; lists what goes; reloads to a clean state).
+
+"Nothing is uploaded" is half the privacy story; the trust panel never said what *is*
+kept locally, and the only way to delete it was the browser's own "clear site data" —
+which is also how RT-4's pre-redaction originals were meant to be cleaned up.
+
+- **Requirements:** The trust panel lists what Stapler keeps, with counts and sizes:
+  open/recoverable documents in OPFS, OCR language models (tesseract's cache and uploaded
+  copies), saved signatures and initials, Recents file handles, presets and recipes, the
+  folder-search index, settings/shortcuts/session record. Per-category clear where cheap
+  (OCR models, signatures, Recents, search index). One "Clear all local data" button that
+  confirms as a danger action listing exactly what will be deleted, says open documents
+  will be closed and unsaved changes lost, is refused while a job runs or another Stapler
+  tab is open, clears OPFS files, the IndexedDB stores, tesseract's cached models and the
+  app's localStorage keys — only Stapler's own entries, since the web twin's origin can be
+  shared — then reloads so no in-memory state survives. Both themes, keyboard operable,
+  stacked over the trust panel.
+- **AC:** A web e2e stores a session (imported document) and a signature, clears all from
+  the trust panel, and after the reload: no restore prompt, no session record, no
+  `*.pdf` in OPFS, no signatures (in IndexedDB or the Sign panel), and a second reload
+  still restores nothing. Unit tests prove the breakdown, that clear-all removes every
+  Stapler file/store/key and nothing else, the in-memory fallback is cleared, and the
+  confirmed flow's refusals (busy, another tab), cancel, autosave suspension, and a clean
+  startup recovery afterwards.
+- **Implementation:** `src/core/local-data.ts` (report + `clearAllLocalData`),
+  `src/ui/clearLocalData.ts` (confirmed flows), `src/ui/components/LocalDataSection.tsx`
+  (in `TrustModal`); helpers in `db.ts` (`readStaplerDbStats`, `clearStaplerStores`),
+  `opfs.ts` (`listStoredFiles`, `clearStaplerFiles`, `otherStaplerTabsOpen`),
+  `ocr/tesseractCache.ts` (`listCachedModels`, `clearCachedModels`), `signatures.ts`
+  (`clearSignatureLibrary`), `session-recovery.ts` (`suspendAutosave`); `ConfirmDialog`
+  gained an optional bullet list. Tests: `tests/unit/local-data.test.ts`,
+  `tests/e2e/local-data.spec.ts`. Known limits: the "disclosed downloads" count is not
+  storage and simply resets with the reload; a web-twin precache (DIST-06) is app code,
+  not user data, and is not cleared; granted persistence cannot be revoked by a page.
 
 ---
 

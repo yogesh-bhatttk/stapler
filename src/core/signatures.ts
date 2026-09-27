@@ -7,6 +7,7 @@
  */
 import { signal } from '@preact/signals';
 import {
+  clearStaplerStores,
   deleteStoredSignature,
   getStoredSignature,
   listSignatures,
@@ -82,4 +83,15 @@ export async function deleteSignature(id: string): Promise<void> {
  */
 export async function getSignature(id: string): Promise<Signature | null> {
   return signatures.value.find(s => s.id === id) ?? (await getStoredSignature(id));
+}
+
+/**
+ * GAP-12 — deletes every saved signature and initials. Returns whether storage
+ * accepted the clear; the in-memory library is emptied only when it did.
+ */
+export async function clearSignatureLibrary(): Promise<boolean> {
+  if (!(await clearStaplerStores(['signatures']))) return false;
+  for (const id of [...previewUrls.keys()]) forgetPreview(id);
+  signatures.value = [];
+  return true;
 }
