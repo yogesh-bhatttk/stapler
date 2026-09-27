@@ -68,7 +68,7 @@ export async function searchAndHighlightMatches(
     return { applied: false, matches: 0, unplaced: 0 };
   }
 
-  commit();
+  commit(docId);
   addAnnotations(highlights);
   notify('info', tPlural('Highlighted {count} matches.', highlights.length), {
     detail:

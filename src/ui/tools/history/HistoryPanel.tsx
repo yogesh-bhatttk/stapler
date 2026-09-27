@@ -1,9 +1,14 @@
 /**
- * DOC-10 — lists the session's operation log (`core/history.ts`) and exports it
- * as a text file. Read-only: nothing here writes to the document or the log.
+ * DOC-10 — lists the active document's operation log (`core/history.ts`) and
+ * exports it as a text file. Read-only: nothing here writes to the document
+ * or the log.
+ *
+ * GAP-11a — each open document has its own undo history, so this shows the
+ * active document's and follows the tab bar: switching tabs switches the log.
  */
 import { Download } from 'lucide-preact';
 import { historyVersion, operationLog } from '../../../core/history';
+import { activeDoc } from '../../../core/store';
 import { platform } from '../../../platform/current';
 import { Button } from '../../components/Button';
 import { panelStyles } from '../../shell/panelStyles';
@@ -19,11 +24,14 @@ export function HistoryPanel() {
   // Reading `.value` subscribes this component to every push/undo/redo/reset —
   // `operationLog()` itself is a plain array snapshot, not reactive on its own.
   void historyVersion.value;
-  const log = operationLog();
+  const doc = activeDoc.value;
+  const log = doc ? operationLog(doc.id) : [];
 
   const handleExport = async () => {
-    const lines =
-      log.length > 0 ? log.map(formatEntry) : [t('No operations recorded this session.')];
+    const lines = [
+      ...(doc ? [doc.name, ''] : []),
+      ...(log.length > 0 ? log.map(formatEntry) : [t('No operations recorded this session.')])
+    ];
     const bytes = new TextEncoder().encode(lines.join('\n'));
     await platform.saveFileAs(bytes, 'stapler-edit-history.txt');
   };
@@ -32,9 +40,14 @@ export function HistoryPanel() {
     <>
       <div className={panelStyles.section}>
         <p className={panelStyles.description}>
-          {t(
-            'Every operation applied this session, in order. An operation you undo before exporting this log is left out.'
-          )}
+          {doc
+            ? t(
+                'Every edit made to {name} this session, in order. Each open document keeps its own history; an edit you undo is left out.',
+                { name: doc.name }
+              )
+            : t(
+                'Every operation applied this session, in order. An operation you undo before exporting this log is left out.'
+              )}
         </p>
       </div>
 
