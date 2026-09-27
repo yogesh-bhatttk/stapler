@@ -25,6 +25,8 @@ export interface ModalProps {
   /** Set false for a dialog that must be answered, e.g. a confirmation. */
   dismissible?: boolean;
   icon?: ComponentChildren;
+  /** `sheet` docks the dialog to the bottom edge at full width (GAP-3's phone tools sheet). */
+  placement?: 'center' | 'sheet';
 }
 
 /**
@@ -64,7 +66,7 @@ const FOCUSABLE =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 export const Modal = forwardRef<HTMLDivElement, ModalProps>(function Modal(
-  { title, onClose, children, footer, size = 'md', dismissible = true, icon },
+  { title, onClose, children, footer, size = 'md', dismissible = true, icon, placement = 'center' },
   ref
 ) {
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -129,14 +131,14 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(function Modal(
 
   return (
     <div
-      className={styles.scrim}
+      className={`${styles.scrim} ${placement === 'sheet' ? styles.sheetScrim : ''}`}
       onMouseDown={event => {
         if (dismissible && event.target === event.currentTarget) onClose();
       }}
     >
       <div
         ref={mergeRefs(dialogRef, ref)}
-        className={`${styles.dialog} ${styles[`size-${size}`]}`}
+        className={`${styles.dialog} ${styles[`size-${size}`]} ${placement === 'sheet' ? styles.sheet : ''}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}

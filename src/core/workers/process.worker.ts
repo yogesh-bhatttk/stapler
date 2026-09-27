@@ -177,6 +177,16 @@ import {
 } from '../pdf/encrypt';
 import { applyAltTextToDoc } from '../pdf/accessibility';
 import {
+  applyGrayscale,
+  planGrayscale,
+  type GrayImageData,
+  type GrayMode,
+  type GrayPageOutcome,
+  type GrayPagePlan,
+  type GrayRaster
+} from '../pdf/grayscale';
+import { repairPdfBytes, type RepairOutcome } from '../pdf/repair';
+import {
   buildSimpleTrueTypeSubstitute,
   glyphNameDecoder,
   SubstitutionRefused,
@@ -889,6 +899,44 @@ export interface ProcessJob extends LocaleAware {
    * via the render worker first; this function only does the PDF assembly.
    */
   contactSheetExport(jpegPages: Uint8Array[], cols: number, job?: JobHandle): Promise<Uint8Array>;
+  /**
+   * GAP-6 — what a greyscale conversion of `pageIndices` involves: which image
+   * objects need pixels, which pages cannot be converted as vectors (and why).
+   * Reads only; the parse is thrown away.
+   */
+  grayscalePlan(
+    bytes: Uint8Array,
+    pageIndices: number[],
+    mode: GrayMode,
+    job?: JobHandle
+  ): Promise<GrayPagePlan[]>;
+  /**
+   * GAP-6 — rewrites the pages with the decoded image pixels and page rasters
+   * in hand, saves, and re-plans the *output* as verification: every converted
+   * page must come back with nothing left to convert.
+   */
+  grayscaleApply(
+    bytes: Uint8Array,
+    input: GrayscaleApplyInput,
+    job?: JobHandle
+  ): Promise<GrayscaleApplyResult>;
+  /** GAP-6 — re-saves a damaged PDF through the tolerant parser (`pdf/repair.ts`). */
+  repairDocument(bytes: Uint8Array, job?: JobHandle): Promise<RepairOutcome>;
+}
+
+export interface GrayscaleApplyInput {
+  pageIndices: number[];
+  mode: GrayMode;
+  images: GrayImageData[];
+  rasters: GrayRaster[];
+  wholeDocument: boolean;
+}
+
+export interface GrayscaleApplyResult {
+  bytes: Uint8Array;
+  outcomes: GrayPageOutcome[];
+  /** The output re-planned (always in `gray` mode) for every converted page. */
+  verification: GrayPagePlan[];
 }
 
 /* ------------------------------------------------------------------ *
@@ -7037,6 +7085,56 @@ Q
       bytes: await pseudoLinearize(doc).save({ useObjectStreams: true }),
       ...report
     });
+  },
+
+  async grayscalePlan(bytes, pageIndices, mode, job) {
+    const doc = await load(bytes);
+    return planGrayscale(doc, pageIndices, mode, (done, total) =>
+      checkpoint(
+        job,
+        done / Math.max(1, total),
+        translate('Checking page {page} for colour', { page: pageIndices[done] + 1 })
+      )
+    );
+  },
+
+  async grayscaleApply(bytes, input, job) {
+    const doc = await load(bytes);
+    const outcomes = await applyGrayscale(
+      doc,
+      {
+        pageIndices: input.pageIndices,
+        mode: input.mode,
+        images: new Map(input.images.map(image => [image.objectNumber, image])),
+        rasters: new Map(input.rasters.map(raster => [raster.pageIndex, raster])),
+        wholeDocument: input.wholeDocument
+      },
+      (done, total) =>
+        checkpoint(
+          job,
+          (done / Math.max(1, total)) * 0.8,
+          translate('Converting page {page}', { page: input.pageIndices[done] + 1 })
+        )
+    );
+    // Colour images no page uses any more would otherwise stay in the file at
+    // full size, invisible — and still in colour.
+    sweepUnreachableObjects(doc);
+    await checkpoint(job, 0.85, translate('Saving'));
+    const output = await doc.save({ useObjectStreams: true });
+
+    await checkpoint(job, 0.9, translate('Verifying the result'));
+    const converted = outcomes
+      .filter(o => o.route === 'vector' || o.route === 'raster')
+      .map(o => o.pageIndex);
+    const verification = await planGrayscale(await load(output), converted, 'gray');
+    return transferOut({ bytes: output, outcomes, verification });
+  },
+
+  async repairDocument(bytes, job) {
+    const outcome = await repairPdfBytes(bytes, (fraction, label) =>
+      checkpoint(job, fraction, label)
+    );
+    return transferOut(outcome);
   },
 
   // DOC-09 — contact sheet

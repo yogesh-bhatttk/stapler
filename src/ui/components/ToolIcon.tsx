@@ -8,6 +8,7 @@
 import {
   BookOpen,
   Columns2,
+  Contrast,
   Eraser,
   FileImage,
   FilePlus,
@@ -17,6 +18,7 @@ import {
   History,
   Image as ImageIcon,
   ImageDown,
+  ImageMinus,
   Layers,
   LayoutGrid,
   ListTree,
@@ -29,6 +31,7 @@ import {
   SplitSquareHorizontal,
   Table,
   Volume2,
+  Wrench,
   type LucideIcon
 } from 'lucide-preact';
 import { forwardRef } from 'preact/compat';
@@ -36,6 +39,7 @@ import { forwardRef } from 'preact/compat';
 const ICONS: Record<string, LucideIcon> = {
   BookOpen,
   Columns2,
+  Contrast,
   Eraser,
   FileImage,
   FilePlus,
@@ -45,6 +49,7 @@ const ICONS: Record<string, LucideIcon> = {
   History,
   Image: ImageIcon,
   ImageDown,
+  ImageMinus,
   Layers,
   LayoutGrid,
   ListTree,
@@ -56,7 +61,8 @@ const ICONS: Record<string, LucideIcon> = {
   Sparkles,
   SplitSquareHorizontal,
   Table,
-  Volume2
+  Volume2,
+  Wrench
 };
 
 export const ToolIcon = forwardRef<SVGSVGElement, { name: string; size?: number }>(

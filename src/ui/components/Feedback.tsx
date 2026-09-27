@@ -30,15 +30,29 @@ function ToastCard({ toast }: { toast: Toast }) {
       <div className={styles.toastBody}>
         <span className={styles.toastTitle}>{toast.title}</span>
         {toast.detail && <span className={styles.toastDetail}>{toast.detail}</span>}
-        {toast.diagnostic && (
+        {(toast.diagnostic || toast.action) && (
           <div className={styles.toastActions}>
-            <Button
-              size="compact"
-              variant="tertiary"
-              onClick={() => navigator.clipboard.writeText(toast.diagnostic ?? '')}
-            >
-              {translate('Copy diagnostic')}
-            </Button>
+            {toast.action && (
+              <Button
+                size="compact"
+                variant="secondary"
+                onClick={() => {
+                  dismissToast(toast.id);
+                  toast.action?.run();
+                }}
+              >
+                {toast.action.label}
+              </Button>
+            )}
+            {toast.diagnostic && (
+              <Button
+                size="compact"
+                variant="tertiary"
+                onClick={() => navigator.clipboard.writeText(toast.diagnostic ?? '')}
+              >
+                {translate('Copy diagnostic')}
+              </Button>
+            )}
           </div>
         )}
       </div>

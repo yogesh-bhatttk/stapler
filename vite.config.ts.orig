@@ -318,14 +318,7 @@ const LANDING_PAGES: Record<string, string> = {
   'pdf-to-excel': 'pdf-to-excel.html',
   'excel-to-pdf': 'excel-to-pdf.html',
   'pdf-to-ppt': 'pdf-to-ppt.html',
-  'ppt-to-pdf': 'ppt-to-pdf.html',
-  // GAP-4 — "compress PDF to X KB" entry pages, all one entry script that opens
-  // Compress in "Aim for a size" mode with the page's target pre-filled.
-  'compress-pdf-to-100kb': 'compress-pdf-to-100kb.html',
-  'compress-pdf-to-200kb': 'compress-pdf-to-200kb.html',
-  'compress-pdf-to-500kb': 'compress-pdf-to-500kb.html',
-  'compress-pdf-to-1mb': 'compress-pdf-to-1mb.html',
-  'compress-pdf-to-size': 'compress-pdf-to-size.html'
+  'ppt-to-pdf': 'ppt-to-pdf.html'
 };
 
 export default defineConfig(() => {

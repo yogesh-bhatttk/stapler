@@ -37,7 +37,6 @@ import { logEvent } from './errors';
 import { announceTab, sourceBytesExist, sweepOrphanedSourceBytesIfSoleTab } from './opfs';
 import { notify } from './notify';
 import { translate } from './i18n';
-import { noteSessionSaved } from './storage-persistence';
 
 const SESSION_KEY = 'session.recovery';
 const SAVE_DEBOUNCE_MS = 500;
@@ -132,19 +131,6 @@ export function isAutosaveSuspended(): boolean {
   return autosaveSuspended;
 }
 
-/**
- * GAP-12 — "Clear all local data" turns autosave off for the rest of this page's
- * life (the page reloads straight after), so a debounced save cannot write the
- * session record back after it was cleared.
- */
-export function suspendAutosave(): void {
-  autosaveSuspended = true;
-  if (saveTimer) {
-    clearTimeout(saveTimer);
-    saveTimer = null;
-  }
-}
-
 /** Test hook: clear the suspension a previous startup set. */
 export function __resetAutosaveSuspendedForTests(): void {
   autosaveSuspended = false;
@@ -184,8 +170,7 @@ export async function saveSession(): Promise<void> {
       history: serializeHistory(),
       savedAt: Date.now()
     };
-    // GAP-9 — the first saved session is what makes persistence worth asking for.
-    if ((await writeSetting(SESSION_KEY, record)) !== false) noteSessionSaved();
+    await writeSetting(SESSION_KEY, record);
   } finally {
     isSaving = false;
     if (needsSave) {

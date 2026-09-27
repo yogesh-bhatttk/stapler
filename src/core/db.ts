@@ -239,9 +239,9 @@ async function guard<T>(scope: string, fn: (db: IDBPDatabase<StaplerSchema>) => 
       if (now - lastQuotaToastAt >= QUOTA_TOAST_INTERVAL_MS) {
         lastQuotaToastAt = now;
         notify('warning', translate('Local storage is full.'), {
-          detail:
-            'Stapler could not save to browser storage. Your document is unaffected — delete ' +
-            'saved signatures or clear site data to free space.'
+          detail: translate(
+            'Stapler could not save to browser storage. Your document is unaffected. Open the privacy panel from the top bar to see what is stored and free space.'
+          )
         });
       }
       return { ok: false as const, value: undefined };
@@ -315,8 +315,9 @@ export async function readSetting<T>(key: string): Promise<T | undefined> {
   return (await guard('db.readSetting', db => db.get('settings', key))).value as T | undefined;
 }
 
-export async function writeSetting(key: string, value: unknown) {
-  await guard('db.writeSetting', db => db.put('settings', value, key));
+/** Resolves `false` when storage refused the write (quota, unavailable), `true` otherwise. */
+export async function writeSetting(key: string, value: unknown): Promise<boolean> {
+  return (await guard('db.writeSetting', db => db.put('settings', value, key))).ok;
 }
 
 /* ---------------- searchIndex ---------------- */
@@ -452,4 +453,65 @@ export async function listRecipes(): Promise<Recipe[]> {
 
 export async function deleteRecipe(id: string) {
   await guard('db.deleteRecipe', db => db.delete('recipes', id));
+}
+
+/* ---------------- GAP-12: what is stored, and clearing it ---------------- */
+
+/** Every object store in the `stapler` database. */
+export const STAPLER_STORES = [
+  'handles',
+  'signatures',
+  'presets',
+  'settings',
+  'searchIndex',
+  'recipes'
+] as const;
+export type StaplerStore = (typeof STAPLER_STORES)[number];
+
+export interface StaplerDbStats {
+  signatures: { count: number; bytes: number };
+  recents: number;
+  presets: number;
+  recipes: number;
+  /** Files the folder-search index covers (its `doc` records). */
+  indexedFiles: number;
+  settings: number;
+}
+
+/**
+ * GAP-12 — counts for the trust panel's "Stored on this device" list. `null`
+ * when IndexedDB could not be read at all (the panel then says so instead of
+ * claiming nothing is stored).
+ */
+export async function readStaplerDbStats(): Promise<StaplerDbStats | null> {
+  const result = await guard('db.stats', async db => {
+    const signatures = await db.getAll('signatures');
+    return {
+      signatures: {
+        count: signatures.length,
+        bytes: signatures.reduce((sum, s) => sum + (s.png?.byteLength ?? 0), 0)
+      },
+      recents: await db.count('handles'),
+      presets: await db.count('presets'),
+      recipes: await db.count('recipes'),
+      indexedFiles: await db.countFromIndex('searchIndex', 'by-type', 'doc'),
+      settings: await db.count('settings')
+    };
+  });
+  return result.ok ? result.value : null;
+}
+
+/**
+ * GAP-12 — empties the named stores in one transaction. The database itself is
+ * kept (deleting it would block on this tab's own open connection); an empty
+ * store holds nothing. Returns whether the clear committed.
+ */
+export async function clearStaplerStores(stores: readonly StaplerStore[]): Promise<boolean> {
+  if (stores.includes('searchIndex')) memorySearchIndexStore.clear();
+  const result = await guard('db.clearStores', async db => {
+    const tx = db.transaction([...stores], 'readwrite');
+    await Promise.all(stores.map(name => tx.objectStore(name).clear()));
+    await tx.done;
+  });
+  return result.ok;
 }

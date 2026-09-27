@@ -19,6 +19,7 @@ import { toolRoute } from '../../../core/tools';
 import { cropSettings } from '../crop/state';
 import { Button } from '../../components/Button';
 import { panelStyles } from '../../shell/panelStyles';
+import { DuplexSection } from './DuplexSection';
 import { tPlural, useTranslation } from '../../../core/i18n';
 
 export function OrganizePanel() {
@@ -94,6 +95,10 @@ export function OrganizePanel() {
           {t('Delete')}
         </Button>
       </div>
+
+      <hr className={panelStyles.divider} />
+
+      <DuplexSection />
 
       <hr className={panelStyles.divider} />
 

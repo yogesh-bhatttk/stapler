@@ -34,6 +34,7 @@ import { CropOverlay } from '../tools/crop/CropOverlay';
 import { CompareView } from '../tools/compare/CompareView';
 import { AnnotateOverlay } from '../tools/annotate/AnnotateOverlay';
 import { BatchView } from '../tools/batch/BatchView';
+import { ImageSizeView } from '../tools/image-size/ImageSizeView';
 import { ReflowView } from '../tools/reflow/ReflowView';
 import { SideBySideView } from '../tools/side-by-side/SideBySideView';
 import { sideBySideSourceId } from '../tools/side-by-side/state';
@@ -86,6 +87,11 @@ export function Canvas() {
 
   if (tool.id === 'batch') {
     return <BatchView />;
+  }
+
+  // GAP-5 — reads its image from disk, never from the open document.
+  if (tool.id === 'image-to-size') {
+    return <ImageSizeView />;
   }
 
   if (!doc || doc.pages.length === 0) {

@@ -31,9 +31,24 @@ export const splitSettings = signal<SplitSettings>({
 export interface PdfToImageSettings {
   format: 'png' | 'jpeg';
   dpi: number;
+  /**
+   * GAP-5 — `resolution` exports at `dpi` as before; `target` aims each image
+   * at `targetKb` (JPEG only), measured per image.
+   */
+  sizeMode: 'resolution' | 'target';
+  /** Per-image target, in decimal kilobytes. */
+  targetKb: number;
+  /** Longest side limit in pixels, or null for none. Applies in both modes. */
+  maxDimension: number | null;
 }
 
-export const pdfToImageSettings = signal<PdfToImageSettings>({ format: 'jpeg', dpi: 150 });
+export const pdfToImageSettings = signal<PdfToImageSettings>({
+  format: 'jpeg',
+  dpi: 150,
+  sizeMode: 'resolution',
+  targetKb: 200,
+  maxDimension: null
+});
 
 /** OPS-05 sensitivity, 0 (strict) to 100 (forgiving). */
 export const removeBlanksThreshold = signal(50);

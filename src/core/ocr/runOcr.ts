@@ -18,6 +18,7 @@ import { requestOcrConsent } from '../notify';
 import { tPlural, translate } from '../i18n';
 import { cancelled, internal, isCancellation, fromUnknown } from '../errors';
 import { markModelDownloaded, removeOcrModel } from './modelState';
+import { noteModelStored } from '../storage-persistence';
 import { hasModelBytes, readModelBytes } from '../opfs';
 import { fetchVerifiedModel } from './download';
 import { hasCachedModel, writeCachedModel } from './tesseractCache';
@@ -435,6 +436,8 @@ export async function runOcr(
   // the user opted out and the dialog comes back next time — the flag records
   // consent *and* success, never intent.
   await Promise.all(missing.map(code => markModelDownloaded(code)));
+  // GAP-9 — a model is now stored locally; ask (once) that it not be evicted.
+  if (missing.length > 0) noteModelStored();
 
   options.onProgress?.(1, translate('Done'));
   return { ...written, downloadedModel: missing.length > 0, skippedPages };

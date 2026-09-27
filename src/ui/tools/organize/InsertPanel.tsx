@@ -8,6 +8,7 @@ import { tPlural, translate, useTranslation } from '../../../core/i18n';
  * no way to choose where the pages landed short of appending, then dragging
  * them into place in the grid by hand.
  */
+import { tryToRepairAction } from '../repair/state';
 import { useState } from 'preact/hooks';
 import { FilePlus } from 'lucide-preact';
 import { platform } from '../../../platform/current';
@@ -79,7 +80,8 @@ export function InsertPanel() {
         // A failure on one file never stops the others, and each says why.
         for (const failure of outcome.failures) {
           notify('danger', translate('Could not add {name}', { name: failure.name }), {
-            detail: failure.message
+            detail: failure.message,
+            ...(failure.repairable ? { action: tryToRepairAction(failure.repairable) } : {})
           });
         }
         if (insertedKeys.length > 0) {

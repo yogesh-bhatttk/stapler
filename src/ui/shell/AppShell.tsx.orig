@@ -7,7 +7,6 @@ import { tPlural, translate } from '../../core/i18n';
  * as they were, and they now ignore keystrokes typed into a field — previously ⌘Z
  * inside a text stamp undid a document mutation instead of the typing.
  */
-import { tryToRepairAction } from '../tools/repair/state';
 import type { ComponentChildren } from 'preact';
 import { lazy, Suspense } from 'preact/compat';
 import { useEffect, useState } from 'preact/hooks';
@@ -96,16 +95,6 @@ export function AppShell({ children }: { children: ComponentChildren }) {
   useExternalOpen(requestOptions); // GAP-2: files opened with / shared to the installed web app
   const [showWelcome, setShowWelcome] = useState(false);
   useUnsavedGuard();
-
-  // GAP-7 — the extension's `pdf` omnibox keyword asks an open editor tab to
-  // switch tool. A hash change, like any rail click, so open documents stay.
-  useEffect(
-    () =>
-      platform.onExternalNavigate?.(route => {
-        window.location.hash = `#${route}`;
-      }),
-    []
-  );
 
   useEffect(() => {
     // Stored in IndexedDB with the rest of the settings, not localStorage, so
@@ -237,10 +226,7 @@ export function AppShell({ children }: { children: ComponentChildren }) {
       });
       if (!outcome) return;
       if (outcome.failures.length > 0) {
-        const failure = outcome.failures[0];
-        notify('danger', failure.message, {
-          ...(failure.repairable ? { action: tryToRepairAction(failure.repairable) } : {})
-        });
+        notify('danger', outcome.failures[0].message);
         return;
       }
       const imported = outcome.imported[0];

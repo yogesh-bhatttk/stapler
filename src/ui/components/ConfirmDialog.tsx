@@ -6,6 +6,7 @@ import { forwardRef } from 'preact/compat';
 import { confirmRequest } from '../../core/notify';
 import { Button } from './Button';
 import { Modal, requestKey } from './Modal';
+import styles from './InfoModals.module.css';
 
 export const ConfirmDialog = forwardRef<HTMLDivElement, Record<string, never>>(
   function ConfirmDialog(_props, ref) {
@@ -36,6 +37,13 @@ export const ConfirmDialog = forwardRef<HTMLDivElement, Record<string, never>>(
         }
       >
         {request.body}
+        {request.details && request.details.length > 0 && (
+          <ul className={styles.steps}>
+            {request.details.map(line => (
+              <li key={line}>{line}</li>
+            ))}
+          </ul>
+        )}
       </Modal>
     );
   }

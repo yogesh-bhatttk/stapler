@@ -22,6 +22,7 @@ import {
   fillFormFields,
   flattenDocument,
   pagesToImageArchive,
+  pagesToSizedImageArchive,
   protectDocument,
   restrictDocument,
   scrubDocumentMetadata,
@@ -29,8 +30,12 @@ import {
   planSizeSplitBoundaries,
   sanitizeFileStem,
   splitBoundaries,
-  splitDocument
+  splitDocument,
+  grayscaleDocument,
+  repairDocument
 } from '../../core/operations';
+import { grayscaleReport, grayscaleSettings } from './grayscale/state';
+import { lastRepair, repairCandidate, repairedName } from './repair/state';
 import { processWorker } from '../../core/workers';
 import { imagesToPdfBytes } from '../../core/import';
 import {
@@ -49,7 +54,7 @@ import { formatBytes } from '../components/Feedback';
 import type { JobOptions } from '../../core/workers/protocol';
 import { createJobHandle } from '../../core/workers/protocol';
 import { findTool, type ToolId } from '../../core/tools';
-import { writeSourceBytes } from '../../core/opfs';
+import { readSourceBytes, writeSourceBytes } from '../../core/opfs';
 import {
   compressMode,
   compressSettings,
@@ -69,6 +74,9 @@ import {
   extractImagesSettings
 } from './state';
 import { extractSettings } from './extract/state';
+import { pdfToImageReport } from './convert/pdf-to-img-state';
+import { imageSizeRequest, imageSizeResult, imageSizeSettings } from './image-size/state';
+import { jpegPassthrough, resizeImageFile } from '../../core/image';
 import { extractImagesReport, summarize } from './extract-images/state';
 import { formFields, formValues, formulas } from './sign/state';
 import { applyFormulas } from '../../core/formula';
@@ -1094,8 +1102,140 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       .filter(({ page }) => selected.size === 0 || selected.has(page.key))
       .map(({ index }) => index);
 
-    const archive = await pagesToImageArchive(bytes, indices, settings.format, settings.dpi, job);
-    await reviewAndSaveZip(doc, archive, `${stem(doc.name)}-${settings.dpi}dpi.zip`);
+    // GAP-5 — a pixel limit or a size target goes through the measured
+    // per-image search; plain resolution exports keep the original path.
+    const targetMode = settings.sizeMode === 'target';
+    if (!targetMode && settings.maxDimension === null) {
+      const archive = await pagesToImageArchive(bytes, indices, settings.format, settings.dpi, job);
+      await reviewAndSaveZip(doc, archive, `${stem(doc.name)}-${settings.dpi}dpi.zip`);
+      return;
+    }
+
+    const targetBytes = targetMode ? Math.round(settings.targetKb * 1000) : null;
+    const { archive, pages } = await pagesToSizedImageArchive(
+      bytes,
+      indices,
+      targetMode ? 'jpeg' : settings.format,
+      settings.dpi,
+      { targetBytes, maxDimension: settings.maxDimension },
+      job
+    );
+    pdfToImageReport.value = { docId: doc.id, targetBytes, pages };
+    const missed = pages.filter(page => !page.reached);
+    const suffix = targetMode ? `${settings.targetKb}kb` : `max${settings.maxDimension}px`;
+    const saved = await reviewAndSaveZip(doc, archive, `${stem(doc.name)}-${suffix}.zip`);
+    if (saved && missed.length > 0 && targetBytes !== null) {
+      // Never a silent miss: name the pages and their measured sizes.
+      notify(
+        'warning',
+        tPlural('{count} images are over {size}.', missed.length, {
+          size: formatBytes(targetBytes)
+        }),
+        {
+          detail: translate(
+            'Each was saved at the smallest size Stapler could make: {pages}. Lower the starting resolution or the page count, or raise the target.',
+            {
+              pages: missed
+                .map(page =>
+                  translate('page {page} ({size})', {
+                    page: page.pageIndex + 1,
+                    size: formatBytes(page.bytes)
+                  })
+                )
+                .join(', ')
+            }
+          ),
+          timeout: 0
+        }
+      );
+    }
+  },
+
+  /**
+   * GAP-5 — one image to a JPEG at or under a size and/or within a pixel box.
+   * The search runs in the image worker and every number it reports is
+   * measured on the bytes about to be written. A miss is never saved silently:
+   * the smallest file found is offered, with its size, for the person to accept.
+   */
+  'image-to-size': async ({ job }) => {
+    const settings = imageSizeSettings.value;
+    const file = settings.file;
+    if (!file) {
+      notify('warning', translate('Choose an image first.'), {
+        detail: translate('Pick a JPEG, PNG, WebP, GIF, HEIC or TIFF file in the options panel.')
+      });
+      return;
+    }
+    const request = imageSizeRequest(settings);
+    const resized = await resizeImageFile(file, request, job);
+
+    // A JPEG that already meets every limit is better left alone: re-encoding
+    // it can only lose quality, and could even make it bigger.
+    const original = new Uint8Array(await file.arrayBuffer());
+    const upright = jpegPassthrough(original)?.orientation === 1;
+    const fitsBox =
+      request.maxDimension === null ||
+      Math.max(resized.sourceWidth, resized.sourceHeight) <= request.maxDimension;
+    const fitsTarget = request.targetBytes === null || original.byteLength <= request.targetBytes;
+    const keepOriginal =
+      upright && fitsBox && fitsTarget && original.byteLength <= resized.bytes.byteLength;
+
+    const bytes = keepOriginal ? original : resized.bytes;
+    const reached = request.targetBytes === null || bytes.byteLength <= request.targetBytes;
+    imageSizeResult.value = {
+      source: file,
+      bytes,
+      width: keepOriginal ? resized.sourceWidth : resized.width,
+      height: keepOriginal ? resized.sourceHeight : resized.height,
+      sourceWidth: resized.sourceWidth,
+      sourceHeight: resized.sourceHeight,
+      quality: keepOriginal ? null : resized.quality,
+      targetBytes: request.targetBytes,
+      reached,
+      attempts: resized.attempts,
+      sourcePages: resized.sourcePages,
+      keptOriginal: keepOriginal
+    };
+
+    if (!reached && request.targetBytes !== null) {
+      announceWaiting(job, translate('Waiting for confirmation…'));
+      const proceed = await confirmAction({
+        title: translate('Could not reach {size}', { size: formatBytes(request.targetBytes) }),
+        body: translate(
+          'The smallest Stapler could make is {size}, at {width}×{height} px — measured, after {attempts}. Save it anyway?',
+          {
+            size: formatBytes(bytes.byteLength),
+            width: resized.width,
+            height: resized.height,
+            attempts: tPlural('{count} attempts', resized.attempts)
+          }
+        ),
+        confirmLabel: translate('Save at {size}', { size: formatBytes(bytes.byteLength) }),
+        cancelLabel: translate('Don’t save')
+      });
+      if (!proceed) return;
+    }
+
+    const suffix =
+      request.targetBytes !== null
+        ? `${settings.target.amount}${settings.target.unit.toLowerCase()}`
+        : `${request.maxDimension ?? 'resized'}px`;
+    const name = keepOriginal ? file.name : `${stem(file.name)}-${suffix}.jpg`;
+    const saved = await platform.saveFileAs(bytes, name);
+    if (!saved) return;
+    notify(
+      'success',
+      keepOriginal
+        ? translate('The original already fits, so it was saved unchanged ({size}).', {
+            size: formatBytes(bytes.byteLength)
+          })
+        : translate('Saved {name}: {size}, {width}×{height} px.', {
+            name,
+            size: formatBytes(bytes.byteLength),
+            width: resized.width,
+            height: resized.height
+          })
+    );
   },
 
   'images-to-pdf': async ({ job }) => {
@@ -1807,6 +1947,133 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   reflow: async () => {},
   history: async () => {},
   'side-by-side': async () => {},
+
+  // GAP-6 — greyscale / black-and-white.
+  grayscale: async ({ doc, job }) => {
+    const settings = grayscaleSettings.value;
+    const pageIndices =
+      settings.scope === 'selected'
+        ? doc.pages
+            .map((page, index) => (selectedPageKeys.value.has(page.key) ? index : -1))
+            .filter(index => index >= 0)
+        : doc.pages.map((_, index) => index);
+    if (pageIndices.length === 0) {
+      notify('warning', translate('Select the pages to convert first.'), {
+        detail: translate('Tick pages in the grid, or choose "All pages".')
+      });
+      return;
+    }
+
+    // Conversion runs on the *current* pages — the file actually being saved.
+    const current = await currentDocumentBytes(job);
+    const result = await grayscaleDocument(
+      current,
+      pageIndices,
+      doc.pages.length,
+      { mode: settings.mode, rasterDpi: settings.rasterDpi },
+      job
+    );
+    if (result.nothingToDo) {
+      grayscaleReport.value = null;
+      notify('info', translate('Already grey.'), {
+        detail: translate(
+          'Nothing on those pages carries colour, so there is nothing to convert. Nothing was saved.'
+        )
+      });
+      return;
+    }
+    grayscaleReport.value = {
+      pages: result.pages,
+      undecodable: result.undecodable,
+      originalBytes: result.originalBytes,
+      resultBytes: result.bytes.byteLength,
+      mode: settings.mode
+    };
+
+    // Proven, not asserted: the output was re-read, and a converted page that
+    // still has colour on it blocks the save.
+    if (result.colourLeft.length > 0) {
+      notify('danger', translate('The conversion could not be verified — nothing was saved.'), {
+        detail: translate(
+          'Colour was still found on pages {pages} after converting. Your document is unchanged.',
+          { pages: result.colourLeft.map(i => i + 1).join(', ') }
+        ),
+        timeout: 0
+      });
+      return;
+    }
+
+    const rastered = result.pages.filter(p => p.route === 'raster').length;
+    if (rastered > 0) {
+      notify('warning', tPlural('{count} pages were rendered as images.', rastered), {
+        detail: translate(
+          'They contain something that cannot be converted directly; their text is no longer selectable. The Grayscale panel lists them with the reason.'
+        )
+      });
+    }
+    // Never a silent size increase: B&W is meant to shrink scans, so a file
+    // that grew is said out loud before it is written.
+    if (result.bytes.byteLength > result.originalBytes) {
+      notify('warning', translate('The converted file is larger than the original.'), {
+        detail: translate(
+          '{before} → {after}. Re-encoding the images as grey cost more than it saved; Compress may help afterwards.',
+          { before: formatBytes(result.originalBytes), after: formatBytes(result.bytes.byteLength) }
+        ),
+        timeout: 0
+      });
+    }
+    await reviewAndSave(
+      doc,
+      current,
+      result.bytes,
+      `${stem(doc.name)}-${settings.mode === 'bw' ? 'bw' : 'grayscale'}.pdf`,
+      job
+    );
+  },
+
+  // GAP-6 — repair. `worksWithoutDocument`: the file is often one that never
+  // opened, so `context.doc` is not trusted.
+  repair: async ({ job }) => {
+    const doc = activeDoc.value;
+    const candidate = repairCandidate.value;
+    let bytes: Uint8Array;
+    let name: string;
+    if (candidate) {
+      bytes = new Uint8Array(await candidate.arrayBuffer());
+      name = candidate.name;
+    } else if (doc) {
+      // A document drawn from one file is repaired from that file's own bytes;
+      // a merge has no single file, so its current composition is used.
+      const sourceIds = new Set(doc.pages.map(p => p.sourceDocId));
+      bytes =
+        sourceIds.size === 1
+          ? await readSourceBytes([...sourceIds][0])
+          : await currentDocumentBytes(job);
+      name = doc.name;
+    } else {
+      notify('warning', translate('Choose a PDF to repair first.'), {
+        detail: translate('Use "Choose a PDF…" in the Repair panel.')
+      });
+      return;
+    }
+
+    const result = await repairDocument(bytes, job);
+    const outName = repairedName(name);
+    lastRepair.value = { name: outName, result };
+    if (!result.changed) {
+      notify('info', translate('No damage found.'), {
+        detail: translate('{name} opens cleanly as it is, so nothing was saved.', { name })
+      });
+      return;
+    }
+    if (!(await reviewOnly(result.bytes, outName, job))) return;
+    const saved = await platform.saveFileAs(result.bytes, outName);
+    if (saved) {
+      notify('success', translate('Saved {name}', { name: outName }), {
+        detail: tPlural('{count} pages recovered and verified.', result.pageCount)
+      });
+    }
+  },
   // CNV-06 — panel only configures the Markdown source (`tools/state.ts`); this is
   // the actual commit, reached the same way every other tool's is: the action
   // bar's single primary CTA (DESIGN-ADAPTATION §4.2). `worksWithoutDocument` on
@@ -2023,7 +2290,9 @@ export const TOOLS_WITH_EXPORT_REVIEW: ReadonlySet<ToolId> = new Set([
   'extract-img',
   'images-to-pdf',
   'md-to-pdf',
-  'contact-sheet'
+  'contact-sheet',
+  'grayscale',
+  'repair'
 ]);
 
 export async function commitTool(toolId: ToolId, job: JobOptions): Promise<void> {

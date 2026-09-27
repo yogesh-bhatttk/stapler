@@ -54,10 +54,23 @@ export interface ImportedFile {
   warnings: string[];
 }
 
+/** GAP-6 — a refusal Repair cannot help with (no bytes, or not a PDF at all). */
+const NOT_REPAIRABLE = { repairable: false } as const;
+
+export interface ImportFailure {
+  name: string;
+  message: string;
+  /**
+   * GAP-6 — set when a PDF was refused as damaged or truncated: the file the
+   * Repair tool can be offered, straight from the error.
+   */
+  repairable?: File;
+}
+
 export interface ImportOutcome {
   imported: ImportedFile[];
   /** One entry per file that could not be imported, with its reason. */
-  failures: { name: string; message: string }[];
+  failures: ImportFailure[];
 }
 
 const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46]; // %PDF
@@ -100,15 +113,15 @@ async function importPdf(
   // RT-16 — the header is sniffed from the first KB *before* the whole file is
   // read. A 2 GB video renamed to `.pdf` used to be read into memory in full
   // just to be told it was not a PDF.
-  if (file.size === 0) throw corrupt('The file is empty.');
+  if (file.size === 0) throw corrupt('The file is empty.', NOT_REPAIRABLE);
   const head = new Uint8Array(await file.slice(0, 1024).arrayBuffer());
   if (!looksLikePdf(head)) {
-    throw corrupt('The file does not start with a PDF header, so it is not a PDF.');
+    throw corrupt('The file does not start with a PDF header, so it is not a PDF.', NOT_REPAIRABLE);
   }
   stage(0.05, translate('Reading {name}', { name: file.name }));
   const bytes = new Uint8Array(await file.arrayBuffer());
   stage(0.15, translate('Checking {name}', { name: file.name }));
-  if (bytes.length === 0) throw corrupt('The file is empty.');
+  if (bytes.length === 0) throw corrupt('The file is empty.', NOT_REPAIRABLE);
 
   const warnings: string[] = [];
 
@@ -404,7 +417,14 @@ export async function importFiles(
         // A cancelled import is not a per-file failure: the user asked for it, and
         // listing "Operation cancelled" against every remaining file is noise.
         if (isCancellation(err)) break;
-        failures.push({ name: file.name, message: fromUnknown(err).message });
+        const failure = fromUnknown(err);
+        failures.push({
+          name: file.name,
+          message: failure.message,
+          ...(failure.kind === 'CorruptDocument' && failure.context.repairable !== false
+            ? { repairable: file }
+            : {})
+        });
       }
       done += 1;
       options.onProgress?.(done / total, translate('Imported {done} of {total}', { done, total }));

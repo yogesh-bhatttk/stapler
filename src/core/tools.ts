@@ -21,6 +21,7 @@ export type ToolId =
   | 'cleanup'
   | 'pdf-to-img'
   | 'images-to-pdf'
+  | 'image-to-size'
   | 'extract-img'
   | 'extract'
   | 'compress'
@@ -50,7 +51,9 @@ export type ToolId =
   | 'read-aloud'
   | 'reflow'
   | 'history'
-  | 'side-by-side';
+  | 'side-by-side'
+  | 'grayscale'
+  | 'repair';
 
 export type ToolGroup = 'Organize' | 'Convert' | 'Optimize' | 'Document' | 'Automation';
 
@@ -160,6 +163,33 @@ export const TOOLS: readonly ToolDefinition[] = [
     selectable: false
   },
   {
+    id: 'grayscale',
+    title: tKey('Grayscale'),
+    group: 'Optimize',
+    summary: tKey(
+      'Turn colour into shades of grey, or scans into crisp black and white. Text stays text.'
+    ),
+    icon: 'Contrast',
+    canvasMode: 'grid',
+    needsOptionsPanel: true,
+    commitLabel: tKey('Convert & export'),
+    // "Only the selected pages" is an option in the panel.
+    selectable: true
+  },
+  {
+    id: 'repair',
+    title: tKey('Repair'),
+    group: 'Optimize',
+    summary: tKey('Rescue a damaged or truncated PDF, and see exactly what was fixed.'),
+    icon: 'Wrench',
+    canvasMode: 'single',
+    needsOptionsPanel: true,
+    commitLabel: tKey('Repair & save'),
+    selectable: false,
+    // The file to repair is usually one Stapler could not open at all.
+    worksWithoutDocument: true
+  },
+  {
     id: 'crop',
     title: tKey('Crop'),
     group: 'Organize',
@@ -223,6 +253,21 @@ export const TOOLS: readonly ToolDefinition[] = [
     canvasMode: 'single',
     needsOptionsPanel: true,
     commitLabel: tKey('Export PDF'),
+    worksWithoutDocument: true,
+    selectable: false
+  },
+  {
+    // GAP-5 — "the photo must be under 20 KB": one image in, one JPEG out, at
+    // or under a file size and/or within a pixel box. Reads its image from
+    // disk, so it needs no open document.
+    id: 'image-to-size',
+    title: tKey('Image to size'),
+    group: 'Convert',
+    summary: tKey('Shrink one photo to a file size or pixel limit, e.g. under 20 KB for a form.'),
+    icon: 'ImageMinus',
+    canvasMode: 'single',
+    needsOptionsPanel: true,
+    commitLabel: tKey('Resize & save'),
     worksWithoutDocument: true,
     selectable: false
   },

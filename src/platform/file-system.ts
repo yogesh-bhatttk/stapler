@@ -55,7 +55,8 @@ export async function readClipboardImage(): Promise<File | null> {
 /** Handles from this session, so `saveOver` can find the one a file came from. */
 const session = new Map<string, FsaFileHandle>();
 
-function wrap(handle: FsaFileHandle): OpenedFile {
+/** A picker's (or a PWA launch's, GAP-2) file handle as an `OpenedFile`. */
+export function wrapFileHandle(handle: FsaFileHandle): OpenedFile {
   const id = crypto.randomUUID();
   session.set(id, handle);
   return {
@@ -73,7 +74,7 @@ export async function openFilesViaPicker(options?: OpenOptions): Promise<OpenedF
       multiple: options?.multiple,
       types: pickerTypes(options?.accept, 'PDFs and images')
     });
-    return handles.map(wrap);
+    return handles.map(wrapFileHandle);
   } catch (err) {
     if (isAbort(err)) return [];
     throw err;

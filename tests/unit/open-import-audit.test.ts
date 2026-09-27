@@ -3,9 +3,9 @@
  * driven through the real store, history, open-document, import and opfs
  * modules:
  *
- *  • RT-6  — opening a file is one undo step; it never wipes another
- *            document's history, and undo after an open removes exactly
- *            what was opened.
+ *  • GAP-11a — opening a file is not an undo step and never touches another
+ *            document's history (supersedes RT-6's global-stack fix).
+ *  • GAP-11b — the open-document ceiling and the memory-aware soft limit.
  *  • RT-7  — the open-files path runs as the app job: `activeJob` is set with
  *            a Cancel that aborts the import, and a cancelled open adds
  *            nothing and frees what it had already stored.
@@ -88,15 +88,13 @@ vi.mock('../../src/core/workers', () => {
 const store = await import('../../src/core/store');
 const {
   addDocument,
-  closeDocument,
   documents,
   sources,
   activeDocId,
   selectedPageKeys,
   makePageRefs,
   registerSource,
-  renameDocument,
-  OPEN_DOCUMENT_LABEL
+  renameDocument
 } = store;
 const { undo, redo, canUndo, resetHistory, operationLog } = await import('../../src/core/history');
 const { writeSourceBytes, sourceBytesExist, __memoryFallback, __resetOpfsProbeForTests } =
@@ -106,7 +104,15 @@ const { sessionRecoveryChecked, sessionRecoveryPrompting } =
 const { importFilesAsDocuments, addImportedDocuments, runImportJob } =
   await import('../../src/core/open-document');
 const { importFiles, registerSourceFromBytes } = await import('../../src/core/import');
-const { activeJob, toasts } = await import('../../src/core/notify');
+const { activeJob, toasts, confirmRequest } = await import('../../src/core/notify');
+const {
+  MAX_OPEN_DOCUMENTS,
+  SOFT_WORKSPACE_BYTES,
+  checkOpenCapacity,
+  knownSourceBytes,
+  recordSourceSize,
+  __resetSourceSizesForTests
+} = await import('../../src/core/workspace-limits');
 
 const encoder = new TextEncoder();
 const pdfFile = (name: string) =>
@@ -132,6 +138,7 @@ function reset() {
   inspectFails = false;
   sessionRecoveryChecked.value = true;
   sessionRecoveryPrompting.value = false;
+  __resetSourceSizesForTests();
 }
 
 beforeEach(reset);
@@ -154,67 +161,145 @@ async function openExisting(id: string) {
   });
 }
 
-describe('RT-6 — opening is one undo step', () => {
-  it("opening a file keeps another document's undo, and Ctrl+Z removes only the new document", async () => {
+/**
+ * GAP-11a supersedes RT-6's fix (opening as an undo step in one global stack,
+ * which let Ctrl+Z empty the workspace — R-RT-6/7): each document now has its
+ * own history, and opening is a workspace action, not an undo step.
+ */
+describe('GAP-11a — opening is not an undo step, and never touches another history', () => {
+  it("opening a file keeps another document's undo, and Ctrl+Z never removes the new document", async () => {
     await openExisting('A');
     renameDocument('A', 'renamed.pdf');
 
     const result = await importFilesAsDocuments([pdfFile('b.pdf')], noImages);
     expect(result.imported).toBe(1);
     expect(documents.value.map(d => d.name)).toEqual(['renamed.pdf', 'b.pdf']);
-    // Before: `resetHistory()` here wiped A's rename from the undo stack.
-    expect(operationLog().map(e => e.label)).toEqual([
-      OPEN_DOCUMENT_LABEL,
-      'Edit',
-      OPEN_DOCUMENT_LABEL
-    ]);
-
+    // The new document is active and has nothing to undo.
+    expect(activeDocId.value).toBe(documents.value[1].id);
+    expect(operationLog()).toEqual([]);
+    expect(canUndo()).toBe(false);
     undo();
-    expect(documents.value.map(d => d.name)).toEqual(['renamed.pdf']);
-    expect(activeDocId.value).toBe('A');
-    undo();
-    expect(documents.value.map(d => d.name)).toEqual(['A.pdf']);
+    expect(documents.value.map(d => d.name)).toEqual(['renamed.pdf', 'b.pdf']);
 
-    redo();
+    // A's rename survived the open, in A's own history.
+    expect(operationLog('A').map(e => e.label)).toEqual(['Edit']);
+    store.switchDocument('A');
+    undo();
+    expect(documents.value.map(d => d.name)).toEqual(['A.pdf', 'b.pdf']);
     redo();
     expect(documents.value.map(d => d.name)).toEqual(['renamed.pdf', 'b.pdf']);
   });
 
-  it('opening several files at once is a single undo step', async () => {
+  it('opening several files at once records nothing to undo', async () => {
     await importFilesAsDocuments([pdfFile('a.pdf'), pdfFile('b.pdf'), pdfFile('c.pdf')], noImages);
     expect(documents.value).toHaveLength(3);
-    expect(operationLog()).toHaveLength(1);
+    for (const doc of documents.value) expect(operationLog(doc.id)).toEqual([]);
     undo();
-    expect(documents.value).toHaveLength(0);
-    expect(canUndo()).toBe(false);
+    expect(documents.value).toHaveLength(3);
   });
 
-  it('addImportedDocuments (the Recents and paste path) records the same undo step', async () => {
+  it('addImportedDocuments (the Recents and paste path) leaves the other history intact', async () => {
     await openExisting('A');
     renameDocument('A', 'renamed.pdf');
     const file = pdfFile('pasted.pdf');
     const outcome = await importFiles([file]);
     addImportedDocuments(outcome, [file]);
+    expect(documents.value.map(d => d.name)).toEqual(['renamed.pdf', 'pasted.pdf']);
+    // Ctrl+Z on the pasted document does nothing; A still has its rename.
     undo();
-    // Before: nothing was recorded, so this undo reverted the rename *and*
-    // silently dropped the pasted document in one step.
-    expect(documents.value.map(d => d.name)).toEqual(['renamed.pdf']);
+    expect(documents.value.map(d => d.name)).toEqual(['renamed.pdf', 'pasted.pdf']);
+    expect(canUndo('A')).toBe(true);
+  });
+});
+
+describe('GAP-11b — the open-document ceiling', () => {
+  it('refuses an open that would pass MAX_OPEN_DOCUMENTS, with a message, adding nothing', async () => {
+    for (let i = 0; i < MAX_OPEN_DOCUMENTS - 1; i++) await openExisting(`D${i}`);
+    toasts.value = [];
+    calls.length = 0;
+    const result = await importFilesAsDocuments([pdfFile('a.pdf'), pdfFile('b.pdf')], noImages);
+    expect(result.imported).toBe(0);
+    expect(documents.value).toHaveLength(MAX_OPEN_DOCUMENTS - 1);
+    // Refused before any work: nothing was parsed or stored.
+    expect(calls.filter(c => c.endsWith(':load'))).toEqual([]);
+    const toast = toasts.value.find(t => t.title === 'Too many documents are open.');
+    expect(toast?.detail).toContain(String(MAX_OPEN_DOCUMENTS));
+    expect(toast?.detail).toMatch(/close some tabs/i);
+
+    // One more still fits.
+    expect((await importFilesAsDocuments([pdfFile('c.pdf')], noImages)).imported).toBe(1);
+    expect(documents.value).toHaveLength(MAX_OPEN_DOCUMENTS);
   });
 
-  it("an undone open's bytes survive an unrelated close, so redo restores a readable document", async () => {
-    await openExisting('A');
-    await importFilesAsDocuments([pdfFile('b.pdf')], noImages);
-    const bSource = documents.value[1].pages[0].sourceDocId;
-    await settle(); // the import's pending marks are released
+  it('addDocument is refused at the ceiling (the backstop for every open path)', async () => {
+    for (let i = 0; i < MAX_OPEN_DOCUMENTS; i++) await openExisting(`D${i}`);
+    const added = addDocument({
+      id: 'over',
+      name: 'over.pdf',
+      pages: makePageRefs('src-D0', 1),
+      annotations: [],
+      dirty: false
+    });
+    expect(added).toBe(false);
+    expect(documents.value).toHaveLength(MAX_OPEN_DOCUMENTS);
+  });
 
-    undo(); // B is gone from the workspace; only the redo stack holds it
-    closeDocument('A');
+  it('addImportedDocuments adds what fits, frees the rest and says so', async () => {
+    for (let i = 0; i < MAX_OPEN_DOCUMENTS - 1; i++) await openExisting(`D${i}`);
+    const files = [pdfFile('a.pdf'), pdfFile('b.pdf')];
+    const outcome = await importFiles(files);
+    toasts.value = [];
+    addImportedDocuments(outcome, files);
+    expect(documents.value).toHaveLength(MAX_OPEN_DOCUMENTS);
+    expect(documents.value.at(-1)?.name).toBe('a.pdf');
+    const refusedSource = outcome.imported[1].source.id;
+    expect(refusedSource in sources.value).toBe(false);
     await settle();
-    expect(await sourceBytesExist(bSource)).toBe(true);
-    expect(bSource in sources.value).toBe(true);
+    expect(await sourceBytesExist(refusedSource)).toBe(false);
+    expect(toasts.value.some(t => t.title === 'Some files were not opened.')).toBe(true);
+  });
 
-    redo();
-    expect(documents.value.map(d => d.name)).toEqual(['b.pdf']);
+  it('asks before passing the memory-aware soft limit, and opens nothing on Cancel', async () => {
+    await openExisting('A');
+    recordSourceSize('src-A', SOFT_WORKSPACE_BYTES);
+    const answers: boolean[] = [false, true];
+    const titles: string[] = [];
+    const unsubscribe = confirmRequest.subscribe(request => {
+      if (!request) return;
+      titles.push(request.title);
+      const answer = answers.shift() ?? true;
+      queueMicrotask(() => request.resolve(answer));
+    });
+    try {
+      const refused = await importFilesAsDocuments([pdfFile('big.pdf')], noImages);
+      expect(refused.imported).toBe(0);
+      expect(documents.value).toHaveLength(1);
+      const accepted = await importFilesAsDocuments([pdfFile('big.pdf')], noImages);
+      expect(accepted.imported).toBe(1);
+      expect(titles).toEqual(['Open these files anyway?', 'Open these files anyway?']);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('checkOpenCapacity: hard ceiling on count, soft limit on bytes', () => {
+    expect(checkOpenCapacity(19, 1, 0, 0).ok).toBe(true);
+    expect(checkOpenCapacity(20, 1, 0, 0)).toEqual({ ok: false, openCount: 20, max: 20 });
+    expect(checkOpenCapacity(3, 2, 10, 5, 4)).toMatchObject({ ok: false });
+    expect(checkOpenCapacity(1, 1, 90, 20, 20, 100)).toEqual({
+      ok: true,
+      overSoftLimit: true,
+      projectedBytes: 110
+    });
+    expect(checkOpenCapacity(1, 1, 50, 20, 20, 100)).toEqual({ ok: true, overSoftLimit: false });
+  });
+
+  it('source sizes are learnt from OPFS writes and forgotten on delete', async () => {
+    await writeSourceBytes('sized', new Uint8Array(1234));
+    expect(knownSourceBytes(['sized'])).toBe(1234);
+    const { deleteSourceBytes } = await import('../../src/core/opfs');
+    await deleteSourceBytes('sized');
+    expect(knownSourceBytes(['sized'])).toBe(0);
   });
 });
 
@@ -228,6 +313,7 @@ describe('RT-7 — the open path is a cancellable job', () => {
     expect(seen).toBeTruthy();
     expect(activeJob.value).toBeNull();
     // Undo is locked while it runs (canUndo reads activeJob) and free after.
+    renameDocument(documents.value[0].id, 'x.pdf');
     expect(canUndo()).toBe(true);
   });
 

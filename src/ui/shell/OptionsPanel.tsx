@@ -18,6 +18,7 @@ import { SplitPanel } from '../tools/split/SplitPanel';
 import { BlanksPanel } from '../tools/blanks/BlanksPanel';
 import { PdfToImagePanel } from '../tools/convert/PdfToImagePanel';
 import { ImagesToPdfPanel } from '../tools/convert/ImagesToPdfPanel';
+import { ImageSizePanel } from '../tools/image-size/ImageSizePanel';
 import { ExtractPanel } from '../tools/extract/ExtractPanel';
 import { ExtractImagesPanel } from '../tools/extract-images/ExtractImagesPanel';
 import { CompressPanel } from '../tools/compress/CompressPanel';
@@ -49,6 +50,8 @@ import { ReadAloudPanel } from '../tools/read-aloud/ReadAloudPanel';
 import { ReflowPanel } from '../tools/reflow/ReflowPanel';
 import { HistoryPanel } from '../tools/history/HistoryPanel';
 import { SideBySidePanel } from '../tools/side-by-side/SideBySidePanel';
+import { GrayscalePanel } from '../tools/grayscale/GrayscalePanel';
+import { RepairPanel } from '../tools/repair/RepairPanel';
 import styles from './OptionsPanel.module.css';
 
 const BODIES: Record<string, () => preact.JSX.Element | null> = {
@@ -59,6 +62,7 @@ const BODIES: Record<string, () => preact.JSX.Element | null> = {
   'remove-blanks': BlanksPanel,
   'pdf-to-img': PdfToImagePanel,
   'images-to-pdf': ImagesToPdfPanel,
+  'image-to-size': ImageSizePanel,
   extract: ExtractPanel,
   'extract-img': ExtractImagesPanel,
   compress: CompressPanel,
@@ -89,7 +93,9 @@ const BODIES: Record<string, () => preact.JSX.Element | null> = {
   'read-aloud': ReadAloudPanel,
   reflow: ReflowPanel,
   history: HistoryPanel,
-  'side-by-side': SideBySidePanel
+  'side-by-side': SideBySidePanel,
+  grayscale: GrayscalePanel,
+  repair: RepairPanel
 };
 
 /** Whether the bottom-sheet form of the panel is folded down to its title row. */

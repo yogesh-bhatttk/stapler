@@ -108,6 +108,13 @@
   opacity: 0.8;
 }
 
+/* A key chord means nothing on a touch screen (GAP-3). */
+@media (hover: none), (pointer: coarse) {
+  .shortcutHint {
+    display: none;
+  }
+}
+
 .empty {
   padding: var(--space-lg);
   text-align: center;

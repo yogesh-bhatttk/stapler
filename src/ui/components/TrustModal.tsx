@@ -11,6 +11,7 @@ import { Modal } from './Modal';
 import { platform } from '../../platform/current';
 import styles from './InfoModals.module.css';
 import { useTranslation } from '../../core/i18n';
+import { LocalDataSection } from './LocalDataSection';
 
 export const REPOSITORY_URL = 'https://github.com/stapler-pdf/stapler';
 
@@ -49,6 +50,8 @@ export const TrustModal = forwardRef<HTMLDivElement, { onClose: () => void }>(fu
             'The same check runs automatically in CI on every change, so it cannot regress unnoticed. The source is public and MIT-licensed.'
           )}
         </p>
+
+        <LocalDataSection />
 
         <p>
           <a

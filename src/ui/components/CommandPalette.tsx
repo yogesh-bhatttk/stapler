@@ -28,6 +28,8 @@ interface Command {
   /** Untranslated title and group, so an English query still matches in any locale. */
   english?: string;
   hint?: string;
+  /** True when `hint` is a key chord — hidden on touch screens (GAP-3). */
+  hintIsShortcut?: boolean;
   icon: ReturnType<typeof toolIconComponent>;
   run: () => void;
   enabled?: () => boolean;
@@ -66,6 +68,7 @@ export const CommandPalette = forwardRef<HTMLDivElement, Record<string, never>>(
           title: t('Select all pages'),
           group: t('Document'),
           hint: '⌘A',
+          hintIsShortcut: true,
           icon: toolIconComponent('LayoutGrid'),
           enabled: () => activeDoc.value !== null,
           run: () => {
@@ -78,6 +81,7 @@ export const CommandPalette = forwardRef<HTMLDivElement, Record<string, never>>(
           title: t('Undo'),
           group: t('Document'),
           hint: '⌘Z',
+          hintIsShortcut: true,
           icon: toolIconComponent('Eraser'),
           enabled: canUndo,
           run: undo
@@ -87,6 +91,7 @@ export const CommandPalette = forwardRef<HTMLDivElement, Record<string, never>>(
           title: t('Redo'),
           group: t('Document'),
           hint: '⇧⌘Z',
+          hintIsShortcut: true,
           icon: toolIconComponent('Eraser'),
           enabled: canRedo,
           run: redo
@@ -105,6 +110,7 @@ export const CommandPalette = forwardRef<HTMLDivElement, Record<string, never>>(
           title: t('Keyboard shortcuts'),
           group: t('Settings'),
           hint: '?',
+          hintIsShortcut: true,
           icon: toolIconComponent('FileText'),
           run: () => (isShortcutSheetOpen.value = true)
         }
@@ -242,7 +248,13 @@ export const CommandPalette = forwardRef<HTMLDivElement, Record<string, never>>(
                   >
                     <Icon size={16} aria-hidden="true" />
                     {command.title}
-                    {command.hint && <span className={styles.itemHint}>{command.hint}</span>}
+                    {command.hint && (
+                      <span
+                        className={`${styles.itemHint} ${command.hintIsShortcut ? styles.shortcutHint : ''}`}
+                      >
+                        {command.hint}
+                      </span>
+                    )}
                   </li>
                 </>
               );

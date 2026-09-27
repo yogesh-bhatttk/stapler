@@ -1,8 +1,15 @@
 .layout {
+  /* The containing block for the options bottom sheet (< 1100px). */
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100vh;
-  width: 100vw;
+  /* A phone's collapsing address bar makes 100vh taller than what is visible,
+     pushing the action bar off-screen; dvh tracks the visible height. */
+  height: 100dvh;
+  /* Not 100vw: that includes a desktop scrollbar, which scrolled the
+     landing pages (where the app is embedded below the hero) sideways. */
+  width: 100%;
   overflow: hidden;
   background: var(--canvas);
 }

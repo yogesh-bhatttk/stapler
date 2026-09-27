@@ -20,6 +20,10 @@ import type { RasterKind } from './raster-decode';
 import { jpegPassthrough, readJpegInfo, type JpegInfo } from './jpeg-info';
 import { encodeCanvasAtMaximum, webpTraits } from './max-quality';
 import type { PdfImageSource } from './image-embed';
+import type { Remote } from 'comlink';
+import type { ImageJob, ResizedImage } from './workers/image.worker';
+import type { JobHandle } from './workers/protocol';
+import type { SizedImageRequest } from './image-resize';
 
 export type { RasterKind, JpegInfo, PdfImageSource };
 export { jpegPassthrough, readJpegInfo };
@@ -199,33 +203,46 @@ export async function decodeRasterInWorker(
   // The timeout below starts only once this decode owns the worker.
   const release = await takeDecodeTurn(signal);
   try {
-    return await decodeOnOwnedWorker(file, kind, quality, bytes, options, {
-      imageWorker,
-      createJobHandle,
-      transfer: Comlink.transfer
-    });
+    return await onOwnedImageWorker(
+      file,
+      kind === 'heic' ? 'HEIC' : 'TIFF',
+      options,
+      { imageWorker, createJobHandle },
+      (api, job) =>
+        api.decodeToPdfImages(
+          kind,
+          Comlink.transfer(bytes, [bytes.buffer as ArrayBuffer]),
+          quality,
+          file.name,
+          job
+        )
+    );
   } finally {
     release();
   }
 }
 
-async function decodeOnOwnedWorker(
+/**
+ * Runs one call on the image worker this caller already owns (see
+ * {@link takeDecodeTurn}), under the size-scaled timeout and the caller's
+ * abort — either of which *terminates* the worker, because a WASM decode
+ * cannot be interrupted. Errors other than cancellation, a timeout, or the
+ * worker's own unsupported/corrupt verdicts are reported as "failed to decode".
+ */
+async function onOwnedImageWorker<T>(
   file: File,
-  kind: RasterKind,
-  quality: number,
-  bytes: Uint8Array,
+  label: string,
   options: RasterDecodeOptions,
   deps: {
     imageWorker: (typeof import('./workers'))['imageWorker'];
     createJobHandle: (typeof import('./workers/protocol'))['createJobHandle'];
-    transfer: (typeof import('comlink'))['transfer'];
-  }
-): Promise<Uint8Array[]> {
+  },
+  call: (api: Remote<ImageJob>, job: JobHandle) => Promise<T>
+): Promise<T> {
   const { signal } = options;
   const { imageWorker, createJobHandle } = deps;
   if (signal?.aborted) throw cancelled();
   const timeoutMs = options.timeoutMs ?? heicTimeoutMs(file.size);
-  const label = kind === 'heic' ? 'HEIC' : 'TIFF';
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
   let stopped: StaplerError | undefined;
@@ -261,18 +278,7 @@ async function decodeOnOwnedWorker(
 
   const job = createJobHandle({ signal, onProgress: options.onProgress });
   try {
-    return await Promise.race([
-      imageWorker.lease(api =>
-        api.decodeToPdfImages(
-          kind,
-          deps.transfer(bytes, [bytes.buffer as ArrayBuffer]),
-          quality,
-          file.name,
-          job
-        )
-      ),
-      guard
-    ]);
+    return await Promise.race([imageWorker.lease(api => call(api, job)), guard]);
   } catch (err) {
     // The lease rejects with "worker crashed" once `stop` terminated it; the
     // reason it was stopped is the real error.
@@ -290,6 +296,79 @@ async function decodeOnOwnedWorker(
   } finally {
     clearTimeout(timer);
     if (onAbort) signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+/** GAP-5 — the most a single-image resize will read into memory, in bytes. */
+export const MAX_RESIZE_INPUT_BYTES = 200 * 1024 * 1024;
+
+/**
+ * GAP-5 — one image file as a JPEG at or under `request.targetBytes` and/or
+ * within `request.maxDimension` on its longest side.
+ *
+ * Decode, the measured search and every encode run in the image worker
+ * (`resizeImage`), queued behind any HEIC/TIFF import decode and stopped by
+ * terminating the worker on cancel or timeout, exactly like
+ * {@link decodeRasterInWorker}. The result's sizes are measured on the bytes
+ * returned; `reached: false` means the smallest file the search produced is
+ * still over the target.
+ */
+export async function resizeImageFile(
+  file: File,
+  request: SizedImageRequest,
+  options: RasterDecodeOptions = {}
+): Promise<ResizedImage> {
+  const { signal } = options;
+  if (signal?.aborted) throw cancelled();
+  if (!isSupportedImage(file)) {
+    throw unsupported(
+      translate('{name} is not an image Stapler can read (JPEG, PNG, WebP, GIF, HEIC or TIFF).', {
+        name: file.name
+      })
+    );
+  }
+  if (file.size > MAX_RESIZE_INPUT_BYTES) {
+    throw unsupported(
+      translate('{name} is larger than {size}, which is more than this tool will open.', {
+        name: file.name,
+        size: '200 MB'
+      })
+    );
+  }
+  const [{ imageWorker }, { createJobHandle }, Comlink] = await Promise.all([
+    import('./workers'),
+    import('./workers/protocol'),
+    import('comlink')
+  ]);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (signal?.aborted) throw cancelled();
+  const kind = rasterKindOf(file) ?? 'bitmap';
+  const extension = /\.([a-z0-9]+)$/i.exec(file.name)?.[1] ?? 'image';
+  const label = (kind === 'bitmap' ? extension : kind).toUpperCase();
+
+  const release = await takeDecodeTurn(signal);
+  try {
+    return await onOwnedImageWorker(
+      file,
+      label,
+      // Decode plus up to MAX_IMAGE_TRIALS encodes: twice a plain decode's allowance.
+      {
+        ...options,
+        timeoutMs:
+          options.timeoutMs ?? Math.min(RASTER_TIMEOUT_MAX_MS, 2 * heicTimeoutMs(file.size))
+      },
+      { imageWorker, createJobHandle },
+      (api, job) =>
+        api.resizeImage(
+          kind,
+          Comlink.transfer(bytes, [bytes.buffer as ArrayBuffer]),
+          request,
+          file.name,
+          job
+        )
+    );
+  } finally {
+    release();
   }
 }
 

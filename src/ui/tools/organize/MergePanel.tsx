@@ -18,6 +18,8 @@ import { isPdfFile } from '../../../core/import';
 import { isSupportedImage } from '../../../core/image';
 import { panelStyles } from '../../shell/panelStyles';
 import { useJob } from '../../useJob';
+import { tryToRepairAction } from '../repair/state';
+import { DuplexSection } from './DuplexSection';
 
 export function MergePanel() {
   const t = useTranslation();
@@ -76,7 +78,8 @@ export function MergePanel() {
         // A failure on one file never stops the others, and each says why.
         for (const failure of outcome.failures) {
           notify('danger', translate('Could not add {name}', { name: failure.name }), {
-            detail: failure.message
+            detail: failure.message,
+            ...(failure.repairable ? { action: tryToRepairAction(failure.repairable) } : {})
           });
         }
         if (outcome.imported.length > 0) {
@@ -121,6 +124,12 @@ export function MergePanel() {
             )}
           </p>
         </div>
+      )}
+      {doc && doc.pages.length > 1 && (
+        <>
+          <hr className={panelStyles.divider} />
+          <DuplexSection />
+        </>
       )}
     </>
   );

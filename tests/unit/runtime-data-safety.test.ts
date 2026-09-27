@@ -91,6 +91,7 @@ const {
   __resetOpfsProbeForTests
 } = await import('../../src/core/opfs');
 const recovery = await import('../../src/core/session-recovery');
+type SerializedHistory = import('../../src/core/history').SerializedHistory;
 const { checkRecovery, saveSession, loadPendingRecovery, sessionRecoveryChecked } = recovery;
 const { sessionRecoveryPrompting, waitForImportReadiness } = recovery;
 const { ensureImportsAllowed } = await import('../../src/core/open-document');
@@ -235,22 +236,32 @@ describe('RT-2 — checkRecovery validates every page reference', () => {
     // A snapshot pointing at a source that is neither listed nor stored —
     // exactly what the old GC left behind. The old fast path only looked at
     // `record.sources`, found everything present, and restored it as-is.
-    record.history.undoStack = [
-      {
-        docs: [{ ...record.documents[0], pages: makePageRefs('GONE', 1), baseline: [] }],
-        activeId: 'A',
-        selection: [],
-        cropBoxes: {},
-        pageAnnotations: {}
+    // GAP-11a: history is per document now.
+    record.history = {
+      version: 2,
+      docs: {
+        A: {
+          undoStack: [
+            {
+              doc: { ...record.documents[0], pages: makePageRefs('GONE', 1), baseline: [] },
+              selection: [],
+              cropBoxes: {},
+              pageAnnotations: {}
+            }
+          ],
+          redoStack: [],
+          undoLog: [{ label: 'Edit', timestamp: 0 }],
+          redoLog: []
+        }
       }
-    ];
-    record.history.undoLog = [{ label: 'Edit', timestamp: 0 }];
+    } satisfies SerializedHistory;
 
     const checked = await checkRecovery(record);
     expect(checked).not.toBeNull();
     expect(checked!.droppedDocuments).toBe(0);
     expect(checked!.record.documents.map(d => d.id)).toEqual(['A']);
-    expect(checked!.record.history.undoStack).toEqual([]);
+    // The document is kept; only its unusable history is dropped.
+    expect((checked!.record.history as SerializedHistory).docs).toEqual({});
   });
 
   it('drops a document whose pages point at a source missing from record.sources', async () => {
@@ -290,9 +301,11 @@ describe('RT-2 — checkRecovery validates every page reference', () => {
     await saveSession();
     const record = (await loadPendingRecovery())!;
     const checked = await checkRecovery(record);
-    expect(checked!.record).toBe(record);
-    // The open (RT-6) and the rename.
-    expect(checked!.record.history.undoStack).toHaveLength(2);
+    expect(checked!.record.documents).toBe(record.documents);
+    expect(checked!.record.sources).toBe(record.sources);
+    // Only the rename: opening is not an undo step (GAP-11a).
+    const history = checked!.record.history as SerializedHistory;
+    expect(history.docs.A.undoStack).toHaveLength(1);
   });
 });
 
@@ -407,13 +420,13 @@ describe('RT-17 — refreshBaseline after a save', () => {
     expect(documents.value[0].dirty).toBe(false);
     expect(documents.value[0].baseline).toBe(doc.pages);
     expect(canUndo()).toBe(undoDepthBefore);
-    // Only the rename, then the open (RT-6), were undoable — the save itself
-    // left no entry.
+    // Only the rename was undoable — the save itself left no entry, and
+    // opening is not an undo step (GAP-11a).
     undo();
     expect(documents.value[0].name).toBe('a.pdf');
-    undo();
-    expect(documents.value).toHaveLength(0);
     expect(canUndo()).toBe(false);
+    undo();
+    expect(documents.value).toHaveLength(1);
   });
 
   it('keeps dirty when the pages changed while the save was in flight', async () => {

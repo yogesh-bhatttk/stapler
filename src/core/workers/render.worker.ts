@@ -36,6 +36,9 @@ import { cropUnitRect, intersectionOverUnion, matchTemplate } from '../faceblur/
 import { decodeBarcodesFromImage, type DecodedBarcode } from '../barcode';
 import { fillPolygonMask, polygonOverlapsBox, shrinkMask } from '../geometry';
 import { clampRenderScale } from '../render-limits';
+import { applyAdaptiveThreshold } from '../cv/enhance';
+import type { GrayImageData, GrayMode, GrayRaster } from '../pdf/grayscale';
+import { resizeToTarget, type SizedImageRequest, type SizedImageResult } from '../image-resize';
 
 export interface DocumentInfo {
   handle: string;
@@ -209,6 +212,22 @@ export interface RenderJob extends LocaleAware {
     quality?: number
   ): Promise<Uint8Array>;
   /**
+   * GAP-5 — one page as an image within a longest-side pixel box and, for
+   * JPEG, at or under a file size. The page is rendered once, at `dpi` or at
+   * whatever lower resolution the box allows; a size target then runs the
+   * measured quality/scale search in `image-target.ts` over that render. PNG
+   * takes the box only (it has no quality to trade), and its result says
+   * `reached: true` only when no target was asked of it.
+   */
+  pageToSizedImage(
+    handle: string,
+    pageIndex: number,
+    format: 'png' | 'jpeg',
+    dpi: number,
+    request: SizedImageRequest,
+    job?: JobHandle
+  ): Promise<SizedImageResult>;
+  /**
    * SCN-04 — renders one page and scans the bitmap for any barcode/QR code.
    * Reuses the exact rendering path {@link RenderJob.renderPage} does (same
    * viewport/render call), rather than a second one, so this is the same
@@ -304,6 +323,30 @@ export interface RenderJob extends LocaleAware {
     targetDpi: number,
     job?: JobHandle
   ): Promise<ExtractedImage[]>;
+  /**
+   * GAP-6 — decodes the named image XObjects through pdf.js (which resolves
+   * CMYK, Indexed, ICC, Lab, Separation and 16-bit samples to RGB) and returns
+   * their luminance, one byte per pixel — thresholded to 0/255 in `bw` mode.
+   * Each object is decoded once however many pages show it. An image pdf.js
+   * cannot decode (JPX/JBIG2 without a decoder, a broken stream) is simply
+   * absent from the result; the caller reports it and leaves it untouched.
+   */
+  decodeImagesGray(
+    handle: string,
+    requests: { pageIndex: number; objectNumbers: number[] }[],
+    mode: GrayMode,
+    job?: JobHandle
+  ): Promise<GrayImageData[]>;
+  /**
+   * GAP-6 — renders one page, unrotated and without annotations (they are
+   * converted separately and stay annotations), to grey pixels at `dpi`.
+   */
+  renderPageGray(
+    handle: string,
+    pageIndex: number,
+    dpi: number,
+    mode: GrayMode
+  ): Promise<GrayRaster>;
   checkRegionText(
     handle: string,
     regions: RedactionRegion[],
@@ -1228,6 +1271,59 @@ const api: RenderJob = {
     }
   },
 
+  async pageToSizedImage(handle, pageIndex, format, dpi, request, job) {
+    const page = await entry(handle).doc.getPage(pageIndex + 1);
+    try {
+      const base = page.getViewport({ scale: 1 });
+      let scale = dpi / 72;
+      const longestPt = Math.max(base.width, base.height);
+      if (request.maxDimension && longestPt * scale > request.maxDimension) {
+        scale = request.maxDimension / longestPt;
+      }
+      scale = clampRenderScale(base.width, base.height, scale).scale;
+      const viewport = page.getViewport({ scale });
+      const { canvas, ctx } = offscreen(viewport.width, viewport.height);
+      await page.render(renderParams(ctx, viewport)).promise;
+      try {
+        if (format === 'png') {
+          const blob = await canvas.convertToBlob({ type: 'image/png' });
+          const bytes = new Uint8Array(await blob.arrayBuffer());
+          const result: SizedImageResult = {
+            bytes,
+            width: canvas.width,
+            height: canvas.height,
+            quality: 1,
+            sourceWidth: canvas.width,
+            sourceHeight: canvas.height,
+            targetBytes: request.targetBytes,
+            reached: request.targetBytes === null || bytes.byteLength <= request.targetBytes,
+            attempts: 1
+          };
+          return Comlink.transfer(result, [bytes.buffer as ArrayBuffer]);
+        }
+        const result = await resizeToTarget(
+          canvas,
+          // The box was already applied by rendering smaller.
+          { targetBytes: request.targetBytes, maxDimension: null },
+          {
+            onTrial: (index, max) =>
+              checkpoint(
+                job,
+                index / max,
+                translate('Trying size {attempt} of up to {max}', { attempt: index + 1, max })
+              )
+          }
+        );
+        return Comlink.transfer(result, [result.bytes.buffer as ArrayBuffer]);
+      } finally {
+        canvas.width = 0;
+        canvas.height = 0;
+      }
+    } finally {
+      page.cleanup();
+    }
+  },
+
   async decodePageBarcodes(handle, pageIndex, dpi) {
     const page = await entry(handle).doc.getPage(pageIndex + 1);
     try {
@@ -1868,6 +1964,66 @@ const api: RenderJob = {
       out,
       out.map(o => o.jpeg.buffer)
     );
+  },
+
+  async decodeImagesGray(handle, requests, mode, job) {
+    const { doc } = entry(handle);
+    const out: GrayImageData[] = [];
+    const done = new Set<number>();
+    for (let i = 0; i < requests.length; i++) {
+      const { pageIndex, objectNumbers } = requests[i];
+      await checkpoint(
+        job,
+        i / Math.max(1, requests.length),
+        translate('Converting images on page {page}', { page: pageIndex + 1 })
+      );
+      const wanted = new Set(objectNumbers.filter(n => !done.has(n)));
+      if (wanted.size === 0) continue;
+      const page = await doc.getPage(pageIndex + 1);
+      try {
+        for (const placement of imagePlacements(await page.getOperatorList())) {
+          const resolved = await awaitImageObject(page, placement.objId);
+          const objectNumber = refObjectNumber((resolved?.data as { ref?: unknown })?.ref);
+          if (objectNumber < 0 || !wanted.has(objectNumber) || done.has(objectNumber)) continue;
+          const decoded = await decodeImage(page, placement.objId);
+          done.add(objectNumber);
+          if (!decoded) continue;
+          out.push(grayFromDecoded(decoded, mode));
+        }
+      } finally {
+        page.cleanup();
+      }
+    }
+    return Comlink.transfer(
+      out,
+      out.flatMap(o => (o.alpha ? [o.gray.buffer, o.alpha.buffer] : [o.gray.buffer]))
+    );
+  },
+
+  async renderPageGray(handle, pageIndex, dpi, mode) {
+    const page = await entry(handle).doc.getPage(pageIndex + 1);
+    try {
+      const at = (s: number) => page.getViewport({ scale: s, rotation: 0 });
+      const unit = at(1);
+      const safe = clampRenderScale(unit.width, unit.height, dpi / 72);
+      const viewport = at(safe.clamped ? safe.scale : dpi / 72);
+      const { canvas, ctx } = offscreen(viewport.width, viewport.height);
+      await page.render({
+        ...renderParams(ctx, viewport),
+        annotationMode: pdfjsLib.AnnotationMode.DISABLE
+      }).promise;
+      const width = canvas.width;
+      const height = canvas.height;
+      const rgba = ctx.getImageData(0, 0, width, height).data;
+      canvas.width = 0;
+      canvas.height = 0;
+      const gray = rgbaToGray(rgba, width, height, mode);
+      const [x0, y0, x1, y1] = page.view;
+      const raster: GrayRaster = { pageIndex, width, height, gray, view: [x0, y0, x1, y1] };
+      return Comlink.transfer(raster, [gray.buffer]);
+    } finally {
+      page.cleanup();
+    }
   },
 
   async redactPageImages(handle, pageIndex, requests) {
@@ -2605,6 +2761,43 @@ async function encodeMask(
   } finally {
     bitmap.close();
   }
+}
+
+/**
+ * RGBA → one luminance byte per pixel (Rec. 709, the weighting
+ * `pdf/grayscale.ts` uses for vector colours, so a vector fill and a picture of
+ * the same colour come out the same grey). `bw` thresholds with the scan
+ * cleanup's own adaptive threshold (SCN-02), with a window proportional to the
+ * image so it behaves the same at any resolution.
+ */
+function rgbaToGray(
+  rgba: Uint8ClampedArray,
+  width: number,
+  height: number,
+  mode: GrayMode
+): Uint8Array {
+  const gray = new Uint8Array(width * height);
+  if (mode === 'bw') {
+    const window = Math.max(15, Math.round(Math.min(width, height) / 8)) | 1;
+    const thresholded = applyAdaptiveThreshold(new ImageData(rgba, width, height), window, 15);
+    for (let p = 0; p < gray.length; p++) gray[p] = thresholded.data[p * 4];
+    return gray;
+  }
+  for (let p = 0; p < gray.length; p++) {
+    const i = p * 4;
+    gray[p] = Math.round(0.2126 * rgba[i] + 0.7152 * rgba[i + 1] + 0.0722 * rgba[i + 2]);
+  }
+  return gray;
+}
+
+function grayFromDecoded(decoded: DecodedImage, mode: GrayMode): GrayImageData {
+  return {
+    objectNumber: decoded.objectNumber,
+    width: decoded.width,
+    height: decoded.height,
+    gray: rgbaToGray(decoded.rgba, decoded.width, decoded.height, mode),
+    alpha: decoded.mask
+  };
 }
 
 Comlink.expose(releaseJobHandlesAfterCall(api));

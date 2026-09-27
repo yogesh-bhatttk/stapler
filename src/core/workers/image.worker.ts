@@ -28,6 +28,21 @@ import {
 } from '../raster-decode';
 import { corrupt, internal } from '../errors';
 import { encodeCanvasAtMaximum, hasTransparency } from '../max-quality';
+import {
+  resizeToTarget,
+  type DrawableSource,
+  type SizedImageRequest,
+  type SizedImageResult
+} from '../image-resize';
+
+/** Which decoder a single-image resize needs: the worker's own, or the browser's. */
+export type ResizeSourceKind = RasterKind | 'bitmap';
+
+/** GAP-5 — a resized image plus what the source was. */
+export interface ResizedImage extends SizedImageResult {
+  /** Pages in the source; only the first is used (a multi-page TIFF). */
+  sourcePages: number;
+}
 
 export interface ImageJob extends LocaleAware {
   /**
@@ -42,6 +57,84 @@ export interface ImageJob extends LocaleAware {
     name: string,
     job?: JobHandle
   ): Promise<Uint8Array[]>;
+  /**
+   * GAP-5 — decodes one image (HEIC/TIFF here, anything else through
+   * `createImageBitmap` with EXIF orientation applied) and returns a JPEG at or
+   * under `request.targetBytes` and/or within `request.maxDimension`, found by
+   * the measured search in `image-target.ts`. A multi-page TIFF uses its first
+   * page and says how many it had.
+   */
+  resizeImage(
+    kind: ResizeSourceKind,
+    bytes: Uint8Array,
+    request: SizedImageRequest,
+    name: string,
+    job?: JobHandle
+  ): Promise<ResizedImage>;
+}
+
+/** Thrown from inside the TIFF page loop to stop after the first page. */
+const STOP_AFTER_FIRST = Symbol('stop-after-first-page');
+
+function frameToCanvas(frame: RgbaFrame): OffscreenCanvas {
+  flattenOnWhite(frame);
+  const canvas = new OffscreenCanvas(frame.width, frame.height);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw corrupt(translate('A 2D canvas context was unavailable for image conversion.'));
+  ctx.putImageData(new ImageData(frame.data, frame.width, frame.height), 0, 0);
+  return canvas;
+}
+
+async function decodeForResize(
+  kind: ResizeSourceKind,
+  bytes: Uint8Array,
+  name: string,
+  job?: JobHandle
+): Promise<{ source: DrawableSource; pages: number }> {
+  if (kind === 'heic') {
+    await checkpoint(job, 0, translate('Loading the HEIC decoder'));
+    const lib = await loadLibheif();
+    await checkpoint(job, 0.05, translate('Decoding {name}', { name }));
+    return { source: frameToCanvas(await decodeHeicToRgba(lib, bytes, name)), pages: 1 };
+  }
+  if (kind === 'tiff') {
+    await checkpoint(job, 0.05, translate('Decoding {name}', { name }));
+    let first: OffscreenCanvas | null = null;
+    let pages = 1;
+    try {
+      await decodeTiffPages(
+        bytes,
+        {
+          beforePage: (i, count) => {
+            pages = count;
+            if (i > 0) throw STOP_AFTER_FIRST;
+          },
+          onPage: frame => {
+            first = frameToCanvas(frame);
+          }
+        },
+        name
+      );
+    } catch (err) {
+      if (err !== STOP_AFTER_FIRST) throw err;
+    }
+    if (!first) throw corrupt(translate('{name} contains no pages.', { name }));
+    return { source: first, pages };
+  }
+  await checkpoint(job, 0.05, translate('Decoding {name}', { name }));
+  try {
+    const bitmap = await createImageBitmap(new Blob([bytes as BlobPart]), {
+      imageOrientation: 'from-image'
+    });
+    return { source: bitmap, pages: 1 };
+  } catch (err) {
+    throw corrupt(
+      translate('{name} could not be decoded as an image: {message}', {
+        name,
+        message: err instanceof Error ? err.message : String(err)
+      })
+    );
+  }
 }
 
 let libheif: Promise<LibHeif> | undefined;
@@ -146,6 +239,29 @@ const api: ImageJob = {
       out,
       out.map(b => b.buffer as ArrayBuffer)
     );
+  },
+
+  async resizeImage(kind, bytes, request, name, job) {
+    const { source, pages } = await decodeForResize(kind, bytes, name, job);
+    try {
+      const result = await resizeToTarget(source, request, {
+        onTrial: (index, max) =>
+          checkpoint(
+            job,
+            0.1 + (0.85 * index) / max,
+            translate('Trying size {attempt} of up to {max}', { attempt: index + 1, max })
+          )
+      });
+      await checkpoint(job, 1, translate('Done'));
+      const out: ResizedImage = { ...result, sourcePages: pages };
+      return Comlink.transfer(out, [out.bytes.buffer as ArrayBuffer]);
+    } finally {
+      if ('close' in source) source.close();
+      else {
+        source.width = 0;
+        source.height = 0;
+      }
+    }
   }
 };
 

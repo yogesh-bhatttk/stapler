@@ -28,6 +28,7 @@ import {
   historySourceRefCount
 } from './history';
 import { normalizeRotation } from './rotation';
+import { checkOpenCapacity, knownSourceBytes, type OpenCapacity } from './workspace-limits';
 import { pruneRenderHandles } from './render-cache';
 import { deleteSourceBytes, readSourceBytes } from './opfs';
 import { logEvent } from './errors';
@@ -119,8 +120,9 @@ export const documents = signal<StaplerDoc[]>([]);
  * discard/export-review diff can still reach a baseline-only page). Called
  * from `deletePages` and `closeDocument` — the two mutators that can make a
  * page key unreachable — with the keys each is about to orphan; undo/redo
- * needs no equivalent, since every snapshot already carries its own full copy
- * of both maps (`history.ts`), independent of what the live signal holds.
+ * needs no equivalent, since every snapshot already carries its own copy of
+ * both maps' entries for that document's page keys (`history.ts`),
+ * independent of what the live signal holds.
  */
 function pruneOrphanedPageState(candidateKeys: Iterable<string>): void {
   const stillLive = new Set<string>();
@@ -380,29 +382,43 @@ export function makePageRefs(sourceDocId: string, pageCount: number): PageRef[] 
   }));
 }
 
-/** The operation-log entry an open records (see {@link addDocument}). */
-export const OPEN_DOCUMENT_LABEL = 'Open document';
+/**
+ * GAP-11b — the open-document ceiling for the workspace as it stands, given
+ * `incomingDocuments` more of `incomingBytes` in total. See
+ * `workspace-limits.ts`; every open path asks this before importing.
+ */
+export function workspaceOpenCapacity(incomingDocuments: number, incomingBytes = 0): OpenCapacity {
+  return checkOpenCapacity(
+    documents.value.length,
+    incomingDocuments,
+    knownSourceBytes(Object.keys(sources.value)),
+    incomingBytes
+  );
+}
 
 /**
- * RT-6 — opening a document is an undoable step like any other edit, recorded
- * *before* the document appears. Every open path used to either wipe the
- * whole undo/redo history afterwards (`resetHistory()` in the drop-zone path,
- * losing every other open document's undo) or record nothing at all (Recents,
- * paste), so the next Ctrl+Z restored the snapshot from before the *previous*
- * edit — undoing that edit and silently removing the new document in one go.
- * Now the first Ctrl+Z after an open removes exactly what was opened, Ctrl+Y
- * brings it back, and no other document's history is touched. RT-2's liveness
- * still holds: an undone document's sources sit in the redo stack, which
- * `historySourceIds` counts as live.
+ * Adds a document to the workspace and makes it active.
+ *
+ * Opening is a workspace action, not an undo step (GAP-11a, resolving
+ * R-RT-6/7): the new document starts with an empty undo history of its own,
+ * and no other document's history is touched. It used to be recorded as an
+ * "Open document" step in the single global stack, so enough Ctrl+Z emptied
+ * the workspace; closing the tab (which confirms unsaved changes) is how a
+ * document is removed.
+ *
+ * Refused — returning false, adding nothing — when the workspace is already
+ * at `MAX_OPEN_DOCUMENTS`. Callers check `workspaceOpenCapacity` first and
+ * explain; this is the backstop.
  */
-export function addDocument(doc: Omit<StaplerDoc, 'baseline'>): void {
-  commit(OPEN_DOCUMENT_LABEL);
+export function addDocument(doc: Omit<StaplerDoc, 'baseline'>): boolean {
+  if (!workspaceOpenCapacity(1).ok) return false;
   batch(() => {
     documents.value = [...documents.value, { ...doc, baseline: doc.pages }];
     activeDocId.value = doc.id;
     if (selectedPageKeys.value.size > 0) selectedPageKeys.value = new Set();
     activePageIndex.value = 0;
   });
+  return true;
 }
 
 export function switchDocument(id: string): void {
@@ -455,13 +471,9 @@ export function closeDocument(id: string): void {
       }
     }
   });
-  // A snapshot that still holds this document would otherwise point at the
-  // source bytes freed below — but only *this* document's entries are
-  // invalid, not the other open documents' undo/redo history, so this trims
-  // just those instead of wiping every open document's history via
-  // resetHistory() (which remains reserved for the workspace actually being
-  // replaced wholesale, e.g. on session load). Done *before* the GC, so the
-  // closed document's own history entries do not keep its bytes alive.
+  // GAP-11a — the closed document's own undo/redo history goes with it (no
+  // other document's history is affected). Done *before* the GC, so that
+  // history's snapshots do not keep the closed document's bytes alive.
   forgetDocumentInHistory(id);
   // Drop sources nothing references any more, so closing a tab frees its bytes.
   // ANN-07's side-by-side comparison document, and Compare's own comparison
@@ -506,7 +518,7 @@ function mutateDoc(docId: string, mutate: (doc: StaplerDoc) => StaplerDoc): void
 }
 
 export function renameDocument(docId: string, name: string): void {
-  commit();
+  commit(docId);
   mutateDoc(docId, doc => ({ ...doc, name }));
 }
 
@@ -532,7 +544,7 @@ export function deletePages(docId: string, pageKeys: Iterable<string>): void {
     return;
   }
 
-  commit();
+  commit(docId);
   batch(() => {
     let remainingCount = 0;
     mutateDoc(docId, d => {
@@ -669,7 +681,7 @@ export function rotatePages(docId: string, pageKeys: Iterable<string>, delta: nu
     }
   }
 
-  commit();
+  commit(docId);
   batch(() => {
     mutateDoc(docId, doc => ({
       ...doc,
@@ -696,7 +708,7 @@ export function rotatePages(docId: string, pageKeys: Iterable<string>, delta: nu
  * separately, by the caller.
  */
 export function discardPageChanges(docId: string): void {
-  commit();
+  commit(docId);
   // Signature, text/date stamps and form fields live on the document itself
   // (`annotations`), so they revert here with the page list — and, like it,
   // undoably. The discard dialog always promised annotations were cleared;
@@ -711,7 +723,7 @@ export function rotatePage(docId: string, pageKey: string, delta: number): void 
 export function duplicatePages(docId: string, pageKeys: Iterable<string>): void {
   const keys = new Set(pageKeys);
   if (keys.size === 0) return;
-  commit();
+  commit(docId);
   // Collected while walking `doc.pages` below and applied to `cropBoxes`/
   // `pageAnnotations` afterwards — those are separate signals keyed by page
   // key, not part of `PageRef` itself, so spreading `page` into the duplicate
@@ -768,7 +780,7 @@ export function duplicatePages(docId: string, pageKeys: Iterable<string>): void 
 export function movePages(docId: string, pageKeys: Iterable<string>, toIndex: number): void {
   const keys = new Set(pageKeys);
   if (keys.size === 0) return;
-  commit();
+  commit(docId);
   batch(() => {
     let newIndex = activePageIndex.value;
     mutateDoc(docId, doc => {
@@ -793,6 +805,37 @@ export function movePages(docId: string, pageKeys: Iterable<string>, toIndex: nu
   });
 }
 
+/**
+ * GAP-6 — replaces a document's page order with `orderedKeys`, a permutation
+ * of its current page keys (duplex interleave). One undo step. Refused — a
+ * no-op returning false — unless it is exactly a permutation: a reorder must
+ * never drop or duplicate a page by accident.
+ */
+export function reorderPages(docId: string, orderedKeys: readonly string[]): boolean {
+  const doc = documents.value.find(d => d.id === docId);
+  if (!doc || orderedKeys.length !== doc.pages.length) return false;
+  const byKey = new Map(doc.pages.map(page => [page.key, page]));
+  if (new Set(orderedKeys).size !== orderedKeys.length) return false;
+  const pages: PageRef[] = [];
+  for (const key of orderedKeys) {
+    const page = byKey.get(key);
+    if (!page) return false;
+    pages.push(page);
+  }
+  commit();
+  batch(() => {
+    const activeKey = doc.pages[activePageIndex.value]?.key;
+    mutateDoc(docId, d => ({ ...d, pages }));
+    if (activeDocId.value === docId && activeKey) {
+      activePageIndex.value = Math.max(
+        0,
+        pages.findIndex(p => p.key === activeKey)
+      );
+    }
+  });
+  return true;
+}
+
 export function movePage(docId: string, fromIndex: number, toIndex: number): void {
   const doc = documents.value.find(d => d.id === docId);
   const page = doc?.pages[fromIndex];
@@ -803,7 +846,7 @@ export function movePage(docId: string, fromIndex: number, toIndex: number): voi
 /** Inserts pages from a registered source at `insertIndex`. */
 export function insertPages(docId: string, pages: PageRef[], insertIndex: number): void {
   if (pages.length === 0) return;
-  commit();
+  commit(docId);
   mutateDoc(docId, doc => {
     const at = Math.max(0, Math.min(doc.pages.length, insertIndex));
     return { ...doc, pages: [...doc.pages.slice(0, at), ...pages, ...doc.pages.slice(at)] };
@@ -837,7 +880,7 @@ function carryRestrictions(docId: string, source: SourceDocument): SourceDocumen
  * rewrites the bytes (redaction, scan cleanup) rather than rearranging pages.
  */
 export function replaceWithSource(docId: string, source: SourceDocument): void {
-  commit();
+  commit(docId);
   registerSource(carryRestrictions(docId, source));
   mutateDoc(docId, doc => {
     const pages = makePageRefs(source.id, source.pageCount);
@@ -874,7 +917,7 @@ export function repointPage(
   sourceId: string,
   sourceIndex = 0
 ): void {
-  commit();
+  commit(docId);
   // Same reasoning as `replaceWithSource`: the rewritten page's new source was
   // written in the clear, and on a single-page document it is the *only*
   // source left once this repoint lands.
@@ -924,7 +967,7 @@ export function selectPageRange(docId: string, fromKey: string, toKey: string): 
 /* ---------------- annotations ---------------- */
 
 export function addAnnotation(docId: string, annotation: Annotation): void {
-  commit();
+  commit(docId);
   mutateDoc(docId, doc => ({ ...doc, annotations: [...doc.annotations, annotation] }));
 }
 
@@ -935,7 +978,7 @@ export function updateAnnotation(
 ): void {
   // A drag calls this on every pointer move; `commit` collapses them into the one
   // entry opened by the caller's transaction.
-  commit();
+  commit(docId);
   mutateDoc(docId, doc => ({
     ...doc,
     annotations: doc.annotations.map(a => (a.id === annotationId ? { ...a, ...updates } : a))
@@ -943,7 +986,7 @@ export function updateAnnotation(
 }
 
 export function deleteAnnotation(docId: string, annotationId: string): void {
-  commit();
+  commit(docId);
   mutateDoc(docId, doc => ({
     ...doc,
     annotations: doc.annotations.filter(a => a.id !== annotationId)
@@ -956,7 +999,7 @@ export function duplicateAnnotationToAllPages(docId: string, annotationId: strin
   const sourceAnnotation = doc.annotations.find(a => a.id === annotationId);
   if (!sourceAnnotation) return;
 
-  commit();
+  commit(docId);
   mutateDoc(docId, doc => {
     const newAnnotations: Annotation[] = [];
     for (const page of doc.pages) {

@@ -9,7 +9,8 @@ import { translate } from '../../core/i18n';
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { useLocation } from 'wouter-preact';
 import { ChevronDown, Clock, Info, X } from 'lucide-preact';
-import { TOOLS, groupedTools, toolGroupLabel, toolRoute } from '../../core/tools';
+import { toolRoute } from '../../core/tools';
+import { searchToolGroups } from '../toolSearch';
 import { importFilesAsDocuments } from '../../core/open-document';
 import { notify, notifyError } from '../../core/notify';
 import { platform } from '../../platform/current';
@@ -20,7 +21,6 @@ import { Field, TextInput } from '../components/Field';
 import { Button } from '../components/Button';
 import { IconButton } from '../components/IconButton';
 import { ToolIcon } from '../components/ToolIcon';
-import { fuzzyRank } from '../../core/fuzzy';
 import styles from './HomeView.module.css';
 import { useTranslation } from '../../core/i18n';
 import { useImageImportOptions } from '../useImageImportOptions';
@@ -55,21 +55,9 @@ export function HomeView() {
     void platform.restoreHandles().then(setRecents);
   }, []);
 
-  const groups = useMemo(() => {
-    const labelled = (entries: ReturnType<typeof groupedTools>) =>
-      entries.map(entry => ({ ...entry, label: t(toolGroupLabel(entry.group)) }));
-    if (!query.trim()) return labelled(groupedTools());
-    // While searching, a single ranked list beats four sparse groups. The
-    // haystack holds the translated text *and* the English, so a query in
-    // either language finds the tool.
-    const matches = fuzzyRank(TOOLS, query, tool => [
-      `${t(tool.title)} ${t(toolGroupLabel(tool.group))} ${t(tool.summary)}`,
-      `${tool.title} ${tool.group} ${tool.summary}`
-    ]);
-    return matches.length > 0 ? [{ group: 'Matches', label: t('Matches'), tools: matches }] : [];
-    // `t` is a new function each render, so this recomputes whenever the
-    // locale (or anything else) re-renders the view — cheap for ~40 tools.
-  }, [query, t]);
+  // `t` is a new function each render, so this recomputes whenever the
+  // locale (or anything else) re-renders the view — cheap for ~40 tools.
+  const groups = useMemo(() => searchToolGroups(query, t), [query, t]);
 
   const reopen = async (entry: RecentEntry) => {
     // A double click (or Enter pressed twice) used to open the file as two

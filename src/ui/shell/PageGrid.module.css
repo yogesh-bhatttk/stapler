@@ -94,3 +94,10 @@
   font: var(--text-small);
   color: var(--ink-subtle);
 }
+
+/* Keyboard instructions are noise on a touch screen (GAP-3). */
+@media (hover: none), (pointer: coarse) {
+  .hint {
+    display: none;
+  }
+}

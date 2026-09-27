@@ -190,6 +190,65 @@ describe('session-recovery (DOC-11)', () => {
     expect(pageAnnotations.value[pageKey][0].type).toBe('highlight');
   });
 
+  it('GAP-11a: a record with the old global undo stack restores its documents with empty undo', async () => {
+    const pages = makePageRefs('src-legacy', 2);
+    await writeSourceBytes('src-legacy', new Uint8Array([1, 2, 3]));
+    registerSource({
+      id: 'src-legacy',
+      name: 'l.pdf',
+      pageCount: 2,
+      pageSizes: [
+        { width: 1, height: 1 },
+        { width: 1, height: 1 }
+      ]
+    });
+    const doc = {
+      id: 'doc-l',
+      name: 'l.pdf',
+      pages,
+      baseline: pages,
+      annotations: [],
+      dirty: true
+    };
+    settings.set('session.recovery', {
+      documents: [doc],
+      sources: sources.value,
+      activeDocId: 'doc-l',
+      selection: [],
+      cropBoxes: {},
+      pageAnnotations: {},
+      // The pre-GAP-11 shape: whole-workspace snapshots in one global stack.
+      history: {
+        undoStack: [
+          { docs: [], activeId: null, selection: [], cropBoxes: {}, pageAnnotations: {} },
+          { docs: [doc], activeId: 'doc-l', selection: [], cropBoxes: {}, pageAnnotations: {} }
+        ],
+        redoStack: [],
+        undoLog: [
+          { label: 'Open document', timestamp: 1 },
+          { label: 'Edit', timestamp: 2 }
+        ],
+        redoLog: []
+      },
+      savedAt: Date.now()
+    });
+    documents.value = [];
+    sources.value = {};
+
+    const record = await loadPendingRecovery();
+    const checked = await checkRecovery(record!);
+    expect(checked).not.toBeNull();
+    restoreSession(checked!.record);
+
+    expect(documents.value.map(d => d.id)).toEqual(['doc-l']);
+    expect(canUndo()).toBe(false);
+    undo(); // must not throw, and must not empty the workspace
+    expect(documents.value).toHaveLength(1);
+    // New edits record normally into the per-document format.
+    rotatePage('doc-l', pages[0].key, 90);
+    expect(canUndo()).toBe(true);
+  });
+
   it('backfills a missing baseline from a record saved before that field existed', async () => {
     // `baseline` was added after this record format shipped — IndexedDB has no
     // schema to migrate the JSON payload against, so a record written by an

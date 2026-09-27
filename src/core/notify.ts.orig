@@ -19,11 +19,6 @@ import {
 
 export type ToastTone = 'info' | 'success' | 'warning' | 'danger';
 
-export interface ToastAction {
-  label: string;
-  run: () => void;
-}
-
 export interface Toast {
   id: string;
   tone: ToastTone;
@@ -36,6 +31,11 @@ export interface Toast {
   action?: ToastAction;
   /** ms before auto-dismiss; 0 keeps it until dismissed. */
   timeout: number;
+}
+
+export interface ToastAction {
+  label: string;
+  run: () => void;
 }
 
 export const toasts = signal<Toast[]>([]);
@@ -166,8 +166,6 @@ export interface ConfirmRequest {
   confirmLabel: string;
   cancelLabel: string;
   tone: 'default' | 'danger';
-  /** Optional bullet list under the body, e.g. exactly what will be deleted. */
-  details?: string[];
   resolve: (ok: boolean) => void;
 }
 
@@ -186,12 +184,10 @@ export function confirmAction(options: {
   confirmLabel?: string;
   cancelLabel?: string;
   tone?: 'default' | 'danger';
-  details?: string[];
 }): Promise<boolean> {
   return confirmQueue.enqueue(resolve => ({
     title: options.title,
     body: options.body,
-    details: options.details,
     confirmLabel: options.confirmLabel ?? translate('Continue'),
     cancelLabel: options.cancelLabel ?? translate('Cancel'),
     tone: options.tone ?? 'default',
