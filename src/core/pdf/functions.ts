@@ -10,6 +10,8 @@
  * Every parser here returns `null` for anything it does not fully understand,
  * never a guess: the caller turns `null` into "this page is rasterised instead",
  * which is honest, where a wrong function would silently paint the wrong grey.
+ * The same goes for evaluation: a program that fails at a particular input (a
+ * PostScript stack underflow, say) evaluates to `null` there, not to zeros.
  */
 import { PDFArray, PDFDict, PDFName, PDFNumber, PDFRawStream, PDFRef, PDFStream } from 'pdf-lib';
 import type { PDFContext } from 'pdf-lib';
@@ -20,7 +22,8 @@ export interface PdfFunction {
   domain: number[];
   /** Number of outputs. */
   outputs: number;
-  evaluate(input: readonly number[]): number[];
+  /** The outputs at `input`, or `null` when the function cannot be evaluated there. */
+  evaluate(input: readonly number[]): number[] | null;
 }
 
 function resolve(value: unknown, context: PDFContext): unknown {
@@ -66,6 +69,7 @@ function withRange(fn: PdfFunction, range: number[] | null): PdfFunction {
     outputs: fn.outputs,
     evaluate(input) {
       const out = fn.evaluate(input);
+      if (!out) return null;
       return out.map((v, i) =>
         2 * i + 1 < range.length ? clip(v, range[2 * i], range[2 * i + 1]) : v
       );
@@ -88,6 +92,9 @@ function readSample(data: Uint8Array, index: number, bits: number): number {
   return value;
 }
 
+/** The most inputs a sampled function is interpolated over (2^8 = 256 corners). */
+const MAX_SAMPLED_INPUTS = 8;
+
 function sampledFunction(stream: PDFStream, context: PDFContext): PdfFunction | null {
   const dict = stream.dict;
   const domain = numbers(dict.get(PDFName.of('Domain')), context);
@@ -100,6 +107,9 @@ function sampledFunction(stream: PDFStream, context: PDFContext): PdfFunction | 
   const m = domain.length / 2;
   const n = range.length / 2;
   if (m < 1 || n < 1 || size.length !== m || size.some(s => !(s >= 1))) return null;
+  // Multilinear interpolation visits 2^m corners per evaluation. Beyond this
+  // many inputs that is not worth it — the page is rasterised instead.
+  if (m > MAX_SAMPLED_INPUTS) return null;
   const encode = numbers(dict.get(PDFName.of('Encode')), context) ?? size.flatMap(s => [0, s - 1]);
   const decode = numbers(dict.get(PDFName.of('Decode')), context) ?? range;
   const data = streamBytes(stream);
@@ -133,25 +143,32 @@ function sampledFunction(stream: PDFStream, context: PDFContext): PdfFunction | 
           );
           positions.push(clip(e, 0, size[i] - 1));
         }
-        const out: number[] = [];
-        for (let j = 0; j < n; j++) {
-          let sample: number;
-          if (m === 1) {
-            // Linear interpolation for the common one-input case (tint
-            // transforms, axial/radial shadings).
-            const lo = Math.floor(positions[0]);
-            const hi = Math.min(size[0] - 1, lo + 1);
-            const t = positions[0] - lo;
-            sample = sampleAt([lo], j) * (1 - t) + sampleAt([hi], j) * t;
-          } else {
-            sample = sampleAt(
-              positions.map(p => Math.round(p)),
-              j
-            );
-          }
-          out.push(interpolate(sample, 0, maxSample, decode[2 * j], decode[2 * j + 1]));
+        // Multilinear interpolation (§7.10.2): every corner of the cell the
+        // input falls in, weighted by its distance along each axis. For one
+        // input this is plain linear interpolation.
+        const lo: number[] = [];
+        const hi: number[] = [];
+        const t: number[] = [];
+        for (let i = 0; i < m; i++) {
+          lo.push(Math.floor(positions[i]));
+          hi.push(Math.min(size[i] - 1, lo[i] + 1));
+          t.push(positions[i] - lo[i]);
         }
-        return out;
+        const sums = new Array<number>(n).fill(0);
+        const corner: number[] = new Array<number>(m).fill(0);
+        for (let mask = 0; mask < 1 << m; mask++) {
+          let weight = 1;
+          for (let i = 0; i < m; i++) {
+            const upper = (mask >> i) & 1;
+            corner[i] = upper ? hi[i] : lo[i];
+            weight *= upper ? t[i] : 1 - t[i];
+          }
+          if (weight === 0) continue;
+          for (let j = 0; j < n; j++) sums[j] += weight * sampleAt(corner, j);
+        }
+        return sums.map((sample, j) =>
+          interpolate(sample, 0, maxSample, decode[2 * j], decode[2 * j + 1])
+        );
       }
     },
     range
@@ -326,11 +343,30 @@ function validProgram(nodes: PsNode[]): boolean {
 const PS_MAX_STACK = 100;
 const PS_MAX_STEPS = 10_000;
 
+/** Thrown inside the interpreter when an operator finds too few operands. */
+class StackUnderflow extends Error {}
+
 function runPostScript(program: PsNode[], stack: (number | boolean)[]): boolean {
+  try {
+    return runPostScriptUnchecked(program, stack);
+  } catch (err) {
+    if (err instanceof StackUnderflow) return false;
+    throw err;
+  }
+}
+
+function runPostScriptUnchecked(program: PsNode[], stack: (number | boolean)[]): boolean {
   let steps = 0;
-  const num = (): number => {
+  // A missing operand is a broken program, not a zero: the caller must not
+  // paint a guessed colour.
+  const pop = (): number | boolean => {
     const v = stack.pop();
-    return typeof v === 'boolean' ? (v ? 1 : 0) : (v ?? 0);
+    if (v === undefined) throw new StackUnderflow();
+    return v;
+  };
+  const num = (): number => {
+    const v = pop();
+    return typeof v === 'boolean' ? (v ? 1 : 0) : v;
   };
   const run = (nodes: PsNode[]): boolean => {
     for (const node of nodes) {
@@ -340,7 +376,7 @@ function runPostScript(program: PsNode[], stack: (number | boolean)[]): boolean 
         continue;
       }
       if (typeof node === 'object') {
-        const cond = stack.pop();
+        const cond = pop();
         const branch = cond === true || cond === 1 ? node.ifTrue : node.ifFalse;
         if (branch && !run(branch)) return false;
         continue;
@@ -430,14 +466,14 @@ function runPostScript(program: PsNode[], stack: (number | boolean)[]): boolean 
           stack.push(Math.log10(num()));
           break;
         case 'eq': {
-          const b = stack.pop();
-          const a = stack.pop();
+          const b = pop();
+          const a = pop();
           stack.push(a === b);
           break;
         }
         case 'ne': {
-          const b = stack.pop();
-          const a = stack.pop();
+          const b = pop();
+          const a = pop();
           stack.push(a !== b);
           break;
         }
@@ -462,25 +498,25 @@ function runPostScript(program: PsNode[], stack: (number | boolean)[]): boolean 
           break;
         }
         case 'and': {
-          const b = stack.pop();
-          const a = stack.pop();
+          const b = pop();
+          const a = pop();
           stack.push(typeof a === 'boolean' ? a && b === true : Number(a) & Number(b));
           break;
         }
         case 'or': {
-          const b = stack.pop();
-          const a = stack.pop();
+          const b = pop();
+          const a = pop();
           stack.push(typeof a === 'boolean' ? a || b === true : Number(a) | Number(b));
           break;
         }
         case 'xor': {
-          const b = stack.pop();
-          const a = stack.pop();
+          const b = pop();
+          const a = pop();
           stack.push(typeof a === 'boolean' ? a !== (b === true) : Number(a) ^ Number(b));
           break;
         }
         case 'not': {
-          const a = stack.pop();
+          const a = pop();
           stack.push(typeof a === 'boolean' ? !a : ~Number(a));
           break;
         }
@@ -497,14 +533,13 @@ function runPostScript(program: PsNode[], stack: (number | boolean)[]): boolean 
           break;
         }
         case 'exch': {
-          const b = stack.pop();
-          const a = stack.pop();
-          if (a === undefined || b === undefined) return false;
+          const b = pop();
+          const a = pop();
           stack.push(b, a);
           break;
         }
         case 'pop':
-          stack.pop();
+          pop();
           break;
         case 'copy': {
           const n = Math.trunc(num());
@@ -564,10 +599,11 @@ function postScriptFunction(stream: PDFStream, context: PDFContext): PdfFunction
       for (let i = 0; i < inputs; i++) {
         stack.push(clip(input[i] ?? 0, domain[2 * i], domain[2 * i + 1]));
       }
-      if (!runPostScript(program, stack)) return new Array(outputs).fill(0);
+      if (!runPostScript(program, stack) || stack.length < outputs) return null;
       const out = stack
         .slice(stack.length - outputs)
         .map(v => (typeof v === 'boolean' ? (v ? 1 : 0) : v));
+      if (out.some(v => !Number.isFinite(v))) return null;
       return out.map((v, i) => clip(v, range[2 * i], range[2 * i + 1]));
     }
   };
@@ -621,6 +657,14 @@ export function parseFunctionOrArray(value: unknown, context: PDFContext): PdfFu
   return {
     domain: parts[0].domain,
     outputs: parts.length,
-    evaluate: input => parts.map(fn => fn.evaluate(input)[0])
+    evaluate: input => {
+      const out: number[] = [];
+      for (const fn of parts) {
+        const value = fn.evaluate(input);
+        if (!value) return null;
+        out.push(value[0]);
+      }
+      return out;
+    }
   };
 }

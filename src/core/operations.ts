@@ -64,7 +64,7 @@ import type { WatermarkData } from './workers/process.worker';
 import { internal, unsupported, cancelled, isCancellation, fromUnknown, corrupt } from './errors';
 import type { GrayImageData, GrayMode, GrayPageOutcome, GrayRaster } from './pdf/grayscale';
 import type { RepairOutcome } from './pdf/repair';
-import { translate } from './i18n';
+import { tPlural, translate } from './i18n';
 import { hasXfaMarker, xfaConvertMessage } from './pdf/xfa';
 import type { DocxModel, DocxPage, DocxPreviewItem } from './convert/blocks';
 import {
@@ -423,15 +423,40 @@ export function splitBoundaries(
   }
 
   // "5, 10" means "cut after page 5 and after page 10" — 1-based page numbers from
-  // the user, 0-based boundary indices for the worker.
+  // the user, 0-based boundary indices for the worker. Tokens that are not plain
+  // integers ("1-3", "2.5") never become a cut: `parseInt` would read them as 1
+  // and 2. Callers show `splitPointsError` for them.
   return [
-    ...new Set(
-      (options.custom ?? '')
-        .split(/[,\s]+/)
-        .map(part => Number.parseInt(part, 10))
-        .filter(n => Number.isInteger(n) && n > 0 && n < pageCount)
-    )
+    ...new Set(parseSplitPoints(options.custom ?? '').points.filter(n => n > 0 && n < pageCount))
   ].sort((a, b) => a - b);
+}
+
+/**
+ * X-8 — the custom split points the user typed: plain integers only, separated
+ * by commas or spaces. Everything else is returned in `invalid`, verbatim.
+ */
+export function parseSplitPoints(custom: string): { points: number[]; invalid: string[] } {
+  const points: number[] = [];
+  const invalid: string[] = [];
+  for (const token of custom.split(/[,\s]+/)) {
+    if (token === '') continue;
+    if (/^[+-]?\d+$/.test(token)) points.push(Number(token));
+    else invalid.push(token);
+  }
+  return { points, invalid };
+}
+
+/**
+ * X-8 — the message to show when the custom split points contain something
+ * that is not a page number, or `null` when they are all plain integers.
+ */
+export function splitPointsError(custom: string): string | null {
+  const { invalid } = parseSplitPoints(custom);
+  if (invalid.length === 0) return null;
+  return translate(
+    'Split points must be single page numbers separated by commas. These are not: {tokens}',
+    { tokens: invalid.join(', ') }
+  );
 }
 
 export interface SizeSplitPlan {
@@ -716,7 +741,7 @@ export async function compressDocument(
         const page = work[i];
         options.onProgress?.(
           (i / Math.max(1, work.length)) * 0.6,
-          `Processing page ${page.pageIndex + 1}`
+          translate('Processing page {page}', { page: page.pageIndex + 1 })
         );
         if (options.signal?.aborted) break;
 
@@ -740,7 +765,7 @@ export async function compressDocument(
       }
 
       if (surgical.length > 0 && !options.signal?.aborted) {
-        options.onProgress?.(0.6, 'Re-encoding images');
+        options.onProgress?.(0.6, translate('Re-encoding images'));
         // One call for the whole document, not one per page: the encode-once rule
         // can only be enforced where every page's placements are visible at once.
         const extracted = await api.extractSharedImages(
@@ -861,7 +886,12 @@ export async function compressToTargetSize(
     onTrial: (index, maxTrials, settings) => {
       options.onProgress?.(
         index / maxTrials,
-        `Trying ${settings.dpi} DPI at ${Math.round(settings.quality * 100)}% (attempt ${index + 1} of up to ${maxTrials})`
+        translate('Trying {dpi} DPI at {quality}% (attempt {attempt} of up to {max})', {
+          dpi: settings.dpi,
+          quality: Math.round(settings.quality * 100),
+          attempt: index + 1,
+          max: maxTrials
+        })
       );
     },
     run: async (settings, index) => {
@@ -871,7 +901,11 @@ export async function compressToTargetSize(
         onProgress: (fraction, label) =>
           options.onProgress?.(
             base + (fraction ?? 0) / MAX_TARGET_TRIALS,
-            `${settings.dpi} DPI at ${Math.round(settings.quality * 100)}% — ${label}`
+            translate('{dpi} DPI at {quality}% — {step}', {
+              dpi: settings.dpi,
+              quality: Math.round(settings.quality * 100),
+              step: label
+            })
           )
       };
       const report = await planCompression(bytes, settings, trialJob);
@@ -884,7 +918,7 @@ export async function compressToTargetSize(
       };
     }
   });
-  options.onProgress?.(1, `Finished after ${completed} attempt(s)`);
+  options.onProgress?.(1, tPlural('Finished after {count} attempts', completed));
 
   const chosen = outcome.chosen;
   return {
@@ -986,18 +1020,18 @@ export async function applyRedactions(
   // rectangle (an overlay is not a redaction). Its pixels are destroyed instead,
   // which needs pdf.js to decode the image and pdf-lib to substitute it — two
   // workers, so the plan is computed first and the pixel work handed across.
-  options.onProgress?.(0.4, 'Checking images');
+  options.onProgress?.(0.4, translate('Checking images'));
   const imageRequests = await processWorker.lease(api => api.planImageRedactions(bytes, regions));
   const imageReplacements = await redactOverlappedImages(bytes, imageRequests, options);
 
-  options.onProgress?.(0.55, 'Rebuilding document');
+  options.onProgress?.(0.55, translate('Rebuilding document'));
   let output = await processWorker.lease(api =>
     api.applyRedactions(bytes, regions, imageReplacements, job)
   );
 
   // RED-04: metadata is scrubbed as part of redaction, because redacted content
   // routinely survives in XMP, the info dictionary, and embedded thumbnails.
-  options.onProgress?.(0.75, 'Stripping metadata');
+  options.onProgress?.(0.75, translate('Stripping metadata'));
   // `output` is the redaction worker's own result, reassigned on the next line:
   // nothing else can ever read this buffer, so it is handed over rather than
   // copied.
@@ -1060,7 +1094,7 @@ async function redactOverlappedImages(
         if (options.signal?.aborted) throw cancelled();
         options.onProgress?.(
           0.4 + (done / byPage.size) * 0.15,
-          `Redacting images on page ${pageIndex + 1}`
+          translate('Redacting images on page {page}', { page: pageIndex + 1 })
         );
         done += 1;
         const results = await api.redactPageImages(
@@ -1073,11 +1107,16 @@ async function redactOverlappedImages(
           const result = byObjectNumber.get(request.objectNumber);
           if (!result?.image) {
             throw unsupported(
-              `An image on page ${pageIndex + 1} is only partly covered by a redaction mark and ` +
-                `its pixels could not be removed. ${result?.reason ?? 'The image could not be decoded.'} ` +
-                'Drawing a black box over it would leave the original image inside the file, so ' +
-                'nothing was saved and your document is untouched. Cover the whole image with ' +
-                'the mark, or rasterise the page first.'
+              translate(
+                'An image on page {page} is only partly covered by a redaction mark and its ' +
+                  'pixels could not be removed. {reason} Drawing a black box over it would leave ' +
+                  'the original image inside the file, so nothing was saved and your document is ' +
+                  'untouched. Cover the whole image with the mark, or rasterise the page first.',
+                {
+                  page: pageIndex + 1,
+                  reason: result?.reason ?? translate('The image could not be decoded.')
+                }
+              )
             );
           }
           const page = (replacements[pageIndex] ??= {});
@@ -1552,7 +1591,10 @@ export async function proposeOutlineFromHeadings(
   const pages: HeadingPage[] = [];
   for (let i = 0; i < pageCount; i++) {
     if (options.signal?.aborted) throw cancelled();
-    options.onProgress?.(i / Math.max(1, pageCount), `Reading page ${i + 1} of ${pageCount}`);
+    options.onProgress?.(
+      i / Math.max(1, pageCount),
+      translate('Reading page {page} of {total}', { page: i + 1, total: pageCount })
+    );
     const items = await extractPageTextItems(bytes, i);
     pages.push({ pageIndex: i, items });
   }
@@ -1638,7 +1680,13 @@ export async function scanDocumentBarcodes(
       for (let i = 0; i < pageIndices.length; i++) {
         if (options.signal?.aborted) throw cancelled();
         const pageIndex = pageIndices[i];
-        options.onProgress?.(i / pageIndices.length, `Scanning page ${pageIndex + 1}`);
+        options.onProgress?.(
+          i / pageIndices.length,
+          translate('Scanning page {page} of {total}', {
+            page: pageIndex + 1,
+            total: pageIndices.length
+          })
+        );
         try {
           const barcodes = await api.decodePageBarcodes(handle, pageIndex, BARCODE_SCAN_DPI);
           results.push({ pageIndex, barcodes });
@@ -1647,7 +1695,9 @@ export async function scanDocumentBarcodes(
           results.push({
             pageIndex,
             barcodes: [],
-            reason: `Could not render this page to scan it: ${fromUnknown(err).message}`
+            reason: translate('Could not render this page to scan it: {message}', {
+              message: fromUnknown(err).message
+            })
           });
         }
       }
@@ -1674,7 +1724,13 @@ export async function extractDocumentText(
         // would display/save partial text as if the job had finished.
         if (options.signal?.aborted) throw cancelled();
         const pageIndex = pageIndices[i];
-        options.onProgress?.(i / pageIndices.length, `Reading page ${pageIndex + 1}`);
+        options.onProgress?.(
+          i / pageIndices.length,
+          translate('Reading page {page} of {total}', {
+            page: pageIndex + 1,
+            total: pageIndices.length
+          })
+        );
         const text = await api.extractText(handle, pageIndex, mode);
         if (text) {
           parts.push(
@@ -1743,7 +1799,10 @@ export async function pagesToImageArchive(
         // it would save a truncated ZIP as if the job had finished.
         if (options.signal?.aborted) throw cancelled();
         const pageIndex = pageIndices[i];
-        options.onProgress?.(i / pageIndices.length, `Rendering page ${pageIndex + 1}`);
+        options.onProgress?.(
+          i / pageIndices.length,
+          translate('Rendering page {page}', { page: pageIndex + 1 })
+        );
         const image = await api.pageToImageBytes(handle, pageIndex, format, dpi);
         const name = `page-${String(pageIndex + 1).padStart(pad, '0')}.${format === 'jpeg' ? 'jpg' : 'png'}`;
         files[name] = image;
@@ -1753,7 +1812,7 @@ export async function pagesToImageArchive(
     }
   });
 
-  options.onProgress?.(0.95, 'Compressing archive');
+  options.onProgress?.(0.95, translate('Compressing archive'));
   // Store, not deflate: PNG and JPEG are already compressed, so deflating them
   // costs seconds and saves nothing.
   return zipSync(files, { level: 0 });
@@ -1968,7 +2027,7 @@ export async function convertPdfToDocx(
       for (let i = 0; i < pageCount; i++) {
         if (jobOptions.signal?.aborted) throw cancelled();
         textFraction = i / pageCount;
-        report(`Reading page ${i + 1} of ${pageCount}`);
+        report(translate('Reading page {page} of {total}', { page: i + 1, total: pageCount }));
         pages.push({ pageIndex: i, blocks: await api.extractPageBlocks(handle, i) });
       }
     } finally {
@@ -1981,7 +2040,7 @@ export async function convertPdfToDocx(
         signal: images.signal,
         onProgress: fraction => {
           imageFraction = fraction ?? imageFraction;
-          report('Collecting embedded images');
+          report(translate('Collecting embedded images'));
         }
       })
     : Promise.resolve(null);
@@ -2224,7 +2283,10 @@ export async function convertPdfToXlsx(
       if (isXfa) throw unsupported(xfaConvertMessage('Excel workbook'));
       for (let i = 0; i < pageCount; i++) {
         if (jobOptions.signal?.aborted) throw cancelled();
-        jobOptions.onProgress?.((i / pageCount) * 0.8, `Reading page ${i + 1} of ${pageCount}`);
+        jobOptions.onProgress?.(
+          (i / pageCount) * 0.8,
+          translate('Reading page {page} of {total}', { page: i + 1, total: pageCount })
+        );
         pages.push(await api.extractPageSheet(handle, i));
       }
     } finally {
@@ -2454,7 +2516,7 @@ export async function convertPdfToPptx(
       for (let i = 0; i < pageCount; i++) {
         if (jobOptions.signal?.aborted) throw cancelled();
         textFraction = i / pageCount;
-        report(`Reading page ${i + 1} of ${pageCount}`);
+        report(translate('Reading page {page} of {total}', { page: i + 1, total: pageCount }));
         pages.push(await api.extractPageSlide(handle, i));
       }
     } finally {
@@ -2467,7 +2529,7 @@ export async function convertPdfToPptx(
         signal: images.signal,
         onProgress: fraction => {
           imageFraction = fraction ?? imageFraction;
-          report('Collecting embedded images');
+          report(translate('Collecting embedded images'));
         }
       })
     : Promise.resolve(null);
@@ -2496,7 +2558,7 @@ export async function convertPdfToPptx(
     imageEntries = extracted.entries;
 
     if (jobOptions.signal?.aborted) throw cancelled();
-    jobOptions.onProgress?.(0.62, 'Locating images on the page');
+    jobOptions.onProgress?.(0.62, translate('Locating images on the page'));
     // A second `process` pass rather than a field on `extractImages`: that
     // method's contract is "the image bytes", it is shared with CNV-06's own
     // tool and CNV-08, and widening it would make every caller pay for a
@@ -2520,8 +2582,11 @@ export async function convertPdfToPptx(
     // whichever it did not pick.
     for (const { pageIndex, reason } of located.unreadable) {
       notes.push(
-        `Page ${pageIndex + 1}: no image on this page could be placed, because where the page ` +
-          `draws them could not be read. ${reason} The page's text is still on its slide.`
+        translate(
+          'Page {page}: no image on this page could be placed, because where the page draws ' +
+            "them could not be read. {reason} The page's text is still on its slide.",
+          { page: pageIndex + 1, reason }
+        )
       );
     }
   }
@@ -2802,7 +2867,11 @@ export async function autoTrimDocument(
   for (let i = 0; i < pagesToTrim.length; i++) {
     if (options?.signal?.aborted) throw cancelled();
     const page = pagesToTrim[i];
-    if (options?.onProgress) options.onProgress(i / pagesToTrim.length, `Scanning page ${i + 1}`);
+    if (options?.onProgress)
+      options.onProgress(
+        i / pagesToTrim.length,
+        translate('Scanning page {page} of {total}', { page: i + 1, total: pagesToTrim.length })
+      );
 
     const composedBytes = await composeDocument({ pages: [page], annotations: [] });
 
@@ -2873,7 +2942,10 @@ export async function exportContactSheet(
     try {
       const scale = 150 / 72;
       for (let i = 0; i < pageCount; i++) {
-        options?.onProgress?.(i / pageCount, `Rendering page ${i + 1} of ${pageCount}`);
+        options?.onProgress?.(
+          i / pageCount,
+          translate('Rendering page {page} of {total}', { page: i + 1, total: pageCount })
+        );
         const key = bitmapKey(sourceId, i, scale);
         const cached = thumbnailCache.get(key);
         if (cached) {
@@ -2930,6 +3002,9 @@ function progressBand(options: JobOptions, from: number, to: number): JobOptions
       )
   };
 }
+
+/** Pages whose images the render worker decodes per call (PDF-5). */
+const GRAY_PAGES_PER_BATCH = 8;
 
 export interface GrayscaleSettings {
   mode: GrayMode;
@@ -2993,6 +3068,11 @@ export async function grayscaleDocument(
   }
 
   const rasterPages = new Set(plans.filter(p => p.rasterReasons.length > 0).map(p => p.pageIndex));
+  const planByPage = new Map(plans.map(p => [p.pageIndex, p]));
+  // PDF-5 — memory. The render worker encodes every image and page raster as
+  // soon as it has its pixels, and is asked for a few pages at a time, so
+  // what accumulates here is compressed payloads (about the size of the
+  // output, which has to exist anyway) — never every page's raw pixels at once.
   const images: GrayImageData[] = [];
   const rasters: GrayRaster[] = [];
   await renderWorker.lease(async api => {
@@ -3000,15 +3080,26 @@ export async function grayscaleDocument(
     try {
       const requests = plans
         .filter(p => !rasterPages.has(p.pageIndex) && p.images.length > 0)
-        .map(p => ({ pageIndex: p.pageIndex, objectNumbers: p.images }));
-      if (requests.length > 0) {
+        .map(p => ({ pageIndex: p.pageIndex, objectNumbers: p.images, lossy: p.lossy }));
+      // An image shared by several pages is decoded (and encoded) once, even
+      // when its pages fall in different batches.
+      const requested = new Set<number>();
+      for (let from = 0; from < requests.length; from += GRAY_PAGES_PER_BATCH) {
+        if (options.signal?.aborted) throw cancelled();
+        const batch: typeof requests = [];
+        for (const r of requests.slice(from, from + GRAY_PAGES_PER_BATCH)) {
+          const fresh = r.objectNumbers.filter(n => !requested.has(n));
+          for (const n of fresh) requested.add(n);
+          if (fresh.length > 0) batch.push({ ...r, objectNumbers: fresh });
+        }
+        if (batch.length === 0) continue;
+        const band = progressBand(
+          options,
+          0.15 + (0.4 * from) / requests.length,
+          0.15 + (0.4 * Math.min(requests.length, from + GRAY_PAGES_PER_BATCH)) / requests.length
+        );
         images.push(
-          ...(await api.decodeImagesGray(
-            handle,
-            requests,
-            settings.mode,
-            createJobHandle(progressBand(options, 0.15, 0.55))
-          ))
+          ...(await api.decodeImagesGray(handle, batch, settings.mode, createJobHandle(band)))
         );
       }
       // An image pdf.js did not deliver that is *not* in an encoding it lacks
@@ -3028,12 +3119,23 @@ export async function grayscaleDocument(
       const toRender = [...rasterPages];
       for (let i = 0; i < toRender.length; i++) {
         if (options.signal?.aborted) throw cancelled();
-        options.onProgress?.(
+        const band = progressBand(
+          options,
           0.55 + (0.2 * i) / toRender.length,
-          translate('Rendering page {page}', { page: toRender[i] + 1 })
+          0.55 + (0.2 * (i + 1)) / toRender.length
         );
         rasters.push(
-          await api.renderPageGray(handle, toRender[i], settings.rasterDpi, settings.mode)
+          await api.renderPageGray(
+            handle,
+            toRender[i],
+            settings.rasterDpi,
+            settings.mode,
+            // PDF-2 — an annotation that could not be converted is drawn into
+            // the raster (in grey) and hidden on the page, rather than left in
+            // colour on top of it.
+            planByPage.get(toRender[i])?.flattenAnnotations ?? false,
+            createJobHandle(band)
+          )
         );
       }
     } finally {
@@ -3042,25 +3144,35 @@ export async function grayscaleDocument(
   });
   if (options.signal?.aborted) throw cancelled();
 
+  const input = {
+    pageIndices,
+    mode: settings.mode,
+    images,
+    rasters,
+    wholeDocument: pageIndices.length === totalPages
+  };
+  const payloads = new Set<ArrayBuffer>();
+  for (const item of [...images, ...rasters]) {
+    for (const buffer of [item.encoded?.data, item.gray, 'alpha' in item ? item.alpha : undefined])
+      if (buffer) payloads.add(buffer.buffer as ArrayBuffer);
+  }
   const applied = await processWorker.lease(api =>
     api.grayscaleApply(
       bytes,
-      {
-        pageIndices,
-        mode: settings.mode,
-        images,
-        rasters,
-        wholeDocument: pageIndices.length === totalPages
-      },
+      // Handed over, not copied: these buffers die at this call.
+      Comlink.transfer(input, [...payloads]),
       createJobHandle(progressBand(options, 0.75, 1))
     )
   );
 
-  // Raster reasons are known from the plan; the apply pass skipped that content.
+  // Raster reasons are known from the plan; the apply pass skipped that
+  // content. Anything the apply pass adds (annotations it flattened) is kept.
   const reasonsByPage = new Map(plans.map(p => [p.pageIndex, p.rasterReasons]));
-  const pages = applied.outcomes.map(o =>
-    o.route === 'raster' ? { ...o, reasons: reasonsByPage.get(o.pageIndex) ?? o.reasons } : o
-  );
+  const pages = applied.outcomes.map(o => {
+    if (o.route !== 'raster') return o;
+    const planned = reasonsByPage.get(o.pageIndex) ?? [];
+    return { ...o, reasons: [...new Set([...planned, ...o.reasons])] };
+  });
   const decodedNumbers = new Set(images.map(i => i.objectNumber));
   const undecodable = plans
     .filter(p => !rasterPages.has(p.pageIndex))
@@ -3070,8 +3182,12 @@ export async function grayscaleDocument(
     }))
     .filter(u => u.count > 0);
   const allowed = new Map(undecodable.map(u => [u.pageIndex, u.count]));
+  // Verified on the output, not on the plan: a converted page that still has
+  // colour constructs — or still has something the converter would have to
+  // rasterise (an unconverted annotation appearance over a raster, say) — is
+  // colour left, and blocks the save.
   const colourLeft = applied.verification
-    .filter(v => v.colourConstructs > (allowed.get(v.pageIndex) ?? 0))
+    .filter(v => v.colourConstructs > (allowed.get(v.pageIndex) ?? 0) || v.rasterReasons.length > 0)
     .map(v => v.pageIndex);
 
   return {

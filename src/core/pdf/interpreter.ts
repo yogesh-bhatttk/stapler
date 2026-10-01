@@ -1680,8 +1680,12 @@ export async function decodeStream(bytes: Uint8Array): Promise<Uint8Array> {
   async function tryAlgorithm(algorithm: CompressionFormat): Promise<Uint8Array> {
     const ds = new DecompressionStream(algorithm);
     const writer = ds.writable.getWriter();
-    writer.write(bytes);
-    writer.close();
+    // Not awaited — the readable side has to be drained concurrently or the
+    // write never resolves. A corrupt stream rejects these as well as the
+    // read below; the read's rejection is the one reported, so these are
+    // observed here rather than left as unhandled rejections.
+    writer.write(bytes).catch(() => {});
+    writer.close().catch(() => {});
 
     const reader = ds.readable.getReader();
     const chunks: Uint8Array[] = [];

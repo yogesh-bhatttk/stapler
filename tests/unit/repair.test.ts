@@ -193,3 +193,82 @@ describe('inflatePartial', () => {
     expect(inflatePartial(packed).complete).toBe(true);
   });
 });
+
+describe('repair — audit 2026-10-01 regressions', () => {
+  async function encryptedPdf(): Promise<Uint8Array> {
+    const { PDFString } = await import('pdf-lib');
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    doc.addPage([612, 792]).drawText('Secret', { x: 72, y: 700, size: 18, font });
+    const handler = doc.context.register(
+      doc.context.obj({
+        Filter: 'Standard',
+        V: 2,
+        R: 3,
+        Length: 128,
+        P: -4,
+        O: PDFString.of('owner'),
+        U: PDFString.of('user')
+      })
+    );
+    doc.context.trailerInfo.Encrypt = handler;
+    return doc.save({ useObjectStreams: false });
+  }
+
+  it('PDF-1: refuses an encrypted file whose trailer was cut off', async () => {
+    const text = latin1(await encryptedPdf());
+    const cut = text.slice(0, text.lastIndexOf('\nxref'));
+    // The premise: the trailer (and its /Encrypt) is gone.
+    expect(cut).not.toMatch(/trailer/);
+    await expect(repairPdfBytes(new Uint8Array(Buffer.from(cut, 'latin1')))).rejects.toMatchObject({
+      kind: 'Encrypted',
+      message: expect.stringContaining('This file is encrypted')
+    });
+  });
+
+  it('PDF-1: refuses when only the security handler dictionary survives (no /Encrypt key)', async () => {
+    const text = latin1(await encryptedPdf());
+    // Cut the trailer and rename every `/Encrypt` so only the handler's own
+    // dictionary (/Filter /Standard with /O and /U) is evidence.
+    const cut = text.slice(0, text.lastIndexOf('\nxref')).replace(/\/Encrypt\b/g, '/Xncrypt');
+    await expect(repairPdfBytes(new Uint8Array(Buffer.from(cut, 'latin1')))).rejects.toMatchObject({
+      kind: 'Encrypted'
+    });
+  });
+
+  async function pdfWithFakeHeaderInStream(compress: boolean): Promise<Uint8Array> {
+    const { PDFArray, PDFName } = await import('pdf-lib');
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const page = doc.addPage([300, 300]);
+    page.drawText('Real text', { x: 20, y: 200, size: 18, font });
+    const fake = '% 99 0 obj << /Type /Catalog >> stream\nxx\nendstream\n';
+    const extra = compress ? doc.context.flateStream(fake) : doc.context.stream(fake);
+    const contents = page.node.get(PDFName.of('Contents'))!;
+    const list = contents instanceof PDFArray ? contents : doc.context.obj([contents]);
+    list.push(doc.context.register(extra));
+    page.node.set(PDFName.of('Contents'), list);
+    return doc.save({ useObjectStreams: false });
+  }
+
+  it('PDF-3: an intact file with "99 0 obj" inside a content stream round-trips as already valid', async () => {
+    const input = await pdfWithFakeHeaderInStream(false);
+    const outcome = await repairPdfBytes(input);
+    expect(outcome.changed).toBe(false);
+    expect(outcome.findings).toEqual([]);
+    const strict = await loadPdfDocument(outcome.bytes);
+    expect(strict.context.lookup((await import('pdf-lib')).PDFRef.of(99, 0))).toBeUndefined();
+    expect((await pdfjsOpen(outcome.bytes)).text[0]).toContain('Real text');
+  });
+
+  it('PDF-3: in a damaged file, an object header inside stream data is not salvaged', async () => {
+    const text = latin1(await pdfWithFakeHeaderInStream(false));
+    const cut = text.slice(0, text.lastIndexOf('\nxref'));
+    const outcome = await repairPdfBytes(new Uint8Array(Buffer.from(cut, 'latin1')));
+    expect(outcome.findings.join(' ')).not.toMatch(/Recovered/);
+    const strict = await loadPdfDocument(outcome.bytes);
+    expect(strict.context.lookup((await import('pdf-lib')).PDFRef.of(99, 0))).toBeUndefined();
+    expect(strict.getPageCount()).toBe(1);
+    expect((await pdfjsOpen(outcome.bytes)).text[0]).toContain('Real text');
+  });
+});

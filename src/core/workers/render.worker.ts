@@ -8,6 +8,7 @@
  * Documents live behind an opaque handle so callers never re-parse bytes they have
  * already loaded, and every multi-page loop is a cancellation point.
  */
+import './network-guard'; // PLT-2: first, so it wraps the network APIs before any library runs
 import * as Comlink from 'comlink';
 import { loadLocale, translate } from '../i18n';
 import type { LocaleAware } from './client';
@@ -37,7 +38,9 @@ import { decodeBarcodesFromImage, type DecodedBarcode } from '../barcode';
 import { fillPolygonMask, polygonOverlapsBox, shrinkMask } from '../geometry';
 import { clampRenderScale } from '../render-limits';
 import { applyAdaptiveThreshold } from '../cv/enhance';
-import type { GrayImageData, GrayMode, GrayRaster } from '../pdf/grayscale';
+import type { EncodedGray, GrayImageData, GrayMode, GrayRaster } from '../pdf/grayscale';
+import { encodeGrayJpeg } from '../jpeg-gray';
+import { zlibSync } from 'fflate';
 import { resizeToTarget, type SizedImageRequest, type SizedImageResult } from '../image-resize';
 
 export interface DocumentInfo {
@@ -333,19 +336,24 @@ export interface RenderJob extends LocaleAware {
    */
   decodeImagesGray(
     handle: string,
-    requests: { pageIndex: number; objectNumbers: number[] }[],
+    requests: { pageIndex: number; objectNumbers: number[]; lossy?: number[] }[],
     mode: GrayMode,
     job?: JobHandle
   ): Promise<GrayImageData[]>;
   /**
-   * GAP-6 — renders one page, unrotated and without annotations (they are
-   * converted separately and stay annotations), to grey pixels at `dpi`.
+   * GAP-6 — renders one page, unrotated, to grey pixels at `dpi`, encoded
+   * for the page image. Annotations are left out (they are converted
+   * separately and stay annotations) unless `includeAnnotations` — for a page
+   * where one of them could not be converted, so the raster shows it in grey
+   * and the caller hides the original.
    */
   renderPageGray(
     handle: string,
     pageIndex: number,
     dpi: number,
-    mode: GrayMode
+    mode: GrayMode,
+    includeAnnotations?: boolean,
+    job?: JobHandle
   ): Promise<GrayRaster>;
   checkRegionText(
     handle: string,
@@ -526,8 +534,16 @@ async function textRuns(page: pdfjsLib.PDFPageProxy): Promise<TextRun[]> {
   return (content.items as unknown[]).filter(isTextRun);
 }
 
+/**
+ * Whole pixels covering `size` — rounded up, but not past floating-point noise:
+ * 595 × (400 / 595) is 400.00000000000006, and must give 400 px, not 401.
+ */
+function canvasPixels(size: number): number {
+  return Math.max(1, Math.ceil(size - 1e-6));
+}
+
 function offscreen(width: number, height: number) {
-  const canvas = new OffscreenCanvas(Math.max(1, Math.ceil(width)), Math.max(1, Math.ceil(height)));
+  const canvas = new OffscreenCanvas(canvasPixels(width), canvasPixels(height));
   const ctx = canvas.getContext('2d');
   if (!ctx) throw internal('OffscreenCanvas 2D context unavailable');
   return { canvas, ctx };
@@ -1282,7 +1298,13 @@ const api: RenderJob = {
       }
       scale = clampRenderScale(base.width, base.height, scale).scale;
       const viewport = page.getViewport({ scale });
-      const { canvas, ctx } = offscreen(viewport.width, viewport.height);
+      // IMG-6 — "longest side at most N" is a promise about pixels: never let
+      // rounding up a fractional edge give N + 1.
+      const box = request.maxDimension ?? Infinity;
+      const { canvas, ctx } = offscreen(
+        Math.min(box, viewport.width),
+        Math.min(box, viewport.height)
+      );
       await page.render(renderParams(ctx, viewport)).promise;
       try {
         if (format === 'png') {
@@ -1972,6 +1994,7 @@ const api: RenderJob = {
     const done = new Set<number>();
     for (let i = 0; i < requests.length; i++) {
       const { pageIndex, objectNumbers } = requests[i];
+      const lossy = new Set(requests[i].lossy ?? []);
       await checkpoint(
         job,
         i / Math.max(1, requests.length),
@@ -1988,7 +2011,7 @@ const api: RenderJob = {
           const decoded = await decodeImage(page, placement.objId);
           done.add(objectNumber);
           if (!decoded) continue;
-          out.push(grayFromDecoded(decoded, mode));
+          out.push(grayFromDecoded(decoded, mode, lossy.has(objectNumber)));
         }
       } finally {
         page.cleanup();
@@ -1996,11 +2019,15 @@ const api: RenderJob = {
     }
     return Comlink.transfer(
       out,
-      out.flatMap(o => (o.alpha ? [o.gray.buffer, o.alpha.buffer] : [o.gray.buffer]))
+      out.flatMap(o => [
+        ...(o.encoded ? [o.encoded.data.buffer as ArrayBuffer] : []),
+        ...(o.alpha ? [o.alpha.buffer as ArrayBuffer] : [])
+      ])
     );
   },
 
-  async renderPageGray(handle, pageIndex, dpi, mode) {
+  async renderPageGray(handle, pageIndex, dpi, mode, includeAnnotations = false, job) {
+    await checkpoint(job, 0, translate('Rendering page {page}', { page: pageIndex + 1 }));
     const page = await entry(handle).doc.getPage(pageIndex + 1);
     try {
       const at = (s: number) => page.getViewport({ scale: s, rotation: 0 });
@@ -2010,17 +2037,29 @@ const api: RenderJob = {
       const { canvas, ctx } = offscreen(viewport.width, viewport.height);
       await page.render({
         ...renderParams(ctx, viewport),
-        annotationMode: pdfjsLib.AnnotationMode.DISABLE
+        annotationMode: includeAnnotations
+          ? pdfjsLib.AnnotationMode.ENABLE
+          : pdfjsLib.AnnotationMode.DISABLE
       }).promise;
+      await checkpoint(job, 0.8, translate('Rendering page {page}', { page: pageIndex + 1 }));
       const width = canvas.width;
       const height = canvas.height;
       const rgba = ctx.getImageData(0, 0, width, height).data;
       canvas.width = 0;
       canvas.height = 0;
-      const gray = rgbaToGray(rgba, width, height, mode);
+      // Encoded here, while this page's pixels are the only ones held: the
+      // caller accumulates compressed pages, never raw ones (PDF-5).
+      const encoded = encodeGray(rgbaToGray(rgba, width, height, mode), width, height, mode, true);
       const [x0, y0, x1, y1] = page.view;
-      const raster: GrayRaster = { pageIndex, width, height, gray, view: [x0, y0, x1, y1] };
-      return Comlink.transfer(raster, [gray.buffer]);
+      const raster: GrayRaster = {
+        pageIndex,
+        width,
+        height,
+        encoded,
+        view: [x0, y0, x1, y1],
+        annotationsIncluded: includeAnnotations
+      };
+      return Comlink.transfer(raster, [encoded.data.buffer as ArrayBuffer]);
     } finally {
       page.cleanup();
     }
@@ -2790,12 +2829,54 @@ function rgbaToGray(
   return gray;
 }
 
-function grayFromDecoded(decoded: DecodedImage, mode: GrayMode): GrayImageData {
+/** Must equal `GRAY_JPEG_QUALITY` in `pdf/grayscale.ts` (checked by its test). */
+export const GRAY_JPEG_QUALITY = 0.85;
+
+/**
+ * The render worker's copy of `encodeGraySamples` in `pdf/grayscale.ts` (this
+ * worker does not load pdf-lib): 1-bit Flate in `bw` mode, JPEG where the
+ * original was lossy (and for page rasters), otherwise 8-bit Flate.
+ * `grayscale.test.ts` checks the two produce the same bytes.
+ */
+export function encodeGray(
+  gray: Uint8Array,
+  width: number,
+  height: number,
+  mode: GrayMode,
+  lossy: boolean
+): EncodedGray {
+  if (mode === 'bw') {
+    const rowBytes = Math.ceil(width / 8);
+    const packed = new Uint8Array(rowBytes * height);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (gray[y * width + x] >= 128) packed[y * rowBytes + (x >> 3)] |= 0x80 >> (x & 7);
+      }
+    }
+    return { data: zlibSync(packed), filter: 'FlateDecode', bitsPerComponent: 1 };
+  }
+  if (lossy) {
+    return {
+      data: encodeGrayJpeg(gray, width, height, { quality: GRAY_JPEG_QUALITY }),
+      filter: 'DCTDecode',
+      bitsPerComponent: 8
+    };
+  }
+  return { data: zlibSync(gray), filter: 'FlateDecode', bitsPerComponent: 8 };
+}
+
+function grayFromDecoded(decoded: DecodedImage, mode: GrayMode, lossy: boolean): GrayImageData {
   return {
     objectNumber: decoded.objectNumber,
     width: decoded.width,
     height: decoded.height,
-    gray: rgbaToGray(decoded.rgba, decoded.width, decoded.height, mode),
+    encoded: encodeGray(
+      rgbaToGray(decoded.rgba, decoded.width, decoded.height, mode),
+      decoded.width,
+      decoded.height,
+      mode,
+      lossy
+    ),
     alpha: decoded.mask
   };
 }

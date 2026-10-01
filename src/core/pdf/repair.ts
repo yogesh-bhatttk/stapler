@@ -162,6 +162,24 @@ function validBox(value: unknown, context: PDFContext): boolean {
   return nums.every(Number.isFinite) && nums[2] !== nums[0] && nums[3] !== nums[1];
 }
 
+/** `/Encrypt` as a whole name (not `/EncryptMetadata`), wherever it appears. */
+const ENCRYPT_KEY = /\/Encrypt(?![^\s/<>[\]()%{}])/;
+
+/**
+ * A standard (or third-party) security handler's dictionary: a `/Filter`
+ * name with the owner and user password entries beside it (§7.6.1).
+ */
+function hasSecurityHandler(context: PDFContext): boolean {
+  for (const [, object] of context.enumerateIndirectObjects()) {
+    if (!(object instanceof PDFDict)) continue;
+    if (!(object.get(PDFName.of('Filter')) instanceof PDFName)) continue;
+    if (object.get(PDFName.of('O')) !== undefined && object.get(PDFName.of('U')) !== undefined) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /* ------------------------------------------------------------------ *
  * Salvaging objects the parser dropped
  * ------------------------------------------------------------------ */
@@ -190,20 +208,57 @@ function parseDictAt(
  * file stops inside them. Streams are inflated as far as the data goes; an
  * object stream gives up every member object whose bytes are complete.
  */
-function salvageDroppedObjects(bytes: Uint8Array, context: PDFContext): Salvage {
-  const text = latin1(bytes);
+/**
+ * Where the data of the stream whose dictionary starts at `bodyStart` begins:
+ * just after the `stream` keyword and its end-of-line, or -1 when no `stream`
+ * keyword follows before the object's `endobj`.
+ */
+function streamDataStart(text: string, bodyStart: number, limit: number): number {
+  const keyword = /stream(\r\n|\r|\n)/g;
+  keyword.lastIndex = bodyStart;
+  let found: RegExpExecArray | null;
+  while ((found = keyword.exec(text)) && found.index < limit) {
+    // `endstream` is not the start of a stream.
+    if (text.slice(Math.max(0, found.index - 3), found.index) === 'end') continue;
+    return found.index + found[0].length;
+  }
+  return -1;
+}
+
+function salvageDroppedObjects(bytes: Uint8Array, text: string, context: PDFContext): Salvage {
   const result: Salvage = { objects: 0, partialStreams: 0 };
   const header = /(\d+)\s+(\d+)\s+obj\b/g;
   let match: RegExpExecArray | null;
   const seen = new Set<number>();
+  // The end of the last stream's data seen so far. An `N G obj` inside stream
+  // data — a content stream that prints the words, an uncompressed embedded
+  // PDF — is data, not an object of this file, and must never be "salvaged"
+  // over a real object.
+  let insideStreamUntil = -1;
   while ((match = header.exec(text))) {
+    if (match.index < insideStreamUntil) continue;
     const objectNumber = Number(match[1]);
     const generation = Number(match[2]);
-    if (seen.has(objectNumber)) continue;
-    seen.add(objectNumber);
     const ref = PDFRef.of(objectNumber, generation);
     const existing = context.lookup(ref);
-    if (existing !== undefined && !(existing instanceof PDFInvalidObject)) continue;
+    if (existing !== undefined && !(existing instanceof PDFInvalidObject)) {
+      if (existing instanceof PDFStream) {
+        const bodyStart = match.index + match[0].length;
+        const endobj = text.indexOf('endobj', bodyStart);
+        const dataStart = streamDataStart(text, bodyStart, endobj === -1 ? text.length : endobj);
+        if (dataStart !== -1) {
+          const length = existing instanceof PDFRawStream ? existing.getContents().length : -1;
+          const endstream = text.indexOf('endstream', dataStart);
+          insideStreamUntil = Math.max(
+            insideStreamUntil,
+            length >= 0 ? dataStart + length : endstream === -1 ? text.length : endstream
+          );
+        }
+      }
+      continue;
+    }
+    if (seen.has(objectNumber)) continue;
+    seen.add(objectNumber);
 
     const bodyStart = match.index + match[0].length;
     const nextObj = text.indexOf(' obj', bodyStart);
@@ -224,6 +279,7 @@ function salvageDroppedObjects(bytes: Uint8Array, context: PDFContext): Salvage 
     if (text[dataStart] === '\n') dataStart++;
     const endstream = text.indexOf('endstream', dataStart);
     const dataEnd = endstream === -1 ? bytes.length : endstream;
+    insideStreamUntil = Math.max(insideStreamUntil, dataEnd);
     const data = bytes.subarray(dataStart, dataEnd);
 
     const filter = lookup(dict.get(PDFName.of('Filter')), context);
@@ -562,14 +618,18 @@ export async function repairPdfBytes(bytes: Uint8Array, stage?: Stage): Promise<
       })
     );
   }
-  if (doc.isEncrypted) {
+  const context = doc.context;
+  // `isEncrypted` reads the trailer's /Encrypt — exactly what a file cut off
+  // before its trailer has lost, while every string and stream in it is still
+  // ciphertext. The security handler's own dictionary, or the /Encrypt key
+  // anywhere in the raw bytes, is evidence enough.
+  if (doc.isEncrypted || hasSecurityHandler(context) || ENCRYPT_KEY.test(text)) {
     throw encrypted(
       translate(
         'This file is encrypted. Repairing it would mean writing it back without its protection, so nothing was changed.'
       )
     );
   }
-  const context = doc.context;
 
   if (!xrefSound)
     findings.push(
@@ -583,7 +643,21 @@ export async function repairPdfBytes(bytes: Uint8Array, stage?: Stage): Promise<
     );
 
   await stage?.(0.3, translate('Recovering damaged objects'));
-  const salvage = salvageDroppedObjects(bytes, context);
+  // Salvage regex-scans the file for object headers. On a file with a sound
+  // xref, an end marker and nothing the parser had to give up on there is no
+  // damaged part to recover from — and the scan could only find false
+  // positives.
+  let hasInvalid = false;
+  for (const [, object] of context.enumerateIndirectObjects()) {
+    if (object instanceof PDFInvalidObject) {
+      hasInvalid = true;
+      break;
+    }
+  }
+  const damaged = !xrefSound || !hasEof || hasInvalid;
+  const salvage: Salvage = damaged
+    ? salvageDroppedObjects(bytes, text, context)
+    : { objects: 0, partialStreams: 0 };
   if (salvage.objects > 0) {
     findings.push(
       tPlural('Recovered {count} objects from the damaged part of the file.', salvage.objects)
