@@ -2349,6 +2349,7 @@
   "Choose an image to shrink": "Выберите изображение для уменьшения",
   "Pick a photo in the options panel, set the size your form allows, then press Resize & save. Nothing is uploaded.": "Выберите фото на панели параметров, укажите размер, который допускает анкета, и нажмите «Изменить размер и сохранить». Ничего не загружается.",
   "{size} now. Press Resize & save to make the smaller version.": "Сейчас {size}. Нажмите «Изменить размер и сохранить», чтобы получить уменьшенную версию.",
+  "{name}, before resizing": "{name}, до изменения размера",
   "Resized version of {name}": "Уменьшенная версия {name}",
   "Fits the limit": "Укладывается в лимит",
   "Over the limit": "Превышает лимит",

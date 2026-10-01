@@ -2087,6 +2087,7 @@
   "Choose an image to shrink": "छोटी करने के लिए एक छवि चुनें",
   "Pick a photo in the options panel, set the size your form allows, then press Resize & save. Nothing is uploaded.": "विकल्प पैनल में एक फ़ोटो चुनें, अपने फ़ॉर्म द्वारा अनुमत आकार सेट करें, फिर “आकार बदलें और सहेजें” दबाएँ। कुछ भी अपलोड नहीं होता।",
   "{size} now. Press Resize & save to make the smaller version.": "अभी {size}। छोटा संस्करण बनाने के लिए “आकार बदलें और सहेजें” दबाएँ।",
+  "{name}, before resizing": "{name}, आकार बदलने से पहले",
   "Resized version of {name}": "{name} का छोटा किया गया संस्करण",
   "Fits the limit": "सीमा के भीतर",
   "Over the limit": "सीमा से अधिक",

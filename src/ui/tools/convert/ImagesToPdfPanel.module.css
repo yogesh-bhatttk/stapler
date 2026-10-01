@@ -1,0 +1,40 @@
+/*
+ * The "Use the images from …" button's label embeds the open document's
+ * filename, which is arbitrary length and unlike every other label here isn't
+ * static copy. Button.module.css's `white-space: nowrap` has no width cap, so
+ * a long name forced this button — and the whole fixed-width options panel —
+ * wider than its column (visible as a stray horizontal scrollbar). Truncated
+ * the same way `panelStyles.listRowText` already truncates page filenames.
+ */
+.reuseButton {
+  width: 100%;
+  min-width: 0;
+}
+
+.reuseButtonLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* A small preview of each picked file in the page list — filenames alone
+   don't let you tell photos apart or confirm reorder/remove hit the right
+   one. HEIC/TIFF can't be decoded by the browser's own `<img>`, so those get
+   the generic icon instead of a blank box. */
+.thumb {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+
+.thumbFallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-subtle);
+}

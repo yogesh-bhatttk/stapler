@@ -46,6 +46,21 @@ export function isSupportedImage(file: File): boolean {
   return SUPPORTED.has(file.type) || SUPPORTED_EXTENSIONS.test(file.name);
 }
 
+const BROWSER_RENDERABLE = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const BROWSER_RENDERABLE_EXTENSIONS = /\.(png|jpe?g|webp|gif)$/i;
+
+/**
+ * Whether an `<img src="blob:…">` of this file, with no decoding of our own,
+ * shows the actual picture — true for every `isSupportedImage` format except
+ * HEIC and TIFF, which no browser renders natively and this app decodes
+ * itself. Tools that read an image straight from disk (rather than from an
+ * already-rendered page) use this to show a live source preview instead of a
+ * filename-only placeholder wherever the browser can actually do it.
+ */
+export function isBrowserRenderableImage(file: File): boolean {
+  return BROWSER_RENDERABLE.has(file.type) || BROWSER_RENDERABLE_EXTENSIONS.test(file.name);
+}
+
 /**
  * Decodes an image file and re-encodes it as JPEG.
  *

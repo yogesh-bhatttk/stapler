@@ -2087,6 +2087,7 @@
   "Choose an image to shrink": "Pilih gambar untuk diperkecil",
   "Pick a photo in the options panel, set the size your form allows, then press Resize & save. Nothing is uploaded.": "Pilih foto di panel opsi, atur ukuran yang diizinkan formulir Anda, lalu tekan “Ubah ukuran & simpan”. Tidak ada yang diunggah.",
   "{size} now. Press Resize & save to make the smaller version.": "Saat ini {size}. Tekan “Ubah ukuran & simpan” untuk membuat versi yang lebih kecil.",
+  "{name}, before resizing": "{name}, sebelum mengubah ukuran",
   "Resized version of {name}": "Versi {name} yang diubah ukurannya",
   "Fits the limit": "Sesuai batas",
   "Over the limit": "Melebihi batas",

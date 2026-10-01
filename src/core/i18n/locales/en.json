@@ -2087,6 +2087,7 @@
   "Choose an image to shrink": "Choose an image to shrink",
   "Pick a photo in the options panel, set the size your form allows, then press Resize & save. Nothing is uploaded.": "Pick a photo in the options panel, set the size your form allows, then press Resize & save. Nothing is uploaded.",
   "{size} now. Press Resize & save to make the smaller version.": "{size} now. Press Resize & save to make the smaller version.",
+  "{name}, before resizing": "{name}, before resizing",
   "Resized version of {name}": "Resized version of {name}",
   "Fits the limit": "Fits the limit",
   "Over the limit": "Over the limit",

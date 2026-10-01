@@ -5,10 +5,11 @@
  * page size/orientation/margin/quality, export. `worksWithoutDocument` lets this
  * run with no PDF open — the action bar's commit builds the PDF from `files`.
  */
-import { ArrowDown, ArrowUp, Plus, X } from 'lucide-preact';
+import { useEffect, useMemo } from 'preact/hooks';
+import { ArrowDown, ArrowUp, Image as ImageIcon, Plus, X } from 'lucide-preact';
 import { platform } from '../../../platform/current';
 import { IMAGES_ONLY } from '../../../platform/index';
-import { isSupportedImage } from '../../../core/image';
+import { isBrowserRenderableImage, isSupportedImage } from '../../../core/image';
 import { notify } from '../../../core/notify';
 import { activeDoc, activeSources, getSourceOriginalFiles } from '../../../core/store';
 import { Button } from '../../components/Button';
@@ -17,6 +18,28 @@ import { Field, RadioGroup, Select, NumberStepper } from '../../components/Field
 import { panelStyles } from '../../shell/panelStyles';
 import { imagesToPdfSettings } from '../state';
 import { tPlural, useTranslation } from '../../../core/i18n';
+import styles from './ImagesToPdfPanel.module.css';
+
+/** A small preview of one picked file, or the generic icon for HEIC/TIFF. */
+function FileThumb({ file }: { file: File }) {
+  const renderable = isBrowserRenderableImage(file);
+  const url = useMemo(() => (renderable ? URL.createObjectURL(file) : null), [file, renderable]);
+  useEffect(
+    () => () => {
+      if (url) URL.revokeObjectURL(url);
+    },
+    [url]
+  );
+
+  if (!url) {
+    return (
+      <span className={`${styles.thumb} ${styles.thumbFallback}`} aria-hidden="true">
+        <ImageIcon size={14} />
+      </span>
+    );
+  }
+  return <img className={styles.thumb} src={url} alt="" />;
+}
 
 export function ImagesToPdfPanel() {
   const t = useTranslation();
@@ -79,8 +102,18 @@ export function ImagesToPdfPanel() {
               { name: doc.name }
             )}
           </span>
-          <Button variant="secondary" size="compact" onClick={useOpenDocumentImages}>
-            {tPlural('Use the images from “{name}”', openDocFiles.length, { name: doc.name })}
+          <Button
+            variant="secondary"
+            size="compact"
+            className={styles.reuseButton}
+            title={tPlural('Use the images from “{name}”', openDocFiles.length, {
+              name: doc.name
+            })}
+            onClick={useOpenDocumentImages}
+          >
+            <span className={styles.reuseButtonLabel}>
+              {tPlural('Use the images from “{name}”', openDocFiles.length, { name: doc.name })}
+            </span>
           </Button>
         </div>
       )}
@@ -95,6 +128,7 @@ export function ImagesToPdfPanel() {
           <ol className={panelStyles.list}>
             {settings.files.map((file, index) => (
               <li className={panelStyles.listRow} key={`${file.name}-${index}`} title={file.name}>
+                <FileThumb file={file} />
                 <span className={panelStyles.listRowText}>
                   {index + 1}. {file.name}
                 </span>

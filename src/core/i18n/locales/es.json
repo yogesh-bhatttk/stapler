@@ -2208,6 +2208,7 @@
   "Choose an image to shrink": "Elige una imagen para reducirla",
   "Pick a photo in the options panel, set the size your form allows, then press Resize & save. Nothing is uploaded.": "Elige una foto en el panel de opciones, indica el tamaño que permite tu formulario y pulsa «Redimensionar y guardar». No se sube nada.",
   "{size} now. Press Resize & save to make the smaller version.": "Ahora ocupa {size}. Pulsa «Redimensionar y guardar» para crear la versión más pequeña.",
+  "{name}, before resizing": "{name}, antes de cambiar el tamaño",
   "Resized version of {name}": "Versión redimensionada de {name}",
   "Fits the limit": "Dentro del límite",
   "Over the limit": "Supera el límite",

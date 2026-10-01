@@ -2087,6 +2087,7 @@
   "Choose an image to shrink": "縮小する画像を選んでください",
   "Pick a photo in the options panel, set the size your form allows, then press Resize & save. Nothing is uploaded.": "オプションパネルで写真を選び、フォームで許されるサイズを設定して「縮小して保存」を押してください。何もアップロードされません。",
   "{size} now. Press Resize & save to make the smaller version.": "現在 {size} です。「縮小して保存」を押すと小さい版を作成します。",
+  "{name}, before resizing": "{name}、リサイズ前",
   "Resized version of {name}": "{name} の縮小版",
   "Fits the limit": "上限内です",
   "Over the limit": "上限を超えています",

@@ -142,10 +142,19 @@ export const EmptyState = forwardRef<HTMLDivElement, EmptyStateProps>(function E
   );
 });
 
+/**
+ * Decimal (1000-based) KB/MB, matching `sizeParamBytes`/`targetSizeBytes` —
+ * the parsers behind every target-size input (Compress, Image to size, the
+ * `?target=` deep link). Those already parse "9 MB" as 9,000,000 bytes; this
+ * used to divide back by 1024, so a 9 MB target came back out of the same
+ * pipeline reading "8.58 MB" in the very message meant to confirm it (a real
+ * user-visible bug, not a rounding nicety) — binary division here would
+ * silently reintroduce that mismatch.
+ */
 export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+  if (bytes < 1000) return `${bytes} B`;
+  if (bytes < 1_000_000) return `${(bytes / 1000).toFixed(0)} KB`;
+  return `${(bytes / 1_000_000).toFixed(2)} MB`;
 }
 
 /**

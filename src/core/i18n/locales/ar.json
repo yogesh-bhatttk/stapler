@@ -2611,6 +2611,7 @@
   "Choose an image to shrink": "اختر صورة لتصغيرها",
   "Pick a photo in the options panel, set the size your form allows, then press Resize & save. Nothing is uploaded.": "اختر صورة من لوحة الخيارات، واضبط الحجم الذي يسمح به النموذج، ثم اضغط «تغيير الحجم والحفظ». لا يُرفع أي شيء.",
   "{size} now. Press Resize & save to make the smaller version.": "الحجم الحالي {size}. اضغط «تغيير الحجم والحفظ» لإنشاء النسخة الأصغر.",
+  "{name}, before resizing": "{name}، قبل تغيير الحجم",
   "Resized version of {name}": "نسخة مصغّرة من {name}",
   "Fits the limit": "ضمن الحد",
   "Over the limit": "يتجاوز الحد",

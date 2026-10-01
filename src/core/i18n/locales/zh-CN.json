@@ -2087,6 +2087,7 @@
   "Choose an image to shrink": "选择要缩小的图片",
   "Pick a photo in the options panel, set the size your form allows, then press Resize & save. Nothing is uploaded.": "在选项面板中选择一张照片，设置表单允许的大小，然后点击“调整并保存”。不会上传任何内容。",
   "{size} now. Press Resize & save to make the smaller version.": "当前为 {size}。点击“调整并保存”生成较小的版本。",
+  "{name}, before resizing": "{name}，调整大小前",
   "Resized version of {name}": "{name} 的缩小版本",
   "Fits the limit": "符合限制",
   "Over the limit": "超出限制",
