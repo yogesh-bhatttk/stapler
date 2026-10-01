@@ -29,7 +29,10 @@ describe('parseSizeParam', () => {
     ['1.5mb', { amount: 1.5, unit: 'MB' }],
     ['1,5 MB', { amount: 1.5, unit: 'MB' }],
     ['2m', { amount: 2, unit: 'MB' }],
-    ['500KiB', { amount: 500, unit: 'KB' }],
+    // IMG-11: binary units are scaled by 1024 (500 KiB = 512,000 B) and
+    // expressed in decimal KB, rounded down so a limit is never exceeded.
+    ['500KiB', { amount: 512, unit: 'KB' }],
+    ['1MiB', { amount: 1048.57, unit: 'KB' }],
     ['.5MB', { amount: 0.5, unit: 'MB' }]
   ])('parses %j', (raw, expected) => {
     expect(parseSizeParam(raw)).toEqual(expected);

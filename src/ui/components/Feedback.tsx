@@ -14,6 +14,7 @@ import { Button } from './Button';
 import { IconButton } from './IconButton';
 import { X } from 'lucide-preact';
 import styles from './Feedback.module.css';
+import { formatBytes } from '../../core/bytes';
 
 const TONE_ICON: Record<ToastTone, typeof Info> = {
   info: Info,
@@ -143,19 +144,12 @@ export const EmptyState = forwardRef<HTMLDivElement, EmptyStateProps>(function E
 });
 
 /**
- * Decimal (1000-based) KB/MB, matching `sizeParamBytes`/`targetSizeBytes` —
- * the parsers behind every target-size input (Compress, Image to size, the
- * `?target=` deep link). Those already parse "9 MB" as 9,000,000 bytes; this
- * used to divide back by 1024, so a 9 MB target came back out of the same
- * pipeline reading "8.58 MB" in the very message meant to confirm it (a real
- * user-visible bug, not a rounding nicety) — binary division here would
- * silently reintroduce that mismatch.
+ * Decimal (1000-based) sizes — one formatter for the whole app, in
+ * `core/bytes.ts` so core modules share it. `formatTargetMiss` is for a size
+ * that missed its target: it rounds up, so an overshoot never reads as equal
+ * to the target (IMG-3).
  */
-export function formatBytes(bytes: number): string {
-  if (bytes < 1000) return `${bytes} B`;
-  if (bytes < 1_000_000) return `${(bytes / 1000).toFixed(0)} KB`;
-  return `${(bytes / 1_000_000).toFixed(2)} MB`;
-}
+export { formatBytes, formatBytesUp, formatTargetMiss, formatTargetMisses } from '../../core/bytes';
 
 /**
  * `4.2MB → 1.1MB · −74%` (DESIGN-ADAPTATION §5). Shows "no reduction possible"

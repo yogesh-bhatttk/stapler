@@ -16,7 +16,9 @@ import {
 } from './errors';
 import { DOC_PAGE_WHITE } from './doc-colors';
 import { translate } from './i18n';
+import { formatBytes } from './bytes';
 import type { RasterKind } from './raster-decode';
+import { sniffWebImageFormat, storedImageSize } from './raster-decode';
 import { jpegPassthrough, readJpegInfo, type JpegInfo } from './jpeg-info';
 import { encodeCanvasAtMaximum, webpTraits } from './max-quality';
 import type { PdfImageSource } from './image-embed';
@@ -58,7 +60,56 @@ const BROWSER_RENDERABLE_EXTENSIONS = /\.(png|jpe?g|webp|gif)$/i;
  * filename-only placeholder wherever the browser can actually do it.
  */
 export function isBrowserRenderableImage(file: File): boolean {
+  // IMG-10: a HEIC named `.jpg` (or typed as HEIC but named `.png`) and an
+  // empty file both show a broken `<img>`; neither is renderable, whatever the
+  // other half of the name/type pair says. Previews still keep an `onError`
+  // fallback for the cases only the decoder can find.
+  if (file.size === 0 || rasterKindOf(file) !== null) return false;
   return BROWSER_RENDERABLE.has(file.type) || BROWSER_RENDERABLE_EXTENSIONS.test(file.name);
+}
+
+/**
+ * IMG-1 — whether an image file, kept byte for byte, already satisfies an
+ * "Image to size" request, so a re-encode that is not smaller should be
+ * discarded in its favour.
+ *
+ * Every limit has to hold on the original as it is, not as it would be after
+ * conversion:
+ *  - its real format (by signature, not name) is one every browser and upload
+ *    form takes — JPEG, PNG, GIF or WebP. A HEIC, a TIFF, or a file whose bytes
+ *    are not what its name says must be converted, which is the request;
+ *  - it is stored upright: a JPEG with orientation 1 that every viewer can
+ *    decode (`jpegPassthrough`), or a PNG/GIF/WebP with no EXIF and a header
+ *    size equal to the decoded one. A sideways original "fits" only in
+ *    viewers that honour its tag;
+ *  - its decoded size fits the longest-side box, and its byte length the target;
+ *  - it is a single page (a multi-page TIFF is already excluded by format).
+ */
+export function imageOriginalSatisfies(
+  original: Uint8Array,
+  decoded: { sourceWidth: number; sourceHeight: number },
+  request: { targetBytes: number | null; maxDimension: number | null }
+): boolean {
+  const format = sniffWebImageFormat(original);
+  if (!format) return false;
+  if (format === 'jpeg') {
+    if (jpegPassthrough(original)?.orientation !== 1) return false;
+  } else {
+    const stored = storedImageSize(original);
+    if (
+      !stored ||
+      stored.hasExif ||
+      stored.width !== decoded.sourceWidth ||
+      stored.height !== decoded.sourceHeight
+    ) {
+      return false;
+    }
+  }
+  const fitsBox =
+    request.maxDimension === null ||
+    Math.max(decoded.sourceWidth, decoded.sourceHeight) <= request.maxDimension;
+  const fitsTarget = request.targetBytes === null || original.byteLength <= request.targetBytes;
+  return fitsBox && fitsTarget;
 }
 
 /**
@@ -314,8 +365,11 @@ async function onOwnedImageWorker<T>(
   }
 }
 
-/** GAP-5 — the most a single-image resize will read into memory, in bytes. */
-export const MAX_RESIZE_INPUT_BYTES = 200 * 1024 * 1024;
+/**
+ * GAP-5 — the most a single-image resize will read into memory, in bytes.
+ * Decimal, because the message calls it "200 MB" (IMG-11).
+ */
+export const MAX_RESIZE_INPUT_BYTES = 200_000_000;
 
 /**
  * GAP-5 — one image file as a JPEG at or under `request.targetBytes` and/or
@@ -346,7 +400,7 @@ export async function resizeImageFile(
     throw unsupported(
       translate('{name} is larger than {size}, which is more than this tool will open.', {
         name: file.name,
-        size: '200 MB'
+        size: formatBytes(MAX_RESIZE_INPUT_BYTES)
       })
     );
   }

@@ -245,8 +245,9 @@ test.describe('DOC-07 compress to a target size', () => {
     const file = path.resolve(process.cwd(), 'tests/fixtures/scanned_skewed.pdf');
     await importFixture(page, file);
     await gotoTool(page, 'compress');
-    // 5KB is below anything the quality floor can produce for a full-page scan.
-    await setTarget(page, 5, 'KB');
+    // 10KB — the smallest target Compress accepts (PDF_TARGET_BOUNDS, IMG-12) —
+    // is below anything the quality floor can produce for a full-page scan.
+    await setTarget(page, 10, 'KB');
 
     let downloaded = false;
     page.on('download', () => {
@@ -266,9 +267,9 @@ test.describe('DOC-07 compress to a target size', () => {
     const achieved = Number(await outcome.getAttribute('data-target-achieved'));
     const attempts = Number(await outcome.getAttribute('data-target-attempts'));
     console.log(
-      `DOC-07 unreachable: target 5000 B, smallest achievable ${achieved} B after ${attempts} attempt(s)`
+      `DOC-07 unreachable: target 10000 B, smallest achievable ${achieved} B after ${attempts} attempt(s)`
     );
-    expect(achieved).toBeGreaterThan(5_000);
+    expect(achieved).toBeGreaterThan(10_000);
     // The floor answers it outright — degrading further is not on offer.
     expect(attempts).toBe(1);
 

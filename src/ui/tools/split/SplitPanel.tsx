@@ -2,7 +2,7 @@
  * Split and extract options (OPS-03, plus OPS-12's bookmark mode).
  */
 import { activeDoc, selectedPageKeys } from '../../../core/store';
-import { splitBoundaries } from '../../../core/operations';
+import { splitBoundaries, splitPointsError } from '../../../core/operations';
 import { Field, NumberInput, RadioGroup, TextInput } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
 import { splitSettings, type SplitMode } from '../state';
@@ -87,16 +87,31 @@ export function SplitPanel() {
             max: doc.pages.length - 1
           })}
         >
-          {id => (
-            <TextInput
-              id={id}
-              placeholder={t('5, 10, 15')}
-              value={settings.customBoundaries}
-              onInput={event =>
-                update({ customBoundaries: (event.target as HTMLInputElement).value })
-              }
-            />
-          )}
+          {id => {
+            // X-8: name tokens that are not plain page numbers instead of
+            // silently cutting somewhere the user did not ask for.
+            const error = splitPointsError(settings.customBoundaries);
+            const errorId = `${id}-error`;
+            return (
+              <>
+                <TextInput
+                  id={id}
+                  placeholder={t('5, 10, 15')}
+                  value={settings.customBoundaries}
+                  aria-invalid={error ? true : undefined}
+                  aria-describedby={error ? errorId : undefined}
+                  onInput={event =>
+                    update({ customBoundaries: (event.target as HTMLInputElement).value })
+                  }
+                />
+                {error && (
+                  <p id={errorId} className={panelStyles.note} role="alert">
+                    {error}
+                  </p>
+                )}
+              </>
+            );
+          }}
         </Field>
       )}
 

@@ -5,7 +5,7 @@
  * page size/orientation/margin/quality, export. `worksWithoutDocument` lets this
  * run with no PDF open — the action bar's commit builds the PDF from `files`.
  */
-import { useEffect, useMemo } from 'preact/hooks';
+import { useEffect, useMemo, useState } from 'preact/hooks';
 import { ArrowDown, ArrowUp, Image as ImageIcon, Plus, X } from 'lucide-preact';
 import { platform } from '../../../platform/current';
 import { IMAGES_ONLY } from '../../../platform/index';
@@ -24,6 +24,9 @@ import styles from './ImagesToPdfPanel.module.css';
 function FileThumb({ file }: { file: File }) {
   const renderable = isBrowserRenderableImage(file);
   const url = useMemo(() => (renderable ? URL.createObjectURL(file) : null), [file, renderable]);
+  // IMG-10: a file the browser turns out not to draw (damaged, or not what its
+  // name says) gets the generic icon instead of a broken image.
+  const [broken, setBroken] = useState<string | null>(null);
   useEffect(
     () => () => {
       if (url) URL.revokeObjectURL(url);
@@ -31,14 +34,14 @@ function FileThumb({ file }: { file: File }) {
     [url]
   );
 
-  if (!url) {
+  if (!url || url === broken) {
     return (
       <span className={`${styles.thumb} ${styles.thumbFallback}`} aria-hidden="true">
         <ImageIcon size={14} />
       </span>
     );
   }
-  return <img className={styles.thumb} src={url} alt="" />;
+  return <img className={styles.thumb} src={url} alt="" onError={() => setBroken(url)} />;
 }
 
 export function ImagesToPdfPanel() {

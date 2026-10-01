@@ -3,9 +3,10 @@
  * pixel limit, and an "Aim for a file size" mode that searches JPEG quality and
  * scale per image and reports, per page, whether the target was met.
  */
-import { activeDoc, selectedPageKeys } from '../../../core/store';
+import { activeDoc, selectedPageKeys, sources } from '../../../core/store';
+import { fitWithin } from '../../../core/image-target';
 import { Field, NumberInput, RadioGroup, Select } from '../../components/Field';
-import { formatBytes } from '../../components/Feedback';
+import { formatBytes, formatBytesUp } from '../../components/Feedback';
 import { panelStyles } from '../../shell/panelStyles';
 import { pdfToImageSettings } from '../state';
 import { maxDimensionOptions, pdfToImageReport } from './pdf-to-img-state';
@@ -31,13 +32,26 @@ export function PdfToImagePanel() {
 
   const selected = selectedPageKeys.value.size;
   const pageCount = selected > 0 ? selected : doc.pages.length;
-  const first = doc.pages[0];
+  // IMG-7: the estimate is for the first page that will be exported, at its
+  // real size — `pageSizes` already has `/Rotate` applied, and a quarter turn
+  // made in Stapler swaps the sides — with the box applied to the longest
+  // side, the way the export applies it.
+  const first =
+    (selected > 0 ? doc.pages.find(page => selectedPageKeys.value.has(page.key)) : undefined) ??
+    doc.pages[0];
   const targetMode = settings.sizeMode === 'target';
   const format = targetMode ? 'jpeg' : settings.format;
-  const naturalWidth = Math.round((595 * settings.dpi) / 72);
-  const width = settings.maxDimension
-    ? Math.min(naturalWidth, settings.maxDimension)
-    : naturalWidth;
+  const pageSize = first
+    ? sources.value[first.sourceDocId]?.pageSizes[first.sourceIndex]
+    : undefined;
+  const quarterTurn = first ? first.rotation % 180 !== 0 : false;
+  const pointsWide = pageSize ? (quarterTurn ? pageSize.height : pageSize.width) : 595;
+  const pointsHigh = pageSize ? (quarterTurn ? pageSize.width : pageSize.height) : 842;
+  const { width } = fitWithin(
+    (pointsWide * settings.dpi) / 72,
+    (pointsHigh * settings.dpi) / 72,
+    settings.maxDimension
+  );
   const shownReport = report && report.docId === doc.id ? report : null;
   const missed = shownReport ? shownReport.pages.filter(page => !page.reached) : [];
 
@@ -177,7 +191,8 @@ export function PdfToImagePanel() {
                 <span className={panelStyles.listRowText}>
                   {t('Page {page}: {size}, {width}×{height} px', {
                     page: page.pageIndex + 1,
-                    size: formatBytes(page.bytes),
+                    // A miss is rounded up, so it never reads as the target (IMG-3).
+                    size: page.reached ? formatBytes(page.bytes) : formatBytesUp(page.bytes),
                     width: page.width,
                     height: page.height
                   })}

@@ -16,7 +16,8 @@
  * Orientation: libheif applies the HEIF transform properties (`irot`/`imir`/
  * `clap`) when it decodes, and reports the transformed size — which is how an
  * iPhone (and `pillow-heif`, which built `photo-rotated.heic`) records "this
- * photo is sideways". The pixels that come back are already upright.
+ * photo is sideways". The pixels that come back are already upright. A TIFF
+ * page is turned by its own Orientation tag (274) in `decodeTiffPages` (IMG-9).
  */
 import { corrupt, unsupported } from './errors';
 import { translate } from './i18n';
@@ -176,15 +177,17 @@ export async function decodeTiffPages(
     const rgba = UTIF.toRGBA8(ifd);
     // The decoded strips hang off the IFD; drop them once converted.
     (ifd as { data?: unknown }).data = undefined;
-    await visit.onPage(
+    // IMG-9: a scanner or camera that records "this page is sideways" in the
+    // Orientation tag (274) means it — the pixels are stored as captured.
+    const frame = orientFrame(
       {
         width,
         height,
         data: new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, width * height * 4)
       },
-      i,
-      ifds.length
+      tiffOrientation(ifd as unknown as Record<string, unknown>)
     );
+    await visit.onPage(frame, i, ifds.length);
   }
   return ifds.length;
 }
@@ -206,4 +209,202 @@ export function flattenOnWhite(frame: RgbaFrame): RgbaFrame {
     d[i] = 255;
   }
   return frame;
+}
+
+/* ------------------------------------------------------------------ *
+ * Orientation (IMG-9)
+ * ------------------------------------------------------------------ */
+
+/**
+ * Applies a TIFF/EXIF Orientation value (tag 274: 1 = upright, 2–8 = the
+ * mirrors and quarter turns) so the frame comes back the way it is meant to be
+ * viewed — the same thing `createImageBitmap(…, { imageOrientation:
+ * 'from-image' })` does for a JPEG. 5–8 swap width and height. Values outside
+ * 2..8 (absent, 1, garbage) return the frame unchanged.
+ */
+export function orientFrame(frame: RgbaFrame, orientation: number): RgbaFrame {
+  if (!Number.isInteger(orientation) || orientation < 2 || orientation > 8) return frame;
+  const { width: w, height: h, data } = frame;
+  const swap = orientation >= 5;
+  const outW = swap ? h : w;
+  const outH = swap ? w : h;
+  const out = new Uint8ClampedArray(outW * outH * 4);
+  for (let y = 0; y < outH; y++) {
+    for (let x = 0; x < outW; x++) {
+      let sx: number;
+      let sy: number;
+      switch (orientation) {
+        case 2: // mirror horizontally
+          sx = w - 1 - x;
+          sy = y;
+          break;
+        case 3: // rotate 180°
+          sx = w - 1 - x;
+          sy = h - 1 - y;
+          break;
+        case 4: // mirror vertically
+          sx = x;
+          sy = h - 1 - y;
+          break;
+        case 5: // transpose
+          sx = y;
+          sy = x;
+          break;
+        case 6: // rotate 90° clockwise
+          sx = y;
+          sy = h - 1 - x;
+          break;
+        case 7: // transverse
+          sx = w - 1 - y;
+          sy = h - 1 - x;
+          break;
+        default: // 8: rotate 90° counter-clockwise
+          sx = w - 1 - y;
+          sy = x;
+      }
+      const from = (sy * w + sx) * 4;
+      const to = (y * outW + x) * 4;
+      out[to] = data[from];
+      out[to + 1] = data[from + 1];
+      out[to + 2] = data[from + 2];
+      out[to + 3] = data[from + 3];
+    }
+  }
+  return { width: outW, height: outH, data: out };
+}
+
+/** The Orientation tag (274) of a decoded UTIF IFD, or 1 when absent. */
+export function tiffOrientation(ifd: Record<string, unknown>): number {
+  const value = (ifd.t274 as number[] | undefined)?.[0];
+  return typeof value === 'number' ? value : 1;
+}
+
+/* ------------------------------------------------------------------ *
+ * Browser-decoded formats: what the bytes say about themselves
+ * ------------------------------------------------------------------ */
+
+/** A format every browser and upload form takes as-is. */
+export type WebImageFormat = 'jpeg' | 'png' | 'gif' | 'webp';
+
+function ascii(bytes: Uint8Array, at: number, length: number): string {
+  let out = '';
+  for (let i = at; i < at + length && i < bytes.length; i++) out += String.fromCharCode(bytes[i]);
+  return out;
+}
+
+/** The format the bytes really are (by signature, never by name), or null. */
+export function sniffWebImageFormat(bytes: Uint8Array): WebImageFormat | null {
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return 'jpeg';
+  }
+  if (ascii(bytes, 0, 8) === '\x89PNG\r\n\x1a\n') return 'png';
+  if (ascii(bytes, 0, 4) === 'GIF8') return 'gif';
+  if (ascii(bytes, 0, 4) === 'RIFF' && ascii(bytes, 8, 4) === 'WEBP') return 'webp';
+  return null;
+}
+
+/**
+ * The pixel size a PNG, GIF or WebP declares in its header — as stored, before
+ * any orientation — and whether it carries EXIF that a browser may rotate it
+ * by. Null for JPEG (its orientation is read by `jpeg-info.ts`) and for
+ * anything unrecognised or truncated.
+ */
+export function storedImageSize(
+  bytes: Uint8Array
+): { width: number; height: number; hasExif: boolean } | null {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const format = sniffWebImageFormat(bytes);
+  try {
+    if (format === 'png') {
+      if (ascii(bytes, 12, 4) !== 'IHDR') return null;
+      let hasExif = false;
+      for (let p = 8; p + 8 <= bytes.length;) {
+        const length = view.getUint32(p);
+        const type = ascii(bytes, p + 4, 4);
+        if (type === 'eXIf') hasExif = true;
+        if (type === 'IDAT' || type === 'IEND') break;
+        p += 12 + length;
+      }
+      return { width: view.getUint32(16), height: view.getUint32(20), hasExif };
+    }
+    if (format === 'gif') {
+      return { width: view.getUint16(6, true), height: view.getUint16(8, true), hasExif: false };
+    }
+    if (format === 'webp') {
+      const chunk = ascii(bytes, 12, 4);
+      if (chunk === 'VP8X') {
+        const flags = bytes[20];
+        const width = 1 + (bytes[24] | (bytes[25] << 8) | (bytes[26] << 16));
+        const height = 1 + (bytes[27] | (bytes[28] << 8) | (bytes[29] << 16));
+        return { width, height, hasExif: (flags & 0x08) !== 0 };
+      }
+      if (chunk === 'VP8 ') {
+        return {
+          width: view.getUint16(26, true) & 0x3fff,
+          height: view.getUint16(28, true) & 0x3fff,
+          hasExif: false
+        };
+      }
+      if (chunk === 'VP8L') {
+        const bits = view.getUint32(21, true);
+        return { width: (bits & 0x3fff) + 1, height: ((bits >>> 14) & 0x3fff) + 1, hasExif: false };
+      }
+    }
+  } catch {
+    return null; // truncated header
+  }
+  return null;
+}
+
+/**
+ * How many frames (image descriptors) a GIF holds: more than one is an
+ * animation, of which a still-image tool can only use the first. Counts by
+ * walking the block structure; stops at the trailer or the first malformed
+ * block, so a damaged file reports the frames it really has up to there.
+ */
+export function gifFrameCount(bytes: Uint8Array): number {
+  if (sniffWebImageFormat(bytes) !== 'gif' || bytes.length < 13) return 0;
+  let p = 13;
+  const packed = bytes[10];
+  if (packed & 0x80) p += 3 * (1 << ((packed & 0x07) + 1));
+  const skipSubBlocks = () => {
+    while (p < bytes.length) {
+      const size = bytes[p++];
+      if (size === 0) return true;
+      p += size;
+    }
+    return false;
+  };
+  let frames = 0;
+  while (p < bytes.length) {
+    const marker = bytes[p++];
+    if (marker === 0x3b) break; // trailer
+    if (marker === 0x21) {
+      p++; // extension label
+      if (!skipSubBlocks()) break;
+    } else if (marker === 0x2c) {
+      if (p + 9 > bytes.length) break;
+      const local = bytes[p + 8];
+      p += 9;
+      if (local & 0x80) p += 3 * (1 << ((local & 0x07) + 1));
+      p++; // LZW minimum code size
+      if (!skipSubBlocks()) {
+        frames++;
+        break;
+      }
+      frames++;
+    } else {
+      break;
+    }
+  }
+  return frames;
+}
+
+/**
+ * Refuses a browser-decoded image larger than {@link MAX_RASTER_PIXELS}
+ * before (from its header) and after (from the bitmap) decoding, with the same
+ * message a HEIC/TIFF of that size gets (IMG-8).
+ */
+export function assertDrawableSize(width: number, height: number, name: string): void {
+  assertFrameSize(width, height, name);
 }

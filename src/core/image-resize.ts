@@ -44,6 +44,12 @@ export async function encodeScaledJpeg(
 export interface SizedImageRequest {
   targetBytes: number | null;
   maxDimension: number | null;
+  /**
+   * The source file's own byte length, when known. The quality search then
+   * prefers a fit that is no larger than the source over one that merely fits
+   * the target (see `preferAtMostBytes` in `image-target.ts`).
+   */
+  sourceBytes?: number;
 }
 
 /** What one sized image came out as — all of it measured on the returned bytes. */
@@ -101,6 +107,7 @@ export async function resizeToTarget(
     height: size.height,
     targetBytes: request.targetBytes,
     maxDimension: request.maxDimension,
+    preferAtMostBytes: request.sourceBytes,
     signal: hooks.signal,
     onTrial: (index, max) => {
       pending = hooks.onTrial?.(index, max);

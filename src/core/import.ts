@@ -26,9 +26,10 @@ import { deleteSourceBytes, usesMemoryFallback, writeSourceBytes } from './opfs'
 import { imageFileToPdfImages, isSupportedImage, type PdfImageSource } from './image';
 import { hasXfaMarker, XFA_MESSAGE } from './pdf/xfa';
 import { tPlural, translate } from './i18n';
+import { wholeMegabytes } from './bytes';
 
 /** Warn rather than refuse — the plan has no size limit, only a warning (§5.1). */
-export const LARGE_FILE_BYTES = 100 * 1024 * 1024;
+export const LARGE_FILE_BYTES = 100_000_000; // decimal, as the warning's "100MB" says (X-10)
 
 /** The formats `importFiles` accepts, named once so every message agrees. */
 export const SUPPORTED_FORMATS = 'PDF, PNG, JPEG, WebP, GIF, TIFF, and HEIC';
@@ -42,7 +43,7 @@ export const SUPPORTED_FORMATS = 'PDF, PNG, JPEG, WebP, GIF, TIFF, and HEIC';
 export function largeFileWarning(byteLength: number): string | null {
   if (byteLength <= LARGE_FILE_BYTES) return null;
   return translate('{size}MB is a large document — operations on it will be slower.', {
-    size: (byteLength / 1024 / 1024).toFixed(0)
+    size: wholeMegabytes(byteLength)
   });
 }
 

@@ -13,8 +13,8 @@ import {
 import { activeDoc } from '../../../core/store';
 import { currentDocumentBytes, planCompression } from '../../../core/operations';
 import { Button } from '../../components/Button';
-import { Field, NumberInput, RadioGroup, Select, Slider } from '../../components/Field';
-import { SizeDelta, formatBytes } from '../../components/Feedback';
+import { Field, RadioGroup, Select, Slider } from '../../components/Field';
+import { SizeDelta, formatBytes, formatTargetMiss } from '../../components/Feedback';
 import { panelStyles } from '../../shell/panelStyles';
 import {
   compressMeasurement,
@@ -26,9 +26,10 @@ import {
   lastCompressionResult,
   projectedOutput,
   targetSizeBytes,
-  type CompressMode,
-  type TargetUnit
+  type CompressMode
 } from './state';
+import { TargetSizeInput } from '../image-size/TargetSizeInput';
+import { PDF_TARGET_BOUNDS } from '../../../core/deep-link';
 import { MAX_TARGET_TRIALS } from '../../../core/compress-target';
 import { useEffect } from 'preact/hooks';
 import { useJob } from '../../useJob';
@@ -54,11 +55,6 @@ const MODE_OPTIONS = [
       'Stapler tries up to {trials} real settings and reports the size it actually reached.'
     )
   }
-] as const;
-
-const UNIT_OPTIONS = [
-  { value: 'MB' as TargetUnit, label: 'MB' },
-  { value: 'KB' as TargetUnit, label: 'KB' }
 ] as const;
 
 export function CompressPanel() {
@@ -179,30 +175,17 @@ export function CompressPanel() {
             )}
           >
             {id => (
-              <div className={panelStyles.actions}>
-                <NumberInput
-                  id={id}
-                  min={0.05}
-                  step={target.unit === 'MB' ? 0.5 : 50}
-                  value={target.amount}
-                  data-target-amount={target.amount}
-                  onInput={event => {
-                    const amount = Number((event.target as HTMLInputElement).value);
-                    if (Number.isFinite(amount) && amount > 0) {
-                      compressTarget.value = { ...target, amount };
-                    }
-                  }}
-                />
-                <Select
-                  value={target.unit}
-                  options={UNIT_OPTIONS}
-                  ariaLabel={t('Target size unit')}
-                  onChange={unit => (compressTarget.value = { ...target, unit })}
-                />
-              </div>
+              <TargetSizeInput
+                id={id}
+                value={target}
+                bounds={PDF_TARGET_BOUNDS}
+                steps={{ KB: 50, MB: 0.5 }}
+                dataAttribute="data-target-amount"
+                onChange={next => (compressTarget.value = next)}
+              />
             )}
           </Field>
-          {report && targetBytes >= report.originalBytes && (
+          {report && Number.isFinite(targetBytes) && targetBytes >= report.originalBytes && (
             <p className={panelStyles.note}>
               {t(
                 'This document is already {size} — smaller than the target, so there is nothing to do.',
@@ -231,10 +214,8 @@ export function CompressPanel() {
                 })
               : t(
                   'Could not reach {target}. The smallest Stapler can produce without destroying this document is {achieved}.',
-                  {
-                    target: formatBytes(outcome.targetBytes),
-                    achieved: formatBytes(outcome.achievedBytes)
-                  }
+                  // Rounded so the miss never reads as the target (IMG-3).
+                  formatTargetMiss(outcome.targetBytes, outcome.achievedBytes)
                 )}
             {outcome.settings
               ? ` ${t('Settings used: {dpi} DPI, {quality}%.', {

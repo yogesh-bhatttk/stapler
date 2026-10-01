@@ -9,7 +9,7 @@ import { tKey, tPlural, translate } from '../../core/i18n';
  */
 import { platform } from '../../platform/current';
 import { confirmAction, notify, requestExportReview } from '../../core/notify';
-import { internal } from '../../core/errors';
+import { internal, isCancellation } from '../../core/errors';
 import { unzipSync, zipSync } from 'fflate';
 import {
   applyRedactions,
@@ -30,6 +30,7 @@ import {
   planSizeSplitBoundaries,
   sanitizeFileStem,
   splitBoundaries,
+  splitPointsError,
   splitDocument,
   grayscaleDocument,
   repairDocument
@@ -50,7 +51,12 @@ import {
   type StaplerDoc
 } from '../../core/store';
 import { alignPages, type PageAlignment } from '../../core/page-alignment';
-import { formatBytes } from '../components/Feedback';
+import {
+  formatBytes,
+  formatBytesUp,
+  formatTargetMiss,
+  formatTargetMisses
+} from '../components/Feedback';
 import type { JobOptions } from '../../core/workers/protocol';
 import { createJobHandle } from '../../core/workers/protocol';
 import { findTool, type ToolId } from '../../core/tools';
@@ -76,7 +82,14 @@ import {
 import { extractSettings } from './extract/state';
 import { pdfToImageReport } from './convert/pdf-to-img-state';
 import { imageSizeRequest, imageSizeResult, imageSizeSettings } from './image-size/state';
-import { jpegPassthrough, resizeImageFile } from '../../core/image';
+import { imageOriginalSatisfies, resizeImageFile } from '../../core/image';
+import { chooseSmaller } from '../../core/size-guard';
+import {
+  IMAGE_TARGET_BOUNDS,
+  PDF_TARGET_BOUNDS,
+  validateSizeParam,
+  type SizeBounds
+} from '../../core/deep-link';
 import { extractImagesReport, summarize } from './extract-images/state';
 import { formFields, formValues, formulas } from './sign/state';
 import { applyFormulas } from '../../core/formula';
@@ -123,6 +136,24 @@ import {
 import { runOcr } from '../../core/ocr/runOcr';
 import { renderWorker } from '../../core/workers';
 import { altTextMap } from './acc/state';
+
+/**
+ * IMG-2 / IMG-12 — a target-size field holds something outside its range (the
+ * panel already shows why, inline). Nothing runs: running with the last good
+ * value, or a clamped one, would use a number the person cannot see.
+ */
+function notifyInvalidTarget(bounds: SizeBounds): void {
+  notify(
+    'warning',
+    translate('Enter a size between {min} and {max}.', {
+      min: formatBytes(bounds.minBytes),
+      max: formatBytes(bounds.maxBytes)
+    }),
+    {
+      detail: translate('Fix the target size in the options panel, then try again.')
+    }
+  );
+}
 
 /** Strips the extension so suffixes can be appended without doubling `.pdf`. */
 function stem(name: string): string {
@@ -902,6 +933,15 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   split: async ({ doc, job }) => {
     const settings = splitSettings.value;
 
+    // X-8: refuse rather than cut at pages the user did not ask for.
+    if (settings.mode === 'custom') {
+      const invalid = splitPointsError(settings.customBoundaries);
+      if (invalid) {
+        notify('warning', invalid);
+        return;
+      }
+    }
+
     if (settings.mode === 'extract') {
       const selected = doc.pages.filter(p => selectedPageKeys.value.has(p.key));
       if (selected.length === 0) {
@@ -958,7 +998,9 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
                 bates: getBates(),
                 barcodeStamp: getBarcodeStamp()
               },
-              settings.targetSizeKb * 1024,
+              // Decimal, like every size Stapler shows: "5000 KB" means
+              // 5,000,000 bytes, the way upload portals count it (IMG-4).
+              settings.targetSizeKb * 1000,
               job
             );
             oversizedPages = plan.oversized;
@@ -995,7 +1037,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
             oversizedPages.length,
             {
               pages: oversizedPages
-                .map(p => `${p.pageIndex + 1} (${formatBytes(p.bytes)})`)
+                .map(p => `${p.pageIndex + 1} (${formatBytesUp(p.bytes)})`)
                 .join(', ')
             }
           ),
@@ -1126,20 +1168,25 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     const saved = await reviewAndSaveZip(doc, archive, `${stem(doc.name)}-${suffix}.zip`);
     if (saved && missed.length > 0 && targetBytes !== null) {
       // Never a silent miss: name the pages and their measured sizes.
+      // Rounded so that no miss reads as the target itself (IMG-3).
+      const shown = formatTargetMisses(
+        targetBytes,
+        missed.map(page => page.bytes)
+      );
       notify(
         'warning',
         tPlural('{count} images are over {size}.', missed.length, {
-          size: formatBytes(targetBytes)
+          size: shown.target
         }),
         {
           detail: translate(
             'Each was saved at the smallest size Stapler could make: {pages}. Lower the starting resolution or the page count, or raise the target.',
             {
               pages: missed
-                .map(page =>
+                .map((page, index) =>
                   translate('page {page} ({size})', {
                     page: page.pageIndex + 1,
-                    size: formatBytes(page.bytes)
+                    size: shown.achieved[index]
                   })
                 )
                 .join(', ')
@@ -1166,21 +1213,30 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       });
       return;
     }
+    // IMG-2: the run uses exactly the value on screen, so an unusable one is
+    // refused here rather than replaced by some other number.
+    if (settings.useTarget && !validateSizeParam(settings.target, IMAGE_TARGET_BOUNDS).ok) {
+      notifyInvalidTarget(IMAGE_TARGET_BOUNDS);
+      return;
+    }
     const request = imageSizeRequest(settings);
     const resized = await resizeImageFile(file, request, job);
 
-    // A JPEG that already meets every limit is better left alone: re-encoding
-    // it can only lose quality, and could even make it bigger.
+    // IMG-1 — an original that already meets every limit is better left
+    // alone whenever the re-encode is no smaller: re-encoding can only lose
+    // quality, and a PNG or WebP re-saved as JPEG easily grows. "Meets every
+    // limit" includes format and orientation (`imageOriginalSatisfies`), so a
+    // HEIC or a sideways JPEG is still converted.
     const original = new Uint8Array(await file.arrayBuffer());
-    const upright = jpegPassthrough(original)?.orientation === 1;
-    const fitsBox =
-      request.maxDimension === null ||
-      Math.max(resized.sourceWidth, resized.sourceHeight) <= request.maxDimension;
-    const fitsTarget = request.targetBytes === null || original.byteLength <= request.targetBytes;
-    const keepOriginal =
-      upright && fitsBox && fitsTarget && original.byteLength <= resized.bytes.byteLength;
+    const choice = chooseSmaller({
+      originalBytes: original.byteLength,
+      resultBytes: resized.bytes.byteLength,
+      originalSatisfies: imageOriginalSatisfies(original, resized, request)
+    });
+    const keepOriginal = choice === 'original';
 
     const bytes = keepOriginal ? original : resized.bytes;
+    // Every claim below is measured on `bytes`, the file about to be written.
     const reached = request.targetBytes === null || bytes.byteLength <= request.targetBytes;
     imageSizeResult.value = {
       source: file,
@@ -1194,23 +1250,25 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       reached,
       attempts: resized.attempts,
       sourcePages: resized.sourcePages,
+      sourceFrames: keepOriginal ? 1 : resized.sourceFrames,
       keptOriginal: keepOriginal
     };
 
     if (!reached && request.targetBytes !== null) {
+      const miss = formatTargetMiss(request.targetBytes, bytes.byteLength);
       announceWaiting(job, translate('Waiting for confirmation…'));
       const proceed = await confirmAction({
-        title: translate('Could not reach {size}', { size: formatBytes(request.targetBytes) }),
+        title: translate('Could not reach {size}', { size: miss.target }),
         body: translate(
           'The smallest Stapler could make is {size}, at {width}×{height} px — measured, after {attempts}. Save it anyway?',
           {
-            size: formatBytes(bytes.byteLength),
+            size: miss.achieved,
             width: resized.width,
             height: resized.height,
             attempts: tPlural('{count} attempts', resized.attempts)
           }
         ),
-        confirmLabel: translate('Save at {size}', { size: formatBytes(bytes.byteLength) }),
+        confirmLabel: translate('Save at {size}', { size: miss.achieved }),
         cancelLabel: translate('Don’t save')
       });
       if (!proceed) return;
@@ -1234,7 +1292,18 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
             size: formatBytes(bytes.byteLength),
             width: resized.width,
             height: resized.height
-          })
+          }),
+      choice === 'larger'
+        ? {
+            // Never a silent size increase: the original could not be kept
+            // (wrong format, sideways, or outside a limit), so say why the
+            // file grew.
+            detail: translate(
+              'That is larger than the original ({before}), which had to be converted to an upright JPEG to meet your limits.',
+              { before: formatBytes(original.byteLength) }
+            )
+          }
+        : undefined
     );
   },
 
@@ -1334,6 +1403,12 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // is about to write; when the floor cannot reach the target it says so and
     // asks, rather than saving a file that quietly misses what was asked for.
     if (compressMode.value === 'target') {
+      // IMG-12: the same bounds the `?target=` link clamps to, refused here
+      // rather than silently run with (the field shows the error inline).
+      if (!validateSizeParam(compressTarget.value, PDF_TARGET_BOUNDS).ok) {
+        notifyInvalidTarget(PDF_TARGET_BOUNDS);
+        return;
+      }
       const targetBytes = targetSizeBytes(compressTarget.value);
       if (original.byteLength <= targetBytes) {
         notify('info', translate('Already under the target.'), {
@@ -1391,14 +1466,15 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
                 { items: outcome.plan.skipped.join('; ') }
               )
             : '';
+        const miss = formatTargetMiss(targetBytes, outcome.achievedBytes);
         announceWaiting(job, translate('Waiting for confirmation…'));
         const proceed = await confirmAction({
-          title: translate('Could not reach {size}', { size: formatBytes(targetBytes) }),
+          title: translate('Could not reach {size}', { size: miss.target }),
           body: [
             translate(
               'The smallest Stapler can produce without destroying this document is {size}, at {dpi} DPI and {quality}% quality — measured, after {attempts}.',
               {
-                size: formatBytes(outcome.achievedBytes),
+                size: miss.achieved,
                 dpi: String(outcome.settings?.dpi),
                 quality: Math.round((outcome.settings?.quality ?? 0) * 100),
                 attempts: tPlural('{count} attempts', outcome.trials.length)
@@ -1409,7 +1485,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
           ]
             .filter(Boolean)
             .join(' '),
-          confirmLabel: translate('Save at {size}', { size: formatBytes(outcome.achievedBytes) }),
+          confirmLabel: translate('Save at {size}', { size: miss.achieved }),
           cancelLabel: translate('Keep the original')
         });
         if (!proceed) return;
@@ -1448,7 +1524,29 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
               )
             }
       );
-      if (savedTarget && outcome.reachedTarget) {
+      // IMG-5: "Reached" is said about the file actually written — after
+      // Protect or re-applied restrictions, which add bytes — not about the
+      // search's measurement before them.
+      if (savedTarget && finalSize > targetBytes && outcome.reachedTarget) {
+        const miss = formatTargetMiss(targetBytes, finalSize);
+        notify(
+          'warning',
+          translate('Saved at {size}, over the {target} target.', {
+            size: miss.achieved,
+            target: miss.target
+          }),
+          {
+            detail: translate(
+              'Compression reached {reached}, but encrypting the file for Protect (or re-applying its restrictions) added {extra}. Turn Protect off, or aim a little lower, to get under the target.',
+              {
+                reached: formatBytes(outcome.achievedBytes),
+                extra: formatBytesUp(finalSize - outcome.achievedBytes)
+              }
+            ),
+            timeout: 0
+          }
+        );
+      } else if (savedTarget && outcome.reachedTarget) {
         notify('success', translate('Reached {size}', { size: formatBytes(finalSize) }), {
           detail: translate(
             'Target was {target}. {before} → {after} at {dpi} DPI, {quality}% quality.',
@@ -2012,12 +2110,22 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       });
     }
     // Never a silent size increase: B&W is meant to shrink scans, so a file
-    // that grew is said out loud before it is written.
-    if (result.bytes.byteLength > result.originalBytes) {
+    // that grew is said out loud before it is written. Not a blocking choice:
+    // this tool was asked for grey, which the original is not (`chooseSmaller`
+    // with `originalSatisfies: false`), and the export review that follows
+    // already shows both sizes before anything is saved.
+    const sizeChoice = chooseSmaller({
+      originalBytes: result.originalBytes,
+      resultBytes: result.bytes.byteLength,
+      originalSatisfies: false
+    });
+    if (sizeChoice === 'larger') {
+      // Formatted so the larger size never prints the same as the smaller.
+      const sizes = formatTargetMiss(result.originalBytes, result.bytes.byteLength);
       notify('warning', translate('The converted file is larger than the original.'), {
         detail: translate(
           '{before} → {after}. Re-encoding the images as grey cost more than it saved; Compress may help afterwards.',
-          { before: formatBytes(result.originalBytes), after: formatBytes(result.bytes.byteLength) }
+          { before: sizes.target, after: sizes.achieved }
         ),
         timeout: 0
       });
@@ -2042,13 +2150,27 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       bytes = new Uint8Array(await candidate.arrayBuffer());
       name = candidate.name;
     } else if (doc) {
-      // A document drawn from one file is repaired from that file's own bytes;
-      // a merge has no single file, so its current composition is used.
+      // UI-3: "the open document" means what is on screen. `currentDocumentBytes`
+      // already hands back the source file's own bytes, untouched, when the
+      // document is exactly that one file (same pages, order, no rotation, no
+      // annotations, crops, watermark…) — the case a damaged file needs — and
+      // composes the edits otherwise, so rotations, deletions, reordering and
+      // annotations are not silently dropped from `-repaired.pdf`.
       const sourceIds = new Set(doc.pages.map(p => p.sourceDocId));
-      bytes =
-        sourceIds.size === 1
-          ? await readSourceBytes([...sourceIds][0])
-          : await currentDocumentBytes(job);
+      try {
+        bytes = await currentDocumentBytes(job);
+      } catch (err) {
+        if (isCancellation(err) || sourceIds.size !== 1) throw err;
+        // The edits could not be written into this (damaged) file. Repair the
+        // file as it was opened, and say plainly that the edits are not in it.
+        bytes = await readSourceBytes([...sourceIds][0]);
+        notify('warning', translate('Your edits could not be included.'), {
+          detail: translate(
+            'This file is too damaged to apply page edits or annotations to, so the original file is repaired instead. Re-open the repaired copy and make the edits again.'
+          ),
+          timeout: 0
+        });
+      }
       name = doc.name;
     } else {
       notify('warning', translate('Choose a PDF to repair first.'), {

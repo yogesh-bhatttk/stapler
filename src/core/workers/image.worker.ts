@@ -13,6 +13,7 @@
  * (`image.ts`); the pool spawns a fresh one for the next import. Between TIFF
  * pages the ordinary {@link checkpoint} applies, with determinate progress.
  */
+import './network-guard'; // PLT-2: first, so it wraps the network APIs before any library runs
 import * as Comlink from 'comlink';
 import { loadLocale, translate } from '../i18n';
 import type { LocaleAware } from './client';
@@ -20,8 +21,12 @@ import { checkpoint, releaseJobHandlesAfterCall, type JobHandle } from './protoc
 import {
   createLibheif,
   decodeHeicToRgba,
+  assertDrawableSize,
   decodeTiffPages,
   flattenOnWhite,
+  gifFrameCount,
+  sniffWebImageFormat,
+  storedImageSize,
   type LibHeif,
   type RasterKind,
   type RgbaFrame
@@ -42,6 +47,8 @@ export type ResizeSourceKind = RasterKind | 'bitmap';
 export interface ResizedImage extends SizedImageResult {
   /** Pages in the source; only the first is used (a multi-page TIFF). */
   sourcePages: number;
+  /** Frames in the source; only the first is used (an animated GIF). */
+  sourceFrames: number;
 }
 
 export interface ImageJob extends LocaleAware {
@@ -122,11 +129,16 @@ async function decodeForResize(
     return { source: first, pages };
   }
   await checkpoint(job, 0.05, translate('Decoding {name}', { name }));
+  // IMG-8: refuse an image too large to draw from its header, before
+  // `createImageBitmap` allocates it, and again from the bitmap itself (a
+  // JPEG's size is not read here). Either way the message names the size.
+  const declared = storedImageSize(bytes);
+  if (declared) assertDrawableSize(declared.width, declared.height, name);
+  let bitmap: ImageBitmap;
   try {
-    const bitmap = await createImageBitmap(new Blob([bytes as BlobPart]), {
+    bitmap = await createImageBitmap(new Blob([bytes as BlobPart]), {
       imageOrientation: 'from-image'
     });
-    return { source: bitmap, pages: 1 };
   } catch (err) {
     throw corrupt(
       translate('{name} could not be decoded as an image: {message}', {
@@ -135,6 +147,13 @@ async function decodeForResize(
       })
     );
   }
+  try {
+    assertDrawableSize(bitmap.width, bitmap.height, name);
+  } catch (err) {
+    bitmap.close();
+    throw err;
+  }
+  return { source: bitmap, pages: 1 };
 }
 
 let libheif: Promise<LibHeif> | undefined;
@@ -242,18 +261,33 @@ const api: ImageJob = {
   },
 
   async resizeImage(kind, bytes, request, name, job) {
+    // IMG-9: an animated GIF decodes to its first frame only; count the rest
+    // so the result can say so rather than drop them silently.
+    const frames =
+      kind === 'bitmap' && sniffWebImageFormat(bytes) === 'gif' ? gifFrameCount(bytes) : 1;
+    const sourceBytes = bytes.byteLength;
     const { source, pages } = await decodeForResize(kind, bytes, name, job);
     try {
-      const result = await resizeToTarget(source, request, {
-        onTrial: (index, max) =>
-          checkpoint(
-            job,
-            0.1 + (0.85 * index) / max,
-            translate('Trying size {attempt} of up to {max}', { attempt: index + 1, max })
-          )
-      });
+      // The source's own size steers the quality search away from a "fit"
+      // that is bigger than the file it came from (IMG-1).
+      const result = await resizeToTarget(
+        source,
+        { ...request, sourceBytes },
+        {
+          onTrial: (index, max) =>
+            checkpoint(
+              job,
+              0.1 + (0.85 * index) / max,
+              translate('Trying size {attempt} of up to {max}', { attempt: index + 1, max })
+            )
+        }
+      );
       await checkpoint(job, 1, translate('Done'));
-      const out: ResizedImage = { ...result, sourcePages: pages };
+      const out: ResizedImage = {
+        ...result,
+        sourcePages: pages,
+        sourceFrames: Math.max(1, frames)
+      };
       return Comlink.transfer(out, [out.bytes.buffer as ArrayBuffer]);
     } finally {
       if ('close' in source) source.close();

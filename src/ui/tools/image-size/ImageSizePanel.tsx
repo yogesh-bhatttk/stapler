@@ -9,19 +9,15 @@ import { IMAGES_ONLY } from '../../../platform/index';
 import { isSupportedImage } from '../../../core/image';
 import { notify } from '../../../core/notify';
 import { activeDoc, activeSources, getSourceOriginalFiles } from '../../../core/store';
-import { IMAGE_TARGET_BOUNDS, sizeParamBytes, type SizeUnit } from '../../../core/deep-link';
+import { IMAGE_TARGET_BOUNDS, validateSizeParam } from '../../../core/deep-link';
 import { tPlural, useTranslation } from '../../../core/i18n';
 import { Button } from '../../components/Button';
-import { Checkbox, Field, NumberInput, Select } from '../../components/Field';
-import { SizeDelta, formatBytes } from '../../components/Feedback';
+import { Checkbox, Field, Select } from '../../components/Field';
+import { SizeDelta, formatBytes, formatTargetMiss } from '../../components/Feedback';
 import { panelStyles } from '../../shell/panelStyles';
 import { maxDimensionOptions } from '../convert/pdf-to-img-state';
 import { imageSizeResult, imageSizeSettings, type ImageSizeSettings } from './state';
-
-const UNIT_OPTIONS = [
-  { value: 'KB' as SizeUnit, label: 'KB' },
-  { value: 'MB' as SizeUnit, label: 'MB' }
-] as const;
+import { TargetSizeInput } from './TargetSizeInput';
 
 /** The limits upload forms most often quote. */
 const QUICK_TARGETS_KB = [20, 50, 100, 200, 500] as const;
@@ -66,12 +62,7 @@ export function ImageSizePanel() {
     chooseFile(file);
   };
 
-  const targetBytes = sizeParamBytes(settings.target);
-  const minAmount = settings.target.unit === 'MB' ? 0.01 : IMAGE_TARGET_BOUNDS.minBytes / 1000;
-  const maxAmount =
-    settings.target.unit === 'MB'
-      ? IMAGE_TARGET_BOUNDS.maxBytes / 1_000_000
-      : IMAGE_TARGET_BOUNDS.maxBytes / 1000;
+  const targetCheck = validateSizeParam(settings.target, IMAGE_TARGET_BOUNDS);
 
   return (
     <>
@@ -93,7 +84,9 @@ export function ImageSizePanel() {
           </p>
         ) : (
           <p className={panelStyles.description}>
-            {t('JPEG, PNG, WebP, GIF, HEIC or TIFF. The result is always a JPEG.')}
+            {t(
+              'JPEG, PNG, WebP, GIF, HEIC or TIFF. The result is a JPEG — or the original, unchanged, when it already meets every limit and a JPEG would be no smaller.'
+            )}
           </p>
         )}
       </div>
@@ -113,33 +106,14 @@ export function ImageSizePanel() {
             )}
           >
             {id => (
-              <div className={panelStyles.actions}>
-                <NumberInput
-                  id={id}
-                  min={minAmount}
-                  max={maxAmount}
-                  step={settings.target.unit === 'MB' ? 0.1 : 5}
-                  value={settings.target.amount}
-                  data-image-target-amount={settings.target.amount}
-                  onInput={event => {
-                    const amount = Number((event.target as HTMLInputElement).value);
-                    const bytes = sizeParamBytes({ amount, unit: settings.target.unit });
-                    if (
-                      Number.isFinite(amount) &&
-                      bytes >= IMAGE_TARGET_BOUNDS.minBytes &&
-                      bytes <= IMAGE_TARGET_BOUNDS.maxBytes
-                    ) {
-                      update({ target: { ...settings.target, amount } });
-                    }
-                  }}
-                />
-                <Select
-                  value={settings.target.unit}
-                  options={UNIT_OPTIONS}
-                  ariaLabel={t('Target size unit')}
-                  onChange={unit => update({ target: { ...settings.target, unit } })}
-                />
-              </div>
+              <TargetSizeInput
+                id={id}
+                value={settings.target}
+                bounds={IMAGE_TARGET_BOUNDS}
+                steps={{ KB: 5, MB: 0.1 }}
+                dataAttribute="data-image-target-amount"
+                onChange={target => update({ target })}
+              />
             )}
           </Field>
           <div className={panelStyles.actions} role="group" aria-label={t('Common limits')}>
@@ -209,14 +183,21 @@ export function ImageSizePanel() {
                   : t(
                       'Could not reach {target}. The smallest Stapler could make is {achieved}, at {width}×{height} px.',
                       {
-                        target: formatBytes(shown.targetBytes),
-                        achieved: formatBytes(shown.bytes.byteLength),
+                        ...formatTargetMiss(shown.targetBytes, shown.bytes.byteLength),
                         width: shown.width,
                         height: shown.height
                       }
                     )}{' '}
             {t('Exactly {bytes} bytes.', { bytes: shown.bytes.byteLength })}
           </p>
+          {shown.sourceFrames > 1 && (
+            <p className={panelStyles.note}>
+              {/* Only shown for two or more frames, so no singular form is needed. */}
+              {t('This GIF is animated ({count} frames); only the first frame was used.', {
+                count: shown.sourceFrames
+              })}
+            </p>
+          )}
           {shown.sourcePages > 1 && (
             <p className={panelStyles.note}>
               {tPlural('This TIFF has {count} pages; only the first was used.', shown.sourcePages)}
@@ -225,9 +206,9 @@ export function ImageSizePanel() {
         </div>
       )}
 
-      {settings.useTarget && !shown && (
+      {settings.useTarget && !shown && targetCheck.ok && (
         <p className={panelStyles.description}>
-          {t('Target: at most {bytes} bytes.', { bytes: targetBytes })}
+          {t('Target: at most {bytes} bytes.', { bytes: targetCheck.bytes })}
         </p>
       )}
     </>

@@ -68,6 +68,16 @@ export interface ImageTargetOptions<T> {
   targetBytes: number | null;
   /** Longest side limit in pixels, or null for none. Never upscales. */
   maxDimension: number | null;
+  /**
+   * The source file's own size (IMG-1). When the 92% encode fits the target
+   * but is larger than this, it is not taken as the answer: the quality search
+   * continues for the highest quality that fits *both* the target and this
+   * size. Only when no quality at full size gets under it does the search fall
+   * back to the highest quality that fits the target alone — lowering
+   * resolution just to beat the source would trade away what was asked to be
+   * kept. Ignored when there is no target.
+   */
+  preferAtMostBytes?: number;
   /** Encodes the source scaled to exactly `width` × `height` at `quality`. */
   encode: (size: ImageSize, quality: number) => Promise<EncodedTrial<T>>;
   maxTrials?: number;
@@ -147,11 +157,15 @@ export async function searchImageTargetSize<T>(
     return done(await attempt(boxed, IMAGE_DEFAULT_QUALITY), true);
   }
 
-  // 1. Quality, at the full boxed size.
-  const high = await attempt(boxed, IMAGE_QUALITY_MAX);
-  if (fits(high)) return done(high, true);
-  const low = await attempt(boxed, IMAGE_QUALITY_MIN);
-  if (fits(low)) {
+  // 1. Quality, at the full boxed size. With a source size to stay under, the
+  // first pass aims for the tighter of the two limits.
+  const source = options.preferAtMostBytes;
+  const cap = source !== undefined && source > 0 && source < target ? source : target;
+  const underCap = (trial: ImageTrial) => trial.bytes <= cap;
+  const bisectQuality = async (
+    low: ImageTrial & { output: T },
+    accept: (trial: ImageTrial) => boolean
+  ) => {
     let best = low;
     let lo = IMAGE_QUALITY_MIN;
     let hi = IMAGE_QUALITY_MAX;
@@ -160,15 +174,24 @@ export async function searchImageTargetSize<T>(
     for (let i = 0; i < 4 && hi - lo > 0.03 && trials.length < budget; i++) {
       const mid = Math.round(((lo + hi) / 2) * 100) / 100;
       const trial = await attempt(boxed, mid);
-      if (fits(trial)) {
+      if (accept(trial)) {
         best = trial;
         lo = mid;
       } else {
         hi = mid;
       }
     }
-    return done(best, true);
-  }
+    return best;
+  };
+
+  const high = await attempt(boxed, IMAGE_QUALITY_MAX);
+  if (underCap(high)) return done(high, true);
+  const low = await attempt(boxed, IMAGE_QUALITY_MIN);
+  if (underCap(low)) return done(await bisectQuality(low, underCap), true);
+  // Nothing at full size gets under the source: the highest quality that
+  // fits the target alone is the answer.
+  if (fits(high)) return done(high, true);
+  if (fits(low)) return done(await bisectQuality(low, fits), true);
 
   // 2. Scale, at a fixed quality. JPEG size tracks pixel count closely enough
   // that the square root of the byte ratio is a good first guess; the guess

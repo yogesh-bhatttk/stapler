@@ -432,9 +432,22 @@ describe('exporting a permission-restricted document', () => {
   });
 });
 
+/**
+ * The fixture plus a trailing PDF comment, so it is larger than the smallest
+ * target Compress accepts (`PDF_TARGET_BOUNDS`, 10 KB — IMG-12). Bytes after
+ * `%%EOF` are ignored by every reader, so the restrictions are untouched.
+ */
+function paddedPastTargetFloor(bytes: Uint8Array): Uint8Array {
+  const pad = new TextEncoder().encode(`\n%${'x'.repeat(12_000)}\n`);
+  const out = new Uint8Array(bytes.byteLength + pad.byteLength);
+  out.set(bytes);
+  out.set(pad, bytes.byteLength);
+  return out;
+}
+
 describe('compress never emits a file larger than the original (CLAUDE.md)', () => {
   it('keeps the original when re-applying restrictions would erase the saving', async () => {
-    const original = fixtureBytes('permission-no-print.pdf');
+    const original = paddedPastTargetFloor(fixtureBytes('permission-no-print.pdf'));
     const doc = await openDocument('compress-restricted', original);
     expect(documentRestrictions(doc)).toBe(NO_PRINT_P);
 
@@ -460,7 +473,7 @@ describe('compress never emits a file larger than the original (CLAUDE.md)', () 
     );
 
     compressMode.value = 'target';
-    compressTarget.value = { amount: 1, unit: 'KB' };
+    compressTarget.value = { amount: 10, unit: 'KB' };
     await commitTool('compress', {});
 
     // Nothing reached `platform.saveFileAs` — the guard fires before the write,
@@ -472,7 +485,7 @@ describe('compress never emits a file larger than the original (CLAUDE.md)', () 
   it('does not block the user’s own explicit choice to add password protection', async () => {
     // Same setup, but with Protect turned on: the size increase is the user's
     // own request, not a silent side effect, so the guard must not apply.
-    const original = fixtureBytes('permission-no-print.pdf');
+    const original = paddedPastTargetFloor(fixtureBytes('permission-no-print.pdf'));
     const doc = await openDocument('compress-restricted-protect', original);
     expect(documentRestrictions(doc)).toBe(NO_PRINT_P);
 
@@ -509,7 +522,7 @@ describe('compress never emits a file larger than the original (CLAUDE.md)', () 
     });
 
     compressMode.value = 'target';
-    compressTarget.value = { amount: 1, unit: 'KB' };
+    compressTarget.value = { amount: 10, unit: 'KB' };
     await commitTool('compress', {});
 
     expect(saved).toHaveLength(1);

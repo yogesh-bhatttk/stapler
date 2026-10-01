@@ -26,6 +26,7 @@ import { readSetting, writeSetting } from './db';
 import { logEvent } from './errors';
 import { notify } from './notify';
 import { translate } from './i18n';
+import { formatBytes } from './bytes';
 
 export const PERSISTENCE_SETTING_KEY = 'storage.persistence';
 
@@ -86,9 +87,37 @@ export async function readStorageEstimate(): Promise<StorageEstimate | null> {
 
 let automaticRequest: Promise<PersistOutcome> | null = null;
 
-async function recordOutcome(outcome: PersistOutcome, trigger: PersistTrigger): Promise<void> {
+/**
+ * RT-9 — "asked this session" in `sessionStorage`, independent of IndexedDB.
+ * "Ask once" used to rest entirely on the `settings` write: when that write
+ * failed, every reload asked `persist()` again (a prompt in Firefox). This
+ * flag survives reloads of the tab, holds the answer given, and is written
+ * *before* asking, so even a write that fails afterwards cannot cause a
+ * second prompt this session. Best-effort: storage access can throw.
+ */
+const SESSION_FLAG_KEY = 'stapler.persistence.asked';
+
+function readSessionFlag(): PersistOutcome | null {
+  try {
+    const value = globalThis.sessionStorage?.getItem(SESSION_FLAG_KEY);
+    return value === 'granted' || value === 'denied' || value === 'unsupported' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeSessionFlag(outcome: PersistOutcome): void {
+  try {
+    globalThis.sessionStorage?.setItem(SESSION_FLAG_KEY, outcome);
+  } catch {
+    // No session storage: the in-memory `automaticRequest` still holds for this page.
+  }
+}
+
+/** Resolves whether the outcome was actually stored (`writeSetting` reports, not throws). */
+async function recordOutcome(outcome: PersistOutcome, trigger: PersistTrigger): Promise<boolean> {
   const record: PersistenceRecord = { outcome, trigger, at: Date.now() };
-  await writeSetting(PERSISTENCE_SETTING_KEY, record);
+  return writeSetting(PERSISTENCE_SETTING_KEY, record);
 }
 
 async function callPersist(storage: StorageManagerLike): Promise<PersistOutcome> {
@@ -123,11 +152,24 @@ export function requestPersistenceOnce(trigger: PersistTrigger): Promise<Persist
         if (prior?.outcome !== 'granted') await recordOutcome('granted', trigger);
         return 'granted';
       }
-      const prior = await readSetting<PersistenceRecord>(PERSISTENCE_SETTING_KEY);
+      const asked = readSessionFlag();
+      if (asked) return asked;
+      const prior = await readSetting<PersistenceRecord>(PERSISTENCE_SETTING_KEY).catch(
+        () => undefined
+      );
       if (prior?.outcome) return prior.outcome;
+      // Marked before asking: nothing after this line can lead to a second
+      // prompt in this session.
+      writeSessionFlag('unsupported');
       const outcome = await callPersist(storage);
-      await recordOutcome(outcome, trigger);
-      if (outcome === 'denied') warnNotPersistent();
+      writeSessionFlag(outcome);
+      const recorded = await recordOutcome(outcome, trigger).catch(() => false);
+      if (!recorded) {
+        logEvent('warn', 'storage', 'Could not record the persistence outcome');
+      }
+      // The one-time warning is one-time only if the outcome was remembered;
+      // when it could not be, staying quiet beats warning on every visit.
+      if (outcome === 'denied' && recorded) warnNotPersistent();
       logEvent('info', 'storage', `Persistent storage ${outcome} (after ${trigger})`);
       return outcome;
     } catch (err) {
@@ -147,6 +189,7 @@ export async function requestPersistenceNow(): Promise<PersistOutcome> {
   const storage = storageManager();
   if (typeof storage?.persist !== 'function') return 'unsupported';
   const outcome = await callPersist(storage);
+  writeSessionFlag(outcome);
   await recordOutcome(outcome, 'manual').catch(() => {});
   automaticRequest = Promise.resolve(outcome);
   return outcome;
@@ -155,12 +198,12 @@ export async function requestPersistenceNow(): Promise<PersistOutcome> {
 let lastHeadroomCheckAt = -Infinity;
 let quotaWarned = false;
 
-/** Formats a byte count for storage figures, up to gigabytes. */
+/**
+ * Formats a byte count for storage figures — the app's one decimal formatter
+ * (X-10), so "Local data" and every other size in the app agree.
+ */
 export function formatStorageBytes(bytes: number): string {
-  if (bytes < 1024) return `${Math.round(bytes)} B`;
-  if (bytes < 1024 ** 2) return `${Math.round(bytes / 1024)} KB`;
-  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-  return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  return formatBytes(bytes);
 }
 
 /**
@@ -195,9 +238,22 @@ export function noteModelStored(): void {
   void checkStorageHeadroom().catch(() => {});
 }
 
-/** Test hook: forget this session's request and warnings. */
+/**
+ * Test hook: forget this session's request and warnings — a new session, so
+ * the `sessionStorage` flag goes too.
+ */
 export function __resetStoragePersistenceForTests(): void {
   automaticRequest = null;
+  try {
+    globalThis.sessionStorage?.removeItem(SESSION_FLAG_KEY);
+  } catch {
+    // ignore
+  }
   lastHeadroomCheckAt = -Infinity;
   quotaWarned = false;
+}
+
+/** Test hook: a reload — this page's memory is forgotten, the session flag is kept. */
+export function __forgetInMemoryRequestForTests(): void {
+  automaticRequest = null;
 }

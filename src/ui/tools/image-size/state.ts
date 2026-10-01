@@ -1,5 +1,6 @@
 /**
- * GAP-5 — "Image to size": one image in, one JPEG out.
+ * GAP-5 — "Image to size": one image in, one JPEG out — or the original,
+ * unchanged, when it already meets every limit and a JPEG would be no smaller.
  *
  * The panel configures, the action bar commits (siblings, so signals), and the
  * canvas shows the last result. Nothing here belongs to an open document —
@@ -41,7 +42,9 @@ export interface ImageSizeResult {
   reached: boolean;
   attempts: number;
   sourcePages: number;
-  /** True when the original JPEG already met every limit and was kept byte for byte. */
+  /** Frames in the source (an animated GIF); only the first was used. */
+  sourceFrames: number;
+  /** True when the original already met every limit and was kept byte for byte. */
   keptOriginal: boolean;
 }
 

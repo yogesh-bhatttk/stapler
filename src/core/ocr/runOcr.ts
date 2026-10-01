@@ -11,6 +11,7 @@
  * recognises in `ocr`, pdf-lib writes the text layer in `process`. This module is
  * only the sequencing, and it yields to the event loop between pages.
  */
+import { wholeKilobytes } from '../bytes';
 import * as Comlink from 'comlink';
 import { renderWorker, cvWorker, ocrWorker, processWorker } from '../workers';
 import { createJobHandle, type JobOptions } from '../workers/protocol';
@@ -166,8 +167,8 @@ async function downloadMissing(missing: string[], options: RunOcrOptions): Promi
       options.onProgress?.(
         Math.min(1, received / total) * 0.1,
         translate('Downloading the language model ({received} of {total} KB)', {
-          received: Math.round(received / 1024),
-          total: Math.round(total / 1024)
+          received: wholeKilobytes(received),
+          total: wholeKilobytes(total)
         })
       );
     }
