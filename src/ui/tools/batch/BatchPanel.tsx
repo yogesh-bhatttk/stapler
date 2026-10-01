@@ -14,10 +14,12 @@ import {
   outputFormat,
   outputZipHandle,
   scrubMetadataInBatch,
-  Recipe,
+  type Recipe,
+  isStoredRecipe,
   loadRecipes,
   addRecipe
 } from './state';
+import { parseRecipe } from './recipe-settings';
 import { compressSettings } from '../compress/state';
 import type { CompressSettings } from '../compress/state';
 import { watermarkSettings, headerFooterSettings } from '../watermark/state';
@@ -217,13 +219,25 @@ export function BatchPanel() {
       if (!file) return;
       try {
         const text = await file.text();
-        const recipes = JSON.parse(text) as Recipe[];
-        for (const r of recipes) {
-          if (r.id && r.name && Array.isArray(r.tools) && typeof r.settings === 'object') {
-            await addRecipe(r);
-          }
+        const parsed: unknown = JSON.parse(text);
+        const records: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
+        // An imported file is the least trusted source a recipe has: keep only
+        // records the runner could actually replay, and say how many were not.
+        let skipped = 0;
+        for (const r of records) {
+          if (isStoredRecipe(r) && parseRecipe(r).ok) await addRecipe(r);
+          else skipped++;
         }
-        notify('success', translate('Recipes imported successfully'));
+        if (skipped > 0) {
+          notify('warning', translate('Some recipes were not imported'), {
+            detail: tPlural(
+              '{count} recipe in the file has missing or invalid settings and was skipped.',
+              skipped
+            )
+          });
+        } else {
+          notify('success', translate('Recipes imported successfully'));
+        }
       } catch (err) {
         notify('danger', translate('Failed to import recipes'), { detail: String(err) });
       }

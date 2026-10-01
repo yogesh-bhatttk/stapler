@@ -2278,5 +2278,10 @@
   "Finished after {count} attempts_one": "Selesai setelah {count} percobaan",
   "Finished after {count} attempts_other": "Selesai setelah {count} percobaan",
   "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._one": "{count} dokumen lagi tidak dibuka karena Stapler membuka maksimal {max} sekaligus. Buka lagi dari disk.",
-  "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._other": "{count} dokumen lagi tidak dibuka karena Stapler membuka maksimal {max} sekaligus. Buka lagi dari disk."
+  "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._other": "{count} dokumen lagi tidak dibuka karena Stapler membuka maksimal {max} sekaligus. Buka lagi dari disk.",
+  "Recipe settings could not be read": "Pengaturan resep tidak dapat dibaca",
+  "\"{name}\" has settings this version cannot use ({fields}). No files were processed. Delete the recipe and save it again.": "\"{name}\" memiliki pengaturan yang tidak dapat digunakan versi ini ({fields}). Tidak ada file yang diproses. Hapus resep tersebut lalu simpan lagi.",
+  "Some recipes were not imported": "Beberapa resep tidak diimpor",
+  "{count} recipe in the file has missing or invalid settings and was skipped._one": "{count} resep dalam file memiliki pengaturan yang hilang atau tidak valid dan dilewati.",
+  "{count} recipe in the file has missing or invalid settings and was skipped._other": "{count} resep dalam file memiliki pengaturan yang hilang atau tidak valid dan dilewati."
 }

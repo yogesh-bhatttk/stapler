@@ -22,11 +22,11 @@ import {
   createLibheif,
   decodeHeicToRgba,
   assertDrawableSize,
+  declaredImageSize,
   decodeTiffPages,
   flattenOnWhite,
   gifFrameCount,
   sniffWebImageFormat,
-  storedImageSize,
   type LibHeif,
   type RasterKind,
   type RgbaFrame
@@ -129,10 +129,11 @@ async function decodeForResize(
     return { source: first, pages };
   }
   await checkpoint(job, 0.05, translate('Decoding {name}', { name }));
-  // IMG-8: refuse an image too large to draw from its header, before
-  // `createImageBitmap` allocates it, and again from the bitmap itself (a
-  // JPEG's size is not read here). Either way the message names the size.
-  const declared = storedImageSize(bytes);
+  // IMG-8: refuse an image too large to draw from its header (a JPEG's from
+  // its SOF marker), before `createImageBitmap` allocates it, and again from
+  // the bitmap itself for a header that could not be read. Either way the
+  // message names the size.
+  const declared = declaredImageSize(bytes);
   if (declared) assertDrawableSize(declared.width, declared.height, name);
   let bitmap: ImageBitmap;
   try {

@@ -18,7 +18,7 @@ import { DOC_PAGE_WHITE } from './doc-colors';
 import { translate } from './i18n';
 import { formatBytes } from './bytes';
 import type { RasterKind } from './raster-decode';
-import { sniffWebImageFormat, storedImageSize } from './raster-decode';
+import { gifFrameCount, sniffWebImageFormat, storedImageSize } from './raster-decode';
 import { jpegPassthrough, readJpegInfo, type JpegInfo } from './jpeg-info';
 import { encodeCanvasAtMaximum, webpTraits } from './max-quality';
 import type { PdfImageSource } from './image-embed';
@@ -505,6 +505,18 @@ export async function imageFileToPdfImages(
   } finally {
     bitmap.close();
   }
+}
+
+/**
+ * IMG-9 — how many frames a file holds when it really is a GIF (by signature,
+ * never by name), else 0. A still-image import decodes only the first frame
+ * (`createImageBitmap`), so a count above 1 means the rest were dropped and the
+ * caller should say so. Reads four bytes first, so a non-GIF costs nothing.
+ */
+export async function gifFrameCountOf(file: File): Promise<number> {
+  const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+  if (sniffWebImageFormat(head) !== 'gif') return 0;
+  return gifFrameCount(new Uint8Array(await file.arrayBuffer()));
 }
 
 /**

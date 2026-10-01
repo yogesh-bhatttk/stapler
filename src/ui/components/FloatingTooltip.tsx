@@ -22,7 +22,7 @@
  */
 import type { ComponentChildren } from 'preact';
 import { createPortal } from 'preact/compat';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import styles from './FloatingTooltip.module.css';
 
 /** Where the bubble sits relative to its anchor, in logical terms. */
@@ -81,7 +81,9 @@ export function useTooltipTrigger(): TooltipTrigger {
   }, [anchor]);
 
   // Escape dismisses it wherever focus is — including a hover-only bubble.
-  useEffect(() => {
+  // A layout effect, so the listener is attached in the same commit that
+  // shows the bubble: an Escape pressed the moment it appears is never missed.
+  useLayoutEffect(() => {
     if (!anchor) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') hide();

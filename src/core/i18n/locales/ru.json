@@ -2594,5 +2594,12 @@
   "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._one": "Ещё {count} документ не открыт, потому что Stapler открывает не более {max} одновременно. Откройте его снова с диска.",
   "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._other": "Ещё {count} документа не открыто, потому что Stapler открывает не более {max} одновременно. Откройте их снова с диска.",
   "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._few": "Ещё {count} документа не открыто, потому что Stapler открывает не более {max} одновременно. Откройте их снова с диска.",
-  "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._many": "Ещё {count} документов не открыто, потому что Stapler открывает не более {max} одновременно. Откройте их снова с диска."
+  "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._many": "Ещё {count} документов не открыто, потому что Stapler открывает не более {max} одновременно. Откройте их снова с диска.",
+  "Recipe settings could not be read": "Не удалось прочитать настройки рецепта",
+  "\"{name}\" has settings this version cannot use ({fields}). No files were processed. Delete the recipe and save it again.": "В рецепте «{name}» есть настройки, которые эта версия не может использовать ({fields}). Файлы не обработаны. Удалите рецепт и сохраните его заново.",
+  "Some recipes were not imported": "Некоторые рецепты не импортированы",
+  "{count} recipe in the file has missing or invalid settings and was skipped._one": "{count} рецепт в файле имеет отсутствующие или недопустимые настройки и был пропущен.",
+  "{count} recipe in the file has missing or invalid settings and was skipped._other": "{count} рецепта в файле имеют отсутствующие или недопустимые настройки и были пропущены.",
+  "{count} recipe in the file has missing or invalid settings and was skipped._few": "{count} рецепта в файле имеют отсутствующие или недопустимые настройки и были пропущены.",
+  "{count} recipe in the file has missing or invalid settings and was skipped._many": "{count} рецептов в файле имеют отсутствующие или недопустимые настройки и были пропущены."
 }

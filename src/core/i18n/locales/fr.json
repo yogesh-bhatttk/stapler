@@ -2401,5 +2401,11 @@
   "Finished after {count} attempts_many": "Terminé après {count} essais",
   "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._one": "{count} document supplémentaire a été laissé de côté, car Stapler en ouvre au plus {max} à la fois. Rouvrez-le depuis le disque.",
   "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._other": "{count} documents supplémentaires ont été laissés de côté, car Stapler en ouvre au plus {max} à la fois. Rouvrez-les depuis le disque.",
-  "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._many": "{count} documents supplémentaires ont été laissés de côté, car Stapler en ouvre au plus {max} à la fois. Rouvrez-les depuis le disque."
+  "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._many": "{count} documents supplémentaires ont été laissés de côté, car Stapler en ouvre au plus {max} à la fois. Rouvrez-les depuis le disque.",
+  "Recipe settings could not be read": "Impossible de lire les paramètres de la recette",
+  "\"{name}\" has settings this version cannot use ({fields}). No files were processed. Delete the recipe and save it again.": "« {name} » contient des paramètres que cette version ne peut pas utiliser ({fields}). Aucun fichier n’a été traité. Supprimez la recette et enregistrez-la à nouveau.",
+  "Some recipes were not imported": "Certaines recettes n’ont pas été importées",
+  "{count} recipe in the file has missing or invalid settings and was skipped._one": "{count} recette du fichier a des paramètres manquants ou non valides et a été ignorée.",
+  "{count} recipe in the file has missing or invalid settings and was skipped._other": "{count} recettes du fichier ont des paramètres manquants ou non valides et ont été ignorées.",
+  "{count} recipe in the file has missing or invalid settings and was skipped._many": "{count} recettes du fichier ont des paramètres manquants ou non valides et ont été ignorées."
 }

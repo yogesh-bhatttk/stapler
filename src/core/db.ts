@@ -38,18 +38,20 @@ export interface SearchIndexRecord {
   indexedAt?: number;
 }
 
+/**
+ * A batch recipe as it sits in the `recipes` store. `id` and `name` are what
+ * this build writes; `tools` and `settings` are typed `unknown` because the
+ * record may have been written by an older build or imported from a JSON file,
+ * so storage cannot vouch for their shape. `settings` holds one snapshot per
+ * tool (`compress`, `watermark`, …) in that tool's settings type; the batch
+ * runner checks it with `ui/tools/batch/recipe-settings.ts` before use
+ * (AUDIT-2026-10-01 X-15). The stored shape is unchanged from earlier builds.
+ */
 export interface Recipe {
   id: string;
   name: string;
-  tools: string[];
-  // `any` on purpose (AUDIT-2026-10-01 X-15): a snapshot of whichever tool
-  // settings the recipe captured, keyed by tool (`compress`, `watermark`, …),
-  // each in that tool's own settings type — and possibly written by an older
-  // build, so it is read back from storage, not trusted. `batch/runner.ts`
-  // hands each slice to the tool that owns its type; a precise type here would
-  // claim a shape storage cannot guarantee.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  settings: any;
+  tools: unknown;
+  settings: unknown;
 }
 
 interface StaplerSchema extends DBSchema {

@@ -23,7 +23,12 @@ import {
   type SourceDocument
 } from './store';
 import { deleteSourceBytes, usesMemoryFallback, writeSourceBytes } from './opfs';
-import { imageFileToPdfImages, isSupportedImage, type PdfImageSource } from './image';
+import {
+  gifFrameCountOf,
+  imageFileToPdfImages,
+  isSupportedImage,
+  type PdfImageSource
+} from './image';
 import { hasXfaMarker, XFA_MESSAGE } from './pdf/xfa';
 import { tPlural, translate } from './i18n';
 import { wholeMegabytes } from './bytes';
@@ -266,6 +271,20 @@ export async function imagesToPdfBytes(
     images.push(
       ...(await imageFileToPdfImages(files[i], imageOptions?.quality ?? 0.9, options.signal))
     );
+    // IMG-9: an animated GIF becomes one page of its first frame; say so per
+    // file rather than drop the rest silently.
+    const frames = await gifFrameCountOf(files[i]);
+    if (frames > 1) {
+      warnings.push(
+        translate('{name}: {warning}', {
+          name: files[i].name,
+          warning: translate(
+            'This GIF is animated ({count} frames); only the first frame was used.',
+            { count: frames }
+          )
+        })
+      );
+    }
   }
 
   const bytes = await processWorker.lease(api => api.imagesToPdf(images, imageOptions, job));

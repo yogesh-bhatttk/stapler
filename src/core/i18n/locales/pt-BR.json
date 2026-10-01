@@ -2401,5 +2401,11 @@
   "Finished after {count} attempts_many": "Concluído após {count} tentativas",
   "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._one": "Mais {count} documento ficou de fora porque o Stapler abre no máximo {max} de uma vez. Abra-o novamente a partir do disco.",
   "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._other": "Mais {count} documentos ficaram de fora porque o Stapler abre no máximo {max} de uma vez. Abra-os novamente a partir do disco.",
-  "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._many": "Mais {count} documentos ficaram de fora porque o Stapler abre no máximo {max} de uma vez. Abra-os novamente a partir do disco."
+  "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._many": "Mais {count} documentos ficaram de fora porque o Stapler abre no máximo {max} de uma vez. Abra-os novamente a partir do disco.",
+  "Recipe settings could not be read": "Não foi possível ler as configurações da receita",
+  "\"{name}\" has settings this version cannot use ({fields}). No files were processed. Delete the recipe and save it again.": "\"{name}\" tem configurações que esta versão não pode usar ({fields}). Nenhum arquivo foi processado. Exclua a receita e salve-a novamente.",
+  "Some recipes were not imported": "Algumas receitas não foram importadas",
+  "{count} recipe in the file has missing or invalid settings and was skipped._one": "{count} receita do arquivo tem configurações ausentes ou inválidas e foi ignorada.",
+  "{count} recipe in the file has missing or invalid settings and was skipped._other": "{count} receitas do arquivo têm configurações ausentes ou inválidas e foram ignoradas.",
+  "{count} recipe in the file has missing or invalid settings and was skipped._many": "{count} receitas do arquivo têm configurações ausentes ou inválidas e foram ignoradas."
 }

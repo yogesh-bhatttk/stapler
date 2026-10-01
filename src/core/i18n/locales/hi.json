@@ -2278,5 +2278,10 @@
   "Finished after {count} attempts_one": "{count} प्रयास के बाद पूरा हुआ",
   "Finished after {count} attempts_other": "{count} प्रयासों के बाद पूरा हुआ",
   "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._one": "{count} और दस्तावेज़ छोड़ दिया गया, क्योंकि Stapler एक साथ अधिकतम {max} खोलता है। इसे डिस्क से फिर से खोलें।",
-  "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._other": "{count} और दस्तावेज़ छोड़ दिए गए, क्योंकि Stapler एक साथ अधिकतम {max} खोलता है। इन्हें डिस्क से फिर से खोलें।"
+  "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._other": "{count} और दस्तावेज़ छोड़ दिए गए, क्योंकि Stapler एक साथ अधिकतम {max} खोलता है। इन्हें डिस्क से फिर से खोलें।",
+  "Recipe settings could not be read": "रेसिपी की सेटिंग पढ़ी नहीं जा सकीं",
+  "\"{name}\" has settings this version cannot use ({fields}). No files were processed. Delete the recipe and save it again.": "\"{name}\" में ऐसी सेटिंग हैं जिनका यह संस्करण उपयोग नहीं कर सकता ({fields})। कोई फ़ाइल संसाधित नहीं की गई। रेसिपी हटाएँ और उसे फिर से सहेजें।",
+  "Some recipes were not imported": "कुछ रेसिपी आयात नहीं की गईं",
+  "{count} recipe in the file has missing or invalid settings and was skipped._one": "फ़ाइल में {count} रेसिपी की सेटिंग अनुपलब्ध या अमान्य हैं, इसलिए उसे छोड़ दिया गया।",
+  "{count} recipe in the file has missing or invalid settings and was skipped._other": "फ़ाइल में {count} रेसिपी की सेटिंग अनुपलब्ध या अमान्य हैं, इसलिए उन्हें छोड़ दिया गया।"
 }

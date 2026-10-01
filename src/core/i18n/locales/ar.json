@@ -2910,5 +2910,14 @@
   "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._zero": "لم يُستبعد أي مستند إضافي لأن Stapler يفتح {max} مستندات كحد أقصى في المرة الواحدة.",
   "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._two": "استُبعد مستندان إضافيان لأن Stapler يفتح {max} مستندات كحد أقصى في المرة الواحدة. افتحهما مرة أخرى من القرص.",
   "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._few": "استُبعدت {count} مستندات إضافية لأن Stapler يفتح {max} مستندات كحد أقصى في المرة الواحدة. افتحها مرة أخرى من القرص.",
-  "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._many": "استُبعد {count} مستندًا إضافيًا لأن Stapler يفتح {max} مستندات كحد أقصى في المرة الواحدة. افتحها مرة أخرى من القرص."
+  "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._many": "استُبعد {count} مستندًا إضافيًا لأن Stapler يفتح {max} مستندات كحد أقصى في المرة الواحدة. افتحها مرة أخرى من القرص.",
+  "Recipe settings could not be read": "تعذّرت قراءة إعدادات الوصفة",
+  "\"{name}\" has settings this version cannot use ({fields}). No files were processed. Delete the recipe and save it again.": "تحتوي \"{name}\" على إعدادات لا يمكن لهذا الإصدار استخدامها ({fields}). لم تتم معالجة أي ملف. احذف الوصفة واحفظها مرة أخرى.",
+  "Some recipes were not imported": "لم يتم استيراد بعض الوصفات",
+  "{count} recipe in the file has missing or invalid settings and was skipped._one": "وصفة واحدة في الملف إعداداتها مفقودة أو غير صالحة وتم تخطيها.",
+  "{count} recipe in the file has missing or invalid settings and was skipped._other": "{count} وصفة في الملف إعداداتها مفقودة أو غير صالحة وتم تخطيها.",
+  "{count} recipe in the file has missing or invalid settings and was skipped._zero": "لا توجد وصفات في الملف بإعدادات مفقودة أو غير صالحة.",
+  "{count} recipe in the file has missing or invalid settings and was skipped._two": "وصفتان في الملف إعداداتهما مفقودة أو غير صالحة وتم تخطيهما.",
+  "{count} recipe in the file has missing or invalid settings and was skipped._few": "{count} وصفات في الملف إعداداتها مفقودة أو غير صالحة وتم تخطيها.",
+  "{count} recipe in the file has missing or invalid settings and was skipped._many": "{count} وصفة في الملف إعداداتها مفقودة أو غير صالحة وتم تخطيها."
 }

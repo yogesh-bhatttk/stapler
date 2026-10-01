@@ -2278,5 +2278,10 @@
   "Finished after {count} attempts_one": "Finished after {count} attempt",
   "Finished after {count} attempts_other": "Finished after {count} attempts",
   "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._one": "{count} more document was left out because Stapler opens at most {max} at once. Open it again from disk.",
-  "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._other": "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk."
+  "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._other": "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk.",
+  "Recipe settings could not be read": "Recipe settings could not be read",
+  "\"{name}\" has settings this version cannot use ({fields}). No files were processed. Delete the recipe and save it again.": "\"{name}\" has settings this version cannot use ({fields}). No files were processed. Delete the recipe and save it again.",
+  "Some recipes were not imported": "Some recipes were not imported",
+  "{count} recipe in the file has missing or invalid settings and was skipped._one": "{count} recipe in the file has missing or invalid settings and was skipped.",
+  "{count} recipe in the file has missing or invalid settings and was skipped._other": "{count} recipes in the file have missing or invalid settings and were skipped."
 }

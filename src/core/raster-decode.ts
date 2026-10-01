@@ -21,6 +21,7 @@
  */
 import { corrupt, unsupported } from './errors';
 import { translate } from './i18n';
+import { readJpegInfo } from './jpeg-info';
 
 /** Which worker decoder an image needs (`workers/image.worker.ts`). */
 export type RasterKind = 'heic' | 'tiff';
@@ -354,6 +355,26 @@ export function storedImageSize(
     return null; // truncated header
   }
   return null;
+}
+
+/**
+ * The pixel size an image declares before it is decoded, for the IMG-8 limit:
+ * the PNG/GIF/WebP header ({@link storedImageSize}), or a JPEG's start-of-frame
+ * marker (SOF0–SOF15 except DHT, JPG and DAC), found by `jpeg-info.ts`'s
+ * bounds-checked segment walk. Null when nothing trustworthy is found — a
+ * truncated or garbled header, no frame header before the scan, or a JPEG
+ * whose height is deferred to a DNL marker (0) — so the caller falls back to
+ * checking the decoded bitmap. Never throws.
+ */
+export function declaredImageSize(bytes: Uint8Array): { width: number; height: number } | null {
+  if (sniffWebImageFormat(bytes) === 'jpeg') {
+    const info = readJpegInfo(bytes);
+    return info && info.width > 0 && info.height > 0
+      ? { width: info.width, height: info.height }
+      : null;
+  }
+  const stored = storedImageSize(bytes);
+  return stored ? { width: stored.width, height: stored.height } : null;
 }
 
 /**

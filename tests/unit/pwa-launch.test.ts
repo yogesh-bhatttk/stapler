@@ -103,7 +103,8 @@ function fakeCacheStorage() {
     return {
       put: async (request, response) => void entries.set(request.url, response),
       match: async request => entries.get(request.url)?.clone(),
-      keys: async () => [...entries.keys()].reverse().map(url => new Request(url))
+      keys: async () => [...entries.keys()].reverse().map(url => new Request(url)),
+      delete: async request => entries.delete(request.url)
     };
   };
   const storage: CacheStorageLike = {

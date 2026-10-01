@@ -2401,5 +2401,11 @@
   "Finished after {count} attempts_many": "Terminado tras {count} intentos",
   "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._one": "Se omitió {count} documento más porque Stapler abre como máximo {max} a la vez. Vuelve a abrirlo desde el disco.",
   "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._other": "Se omitieron {count} documentos más porque Stapler abre como máximo {max} a la vez. Vuelve a abrirlos desde el disco.",
-  "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._many": "Se omitieron {count} documentos más porque Stapler abre como máximo {max} a la vez. Vuelve a abrirlos desde el disco."
+  "{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk._many": "Se omitieron {count} documentos más porque Stapler abre como máximo {max} a la vez. Vuelve a abrirlos desde el disco.",
+  "Recipe settings could not be read": "No se pudo leer la configuración de la receta",
+  "\"{name}\" has settings this version cannot use ({fields}). No files were processed. Delete the recipe and save it again.": "«{name}» tiene una configuración que esta versión no puede usar ({fields}). No se procesó ningún archivo. Elimina la receta y vuelve a guardarla.",
+  "Some recipes were not imported": "Algunas recetas no se importaron",
+  "{count} recipe in the file has missing or invalid settings and was skipped._one": "{count} receta del archivo tiene una configuración ausente o no válida y se omitió.",
+  "{count} recipe in the file has missing or invalid settings and was skipped._other": "{count} recetas del archivo tienen una configuración ausente o no válida y se omitieron.",
+  "{count} recipe in the file has missing or invalid settings and was skipped._many": "{count} recetas del archivo tienen una configuración ausente o no válida y se omitieron."
 }

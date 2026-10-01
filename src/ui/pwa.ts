@@ -13,7 +13,11 @@
 import { platform } from '../platform/current';
 import { consumeLaunchQueue, type LaunchQueueLike } from '../platform/pwa/launch-queue';
 import { registerServiceWorker } from '../platform/pwa/register';
-import { takeSharedFiles } from '../platform/pwa/share-inbox';
+import {
+  sweepStaleSharedFiles,
+  takeSharedFiles,
+  type CacheStorageLike
+} from '../platform/pwa/share-inbox';
 import { SHARE_TARGET_PARAM } from '../platform/pwa/sw-routing';
 import { queueExternalOpen } from '../core/external-open';
 import { documents } from '../core/store';
@@ -37,15 +41,44 @@ function shouldRegister(): boolean {
   }
 }
 
+/** Cache Storage, or `undefined` where the page has none (old browsers, some private modes). */
+function cacheStorage(): CacheStorageLike | undefined {
+  return typeof caches === 'undefined' ? undefined : caches;
+}
+
+/**
+ * Audit 2026-10-01 PLT-5 — on a start that is not a share-target launch,
+ * deletes shared files a failed hand-off left behind. A share-target launch
+ * never sweeps: it takes the whole inbox instead, so the batch it was
+ * redirected for cannot be deleted under it. Returns whether a sweep ran.
+ */
+export async function sweepShareInboxOnStart(
+  href: string,
+  storage: CacheStorageLike | undefined = cacheStorage(),
+  now = Date.now()
+): Promise<boolean> {
+  if (!storage || new URL(href).searchParams.has(SHARE_TARGET_PARAM)) return false;
+  try {
+    await sweepStaleSharedFiles(storage, now);
+  } catch {
+    // Best effort: the next start, the next share or Clear-all tries again.
+  }
+  return true;
+}
+
 async function receiveSharedFiles(): Promise<void> {
   const url = new URL(window.location.href);
-  if (!url.searchParams.has(SHARE_TARGET_PARAM)) return;
+  if (!url.searchParams.has(SHARE_TARGET_PARAM)) {
+    await sweepShareInboxOnStart(url.href);
+    return;
+  }
   url.searchParams.delete(SHARE_TARGET_PARAM);
   // A reload must not look for the same files again.
   history.replaceState(history.state, '', url.href);
   let files: File[];
   try {
-    files = typeof caches === 'undefined' ? [] : await takeSharedFiles(caches);
+    const storage = cacheStorage();
+    files = storage ? await takeSharedFiles(storage) : [];
   } catch {
     files = [];
   }
