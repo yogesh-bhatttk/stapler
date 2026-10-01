@@ -162,8 +162,35 @@ function validBox(value: unknown, context: PDFContext): boolean {
   return nums.every(Number.isFinite) && nums[2] !== nums[0] && nums[3] !== nums[1];
 }
 
-/** `/Encrypt` as a whole name (not `/EncryptMetadata`), wherever it appears. */
-const ENCRYPT_KEY = /\/Encrypt(?![^\s/<>[\]()%{}])/;
+/** `/Encrypt` as a whole name (not `/EncryptMetadata`). */
+const ENCRYPT_KEY = /\/Encrypt(?![^\s/<>[\]()%{}])/g;
+
+/**
+ * `/Encrypt` appears as a key outside stream data — in a trailer, or in an
+ * XRef stream's dictionary, which both sit before any `stream` keyword. Stream
+ * *data* is skipped: an uncompressed attachment, or a page that prints PDF
+ * syntax, can contain the bytes `/Encrypt` without the file being encrypted.
+ * A stream cut off before its `endstream` runs to the end of the file.
+ */
+function encryptKeyOutsideStreams(text: string): boolean {
+  const streamStart = /(?<!end)stream\r?\n/g;
+  const regions: [number, number][] = [];
+  for (let m = streamStart.exec(text); m; m = streamStart.exec(text)) {
+    const dataStart = m.index + m[0].length;
+    const end = text.indexOf('endstream', dataStart);
+    const dataEnd = end === -1 ? text.length : end;
+    regions.push([dataStart, dataEnd]);
+    streamStart.lastIndex = dataEnd;
+  }
+  ENCRYPT_KEY.lastIndex = 0;
+  let r = 0;
+  for (let m = ENCRYPT_KEY.exec(text); m; m = ENCRYPT_KEY.exec(text)) {
+    while (r < regions.length && regions[r][1] <= m.index) r++;
+    const inside = r < regions.length && regions[r][0] <= m.index && m.index < regions[r][1];
+    if (!inside) return true;
+  }
+  return false;
+}
 
 /**
  * A standard (or third-party) security handler's dictionary: a `/Filter`
@@ -622,8 +649,8 @@ export async function repairPdfBytes(bytes: Uint8Array, stage?: Stage): Promise<
   // `isEncrypted` reads the trailer's /Encrypt — exactly what a file cut off
   // before its trailer has lost, while every string and stream in it is still
   // ciphertext. The security handler's own dictionary, or the /Encrypt key
-  // anywhere in the raw bytes, is evidence enough.
-  if (doc.isEncrypted || hasSecurityHandler(context) || ENCRYPT_KEY.test(text)) {
+  // as a key anywhere outside stream data, is evidence enough.
+  if (doc.isEncrypted || hasSecurityHandler(context) || encryptKeyOutsideStreams(text)) {
     throw encrypted(
       translate(
         'This file is encrypted. Repairing it would mean writing it back without its protection, so nothing was changed.'

@@ -43,13 +43,8 @@ vi.mock('../../src/core/workers', async () => {
 
 installCanvasShims();
 const { grayscaleDocument } = await import('../../src/core/operations');
-const {
-  renderWorkerImpl,
-  encodeGray,
-  GRAY_JPEG_QUALITY: WORKER_QUALITY
-} = await import('../../src/core/workers/render.worker');
+const { renderWorkerImpl } = await import('../../src/core/workers/render.worker');
 const { processWorkerImpl } = await import('../../src/core/workers/process.worker');
-const { encodeGraySamples, GRAY_JPEG_QUALITY } = await import('../../src/core/pdf/grayscale');
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -132,6 +127,47 @@ describe('PDF-2 — annotations on a rasterised page', () => {
     expect(annots.size()).toBe(1);
     const annot = out.context.lookup(annots.get(0)) as PDFDict;
     expect((annot.lookup(PDFName.of('F')) as PDFNumber).asNumber() & 2).toBe(2);
+  });
+
+  it('an appearance that also sets a colour is flattened and passes, not blocked as colour left', async () => {
+    // `1 0 0 rg` is read and counted, then a mesh gradient with per-point
+    // colour gives the reason. Once the annotation is drawn into the raster
+    // and hidden, its colour operators draw nothing, so they must not count
+    // as colour left and block the save.
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([200, 200]);
+    const ctx = doc.context;
+    page.node.set(
+      PDFName.of('Contents'),
+      ctx.register(ctx.flateStream('0 0 1 rg 10 10 50 50 re f'))
+    );
+    const mesh = ctx.register(
+      ctx.stream(new Uint8Array(0), {
+        ShadingType: 4,
+        ColorSpace: 'DeviceRGB',
+        BitsPerCoordinate: 8,
+        BitsPerComponent: 8,
+        BitsPerFlag: 8,
+        Decode: [0, 80, 0, 80, 0, 1, 0, 1, 0, 1]
+      })
+    );
+    const ap = ctx.register(
+      ctx.stream('1 0 0 rg 0 0 40 40 re f /Sh0 sh', {
+        Type: 'XObject',
+        Subtype: 'Form',
+        BBox: [0, 0, 80, 80],
+        Resources: { Shading: { Sh0: mesh } }
+      })
+    );
+    const annot = ctx.register(
+      ctx.obj({ Type: 'Annot', Subtype: 'Square', Rect: [100, 100, 180, 180], AP: { N: ap } })
+    );
+    page.node.set(PDFName.of('Annots'), ctx.obj([annot]));
+    const input = await doc.save({ useObjectStreams: false });
+
+    const result = await grayscaleDocument(input, [0], 1, { mode: 'gray', rasterDpi: 72 });
+    expect(result.pages[0].route).toBe('raster');
+    expect(result.colourLeft).toEqual([]);
   });
 
   it('a hidden annotation with an unconvertible appearance does not force a raster', async () => {
@@ -229,22 +265,6 @@ describe('PDF-5 — bounded memory', () => {
       }
     }
     expect(grayImages.size).toBe(PAGES + 1 + 1); // per-page + shared + the page raster
-  });
-
-  it('the render worker encodes exactly as the converter would', () => {
-    expect(WORKER_QUALITY).toBe(GRAY_JPEG_QUALITY);
-    const width = 13;
-    const height = 7;
-    const gray = new Uint8Array(width * height).map((_, i) => (i * 37) % 256);
-    for (const mode of ['gray', 'bw'] as const) {
-      for (const lossy of [false, true]) {
-        const a = encodeGray(gray, width, height, mode, lossy);
-        const b = encodeGraySamples(gray, width, height, mode, lossy);
-        expect(a.filter).toBe(b.filter);
-        expect(a.bitsPerComponent).toBe(b.bitsPerComponent);
-        expect(Buffer.from(a.data).equals(Buffer.from(b.data))).toBe(true);
-      }
-    }
   });
 });
 

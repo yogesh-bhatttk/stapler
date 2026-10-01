@@ -15,7 +15,7 @@ import { translate, useTranslation } from '../../../core/i18n';
 import { Button } from '../../components/Button';
 import { formatBytes } from '../../components/Feedback';
 import { panelStyles } from '../../shell/panelStyles';
-import { MAX_OPEN_DOCUMENTS } from '../../../core/workspace-limits';
+import { notifyDocumentCeiling } from '../../../core/open-document';
 import {
   clearRepairCandidate,
   lastRepair,
@@ -27,15 +27,6 @@ import {
 const PDF_ONLY = { 'application/pdf': ['.pdf'] };
 
 /** The same refusal every other open path shows at the document ceiling. */
-function notifyDocumentCeiling(): void {
-  notify('warning', translate('Too many documents are open.'), {
-    detail: translate(
-      'Stapler can keep up to {max} documents open at once (open now: {open}). Close some tabs, then open your files again.',
-      { max: MAX_OPEN_DOCUMENTS, open: documents.value.length }
-    )
-  });
-}
-
 export function RepairPanel() {
   const t = useTranslation();
   const doc = activeDoc.value;
@@ -65,7 +56,7 @@ export function RepairPanel() {
     if (!run) return;
     try {
       const outcome = await openRepairedCopy(run, registerSourceFromBytes);
-      if (outcome === 'full') notifyDocumentCeiling();
+      if (outcome === 'full') notifyDocumentCeiling(documents.value.length);
       else if (outcome === 'opened') {
         notify('success', translate('Opened {name}', { name: run.name }));
       }

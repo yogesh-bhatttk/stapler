@@ -41,6 +41,15 @@ export const PDF_TARGET_BOUNDS: SizeBounds = { minBytes: 10_000, maxBytes: 2_000
  */
 export const IMAGE_TARGET_BOUNDS: SizeBounds = { minBytes: 5_000, maxBytes: 50_000_000 };
 
+/**
+ * PDF to Images' per-image target, typed in KB, is inside
+ * {@link IMAGE_TARGET_BOUNDS} — the same rule {@link validateSizeParam} applies
+ * to every other target-size field.
+ */
+export function targetKbInRange(kb: number): boolean {
+  return validateSizeParam({ amount: kb, unit: 'KB' }, IMAGE_TARGET_BOUNDS).ok;
+}
+
 /** Longest-side limits for the `max` parameter, in pixels. */
 export const MAX_DIMENSION_BOUNDS = { min: 16, max: 16_384 } as const;
 

@@ -166,10 +166,19 @@ class FakeWorker implements WorkerLike {
   }
 }
 
-function fakeContainer(options: { controller: boolean; waiting?: FakeWorker }) {
+function fakeActiveWorker(): FakeWorker {
+  return {
+    state: 'activated',
+    postMessage: vi.fn(),
+    addEventListener: vi.fn()
+  } as unknown as FakeWorker;
+}
+
+function fakeContainer(options: { controller: boolean; waiting?: FakeWorker; active?: boolean }) {
   const updateListeners: (() => void)[] = [];
   const controllerListeners: (() => void)[] = [];
   const registration: RegistrationLike & { installing: FakeWorker | null } = {
+    active: options.active ? fakeActiveWorker() : null,
     waiting: options.waiting ?? null,
     installing: null,
     addEventListener: (_type, listener) => void updateListeners.push(listener)
@@ -299,6 +308,22 @@ describe('registerServiceWorker', () => {
     fake.controllerChange(); // first install claims the page
     expect(onReplacedElsewhere).not.toHaveBeenCalled();
     fake.controllerChange(); // a later update applied in another tab
+    expect(onReplacedElsewhere).toHaveBeenCalledTimes(1);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('a hard-reloaded tab (uncontrolled, worker active) treats a takeover as an update elsewhere', async () => {
+    const fake = fakeContainer({ controller: false, active: true });
+    const reload = vi.fn();
+    const onReplacedElsewhere = vi.fn();
+    await registerServiceWorker({
+      container: fake.container,
+      url: '/sw.js',
+      onUpdateReady: () => undefined,
+      reload,
+      onReplacedElsewhere
+    });
+    fake.controllerChange(); // a newer version, applied in another tab, claims this one
     expect(onReplacedElsewhere).toHaveBeenCalledTimes(1);
     expect(reload).not.toHaveBeenCalled();
   });

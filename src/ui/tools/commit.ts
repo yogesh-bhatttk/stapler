@@ -47,6 +47,7 @@ import {
   registerSource,
   replaceWithSource,
   selectedPageKeys,
+  sources,
   type PageRef,
   type StaplerDoc
 } from '../../core/store';
@@ -87,6 +88,7 @@ import { chooseSmaller } from '../../core/size-guard';
 import {
   IMAGE_TARGET_BOUNDS,
   PDF_TARGET_BOUNDS,
+  targetKbInRange,
   validateSizeParam,
   type SizeBounds
 } from '../../core/deep-link';
@@ -152,6 +154,27 @@ function notifyInvalidTarget(bounds: SizeBounds): void {
     {
       detail: translate('Fix the target size in the options panel, then try again.')
     }
+  );
+}
+
+/**
+ * The document differs from the single file it was opened from: other pages,
+ * order or rotation, annotations, or a crop on one of its own pages. Panel
+ * settings (watermark, header/footer, N-up) and crops on other documents'
+ * pages are not edits of this document.
+ */
+function hasDocumentEdits(doc: StaplerDoc): boolean {
+  const first = doc.pages[0];
+  if (!first) return true;
+  const source = sources.value[first.sourceDocId];
+  if (!source || doc.pages.length !== source.pageCount) return true;
+  if (doc.annotations.length > 0) return true;
+  return doc.pages.some(
+    (p, i) =>
+      p.sourceDocId !== first.sourceDocId ||
+      p.sourceIndex !== i ||
+      p.rotation !== 0 ||
+      p.key in cropBoxes.value
   );
 }
 
@@ -387,7 +410,7 @@ async function save(
     if (overwrite) {
       const saved = await platform.saveOver(doc.sourceHandle.fileId, bytes);
       if (saved) {
-        refreshBaseline(doc.id, doc.pages);
+        refreshBaseline(doc.id, doc.pages, doc.annotations);
         notify('success', translate('Saved {name}', { name: doc.name }), {
           detail: note(formatBytes(bytes.byteLength))
         });
@@ -402,7 +425,7 @@ async function save(
 
   const saved = await platform.saveFileAs(bytes, name);
   if (saved) {
-    if (refreshesBaseline) refreshBaseline(doc.id, doc.pages);
+    if (refreshesBaseline) refreshBaseline(doc.id, doc.pages, doc.annotations);
     notify('success', translate('Saved {name}', { name }), {
       detail: note(formatBytes(bytes.byteLength))
     });
@@ -1137,6 +1160,15 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
 
   'pdf-to-img': async ({ doc, job }) => {
     const settings = pdfToImageSettings.value;
+    // GAP-5 — a pixel limit or a size target goes through the measured
+    // per-image search; plain resolution exports keep the original path.
+    const targetMode = settings.sizeMode === 'target';
+    // Same rule as IMG-2: never run with a size the field is not showing —
+    // checked before composing, so a refusal costs nothing.
+    if (targetMode && !targetKbInRange(settings.targetKb)) {
+      notifyInvalidTarget(IMAGE_TARGET_BOUNDS);
+      return;
+    }
     const bytes = await currentDocumentBytes(job);
     const selected = selectedPageKeys.value;
     const indices = doc.pages
@@ -1144,9 +1176,6 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       .filter(({ page }) => selected.size === 0 || selected.has(page.key))
       .map(({ index }) => index);
 
-    // GAP-5 — a pixel limit or a size target goes through the measured
-    // per-image search; plain resolution exports keep the original path.
-    const targetMode = settings.sizeMode === 'target';
     if (!targetMode && settings.maxDimension === null) {
       const archive = await pagesToImageArchive(bytes, indices, settings.format, settings.dpi, job);
       await reviewAndSaveZip(doc, archive, `${stem(doc.name)}-${settings.dpi}dpi.zip`);
@@ -2130,13 +2159,34 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         timeout: 0
       });
     }
-    await reviewAndSave(
+    // Password protection (or re-applied restrictions) is added in `save()`,
+    // after the check above: when that alone pushes the written file past the
+    // original, say so — measured on the bytes actually written (pattern 3).
+    let finalSize = result.bytes.byteLength;
+    const saved = await reviewAndSave(
       doc,
       current,
       result.bytes,
       `${stem(doc.name)}-${settings.mode === 'bw' ? 'bw' : 'grayscale'}.pdf`,
-      job
+      job,
+      finalBytes => {
+        finalSize = finalBytes.byteLength;
+      }
     );
+    if (saved && sizeChoice !== 'larger' && finalSize > result.originalBytes) {
+      const sizes = formatTargetMiss(result.originalBytes, finalSize);
+      notify('warning', translate('The converted file is larger than the original.'), {
+        detail: translate(
+          '{before} → {after}. Converting to grey made it smaller, but encrypting it for password protection (or re-applying its restrictions) added {extra}.',
+          {
+            before: sizes.target,
+            after: sizes.achieved,
+            extra: formatBytesUp(finalSize - result.bytes.byteLength)
+          }
+        ),
+        timeout: 0
+      });
+    }
   },
 
   // GAP-6 — repair. `worksWithoutDocument`: the file is often one that never
@@ -2150,26 +2200,34 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       bytes = new Uint8Array(await candidate.arrayBuffer());
       name = candidate.name;
     } else if (doc) {
-      // UI-3: "the open document" means what is on screen. `currentDocumentBytes`
-      // already hands back the source file's own bytes, untouched, when the
-      // document is exactly that one file (same pages, order, no rotation, no
-      // annotations, crops, watermark…) — the case a damaged file needs — and
-      // composes the edits otherwise, so rotations, deletions, reordering and
-      // annotations are not silently dropped from `-repaired.pdf`.
+      // UI-3: "the open document" means what is on screen — but only its own
+      // edits. An untouched document is repaired from its file's raw bytes,
+      // the case a damaged file needs: rebuilding it first would let pdf-lib
+      // quietly drop the very objects repair could have salvaged. An edited
+      // one is composed from its pages, rotations, crops and annotations
+      // alone — never the Watermark/Header-footer/N-up panel settings, which
+      // are not part of the document.
       const sourceIds = new Set(doc.pages.map(p => p.sourceDocId));
-      try {
-        bytes = await currentDocumentBytes(job);
-      } catch (err) {
-        if (isCancellation(err) || sourceIds.size !== 1) throw err;
-        // The edits could not be written into this (damaged) file. Repair the
-        // file as it was opened, and say plainly that the edits are not in it.
-        bytes = await readSourceBytes([...sourceIds][0]);
-        notify('warning', translate('Your edits could not be included.'), {
-          detail: translate(
-            'This file is too damaged to apply page edits or annotations to, so the original file is repaired instead. Re-open the repaired copy and make the edits again.'
-          ),
-          timeout: 0
-        });
+      if (!hasDocumentEdits(doc)) {
+        bytes = await readSourceBytes(doc.pages[0].sourceDocId);
+      } else {
+        try {
+          bytes = await composeDocument(
+            { pages: doc.pages, annotations: doc.annotations, cropBoxes: cropBoxes.value },
+            job
+          );
+        } catch (err) {
+          if (isCancellation(err) || sourceIds.size !== 1) throw err;
+          // The edits could not be written into this (damaged) file. Repair the
+          // file as it was opened, and say plainly that the edits are not in it.
+          bytes = await readSourceBytes([...sourceIds][0]);
+          notify('warning', translate('Your edits could not be included.'), {
+            detail: translate(
+              'This file is too damaged to apply page edits or annotations to, so the original file is repaired instead. Re-open the repaired copy and make the edits again.'
+            ),
+            timeout: 0
+          });
+        }
       }
       name = doc.name;
     } else {

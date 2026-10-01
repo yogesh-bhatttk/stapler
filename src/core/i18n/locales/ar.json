@@ -2919,5 +2919,6 @@
   "{count} recipe in the file has missing or invalid settings and was skipped._zero": "لا توجد وصفات في الملف بإعدادات مفقودة أو غير صالحة.",
   "{count} recipe in the file has missing or invalid settings and was skipped._two": "وصفتان في الملف إعداداتهما مفقودة أو غير صالحة وتم تخطيهما.",
   "{count} recipe in the file has missing or invalid settings and was skipped._few": "{count} وصفات في الملف إعداداتها مفقودة أو غير صالحة وتم تخطيها.",
-  "{count} recipe in the file has missing or invalid settings and was skipped._many": "{count} وصفة في الملف إعداداتها مفقودة أو غير صالحة وتم تخطيها."
+  "{count} recipe in the file has missing or invalid settings and was skipped._many": "{count} وصفة في الملف إعداداتها مفقودة أو غير صالحة وتم تخطيها.",
+  "{before} → {after}. Converting to grey made it smaller, but encrypting it for password protection (or re-applying its restrictions) added {extra}.": "{before} → {after}. أدى التحويل إلى الرمادي إلى تصغير الملف، لكن تشفيره لحماية كلمة المرور (أو إعادة تطبيق قيوده) أضاف {extra}."
 }

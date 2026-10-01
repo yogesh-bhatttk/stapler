@@ -23,6 +23,8 @@ export interface WorkerLike {
 }
 
 export interface RegistrationLike {
+  /** Absent on fakes that predate it; a real registration always has it. */
+  readonly active?: WorkerLike | null;
   readonly waiting: WorkerLike | null;
   readonly installing: WorkerLike | null;
   addEventListener(type: 'updatefound', listener: () => void): void;
@@ -57,11 +59,16 @@ export async function registerServiceWorker(options: RegisterOptions): Promise<R
   // Whether this page was loaded under a worker. The first install also fires
   // `controllerchange` (the new worker claims the page) and must not reload.
   let controlled = Boolean(container.controller);
+  // Whether a worker was already active when this page registered. A page can
+  // be uncontrolled even then — a hard reload (Shift+F5) bypasses the worker —
+  // and for such a page the first `controllerchange` is not the first install
+  // but a newer version, applied in another tab, taking over (PLT-4).
+  let activeAtLoad = false;
 
   container.addEventListener('controllerchange', () => {
     if (!controlled) {
       controlled = true;
-      return;
+      if (!activeAtLoad) return;
     }
     if (handled) return;
     handled = true;
@@ -80,6 +87,7 @@ export async function registerServiceWorker(options: RegisterOptions): Promise<R
   };
 
   const registration = await container.register(options.url, { scope: options.scope });
+  activeAtLoad = Boolean(registration.active);
   // Lets the worker drop a previous version's cache it kept for tabs that
   // have since reloaded (PLT-4).
   container.controller?.postMessage({ type: CLIENT_READY_MESSAGE });

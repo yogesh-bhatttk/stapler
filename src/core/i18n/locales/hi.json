@@ -2283,5 +2283,6 @@
   "\"{name}\" has settings this version cannot use ({fields}). No files were processed. Delete the recipe and save it again.": "\"{name}\" में ऐसी सेटिंग हैं जिनका यह संस्करण उपयोग नहीं कर सकता ({fields})। कोई फ़ाइल संसाधित नहीं की गई। रेसिपी हटाएँ और उसे फिर से सहेजें।",
   "Some recipes were not imported": "कुछ रेसिपी आयात नहीं की गईं",
   "{count} recipe in the file has missing or invalid settings and was skipped._one": "फ़ाइल में {count} रेसिपी की सेटिंग अनुपलब्ध या अमान्य हैं, इसलिए उसे छोड़ दिया गया।",
-  "{count} recipe in the file has missing or invalid settings and was skipped._other": "फ़ाइल में {count} रेसिपी की सेटिंग अनुपलब्ध या अमान्य हैं, इसलिए उन्हें छोड़ दिया गया।"
+  "{count} recipe in the file has missing or invalid settings and was skipped._other": "फ़ाइल में {count} रेसिपी की सेटिंग अनुपलब्ध या अमान्य हैं, इसलिए उन्हें छोड़ दिया गया।",
+  "{before} → {after}. Converting to grey made it smaller, but encrypting it for password protection (or re-applying its restrictions) added {extra}.": "{before} → {after}. ग्रे में बदलने से फ़ाइल छोटी हुई, लेकिन पासवर्ड सुरक्षा के लिए उसे एन्क्रिप्ट करने (या उसकी पाबंदियाँ फिर से लागू करने) से {extra} बढ़ गए।"
 }

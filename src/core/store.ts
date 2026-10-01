@@ -445,13 +445,19 @@ export function switchDocument(id: string): void {
  * not a user edit, so it bypasses `mutateDoc`/`commit()` on purpose: it must not
  * flip `dirty` or push an undo entry.
  */
-export function refreshBaseline(docId: string, pages: PageRef[]): void {
+export function refreshBaseline(
+  docId: string,
+  pages: PageRef[],
+  /** The annotations that were written with `pages` — what is now on disk. */
+  annotations?: Annotation[]
+): void {
   const doc = documents.value.find(d => d.id === docId);
   if (!doc) return;
-  // The annotations written are the live ones only when the page list is; an
-  // edit made while the save was in flight leaves the previous anchor (and
-  // `dirty`, below) as they were.
-  const baselineAnnotations = doc.pages === pages ? doc.annotations : doc.baselineAnnotations;
+  // The written annotations become the anchor. A caller that does not say
+  // which were written gets the live ones only when the page list is still
+  // the one written; otherwise the previous anchor stays.
+  const baselineAnnotations =
+    annotations ?? (doc.pages === pages ? doc.annotations : doc.baselineAnnotations);
   // RT-1 (AUDIT-2026-10-01) — undo past this save must land dirty against
   // what is now on disk, so the whole history is re-anchored here too.
   rebaseHistory(docId, pages, baselineAnnotations);
@@ -465,9 +471,13 @@ export function refreshBaseline(docId: string, pages: PageRef[]): void {
           // no longer has unsaved changes. Before, `dirty` was never cleared:
           // the dot stayed after a save and closing the tab still asked to
           // discard, which trains users to click through that prompt. Only
-          // when the saved page list *is* the current one, though — an edit
-          // made while the save was in flight is still unsaved.
-          dirty: d.pages === pages ? false : d.dirty
+          // when the written pages *and* annotations are the current ones,
+          // though — an edit made while the save was in flight (an annotation
+          // added under the save dialog, say) is still unsaved.
+          dirty:
+            d.pages === pages && (annotations === undefined || d.annotations === annotations)
+              ? false
+              : d.dirty
         }
       : d
   );

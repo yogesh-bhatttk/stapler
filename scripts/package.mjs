@@ -7,7 +7,9 @@
  *   2. runs `validate-builds.mjs` and re-checks the zero-permission and
  *      version invariants on the *built* manifests;
  *   3. zips `dist/ext`, `dist/firefox` and `dist/web` (the static website,
- *      ready to unpack onto any static host), leaving out every `*.map`, with
+ *      ready to unpack onto any static host that serves files unmodified — the
+ *      service worker hash-checks every file, see RELEASE_CHECKLIST.md), leaving
+ *      out every `*.map`, with
  *      fixed timestamps so the same tree always produces the same bytes;
  *   4. writes a `<zip>.sha256` next to each zip (audit 2026-10-01 DIST-07 —
  *      `sha256sum --check <zip>.sha256` verifies one download on its own) and

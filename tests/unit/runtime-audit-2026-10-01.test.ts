@@ -171,6 +171,27 @@ describe('RT-1 — undo past a save', () => {
     expect(live('A').dirty).toBe(false);
   });
 
+  it('an annotation added while a save was in flight stays unsaved', () => {
+    source('s');
+    open('A');
+    // The save captured the document as it was: pages and no annotations.
+    const written = live('A');
+    addAnnotation('A', {
+      id: 'late',
+      pageKey: written.pages[0].key,
+      type: 'text',
+      x: 0.1,
+      y: 0.1,
+      width: 0.2,
+      height: 0.05,
+      data: 'added under the save dialog'
+    });
+    expect(live('A').pages).toBe(written.pages); // page list untouched
+    refreshBaseline('A', written.pages, written.annotations);
+    expect(live('A').dirty).toBe(true);
+    expect(live('A').baselineAnnotations).toEqual([]);
+  });
+
   it('keeps the live sourceHandle across undo and redo', () => {
     source('s');
     open('A');

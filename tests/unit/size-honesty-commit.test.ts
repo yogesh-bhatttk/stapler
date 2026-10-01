@@ -85,9 +85,11 @@ vi.mock('../../src/core/operations', async importOriginal => {
   return {
     ...actual,
     currentDocumentBytes: vi.fn(actual.currentDocumentBytes),
+    composeDocument: vi.fn(actual.composeDocument),
     compressToTargetSize: vi.fn(actual.compressToTargetSize),
     protectDocument: vi.fn(actual.protectDocument),
     grayscaleDocument: vi.fn(actual.grayscaleDocument),
+    pagesToSizedImageArchive: vi.fn(actual.pagesToSizedImageArchive),
     repairDocument: vi.fn()
   };
 });
@@ -108,6 +110,8 @@ const { compressMode, compressTarget } = await import('../../src/ui/tools/compre
 const { protection } = await import('../../src/ui/tools/protect/state');
 const { grayscaleSettings } = await import('../../src/ui/tools/grayscale/state');
 const { repairCandidate } = await import('../../src/ui/tools/repair/state');
+const { pdfToImageSettings } = await import('../../src/ui/tools/state');
+const { watermarkSettings } = await import('../../src/ui/tools/watermark/state');
 
 const fixture = (name: string) => new Uint8Array(readFileSync(`tests/fixtures/${name}`));
 
@@ -292,6 +296,19 @@ describe('Compress — IMG-5 and IMG-12', () => {
   });
 });
 
+describe('PDF to Images — the per-image target is never silently replaced', () => {
+  for (const targetKb of [NaN, 4, 60_000]) {
+    it(`refuses to run with ${targetKb} KB`, async () => {
+      await openPdf(`p-${targetKb}`, fixture('text-2.pdf'));
+      pdfToImageSettings.value = { ...pdfToImageSettings.value, sizeMode: 'target', targetKb };
+      await commitTool('pdf-to-img', {});
+      expect(ops.pagesToSizedImageArchive).not.toHaveBeenCalled();
+      expect(saved).toEqual([]);
+      expect(toasts.value.at(-1)?.title).toMatch(/Enter a size between 5 KB and 50 MB/);
+    });
+  }
+});
+
 describe('OPS-19 — Grayscale never writes a larger file silently', () => {
   async function runLarger(answer: boolean) {
     const source = fixture('text-2.pdf');
@@ -318,6 +335,36 @@ describe('OPS-19 — Grayscale never writes a larger file silently', () => {
     expect(warning?.detail).toMatch(/→/);
     expect(saved).toHaveLength(1);
     expect(saved[0].bytes.byteLength).toBe(source.byteLength + 5_000);
+  });
+
+  it('warns when password protection alone pushes the saved file past the original', async () => {
+    const source = fixture('text-2.pdf');
+    await openPdf('g3', source);
+    protection.value = {
+      ...protection.value,
+      enabled: true,
+      userPassword: 'pw',
+      confirmPassword: 'pw'
+    };
+    vi.mocked(ops.grayscaleDocument).mockResolvedValueOnce({
+      nothingToDo: false,
+      pages: [],
+      undecodable: [],
+      colourLeft: [],
+      originalBytes: source.byteLength,
+      bytes: new Uint8Array(source.byteLength - 100)
+    } as unknown as Awaited<ReturnType<typeof ops.grayscaleDocument>>);
+    vi.mocked(ops.protectDocument).mockImplementationOnce(async bytes => {
+      const out = new Uint8Array(bytes.byteLength + 400);
+      out.set(bytes);
+      return out;
+    });
+    await commitTool('grayscale', {});
+    expect(saved).toHaveLength(1);
+    expect(saved[0].bytes.byteLength).toBe(source.byteLength + 300);
+    const warning = toasts.value.find(t => t.tone === 'warning');
+    expect(warning?.title).toBe('The converted file is larger than the original.');
+    expect(warning?.detail).toMatch(/password protection/);
   });
 
   it('does not ask when the result is smaller', async () => {
@@ -358,6 +405,40 @@ describe('UI-3 — Repair repairs the open document, edits included', () => {
     expect(inputs[0]).toEqual(source);
   });
 
+  it('an untouched document is repaired from its raw file even with Watermark panel text set', async () => {
+    const source = fixture('text-2.pdf');
+    await openPdf('r4', source);
+    const before = watermarkSettings.value;
+    watermarkSettings.value = { ...before, text: 'DRAFT' };
+    try {
+      const inputs = captureRepairInput();
+      await commitTool('repair', {});
+      expect(inputs).toHaveLength(1);
+      expect(inputs[0]).toEqual(source);
+      expect(ops.composeDocument).not.toHaveBeenCalled();
+    } finally {
+      watermarkSettings.value = before;
+    }
+  });
+
+  it('an edited document is composed without the Watermark panel text', async () => {
+    const source = fixture('text-2.pdf');
+    const doc = await openPdf('r5', source);
+    store.rotatePages(doc.id, [doc.pages[0].key], 90);
+    const before = watermarkSettings.value;
+    watermarkSettings.value = { ...before, text: 'DRAFT' };
+    try {
+      captureRepairInput();
+      await commitTool('repair', {});
+      const request = vi.mocked(ops.composeDocument).mock.calls.at(-1)?.[0];
+      expect(request?.watermark).toBeUndefined();
+      expect(request?.headerFooter).toBeUndefined();
+      expect(request?.nup).toBeUndefined();
+    } finally {
+      watermarkSettings.value = before;
+    }
+  });
+
   it('a rotation and a deletion are in what gets repaired', async () => {
     const source = fixture('text-2.pdf');
     const doc = await openPdf('r2', source);
@@ -375,7 +456,7 @@ describe('UI-3 — Repair repairs the open document, edits included', () => {
     const source = fixture('text-2.pdf');
     const doc = await openPdf('r3', source);
     store.rotatePages(doc.id, [doc.pages[0].key], 90);
-    vi.mocked(ops.currentDocumentBytes).mockRejectedValueOnce(new Error('damaged xref'));
+    vi.mocked(ops.composeDocument).mockRejectedValueOnce(new Error('damaged xref'));
     const inputs = captureRepairInput();
     await commitTool('repair', {});
     expect(inputs[0]).toEqual(source);

@@ -26,6 +26,7 @@ import {
   decodeTiffPages,
   flattenOnWhite,
   gifFrameCount,
+  imageOriginalSatisfies,
   sniffWebImageFormat,
   type LibHeif,
   type RasterKind,
@@ -266,11 +267,21 @@ const api: ImageJob = {
     // so the result can say so rather than drop them silently.
     const frames =
       kind === 'bitmap' && sniffWebImageFormat(bytes) === 'gif' ? gifFrameCount(bytes) : 1;
-    const sourceBytes = bytes.byteLength;
     const { source, pages } = await decodeForResize(kind, bytes, name, job);
     try {
       // The source's own size steers the quality search away from a "fit"
-      // that is bigger than the file it came from (IMG-1).
+      // that is bigger than the file it came from (IMG-1) — but only when
+      // keeping that file is possible. A HEIC, a TIFF or a sideways JPEG must
+      // be converted whatever its size, so capping its JPEG at the source's
+      // byte length would only cost quality for nothing.
+      const keepable =
+        kind === 'bitmap' &&
+        imageOriginalSatisfies(
+          bytes,
+          { sourceWidth: source.width, sourceHeight: source.height },
+          request
+        );
+      const sourceBytes = keepable ? bytes.byteLength : undefined;
       const result = await resizeToTarget(
         source,
         { ...request, sourceBytes },

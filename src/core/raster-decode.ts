@@ -21,7 +21,7 @@
  */
 import { corrupt, unsupported } from './errors';
 import { translate } from './i18n';
-import { readJpegInfo } from './jpeg-info';
+import { jpegPassthrough, readJpegInfo } from './jpeg-info';
 
 /** Which worker decoder an image needs (`workers/image.worker.ts`). */
 export type RasterKind = 'heic' | 'tiff';
@@ -384,41 +384,95 @@ export function declaredImageSize(bytes: Uint8Array): { width: number; height: n
  * block, so a damaged file reports the frames it really has up to there.
  */
 export function gifFrameCount(bytes: Uint8Array): number {
-  if (sniffWebImageFormat(bytes) !== 'gif' || bytes.length < 13) return 0;
-  let p = 13;
-  const packed = bytes[10];
-  if (packed & 0x80) p += 3 * (1 << ((packed & 0x07) + 1));
-  const skipSubBlocks = () => {
-    while (p < bytes.length) {
-      const size = bytes[p++];
-      if (size === 0) return true;
-      p += size;
-    }
-    return false;
-  };
-  let frames = 0;
-  while (p < bytes.length) {
-    const marker = bytes[p++];
-    if (marker === 0x3b) break; // trailer
-    if (marker === 0x21) {
-      p++; // extension label
-      if (!skipSubBlocks()) break;
-    } else if (marker === 0x2c) {
-      if (p + 9 > bytes.length) break;
-      const local = bytes[p + 8];
-      p += 9;
-      if (local & 0x80) p += 3 * (1 << ((local & 0x07) + 1));
-      p++; // LZW minimum code size
-      if (!skipSubBlocks()) {
-        frames++;
-        break;
+  const counter = new GifFrameCounter();
+  counter.push(bytes);
+  return counter.finish();
+}
+
+/**
+ * Counts a GIF's image blocks from chunks of the file, holding only the chunk
+ * in hand — so an animated GIF's frames can be counted straight from a `File`
+ * stream without reading it into memory whole (IMG-9). A file that is not a
+ * GIF counts 0; a truncated last frame whose descriptor arrived still counts.
+ */
+export class GifFrameCounter {
+  private header: number[] = [];
+  private phase: 'header' | 'block' | 'label' | 'desc' | 'sub' | 'done' = 'header';
+  private skip = 0;
+  private desc: number[] = [];
+  private pendingFrame = false;
+  private frames = 0;
+  private gif = false;
+
+  push(chunk: Uint8Array): void {
+    let i = 0;
+    while (i < chunk.length && this.phase !== 'done') {
+      if (this.skip > 0) {
+        const n = Math.min(this.skip, chunk.length - i);
+        this.skip -= n;
+        i += n;
+        continue;
       }
-      frames++;
-    } else {
-      break;
+      const byte = chunk[i++];
+      switch (this.phase) {
+        case 'header':
+          this.header.push(byte);
+          if (this.header.length === 13) {
+            const head = new Uint8Array(this.header);
+            this.gif = sniffWebImageFormat(head) === 'gif';
+            if (!this.gif) {
+              this.phase = 'done';
+              break;
+            }
+            if (head[10] & 0x80) this.skip = 3 * (1 << ((head[10] & 0x07) + 1));
+            this.phase = 'block';
+          }
+          break;
+        case 'block':
+          if (byte === 0x3b)
+            this.phase = 'done'; // trailer
+          else if (byte === 0x21) this.phase = 'label';
+          else if (byte === 0x2c) {
+            this.desc = [];
+            this.phase = 'desc';
+          } else this.phase = 'done';
+          break;
+        case 'label':
+          this.phase = 'sub'; // the extension label byte itself
+          break;
+        case 'desc':
+          this.desc.push(byte);
+          if (this.desc.length === 9) {
+            this.pendingFrame = true;
+            const local = this.desc[8];
+            // Local colour table, then the LZW minimum code size byte.
+            this.skip = (local & 0x80 ? 3 * (1 << ((local & 0x07) + 1)) : 0) + 1;
+            this.phase = 'sub';
+          }
+          break;
+        case 'sub':
+          if (byte === 0) {
+            if (this.pendingFrame) this.frames++;
+            this.pendingFrame = false;
+            this.phase = 'block';
+          } else {
+            this.skip = byte;
+          }
+          break;
+      }
     }
   }
-  return frames;
+
+  /** The count once the whole file (or as much of it as there is) was pushed. */
+  finish(): number {
+    if (!this.gif) return 0;
+    if (this.pendingFrame) {
+      this.frames++;
+      this.pendingFrame = false;
+    }
+    this.phase = 'done';
+    return this.frames;
+  }
 }
 
 /**
@@ -428,4 +482,48 @@ export function gifFrameCount(bytes: Uint8Array): number {
  */
 export function assertDrawableSize(width: number, height: number, name: string): void {
   assertFrameSize(width, height, name);
+}
+
+/**
+ * IMG-1 — whether an image file, kept byte for byte, already satisfies an
+ * "Image to size" request, so a re-encode that is not smaller should be
+ * discarded in its favour.
+ *
+ * Every limit has to hold on the original as it is, not as it would be after
+ * conversion:
+ *  - its real format (by signature, not name) is one every browser and upload
+ *    form takes — JPEG, PNG, GIF or WebP. A HEIC, a TIFF, or a file whose bytes
+ *    are not what its name says must be converted, which is the request;
+ *  - it is stored upright: a JPEG with orientation 1 that every viewer can
+ *    decode (`jpegPassthrough`), or a PNG/GIF/WebP with no EXIF and a header
+ *    size equal to the decoded one. A sideways original "fits" only in
+ *    viewers that honour its tag;
+ *  - its decoded size fits the longest-side box, and its byte length the target;
+ *  - it is a single page (a multi-page TIFF is already excluded by format).
+ */
+export function imageOriginalSatisfies(
+  original: Uint8Array,
+  decoded: { sourceWidth: number; sourceHeight: number },
+  request: { targetBytes: number | null; maxDimension: number | null }
+): boolean {
+  const format = sniffWebImageFormat(original);
+  if (!format) return false;
+  if (format === 'jpeg') {
+    if (jpegPassthrough(original)?.orientation !== 1) return false;
+  } else {
+    const stored = storedImageSize(original);
+    if (
+      !stored ||
+      stored.hasExif ||
+      stored.width !== decoded.sourceWidth ||
+      stored.height !== decoded.sourceHeight
+    ) {
+      return false;
+    }
+  }
+  const fitsBox =
+    request.maxDimension === null ||
+    Math.max(decoded.sourceWidth, decoded.sourceHeight) <= request.maxDimension;
+  const fitsTarget = request.targetBytes === null || original.byteLength <= request.targetBytes;
+  return fitsBox && fitsTarget;
 }

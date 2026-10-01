@@ -1,8 +1,13 @@
 import * as Comlink from 'comlink';
 import { PDFDocument } from 'pdf-lib';
 import { type StaplerDoc } from './store';
-import { composeDocument } from './operations';
-import { cvWorker, renderWorker } from './workers';
+import {
+  closeOpenedDocument,
+  openComposedDocument,
+  type OpenedDoc,
+  type PageSize
+} from './compare-documents';
+import { cvWorker } from './workers';
 import { cancelled, internal, isCancellation } from './errors';
 import { translate } from './i18n';
 import {
@@ -33,40 +38,6 @@ export interface ExportVisualDiffOptions {
 const RENDER_SCALE = 1.5;
 /** Used only when nothing better is known about a page (a test's bare overlay). */
 const FALLBACK_SIZE = { width: 612, height: 792 };
-
-type PageSize = { width: number; height: number };
-
-/** A document opened once in its own render-worker instance for the whole export. */
-interface OpenedDoc {
-  client: ReturnType<typeof renderWorker.pin>;
-  handle: string;
-  pageSizes: PageSize[];
-}
-
-async function openComposed(doc: StaplerDoc, signal?: AbortSignal): Promise<OpenedDoc | null> {
-  if (doc.pages.length === 0) return null;
-  const bytes = await composeDocument(
-    { pages: doc.pages, annotations: doc.annotations ?? [] },
-    { signal }
-  );
-  // X-4 — one pinned instance per document, loaded once: load and close must
-  // stay on the same instance, and a reload per page was 400 pdf.js loads for
-  // a pair of 200-page files.
-  const client = renderWorker.pin();
-  try {
-    const info = await client.lease(api => api.loadDocument(bytes));
-    return { client, handle: info.handle, pageSizes: info.pageSizes };
-  } catch (error) {
-    client.release();
-    throw error;
-  }
-}
-
-async function closeOpened(opened: OpenedDoc | null): Promise<void> {
-  if (!opened) return;
-  await opened.client.lease(api => api.closeDocument(opened.handle)).catch(() => {});
-  opened.client.release();
-}
 
 /**
  * X-2 — a page's real size in points: the composed page's CropBox with its
@@ -112,9 +83,9 @@ export async function exportVisualDiff(
   try {
     // Opened only when some page has to be rendered, and then once each.
     if (needsRender) {
-      openedA = await openComposed(docA, options.signal);
+      openedA = await openComposedDocument(docA, options.signal);
       if (options.signal?.aborted) throw cancelled();
-      openedB = await openComposed(docB, options.signal);
+      openedB = await openComposedDocument(docB, options.signal);
     }
 
     for (let i = 0; i < totalPages; i++) {
@@ -184,7 +155,7 @@ export async function exportVisualDiff(
       });
     }
   } finally {
-    await Promise.all([closeOpened(openedA), closeOpened(openedB)]);
+    await Promise.all([closeOpenedDocument(openedA), closeOpenedDocument(openedB)]);
   }
 
   if (options.signal?.aborted) throw cancelled();

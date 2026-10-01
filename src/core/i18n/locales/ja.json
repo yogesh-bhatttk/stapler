@@ -2283,5 +2283,6 @@
   "\"{name}\" has settings this version cannot use ({fields}). No files were processed. Delete the recipe and save it again.": "「{name}」には、このバージョンでは使用できない設定があります（{fields}）。ファイルは処理されていません。レシピを削除して、もう一度保存してください。",
   "Some recipes were not imported": "一部のレシピをインポートできませんでした",
   "{count} recipe in the file has missing or invalid settings and was skipped._one": "ファイル内の {count} 件のレシピは設定が欠落しているか無効なため、スキップしました。",
-  "{count} recipe in the file has missing or invalid settings and was skipped._other": "ファイル内の {count} 件のレシピは設定が欠落しているか無効なため、スキップしました。"
+  "{count} recipe in the file has missing or invalid settings and was skipped._other": "ファイル内の {count} 件のレシピは設定が欠落しているか無効なため、スキップしました。",
+  "{before} → {after}. Converting to grey made it smaller, but encrypting it for password protection (or re-applying its restrictions) added {extra}.": "{before} → {after}。グレースケールへの変換で小さくなりましたが、パスワード保護のための暗号化（または制限の再適用）で {extra} 増えました。"
 }

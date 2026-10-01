@@ -61,7 +61,8 @@ export function expectedDocumentCount(files: readonly File[]): number {
   return pdfs + (hasImages ? 1 : 0);
 }
 
-function notifyDocumentCeiling(openCount: number): void {
+/** The one message for an open refused at the document ceiling. */
+export function notifyDocumentCeiling(openCount: number): void {
   notify('warning', translate('Too many documents are open.'), {
     detail: translate(
       'Stapler can keep up to {max} documents open at once (open now: {open}). Close some tabs, then open your files again.',

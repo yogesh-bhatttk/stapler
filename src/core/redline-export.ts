@@ -1,8 +1,13 @@
 import * as Comlink from 'comlink';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import type { StaplerDoc } from './store';
-import { composeDocument } from './operations';
-import { cvWorker, renderWorker } from './workers';
+import {
+  closeOpenedDocument,
+  openComposedDocument,
+  type OpenedDoc,
+  type PageSize
+} from './compare-documents';
+import { cvWorker } from './workers';
 import { internal, cancelled } from './errors';
 import { translate } from './i18n';
 import {
@@ -40,49 +45,6 @@ const GUTTER_PT = 24;
 const LABEL_BAND_PT = 20;
 const PLACEHOLDER_W_PT = 300;
 const PLACEHOLDER_H_PT = 400;
-
-/**
- * Always composes, never reads a source's raw bytes directly. A `StaplerDoc`
- * is a *view* — `pages[i].sourceIndex` is only `i` for an untouched,
- * single-source document — so a shortcut that read `pages[0]`'s source
- * directly and then rendered its own page `i` silently rendered the wrong
- * page (or threw entirely) the moment a page was deleted, reordered, or
- * pulled in from a second source, and ignored any rotation the workspace
- * had applied. `composeDocument` builds real output bytes where page `i`
- * *is* `doc.pages[i]`, rotation included, so no index translation is needed
- * anywhere below this point.
- */
-async function loadDocBytes(doc: StaplerDoc, signal?: AbortSignal): Promise<Uint8Array> {
-  return composeDocument({ pages: doc.pages, annotations: doc.annotations }, { signal });
-}
-
-type PageSize = { width: number; height: number };
-
-/** A composed document, loaded once into its own pinned render-worker instance. */
-interface OpenedDoc {
-  client: ReturnType<typeof renderWorker.pin>;
-  handle: string;
-  pageSizes: PageSize[];
-}
-
-async function openDoc(doc: StaplerDoc, signal?: AbortSignal): Promise<OpenedDoc | null> {
-  if (doc.pages.length === 0) return null;
-  const bytes = await loadDocBytes(doc, signal);
-  const client = renderWorker.pin();
-  try {
-    const info = await client.lease(api => api.loadDocument(bytes));
-    return { client, handle: info.handle, pageSizes: info.pageSizes };
-  } catch (error) {
-    client.release();
-    throw error;
-  }
-}
-
-async function closeDoc(opened: OpenedDoc | null): Promise<void> {
-  if (!opened) return;
-  await opened.client.lease(api => api.closeDocument(opened.handle)).catch(() => {});
-  opened.client.release();
-}
 
 async function renderOne(opened: OpenedDoc | null, i: number): Promise<ImageBitmap | null> {
   if (!opened || i >= opened.pageSizes.length) return null;
@@ -126,9 +88,9 @@ export async function exportRedlinePdf(
   let openedB: OpenedDoc | null = null;
   try {
     if (!rendered) {
-      openedA = await openDoc(docA, options.signal);
+      openedA = await openComposedDocument(docA, options.signal);
       if (options.signal?.aborted) throw cancelled();
-      openedB = await openDoc(docB, options.signal);
+      openedB = await openComposedDocument(docB, options.signal);
     }
 
     for (let i = 0; i < totalPages; i++) {
@@ -256,7 +218,7 @@ export async function exportRedlinePdf(
       }
     }
   } finally {
-    await Promise.all([closeDoc(openedA), closeDoc(openedB)]);
+    await Promise.all([closeOpenedDocument(openedA), closeOpenedDocument(openedB)]);
   }
 
   if (options.signal?.aborted) throw cancelled();

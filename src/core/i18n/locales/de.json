@@ -2283,5 +2283,6 @@
   "\"{name}\" has settings this version cannot use ({fields}). No files were processed. Delete the recipe and save it again.": "„{name}“ hat Einstellungen, die diese Version nicht verwenden kann ({fields}). Es wurden keine Dateien verarbeitet. Löschen Sie das Rezept und speichern Sie es erneut.",
   "Some recipes were not imported": "Einige Rezepte wurden nicht importiert",
   "{count} recipe in the file has missing or invalid settings and was skipped._one": "{count} Rezept in der Datei hat fehlende oder ungültige Einstellungen und wurde übersprungen.",
-  "{count} recipe in the file has missing or invalid settings and was skipped._other": "{count} Rezepte in der Datei haben fehlende oder ungültige Einstellungen und wurden übersprungen."
+  "{count} recipe in the file has missing or invalid settings and was skipped._other": "{count} Rezepte in der Datei haben fehlende oder ungültige Einstellungen und wurden übersprungen.",
+  "{before} → {after}. Converting to grey made it smaller, but encrypting it for password protection (or re-applying its restrictions) added {extra}.": "{before} → {after}. Die Umwandlung in Graustufen hat die Datei verkleinert, aber die Verschlüsselung für den Passwortschutz (oder das erneute Anwenden der Einschränkungen) hat {extra} hinzugefügt."
 }

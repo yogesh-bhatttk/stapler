@@ -252,7 +252,10 @@ async function install(): Promise<void> {
   // PLT-1: if the server already holds a newer deploy, an unhashed file
   // (an HTML page, a pdf.js asset) would arrive as that deploy's bytes. Such
   // a mixed cache is never completed: the install fails and the browser
-  // tries again with whichever `sw.js` the server now has.
+  // tries again with whichever `sw.js` the server now has. The same check
+  // fails on a host that rewrites responses (HTML minification, injected
+  // snippets): the site then works online but never installs offline, a
+  // hosting requirement stated in RELEASE_CHECKLIST.md's website deploy step.
   for (const path of download) {
     const expected = MANIFEST.revisions[path];
     const stored = await cache.match(urlOf(path));

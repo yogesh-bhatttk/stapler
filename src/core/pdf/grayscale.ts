@@ -54,10 +54,13 @@ import {
   type Token
 } from './interpreter';
 import { parseFunction, parseFunctionOrArray, type PdfFunction } from './functions';
-import { encodeGrayJpeg } from '../jpeg-gray';
+import { encodeGraySamples, GRAY_JPEG_QUALITY, packOneBit, type EncodedGray } from '../gray-encode';
 import { translate } from '../i18n';
 
 export type GrayMode = 'gray' | 'bw';
+
+// Re-exported: the converter's public encoding API predates `gray-encode.ts`.
+export { encodeGraySamples, GRAY_JPEG_QUALITY, packOneBit, type EncodedGray };
 
 /**
  * Grey samples already encoded as a DeviceGray image stream's data. The render
@@ -65,14 +68,6 @@ export type GrayMode = 'gray' | 'bw';
  * a whole document's worth of raw pixels is never held at once (PDF-5): only
  * the compressed payloads travel to the process worker.
  */
-export interface EncodedGray {
-  data: Uint8Array;
-  filter: 'FlateDecode' | 'DCTDecode';
-  bitsPerComponent: 1 | 8;
-}
-
-/** The JPEG quality grey images and page rasters are written at. */
-export const GRAY_JPEG_QUALITY = 0.85;
 
 /** Decoded pixels for one image XObject, from the render worker. */
 export interface GrayImageData {
@@ -1759,51 +1754,8 @@ function annotationVisible(annot: PDFDict, context: PDFContext): boolean {
   return (value & (ANNOT_HIDDEN | ANNOT_NOVIEW)) === 0;
 }
 
-/**
- * Encodes grey samples as a DeviceGray image's data: 1-bit Flate in `bw`
- * mode, JPEG where the original was lossy (or for a page raster), otherwise
- * 8-bit Flate. Pure — the render worker runs the same choice through its own
- * copy (it does not load pdf-lib); `grayscale.test.ts` checks both agree.
- */
-export function encodeGraySamples(
-  gray: Uint8Array,
-  width: number,
-  height: number,
-  mode: GrayMode,
-  lossy: boolean,
-  quality = GRAY_JPEG_QUALITY
-): EncodedGray {
-  if (mode === 'bw') {
-    return {
-      data: zlibSync(packOneBit(gray, width, height)),
-      filter: 'FlateDecode',
-      bitsPerComponent: 1
-    };
-  }
-  if (lossy) {
-    return {
-      data: encodeGrayJpeg(gray, width, height, { quality }),
-      filter: 'DCTDecode',
-      bitsPerComponent: 8
-    };
-  }
-  return { data: zlibSync(gray), filter: 'FlateDecode', bitsPerComponent: 8 };
-}
-
 function formatBox(v: number): string {
   return String(Number(v.toFixed(4)));
-}
-
-/** 8-bit 0/255 samples → 1-bit rows (1 = white, as DeviceGray 1bpc reads). */
-export function packOneBit(gray: Uint8Array, width: number, height: number): Uint8Array {
-  const rowBytes = Math.ceil(width / 8);
-  const out = new Uint8Array(rowBytes * height);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (gray[y * width + x] >= 128) out[y * rowBytes + (x >> 3)] |= 0x80 >> (x & 7);
-    }
-  }
-  return out;
 }
 
 /* ------------------------------------------------------------------ *

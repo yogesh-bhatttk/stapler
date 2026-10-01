@@ -2601,5 +2601,6 @@
   "{count} recipe in the file has missing or invalid settings and was skipped._one": "{count} рецепт в файле имеет отсутствующие или недопустимые настройки и был пропущен.",
   "{count} recipe in the file has missing or invalid settings and was skipped._other": "{count} рецепта в файле имеют отсутствующие или недопустимые настройки и были пропущены.",
   "{count} recipe in the file has missing or invalid settings and was skipped._few": "{count} рецепта в файле имеют отсутствующие или недопустимые настройки и были пропущены.",
-  "{count} recipe in the file has missing or invalid settings and was skipped._many": "{count} рецептов в файле имеют отсутствующие или недопустимые настройки и были пропущены."
+  "{count} recipe in the file has missing or invalid settings and was skipped._many": "{count} рецептов в файле имеют отсутствующие или недопустимые настройки и были пропущены.",
+  "{before} → {after}. Converting to grey made it smaller, but encrypting it for password protection (or re-applying its restrictions) added {extra}.": "{before} → {after}. Перевод в оттенки серого уменьшил файл, но шифрование для защиты паролем (или повторное применение ограничений) добавило {extra}."
 }

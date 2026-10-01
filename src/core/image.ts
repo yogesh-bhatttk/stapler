@@ -18,7 +18,15 @@ import { DOC_PAGE_WHITE } from './doc-colors';
 import { translate } from './i18n';
 import { formatBytes } from './bytes';
 import type { RasterKind } from './raster-decode';
-import { gifFrameCount, sniffWebImageFormat, storedImageSize } from './raster-decode';
+
+export { imageOriginalSatisfies };
+import {
+  assertDrawableSize,
+  declaredImageSize,
+  imageOriginalSatisfies,
+  GifFrameCounter,
+  sniffWebImageFormat
+} from './raster-decode';
 import { jpegPassthrough, readJpegInfo, type JpegInfo } from './jpeg-info';
 import { encodeCanvasAtMaximum, webpTraits } from './max-quality';
 import type { PdfImageSource } from './image-embed';
@@ -66,50 +74,6 @@ export function isBrowserRenderableImage(file: File): boolean {
   // fallback for the cases only the decoder can find.
   if (file.size === 0 || rasterKindOf(file) !== null) return false;
   return BROWSER_RENDERABLE.has(file.type) || BROWSER_RENDERABLE_EXTENSIONS.test(file.name);
-}
-
-/**
- * IMG-1 — whether an image file, kept byte for byte, already satisfies an
- * "Image to size" request, so a re-encode that is not smaller should be
- * discarded in its favour.
- *
- * Every limit has to hold on the original as it is, not as it would be after
- * conversion:
- *  - its real format (by signature, not name) is one every browser and upload
- *    form takes — JPEG, PNG, GIF or WebP. A HEIC, a TIFF, or a file whose bytes
- *    are not what its name says must be converted, which is the request;
- *  - it is stored upright: a JPEG with orientation 1 that every viewer can
- *    decode (`jpegPassthrough`), or a PNG/GIF/WebP with no EXIF and a header
- *    size equal to the decoded one. A sideways original "fits" only in
- *    viewers that honour its tag;
- *  - its decoded size fits the longest-side box, and its byte length the target;
- *  - it is a single page (a multi-page TIFF is already excluded by format).
- */
-export function imageOriginalSatisfies(
-  original: Uint8Array,
-  decoded: { sourceWidth: number; sourceHeight: number },
-  request: { targetBytes: number | null; maxDimension: number | null }
-): boolean {
-  const format = sniffWebImageFormat(original);
-  if (!format) return false;
-  if (format === 'jpeg') {
-    if (jpegPassthrough(original)?.orientation !== 1) return false;
-  } else {
-    const stored = storedImageSize(original);
-    if (
-      !stored ||
-      stored.hasExif ||
-      stored.width !== decoded.sourceWidth ||
-      stored.height !== decoded.sourceHeight
-    ) {
-      return false;
-    }
-  }
-  const fitsBox =
-    request.maxDimension === null ||
-    Math.max(decoded.sourceWidth, decoded.sourceHeight) <= request.maxDimension;
-  const fitsTarget = request.targetBytes === null || original.byteLength <= request.targetBytes;
-  return fitsBox && fitsTarget;
 }
 
 /**
@@ -460,6 +424,13 @@ export async function resizeImageFile(
  *    when that is smaller than the PNG (`max-quality.ts`).
  * Below 1 the image is re-encoded as JPEG at that quality, as before.
  */
+/**
+ * How much of an image file is read to find its declared size. JPEG frame
+ * headers sit after the APPn segments (EXIF, ICC, XMP — each at most 64 KB),
+ * so 1 MB covers any real file without reading a large one whole.
+ */
+const HEADER_PROBE_BYTES = 1_000_000;
+
 export async function imageFileToPdfImages(
   file: File,
   quality = 0.9,
@@ -487,6 +458,14 @@ export async function imageFileToPdfImages(
     photographic =
       readJpegInfo(original) !== null || (webp !== null && !webp.lossless && !webp.alpha);
   }
+  // The same limit the image worker applies (IMG-8): refuse a too-large image
+  // from its header, before the browser commits memory to decoding it. Only
+  // the head of the file is read; a header past it falls back to the check on
+  // the decoded bitmap below.
+  const head = new Uint8Array(await file.slice(0, HEADER_PROBE_BYTES).arrayBuffer());
+  const declared = declaredImageSize(head);
+  if (declared) assertDrawableSize(declared.width, declared.height, file.name);
+  if (signal?.aborted) throw cancelled();
   let bitmap: ImageBitmap;
   try {
     bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
@@ -499,6 +478,7 @@ export async function imageFileToPdfImages(
     );
   }
   try {
+    assertDrawableSize(bitmap.width, bitmap.height, file.name);
     return [
       lossless ? await bitmapToMaximum(bitmap, photographic) : await bitmapToJpeg(bitmap, quality)
     ];
@@ -516,7 +496,16 @@ export async function imageFileToPdfImages(
 export async function gifFrameCountOf(file: File): Promise<number> {
   const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
   if (sniffWebImageFormat(head) !== 'gif') return 0;
-  return gifFrameCount(new Uint8Array(await file.arrayBuffer()));
+  // Streamed: an animated GIF can run to tens of MB, and the count needs no
+  // more of it in memory than one chunk at a time.
+  const counter = new GifFrameCounter();
+  const reader = file.stream().getReader();
+  try {
+    for (let r = await reader.read(); !r.done; r = await reader.read()) counter.push(r.value);
+  } finally {
+    reader.releaseLock();
+  }
+  return counter.finish();
 }
 
 /**

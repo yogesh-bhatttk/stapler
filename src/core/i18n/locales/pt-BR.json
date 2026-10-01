@@ -2407,5 +2407,6 @@
   "Some recipes were not imported": "Algumas receitas não foram importadas",
   "{count} recipe in the file has missing or invalid settings and was skipped._one": "{count} receita do arquivo tem configurações ausentes ou inválidas e foi ignorada.",
   "{count} recipe in the file has missing or invalid settings and was skipped._other": "{count} receitas do arquivo têm configurações ausentes ou inválidas e foram ignoradas.",
-  "{count} recipe in the file has missing or invalid settings and was skipped._many": "{count} receitas do arquivo têm configurações ausentes ou inválidas e foram ignoradas."
+  "{count} recipe in the file has missing or invalid settings and was skipped._many": "{count} receitas do arquivo têm configurações ausentes ou inválidas e foram ignoradas.",
+  "{before} → {after}. Converting to grey made it smaller, but encrypting it for password protection (or re-applying its restrictions) added {extra}.": "{before} → {after}. A conversão para tons de cinza reduziu o arquivo, mas criptografá-lo para a proteção por senha (ou reaplicar suas restrições) acrescentou {extra}."
 }

@@ -11,7 +11,7 @@ import { panelStyles } from '../../shell/panelStyles';
 import { pdfToImageSettings } from '../state';
 import { maxDimensionOptions, pdfToImageReport } from './pdf-to-img-state';
 import { tKey, tPlural, useTranslation } from '../../../core/i18n';
-import { IMAGE_TARGET_BOUNDS } from '../../../core/deep-link';
+import { IMAGE_TARGET_BOUNDS, targetKbInRange } from '../../../core/deep-link';
 
 const DPI_OPTIONS = [
   { value: 72, label: tKey('72 DPI — screen') },
@@ -85,22 +85,40 @@ export function PdfToImagePanel() {
             'If a page cannot get that small, Stapler keeps the smallest version it made and tells you which page.'
           )}
         >
-          {id => (
-            <NumberInput
-              id={id}
-              min={MIN_TARGET_KB}
-              max={MAX_TARGET_KB}
-              step={10}
-              value={settings.targetKb}
-              data-image-target-kb={settings.targetKb}
-              onInput={event => {
-                const value = Number((event.target as HTMLInputElement).value);
-                if (Number.isFinite(value) && value >= MIN_TARGET_KB && value <= MAX_TARGET_KB) {
-                  pdfToImageSettings.value = { ...settings, targetKb: value };
-                }
-              }}
-            />
-          )}
+          {id => {
+            // Stored exactly as typed (IMG-2): an out-of-range or empty value is
+            // shown with an inline error and refused by the export, never
+            // silently replaced by the last good one.
+            const invalid = !targetKbInRange(settings.targetKb);
+            const errorId = `${id}-error`;
+            return (
+              <>
+                <NumberInput
+                  id={id}
+                  min={MIN_TARGET_KB}
+                  max={MAX_TARGET_KB}
+                  step={10}
+                  value={Number.isNaN(settings.targetKb) ? '' : settings.targetKb}
+                  data-image-target-kb={settings.targetKb}
+                  aria-invalid={invalid ? true : undefined}
+                  aria-describedby={invalid ? errorId : undefined}
+                  onInput={event => {
+                    const raw = (event.target as HTMLInputElement).value;
+                    const value = raw.trim() === '' ? NaN : Number(raw);
+                    pdfToImageSettings.value = { ...settings, targetKb: value };
+                  }}
+                />
+                {invalid && (
+                  <p id={errorId} className={panelStyles.note} role="alert">
+                    {t('Enter a size between {min} and {max}.', {
+                      min: formatBytes(IMAGE_TARGET_BOUNDS.minBytes),
+                      max: formatBytes(IMAGE_TARGET_BOUNDS.maxBytes)
+                    })}
+                  </p>
+                )}
+              </>
+            );
+          }}
         </Field>
       ) : (
         <RadioGroup<'jpeg' | 'png'>
@@ -155,7 +173,9 @@ export function PdfToImagePanel() {
         })}
         {first &&
           (targetMode
-            ? ` ${t('At most {width}px wide, each at or under {size}.', { width, size: `${settings.targetKb} KB` })}`
+            ? targetKbInRange(settings.targetKb)
+              ? ` ${t('At most {width}px wide, each at or under {size}.', { width, size: `${settings.targetKb} KB` })}`
+              : ''
             : ` ${t('About {width}px wide.', { width })}`)}
       </p>
       {settings.dpi >= 600 && !settings.maxDimension && (

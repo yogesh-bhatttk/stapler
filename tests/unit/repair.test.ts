@@ -261,6 +261,26 @@ describe('repair — audit 2026-10-01 regressions', () => {
     expect((await pdfjsOpen(outcome.bytes)).text[0]).toContain('Real text');
   });
 
+  it('a damaged, unencrypted file with "/Encrypt" printed inside a stream is still repaired', async () => {
+    const { PDFArray, PDFName } = await import('pdf-lib');
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const page = doc.addPage([300, 300]);
+    page.drawText('Real text', { x: 20, y: 200, size: 18, font });
+    // A page that prints PDF syntax: the bytes "/Encrypt 5 0 R" are stream data.
+    const extra = doc.context.stream('% trailer << /Encrypt 5 0 R >>\n');
+    const contents = page.node.get(PDFName.of('Contents'))!;
+    const list = contents instanceof PDFArray ? contents : doc.context.obj([contents]);
+    list.push(doc.context.register(extra));
+    page.node.set(PDFName.of('Contents'), list);
+    const text = latin1(await doc.save({ useObjectStreams: false }));
+    expect(text).toContain('/Encrypt 5 0 R'); // the premise
+    const cut = text.slice(0, text.lastIndexOf('\nxref'));
+    const outcome = await repairPdfBytes(new Uint8Array(Buffer.from(cut, 'latin1')));
+    expect(outcome.changed).toBe(true);
+    expect((await pdfjsOpen(outcome.bytes)).text[0]).toContain('Real text');
+  });
+
   it('PDF-3: in a damaged file, an object header inside stream data is not salvaged', async () => {
     const text = latin1(await pdfWithFakeHeaderInStream(false));
     const cut = text.slice(0, text.lastIndexOf('\nxref'));

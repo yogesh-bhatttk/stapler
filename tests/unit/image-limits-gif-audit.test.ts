@@ -41,7 +41,8 @@ vi.mock('../../src/core/image', async importOriginal => ({
   imageFileToPdfImages: async (file: File) => [new Uint8Array(await file.arrayBuffer())]
 }));
 
-const { declaredImageSize, MAX_RASTER_PIXELS } = await import('../../src/core/raster-decode');
+const { declaredImageSize, GifFrameCounter, MAX_RASTER_PIXELS } =
+  await import('../../src/core/raster-decode');
 const { readJpegInfo, gifFrameCountOf } = await import('../../src/core/image');
 const { imagesToPdfBytes } = await import('../../src/core/import');
 await import('../../src/core/workers/image.worker');
@@ -213,6 +214,17 @@ describe('IMG-8 — a JPEG is refused from its SOF marker, before decoding', () 
 describe('IMG-9 — Images to PDF says when a GIF lost its animation', () => {
   const file = (bytes: Uint8Array, name: string, type: string) =>
     new File([bytes as BlobPart], name, { type });
+
+  it('counts the same frames whether the file arrives whole or in chunks', () => {
+    for (const frames of [1, 2, 3]) {
+      const bytes = gif(frames);
+      for (const size of [1, 2, 5, 64]) {
+        const counter = new GifFrameCounter();
+        for (let i = 0; i < bytes.length; i += size) counter.push(bytes.subarray(i, i + size));
+        expect(counter.finish()).toBe(frames);
+      }
+    }
+  });
 
   it('counts frames by signature, not by name', async () => {
     expect(await gifFrameCountOf(file(gif(3), 'anim.gif', 'image/gif'))).toBe(3);

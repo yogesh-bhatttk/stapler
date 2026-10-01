@@ -324,4 +324,12 @@ so it gets its own explicit step below rather than being buried inside "run veri
       site's entry scripts are content-hashed and its service worker serves each page
       from its own versioned cache, so open tabs keep running their version until the
       user accepts the "new version" reload.
+      **The host must serve every file byte for byte.** The service worker checks each
+      downloaded file against the SHA-256 recorded at build time and refuses to install
+      a cache that does not match. Turn off anything that rewrites responses: HTML
+      minification, injected analytics or banners, Cloudflare email obfuscation and
+      Rocket Loader, and similar features. Otherwise the site still works online, but it
+      never installs for offline use. To check, open the deployed site, then in DevTools
+      → Application → Service workers confirm that `sw.js` is *activated* and that Cache
+      Storage holds a `stapler-precache-<version>` cache.
 - [ ] **Celebrate:** Grab a coffee! ☕

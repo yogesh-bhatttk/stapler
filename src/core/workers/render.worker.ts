@@ -38,9 +38,8 @@ import { decodeBarcodesFromImage, type DecodedBarcode } from '../barcode';
 import { fillPolygonMask, polygonOverlapsBox, shrinkMask } from '../geometry';
 import { clampRenderScale } from '../render-limits';
 import { applyAdaptiveThreshold } from '../cv/enhance';
-import type { EncodedGray, GrayImageData, GrayMode, GrayRaster } from '../pdf/grayscale';
-import { encodeGrayJpeg } from '../jpeg-gray';
-import { zlibSync } from 'fflate';
+import type { GrayImageData, GrayMode, GrayRaster } from '../pdf/grayscale';
+import { encodeGraySamples } from '../gray-encode';
 import { resizeToTarget, type SizedImageRequest, type SizedImageResult } from '../image-resize';
 
 export interface DocumentInfo {
@@ -2049,7 +2048,13 @@ const api: RenderJob = {
       canvas.height = 0;
       // Encoded here, while this page's pixels are the only ones held: the
       // caller accumulates compressed pages, never raw ones (PDF-5).
-      const encoded = encodeGray(rgbaToGray(rgba, width, height, mode), width, height, mode, true);
+      const encoded = encodeGraySamples(
+        rgbaToGray(rgba, width, height, mode),
+        width,
+        height,
+        mode,
+        true
+      );
       const [x0, y0, x1, y1] = page.view;
       const raster: GrayRaster = {
         pageIndex,
@@ -2829,48 +2834,12 @@ function rgbaToGray(
   return gray;
 }
 
-/** Must equal `GRAY_JPEG_QUALITY` in `pdf/grayscale.ts` (checked by its test). */
-export const GRAY_JPEG_QUALITY = 0.85;
-
-/**
- * The render worker's copy of `encodeGraySamples` in `pdf/grayscale.ts` (this
- * worker does not load pdf-lib): 1-bit Flate in `bw` mode, JPEG where the
- * original was lossy (and for page rasters), otherwise 8-bit Flate.
- * `grayscale.test.ts` checks the two produce the same bytes.
- */
-export function encodeGray(
-  gray: Uint8Array,
-  width: number,
-  height: number,
-  mode: GrayMode,
-  lossy: boolean
-): EncodedGray {
-  if (mode === 'bw') {
-    const rowBytes = Math.ceil(width / 8);
-    const packed = new Uint8Array(rowBytes * height);
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        if (gray[y * width + x] >= 128) packed[y * rowBytes + (x >> 3)] |= 0x80 >> (x & 7);
-      }
-    }
-    return { data: zlibSync(packed), filter: 'FlateDecode', bitsPerComponent: 1 };
-  }
-  if (lossy) {
-    return {
-      data: encodeGrayJpeg(gray, width, height, { quality: GRAY_JPEG_QUALITY }),
-      filter: 'DCTDecode',
-      bitsPerComponent: 8
-    };
-  }
-  return { data: zlibSync(gray), filter: 'FlateDecode', bitsPerComponent: 8 };
-}
-
 function grayFromDecoded(decoded: DecodedImage, mode: GrayMode, lossy: boolean): GrayImageData {
   return {
     objectNumber: decoded.objectNumber,
     width: decoded.width,
     height: decoded.height,
-    encoded: encodeGray(
+    encoded: encodeGraySamples(
       rgbaToGray(decoded.rgba, decoded.width, decoded.height, mode),
       decoded.width,
       decoded.height,

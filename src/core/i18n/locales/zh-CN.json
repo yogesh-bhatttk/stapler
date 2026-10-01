@@ -2283,5 +2283,6 @@
   "\"{name}\" has settings this version cannot use ({fields}). No files were processed. Delete the recipe and save it again.": "“{name}”包含此版本无法使用的设置（{fields}）。未处理任何文件。请删除该配方后重新保存。",
   "Some recipes were not imported": "部分配方未导入",
   "{count} recipe in the file has missing or invalid settings and was skipped._one": "文件中有 {count} 个配方的设置缺失或无效，已跳过。",
-  "{count} recipe in the file has missing or invalid settings and was skipped._other": "文件中有 {count} 个配方的设置缺失或无效，已跳过。"
+  "{count} recipe in the file has missing or invalid settings and was skipped._other": "文件中有 {count} 个配方的设置缺失或无效，已跳过。",
+  "{before} → {after}. Converting to grey made it smaller, but encrypting it for password protection (or re-applying its restrictions) added {extra}.": "{before} → {after}。转换为灰度后文件变小了，但为密码保护加密（或重新应用其限制）增加了 {extra}。"
 }
