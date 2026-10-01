@@ -6,8 +6,14 @@
  * keeps its code (and its open documents) until the user chooses to reload.
  * `onUpdateReady` is how the UI offers that; calling the `apply` it receives
  * tells the waiting worker to take over, and the page reloads once it has.
+ *
+ * Audit 2026-10-01 PLT-4: that switch moves *every* open tab to the new
+ * version's worker, not just the one where the user chose to reload. A tab
+ * that did not ask is told through `onReplacedElsewhere`, so it can reload
+ * too (or, with unsaved changes, ask first) instead of running old code
+ * against a cache that is going away.
  */
-import { SKIP_WAITING_MESSAGE } from './sw-routing';
+import { CLIENT_READY_MESSAGE, SKIP_WAITING_MESSAGE } from './sw-routing';
 
 /** The slices of the Service Worker API used here, so tests can pass fakes. */
 export interface WorkerLike {
@@ -23,7 +29,7 @@ export interface RegistrationLike {
 }
 
 export interface ContainerLike {
-  readonly controller: unknown;
+  readonly controller: { postMessage(message: unknown): void } | null;
   register(url: string, options?: { scope?: string }): Promise<RegistrationLike>;
   addEventListener(type: 'controllerchange', listener: () => void): void;
 }
@@ -35,20 +41,32 @@ export interface RegisterOptions {
   scope?: string;
   onUpdateReady: (apply: () => void) => void;
   reload: () => void;
+  /**
+   * A newer version took over because the user applied it in another tab
+   * (PLT-4). Defaults to `reload`.
+   */
+  onReplacedElsewhere?: () => void;
 }
 
 export async function registerServiceWorker(options: RegisterOptions): Promise<RegistrationLike> {
   const { container, onUpdateReady, reload } = options;
+  const onReplacedElsewhere = options.onReplacedElsewhere ?? reload;
   let applying = false;
-  let reloaded = false;
+  let handled = false;
   let offered: WorkerLike | null = null;
+  // Whether this page was loaded under a worker. The first install also fires
+  // `controllerchange` (the new worker claims the page) and must not reload.
+  let controlled = Boolean(container.controller);
 
   container.addEventListener('controllerchange', () => {
-    // Only a switch the user asked for reloads the page. The first install
-    // also fires this (the new worker claims the page) and must not.
-    if (!applying || reloaded) return;
-    reloaded = true;
-    reload();
+    if (!controlled) {
+      controlled = true;
+      return;
+    }
+    if (handled) return;
+    handled = true;
+    if (applying) reload();
+    else onReplacedElsewhere();
   });
 
   const offer = (worker: WorkerLike) => {
@@ -62,6 +80,9 @@ export async function registerServiceWorker(options: RegisterOptions): Promise<R
   };
 
   const registration = await container.register(options.url, { scope: options.scope });
+  // Lets the worker drop a previous version's cache it kept for tabs that
+  // have since reloaded (PLT-4).
+  container.controller?.postMessage({ type: CLIENT_READY_MESSAGE });
   if (registration.waiting) offer(registration.waiting);
   registration.addEventListener('updatefound', () => {
     const worker = registration.installing;

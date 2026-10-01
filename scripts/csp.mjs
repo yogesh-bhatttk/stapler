@@ -28,6 +28,31 @@
  *    `<style>` elements at run time. Styles cannot fetch anything here because
  *    `img-src`/`font-src` stay local.
  *
+ * Where the policy does *not* reach (audit 2026-10-01 PLT-2):
+ *  - Workers on the website. A `<meta>` CSP governs only the document it is
+ *    in; a dedicated worker takes its policy from its own script's response
+ *    headers, and GitHub Pages sends none. So on the website a `fetch()`
+ *    inside a worker was not blocked (probed: it reached the network, while
+ *    the extension — whose manifest CSP does cover its workers — refused it).
+ *    The backstop is `src/core/workers/network-guard.ts`, imported first by
+ *    every `*.worker.ts` entry: it wraps `fetch`, `XMLHttpRequest`,
+ *    `importScripts` and refuses `WebSocket`/`EventSource`/`WebTransport`/
+ *    `RTCPeerConnection`, allowing this `connect-src` minus its remote source
+ *    (self, `blob:`, `data:` — `network-policy.ts`). The pinned OCR paths are
+ *    not needed there: the model is downloaded on the main thread, under the
+ *    meta CSP; `tests/unit/network-guard-worker.test.ts` keeps any future
+ *    worker allowlist a subset of `OCR_MODEL_CONNECT_SOURCES`.
+ *  - Still uncovered there: tesseract's vendored nested worker
+ *    (`ocr/worker.min.js`, copied verbatim, so nothing can be imported into
+ *    it — it is only ever given same-origin paths and a `langPath` that
+ *    cannot reach the network), a dynamic `import()` of a remote URL (no
+ *    global to wrap; the source and bundle scans forbid any non-relative
+ *    specifier), and the service worker `sw.js`, which issues no request
+ *    except Cache API reads of this build's own files.
+ *  - `frame-ancestors`/`report-uri` cannot be set from a meta tag; the policy
+ *    uses neither. A host that can send response headers would close all of
+ *    the above at once; GitHub Pages cannot.
+ *
  * Kept in sync with `.claude/hooks/check-invariants.mjs` (which is a
  * zero-dependency single file and so duplicates the allowlist below).
  */

@@ -40,6 +40,7 @@
  * tesseract worker outright. That reclaims the thread immediately but throws away
  * a warm engine, which is why it is a last resort rather than the normal path.
  */
+import './network-guard'; // PLT-2: first, so it wraps the network APIs before any library runs
 import * as Comlink from 'comlink';
 import { loadLocale, translate } from '../i18n';
 import type { LocaleAware } from './client';

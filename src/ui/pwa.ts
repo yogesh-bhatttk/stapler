@@ -4,7 +4,8 @@
  * extension, which is offline by construction and ships no service worker.
  *
  *  - registers `sw.js` (built by `scripts/pwa.mjs` for the web target only)
- *    and offers a reload, as a toast, when a new version has installed;
+ *    and offers a reload, as a toast, when a new version has installed —
+ *    and follows an update applied in another tab (PLT-4);
  *  - queues files the OS opens with the installed app (`launchQueue`) and
  *    files shared to it (`share_target`, stored by the worker) for
  *    `useExternalOpen` to import.
@@ -15,6 +16,7 @@ import { registerServiceWorker } from '../platform/pwa/register';
 import { takeSharedFiles } from '../platform/pwa/share-inbox';
 import { SHARE_TARGET_PARAM } from '../platform/pwa/sw-routing';
 import { queueExternalOpen } from '../core/external-open';
+import { documents } from '../core/store';
 import { notify } from '../core/notify';
 import { translate } from '../core/i18n';
 
@@ -64,6 +66,27 @@ async function receiveSharedFiles(): Promise<void> {
 declare const __STAPLER_WEB_BUILD__: boolean | undefined;
 const WEB_BUILD = typeof __STAPLER_WEB_BUILD__ !== 'undefined' && __STAPLER_WEB_BUILD__;
 
+/**
+ * Audit 2026-10-01 PLT-4 — the user applied an update in another tab, and
+ * this tab is now controlled by the new version's worker while still running
+ * the old code. With nothing unsaved it simply reloads into the new version.
+ * With unsaved changes it never reloads on its own: it says so and offers
+ * the reload, which then goes through the same unsaved-changes confirmation
+ * as any other (`useUnsavedGuard`). Until then the worker keeps serving this
+ * tab's old files (`service-worker.ts`), so exporting first still works.
+ */
+function onReplacedElsewhere(): void {
+  if (!documents.value.some(doc => doc.dirty)) {
+    window.location.reload();
+    return;
+  }
+  notify('warning', translate('Stapler was updated in another tab.'), {
+    detail: translate('Export your changes, then reload to finish updating.'),
+    timeout: 0,
+    action: { label: translate('Reload'), run: () => window.location.reload() }
+  });
+}
+
 export function startWebApp(): void {
   if (!WEB_BUILD || platform.kind !== 'web') return;
 
@@ -79,6 +102,7 @@ export function startWebApp(): void {
     url: `${base}sw.js`,
     scope: base,
     reload: () => window.location.reload(),
+    onReplacedElsewhere,
     onUpdateReady: apply =>
       notify('info', translate('A new version of Stapler is ready.'), {
         detail: translate('Reload to start using it.'),
