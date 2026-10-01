@@ -1,6 +1,7 @@
 import { signal } from '@preact/signals';
 import { DOC_SIGNATURE_STROKE } from '../../../core/doc-colors';
 import { translate } from '../../../core/i18n';
+import { pageIndexInRange } from '../../../core/page-range';
 
 export type WatermarkPosition =
   | 'top-left'
@@ -182,18 +183,13 @@ export function resetStampSettings(): void {
   };
 }
 
-/** Whether a 1-based `pageRange` string ("all" or "1-3, 6") covers `pageIndex` (0-based). */
+/**
+ * Whether a 1-based `pageRange` string ("all" or "1-3, 6") covers `pageIndex`
+ * (0-based). X-7 — the same parser the export worker uses, so the preview
+ * never marks a page the saved file leaves alone (or the reverse).
+ */
 export function pageInRange(pageRange: string, pageIndex: number): boolean {
-  const value = pageRange.trim().toLowerCase();
-  if (!value || value === 'all') return true;
-  return value.split(',').some(part => {
-    const match = part.trim().match(/^(\d+)(?:\s*-\s*(\d+))?$/);
-    if (!match) return false;
-    const from = Number(match[1]);
-    const to = Number(match[2] ?? match[1]);
-    const current = pageIndex + 1;
-    return current >= Math.min(from, to) && current <= Math.max(from, to);
-  });
+  return pageIndexInRange(pageRange, pageIndex);
 }
 
 /**

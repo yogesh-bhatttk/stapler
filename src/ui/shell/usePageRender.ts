@@ -49,6 +49,13 @@ export function viewRenderScale(
   return clampRenderScale(pageSize.width, pageSize.height, requested, MAX_VIEW_PIXELS);
 }
 
+/**
+ * UI-7 — how long a zoom change on the page already shown waits before it
+ * re-renders. A window drag or a run of zoom clicks then costs one worker
+ * render, not one per step; meanwhile the current pixels stay up, rescaled.
+ */
+export const ZOOM_RERENDER_DELAY_MS = 120;
+
 export function usePageRender(
   canvasRef: MutableRef<HTMLCanvasElement | null>,
   page: PageRef | undefined,
@@ -76,14 +83,15 @@ export function usePageRender(
     // blocking the Redact/Crop overlays) on every zoom step made each zoom
     // flash an opaque panel for pixels the user was already looking at
     // (regression review R-RT-8).
-    if (shown.current !== pageId) {
+    const samePage = shown.current === pageId;
+    if (!samePage) {
       clearCanvas(canvasRef.current);
       shown.current = null;
       setState('loading');
     }
     setReduced(clamped);
 
-    void (async () => {
+    const render = async () => {
       try {
         const { handle, client } = await renderHandleFor(source.id);
         if (cancelled) return;
@@ -110,10 +118,14 @@ export function usePageRender(
         shown.current = null;
         setState('failed');
       }
-    })();
+    };
+    // A new page renders at once; a zoom step on the shown page is coalesced.
+    const timer = samePage ? setTimeout(() => void render(), ZOOM_RERENDER_DELAY_MS) : null;
+    if (!samePage) void render();
 
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
   }, [page, source, pageSize, zoom]);
 

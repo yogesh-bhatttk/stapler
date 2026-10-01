@@ -1,3 +1,4 @@
+import './network-guard'; // PLT-2: first, so it wraps the network APIs before any library runs
 import { pseudoLinearize } from '../pdf/linearize';
 import {
   copyPageInto,
@@ -193,6 +194,8 @@ import {
   textShowSignature,
   type FontProgram
 } from '../pdf/font-substitute';
+// X-7 — the one page-range parser, shared with the watermark preview.
+import { parsePageRange } from '../page-range';
 
 /** A page in the output, pointing back at the bytes it came from. */
 export interface PageSource {
@@ -3146,31 +3149,6 @@ async function composePages(
   await outDoc.flush();
   sweepUnreachableObjects(outDoc);
   return outDoc;
-}
-
-/**
- * Converts a user-facing 1-based page list into output page indexes. Invalid
- * fragments are ignored: an empty/invalid list must not silently watermark every
- * page, while ranges are clamped to the document that is actually being exported.
- */
-function parsePageRange(value: string | undefined, pageCount: number): Set<number> | null {
-  if (!value || value.trim().toLowerCase() === 'all') return null;
-  const selected = new Set<number>();
-  for (const part of value.split(',')) {
-    const match = part.trim().match(/^(\d+)(?:\s*-\s*(\d+))?$/);
-    if (!match) continue;
-    const from = Number(match[1]);
-    const to = Number(match[2] ?? match[1]);
-    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to)) continue;
-    for (
-      let page = Math.max(1, Math.min(from, to));
-      page <= Math.min(pageCount, Math.max(from, to));
-      page++
-    ) {
-      selected.add(page - 1);
-    }
-  }
-  return selected;
 }
 
 /* ------------------------------------------------------------------ *

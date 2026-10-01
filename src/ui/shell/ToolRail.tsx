@@ -91,16 +91,19 @@ export function ToolRail() {
                       // the accessibility tree, so it stays the accessible name.
                       data-tool-id={tool.id}
                       aria-current={active ? 'page' : undefined}
-                      aria-describedby={
-                        tooltip.anchor?.dataset.toolId === tool.id
-                          ? `${tooltipId}-summary`
-                          : undefined
-                      }
+                      // UI-11: described statically by its own hidden summary,
+                      // so a screen reader hears it on focus — not one render
+                      // later, when the shared bubble happens to mount.
+                      aria-describedby={`${tooltipId}-${tool.id}`}
                       {...tooltip.triggerProps}
                     >
                       <ToolIcon name={tool.icon} />
                       <span className={styles.railLabel}>{t(tool.title)}</span>
                     </a>
+                    {/* Outside the link, so it describes it without joining its name. */}
+                    <span id={`${tooltipId}-${tool.id}`} className="srOnly">
+                      {t(tool.summary)}
+                    </span>
                   </li>
                 );
               })}
@@ -111,7 +114,7 @@ export function ToolRail() {
       {tooltipTool && (
         <FloatingTooltip anchor={tooltip.anchor} id={tooltipId} side="inline-end">
           <span className={tooltipStyles.title}>{t(tooltipTool.title)}</span>
-          <span id={`${tooltipId}-summary`}>{t(tooltipTool.summary)}</span>
+          <span>{t(tooltipTool.summary)}</span>
         </FloatingTooltip>
       )}
     </nav>

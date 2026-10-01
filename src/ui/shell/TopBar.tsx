@@ -145,7 +145,8 @@ export function TopBar() {
                   downloads
                 )
           }
-          aria-describedby={trustTooltip.anchor ? trustTooltipId : undefined}
+          // UI-11: no aria-describedby — the bubble only repeats the claim the
+          // accessible name already carries, so describing it would read it twice.
           {...trustTooltip.triggerProps}
         >
           {/* Below 600px the chip collapses to its shield (GAP-3); the full

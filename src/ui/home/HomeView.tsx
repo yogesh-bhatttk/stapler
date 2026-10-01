@@ -13,6 +13,7 @@ import { toolRoute } from '../../core/tools';
 import { searchToolGroups } from '../toolSearch';
 import { importFilesAsDocuments } from '../../core/open-document';
 import { notify, notifyError } from '../../core/notify';
+import { logEvent } from '../../core/errors';
 import { platform } from '../../platform/current';
 import type { RecentEntry } from '../../platform/index';
 import { DropZone } from '../components/DropZone';
@@ -33,6 +34,10 @@ export function HomeView() {
   const [, setLocation] = useLocation();
   const [query, setQuery] = useState('');
   const [recents, setRecents] = useState<RecentEntry[]>([]);
+  // X-11 — a failed read of the saved handles (IndexedDB blocked or broken)
+  // says so, rather than showing the "files you open appear here" hint as if
+  // there were simply none.
+  const [recentsFailed, setRecentsFailed] = useState(false);
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
   const { requestOptions, node } = useImageImportOptions();
   // RT-7 — Home has no action bar, so a Recents reopen shows its own
@@ -52,7 +57,16 @@ export function HomeView() {
   };
 
   useEffect(() => {
-    void platform.restoreHandles().then(setRecents);
+    platform
+      .restoreHandles()
+      .then(entries => {
+        setRecents(entries);
+        setRecentsFailed(false);
+      })
+      .catch((err: unknown) => {
+        logEvent('warn', 'recents.restore', String(err));
+        setRecentsFailed(true);
+      });
   }, []);
 
   // `t` is a new function each render, so this recomputes whenever the
@@ -83,7 +97,9 @@ export function HomeView() {
     // answer for the second one.
     const reportUnreachable = () => {
       notify('warning', translate('Could not reopen {name}.', { name: entry.name }), {
-        detail: 'Permission was declined, or the file has moved. Open it again from disk.'
+        detail: translate(
+          'Permission was declined, or the file has moved. Open it again from disk.'
+        )
       });
     };
 
@@ -213,6 +229,11 @@ export function HomeView() {
               ))}
             </ul>
           </div>
+        ) : recentsFailed ? (
+          <p className={styles.empty} role="status">
+            <Info size={14} aria-hidden="true" />
+            {t('Recent files could not be loaded. Open a file from disk instead.')}
+          </p>
         ) : (
           platform.supportsFileSystemAccess && (
             <p className={styles.empty}>

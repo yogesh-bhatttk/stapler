@@ -54,7 +54,8 @@ import {
   setReadAloudVoice,
   type ReadAloudPageText
 } from './state';
-import { localVoices, pickLocalVoice } from './voices';
+import { localVoices, pickLocalVoice, preferredVoiceMissing } from './voices';
+import { pageListKey } from '../../../core/page-version';
 import { SpeechSession } from './speech-session';
 import { clampSentence, splitSentences, wordRangeAt } from './sentences';
 import styles from './ReadAloudPanel.module.css';
@@ -99,7 +100,13 @@ export function ReadAloudPanel() {
   const doc = activeDoc.value;
   const { run } = useJob();
   const [bytes, setBytes] = useState<Uint8Array | null>(null);
-  const bytesDocId = useRef<string | null>(null);
+  // UI-1 — the bytes and text are for one *page list*, not just one document
+  // id: deleting or moving a page must not leave Play reading the old page.
+  const docKey = doc ? pageListKey(doc) : null;
+  const bytesKey = useRef<string | null>(null);
+  // The key as of the latest render, for async work to check it is still current.
+  const liveKey = useRef<string | null>(docKey);
+  liveKey.current = docKey;
   // Extracted, sentence-split page text for the current bytes, by page index.
   const textCache = useRef(new Map<number, ReadAloudPageText>());
   const currentSentenceRef = useRef<HTMLSpanElement | null>(null);
@@ -114,6 +121,7 @@ export function ReadAloudPanel() {
     readAloudVoiceUri.value,
     typeof navigator !== 'undefined' ? navigator.language : 'en'
   );
+  const voiceMissing = preferredVoiceMissing(voices, readAloudVoiceUri.value);
 
   useEffect(() => {
     void loadReadAloudPreferences();
@@ -133,17 +141,17 @@ export function ReadAloudPanel() {
     []
   );
   useEffect(() => {
-    if (bytesDocId.current !== (doc?.id ?? null)) {
+    if (bytesKey.current !== docKey) {
       setBytes(null);
       textCache.current.clear();
-      bytesDocId.current = doc?.id ?? null;
+      bytesKey.current = docKey;
       session.stop(hasSpeechSynthesis() ? window.speechSynthesis : null, () => {
         readAloudProgress.value = { status: 'idle', pageIndex: 0, sentenceIndex: 0, note: null };
         readAloudPageText.value = null;
         readAloudWord.value = null;
       });
     }
-  }, [doc?.id]);
+  }, [docKey]);
 
   // Keep the sentence being read in view in the text box.
   useEffect(() => {
@@ -182,12 +190,16 @@ export function ReadAloudPanel() {
   const synth = window.speechSynthesis;
 
   const ensureBytes = async (): Promise<Uint8Array | null> => {
-    if (bytes) return bytes;
+    if (bytes && bytesKey.current === docKey) return bytes;
+    const requestedKey = docKey;
     const fetched = await run({ label: t('Preparing text'), scope: 'read-aloud.prepare' }, job =>
       currentDocumentBytes(job)
     );
-    if (fetched) setBytes(fetched);
-    return fetched ?? null;
+    // UI-1 — the pages changed while the bytes were being built: they are
+    // the old document's, so neither keep nor speak them.
+    if (!fetched || liveKey.current !== requestedKey) return null;
+    setBytes(fetched);
+    return fetched;
   };
 
   const loadPage = async (
@@ -196,16 +208,25 @@ export function ReadAloudPanel() {
   ): Promise<ReadAloudPageText> => {
     const cached = textCache.current.get(pageIndex);
     if (cached) return cached;
+    const requestedKey = docKey;
     const layout = await extractPageText(currentBytes, pageIndex, 'text');
     const text = layout.replace(/\s+/g, ' ').trim();
     const entry: ReadAloudPageText = {
-      docId: doc.id,
+      docKey: requestedKey ?? doc.id,
       pageIndex,
       text,
       sentences: splitSentences(text, voice.lang)
     };
-    textCache.current.set(pageIndex, entry);
+    if (liveKey.current === requestedKey) textCache.current.set(pageIndex, entry);
     return entry;
+  };
+
+  /** UI-2 — a failed extraction or a synthesis error: back to idle, with a note saying why. */
+  const failTo = (note: string) => {
+    session.stop(synth, () => {
+      readAloudProgress.value = { ...readAloudProgress.value, status: 'idle', note };
+      readAloudWord.value = null;
+    });
   };
 
   /** Speaks sentence `index` of `page` for request `token`, then the rest of the document. */
@@ -213,7 +234,8 @@ export function ReadAloudPanel() {
     token: number,
     page: ReadAloudPageText,
     index: number,
-    currentBytes: Uint8Array
+    currentBytes: Uint8Array,
+    note: string | null = null
   ) => {
     if (!session.isLive(token)) return;
     const range = page.sentences[index];
@@ -223,7 +245,8 @@ export function ReadAloudPanel() {
       status: 'playing',
       pageIndex: page.pageIndex,
       sentenceIndex: index,
-      note: null
+      // UI-10 — a "page skipped" note stays up while the next sentence plays.
+      note
     };
     const utterance = new SpeechSynthesisUtterance(page.text.slice(range.start, range.end));
     // Always explicit, and always a local voice (PLT-5): an unset voice lets
@@ -239,6 +262,18 @@ export function ReadAloudPanel() {
       if (event.name && event.name !== 'word') return;
       readAloudWord.value = wordRangeAt(page.text, range, event.charIndex, event.charLength);
     };
+    utterance.onerror = event => {
+      // UI-2 — `interrupted`/`canceled` are our own cancel() (Stop, a step, a
+      // restart at a new speed); anything else would leave the panel stuck on
+      // "Reading page N" with nothing being read.
+      if (event.error === 'interrupted' || event.error === 'canceled') return;
+      if (!session.finished(utterance)) return;
+      failTo(
+        t('Reading stopped: the voice reported an error ({error}).', {
+          error: event.error || t('unknown')
+        })
+      );
+    };
     utterance.onend = () => {
       // Only the utterance that is still current actually reached the end of
       // its text: Chrome answers `cancel()` (Stop, a step, a restart at a new
@@ -249,7 +284,7 @@ export function ReadAloudPanel() {
       if (index + 1 < page.sentences.length) {
         speakSentence(token, page, index + 1, currentBytes);
       } else {
-        goToPage(page.pageIndex + 1, currentBytes);
+        goToPage(page.pageIndex + 1, currentBytes, null);
       }
     };
     // A paused synthesiser stays paused across cancel(): a step or restart
@@ -258,46 +293,67 @@ export function ReadAloudPanel() {
     session.speak(synth, token, utterance);
   };
 
+  /** UI-2 — a page's text, or null (and the panel reset with a note) when extraction fails. */
+  const loadPageOrFail = async (
+    token: number | null,
+    pageIndex: number,
+    currentBytes: Uint8Array
+  ): Promise<ReadAloudPageText | null> => {
+    try {
+      return await loadPage(pageIndex, currentBytes);
+    } catch {
+      if (token === null || session.isLive(token)) {
+        failTo(t('Could not read the text of page {page}.', { page: pageIndex + 1 }));
+      }
+      return null;
+    }
+  };
+
   const speakFrom = async (
     pageIndex: number,
     sentence: number | 'last',
-    currentBytes: Uint8Array
+    currentBytes: Uint8Array,
+    note: string | null = null
   ) => {
     // UI-15 — a Stop, another step, or leaving the tool while this page's
     // text is being extracted supersedes this request; it must not speak late.
     const token = session.begin();
-    const page = await loadPage(pageIndex, currentBytes);
-    if (!session.isLive(token)) return;
+    const page = await loadPageOrFail(token, pageIndex, currentBytes);
+    if (!page || !session.isLive(token)) return;
     readAloudPageText.value = page;
     readAloudWord.value = null;
 
     if (page.sentences.length === 0) {
+      const skipped = t('This page has no extractable text — skipped.');
       readAloudProgress.value = {
         status: 'playing',
         pageIndex,
         sentenceIndex: 0,
-        note: t('This page has no extractable text — skipped.')
+        note: skipped
       };
-      goToPage(pageIndex + 1, currentBytes);
+      goToPage(pageIndex + 1, currentBytes, skipped);
       return;
     }
     const index =
       sentence === 'last'
         ? page.sentences.length - 1
         : clampSentence(sentence, page.sentences.length);
-    speakSentence(token, page, index, currentBytes);
+    speakSentence(token, page, index, currentBytes, note);
   };
 
-  const goToPage = (pageIndex: number, currentBytes: Uint8Array) => {
+  const goToPage = (pageIndex: number, currentBytes: Uint8Array, note: string | null) => {
     if (pageIndex < 0) return;
     if (pageIndex >= doc.pages.length) {
+      // UI-10 — the end of the document: back to the start, so the next Play
+      // reads the document again rather than only its last sentence. A
+      // "skipped" note for the last page stays visible.
       session.stop(synth, () => {
-        readAloudProgress.value = { ...readAloudProgress.value, status: 'idle' };
+        readAloudProgress.value = { status: 'idle', pageIndex: 0, sentenceIndex: 0, note };
         readAloudWord.value = null;
       });
       return;
     }
-    void speakFrom(pageIndex, 0, currentBytes);
+    void speakFrom(pageIndex, 0, currentBytes, note);
   };
 
   const handlePlay = async () => {
@@ -346,7 +402,8 @@ export function ReadAloudPanel() {
     const ready = await ensureBytes();
     if (!ready) return;
     const { pageIndex, sentenceIndex } = readAloudProgress.value;
-    const page = await loadPage(pageIndex, ready);
+    const page = await loadPageOrFail(null, pageIndex, ready);
+    if (!page) return;
     const target = sentenceIndex + delta;
     if (target < 0) {
       void speakFrom(Math.max(0, pageIndex - 1), pageIndex > 0 ? 'last' : 0, ready);
@@ -410,7 +467,7 @@ export function ReadAloudPanel() {
         : t('Ready to read page {current} of {total}.', pageParams);
 
   const shownText =
-    pageText && pageText.docId === doc.id && pageText.pageIndex === progress.pageIndex
+    pageText && pageText.docKey === docKey && pageText.pageIndex === progress.pageIndex
       ? pageText
       : null;
 
@@ -445,6 +502,14 @@ export function ReadAloudPanel() {
           {statusText}
           {progress.note ? ` ${progress.note}` : ''}
         </p>
+        {voiceMissing && (
+          <p className={panelStyles.description}>
+            {t(
+              'Your saved voice is no longer installed on this device, so Stapler is reading with {voice} instead.',
+              { voice: `${voice.name} (${voice.lang})` }
+            )}
+          </p>
+        )}
       </div>
 
       <div className={panelStyles.section} style={{ display: 'flex', gap: '8px' }}>

@@ -104,6 +104,8 @@ export function ComparePanel() {
           sensitivity: settings.sensitivity,
           unchangedPages: settings.unchangedPages,
           signal: job.signal,
+          // X-6 — determinate per-page progress in the action bar.
+          onProgress: job.onProgress,
           onWarning: message => {
             warning = message;
           }

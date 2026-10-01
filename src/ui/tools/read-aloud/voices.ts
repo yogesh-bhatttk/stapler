@@ -31,3 +31,19 @@ export function pickLocalVoice(
     local[0]
   );
 }
+
+/**
+ * ACC-04 — whether the user's remembered voice is no longer installed (or is
+ * no longer on-device), so {@link pickLocalVoice} fell back to another one.
+ * The panel says so instead of silently speaking in a different voice. False
+ * while the browser is still populating its voice list (it is empty then).
+ */
+export function preferredVoiceMissing(
+  voices: readonly SpeechSynthesisVoice[],
+  preferredUri: string | null
+): boolean {
+  if (preferredUri === null) return false;
+  const local = localVoices(voices);
+  if (local.length === 0) return false;
+  return !local.some(voice => voice.voiceURI === preferredUri);
+}

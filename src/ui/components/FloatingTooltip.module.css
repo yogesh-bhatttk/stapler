@@ -12,7 +12,9 @@
   font: var(--text-small);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-2);
-  pointer-events: none;
+  /* UI-11 — hoverable (WCAG 1.4.13): the pointer can move onto the bubble
+     without dismissing it. */
+  pointer-events: auto;
   animation: fadeIn var(--dur-fast) var(--ease-snappy);
 }
 

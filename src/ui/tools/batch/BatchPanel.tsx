@@ -131,8 +131,7 @@ export function BatchPanel() {
         types: [{ description: translate('ZIP Archive'), accept: { 'application/zip': ['.zip'] } }]
       });
       outputFormat.value = 'zip';
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      outputZipHandle.value = handle as any;
+      outputZipHandle.value = handle;
     } catch (e) {
       reportPickerFailure(translate('Output ZIP selection failed'), e);
     }

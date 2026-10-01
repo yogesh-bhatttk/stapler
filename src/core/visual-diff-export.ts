@@ -1,11 +1,17 @@
+import * as Comlink from 'comlink';
 import { PDFDocument } from 'pdf-lib';
-import { encodePng } from './png';
-import { pixelDiff } from './pixel-diff';
 import { type StaplerDoc } from './store';
 import { composeDocument } from './operations';
-import { renderWorker } from './workers';
-import { internal } from './errors';
+import { cvWorker, renderWorker } from './workers';
+import { cancelled, internal, isCancellation } from './errors';
 import { translate } from './i18n';
+import {
+  deflateRaster,
+  drawImageRef,
+  embedFlateRaster,
+  visualDiffRaster,
+  type FlateRaster
+} from './compare-raster';
 
 export interface PageDiffResult {
   pageIndex: number;
@@ -19,10 +25,65 @@ export interface PageDiffResult {
 export interface ExportVisualDiffOptions {
   sensitivity?: number;
   signal?: AbortSignal;
+  /** X-6 — determinate progress, one step per output page. */
+  onProgress?: (fraction: number | null, label: string) => void;
+}
+
+/** The render scale over each page's point size. */
+const RENDER_SCALE = 1.5;
+/** Used only when nothing better is known about a page (a test's bare overlay). */
+const FALLBACK_SIZE = { width: 612, height: 792 };
+
+type PageSize = { width: number; height: number };
+
+/** A document opened once in its own render-worker instance for the whole export. */
+interface OpenedDoc {
+  client: ReturnType<typeof renderWorker.pin>;
+  handle: string;
+  pageSizes: PageSize[];
+}
+
+async function openComposed(doc: StaplerDoc, signal?: AbortSignal): Promise<OpenedDoc | null> {
+  if (doc.pages.length === 0) return null;
+  const bytes = await composeDocument(
+    { pages: doc.pages, annotations: doc.annotations ?? [] },
+    { signal }
+  );
+  // X-4 — one pinned instance per document, loaded once: load and close must
+  // stay on the same instance, and a reload per page was 400 pdf.js loads for
+  // a pair of 200-page files.
+  const client = renderWorker.pin();
+  try {
+    const info = await client.lease(api => api.loadDocument(bytes));
+    return { client, handle: info.handle, pageSizes: info.pageSizes };
+  } catch (error) {
+    client.release();
+    throw error;
+  }
+}
+
+async function closeOpened(opened: OpenedDoc | null): Promise<void> {
+  if (!opened) return;
+  await opened.client.lease(api => api.closeDocument(opened.handle)).catch(() => {});
+  opened.client.release();
+}
+
+/**
+ * X-2 — a page's real size in points: the composed page's CropBox with its
+ * rotation applied, as pdf.js reports it — not a hard-coded US Letter, which
+ * distorted A4 pages and squashed landscape ones.
+ */
+function sizeFromImage(image: ImageData | undefined): PageSize | undefined {
+  return image
+    ? { width: image.width / RENDER_SCALE, height: image.height / RENDER_SCALE }
+    : undefined;
 }
 
 /**
  * ANN-05: Renders visual diff overlays onto page images and embeds them into a new PDF document.
+ *
+ * `diffResults` lets a caller (in practice, a unit test) supply known pixels
+ * for a page instead of rendering it.
  */
 export async function exportVisualDiff(
   docA: StaplerDoc,
@@ -31,8 +92,6 @@ export async function exportVisualDiff(
   options: ExportVisualDiffOptions = {}
 ): Promise<Uint8Array> {
   const sensitivity = options.sensitivity ?? 10;
-  const pdfDoc = await PDFDocument.create();
-
   const pageCountA = docA.pages.length;
   const pageCountB = docB.pages.length;
   const totalPages = Math.max(pageCountA, pageCountB);
@@ -41,156 +100,94 @@ export async function exportVisualDiff(
     throw internal(translate('There are no pages to export.'));
   }
 
-  // Compose documents to include user edits (reorder, rotation, annotations, etc.)
-  const composedBytesA =
-    docA.pages.length > 0
-      ? await composeDocument({ pages: docA.pages, annotations: docA.annotations ?? [] })
-      : null;
-  const composedBytesB =
-    docB.pages.length > 0
-      ? await composeDocument({ pages: docB.pages, annotations: docB.annotations ?? [] })
-      : null;
+  const pdfDoc = await PDFDocument.create();
+  const suppliedFor = (i: number): PageDiffResult | undefined =>
+    diffResults.find(d => d.pageIndex === i) ?? diffResults[i];
+  const needsRender = Array.from({ length: totalPages }, (_, i) => !suppliedFor(i)?.diffImage).some(
+    Boolean
+  );
 
-  for (let i = 0; i < totalPages; i++) {
-    if (options.signal?.aborted) break;
+  let openedA: OpenedDoc | null = null;
+  let openedB: OpenedDoc | null = null;
+  try {
+    // Opened only when some page has to be rendered, and then once each.
+    if (needsRender) {
+      openedA = await openComposed(docA, options.signal);
+      if (options.signal?.aborted) throw cancelled();
+      openedB = await openComposed(docB, options.signal);
+    }
 
-    const pageDiff = diffResults.find(d => d.pageIndex === i) ?? diffResults[i];
+    for (let i = 0; i < totalPages; i++) {
+      // X-1 — fail loudly: a `break` here saved the pages built so far as if
+      // the export had finished.
+      if (options.signal?.aborted) throw cancelled();
+      options.onProgress?.(
+        i / totalPages,
+        translate('Comparing page {page} of {total}', { page: i + 1, total: totalPages })
+      );
 
-    // Page sizes from the composed documents (pages are in sequential order)
-    const sizeA = i < pageCountA ? { width: 612, height: 792 } : undefined;
-    const sizeB = i < pageCountB ? { width: 612, height: 792 } : undefined;
-    const pageWidthPt = sizeA?.width ?? sizeB?.width ?? 612;
-    const pageHeightPt = sizeA?.height ?? sizeB?.height ?? 792;
+      const supplied = suppliedFor(i);
+      let raster: FlateRaster;
+      let size: PageSize | undefined;
 
-    let diffImg = pageDiff?.diffImage;
-    let baseImg = pageDiff?.baseImage;
-    let compareImg = pageDiff?.compareImage;
-
-    // A caller may already have rendered just the overlay. That is sufficient
-    // to make an honest diff page; do not invoke the worker merely to obtain a
-    // background we do not need.
-    if (!diffImg) {
-      try {
-        const bytesA = composedBytesA!;
-        const bytesB = composedBytesB!;
-
-        await renderWorker.lease(async api => {
-          let handleA: string | undefined;
-          let handleB: string | undefined;
-          try {
-            if (i < pageCountA) {
-              const hInfoA = await api.loadDocument(bytesA);
-              handleA = hInfoA.handle;
-            }
-            if (i < pageCountB) {
-              const hInfoB = await api.loadDocument(bytesB);
-              handleB = hInfoB.handle;
-            }
-
-            const scale = 1.5;
-            if (handleA && !baseImg) {
-              const bitmapA = await api.renderPage(handleA, i, scale);
-              const canvasA = document.createElement('canvas');
-              canvasA.width = bitmapA.width;
-              canvasA.height = bitmapA.height;
-              const ctxA = canvasA.getContext('2d', { willReadFrequently: true });
-              ctxA?.drawImage(bitmapA, 0, 0);
-              bitmapA.close();
-              if (ctxA) {
-                baseImg = ctxA.getImageData(0, 0, canvasA.width, canvasA.height);
-              }
-            }
-
-            if (handleB && !compareImg) {
-              const bitmapB = await api.renderPage(handleB, i, scale);
-              const canvasB = document.createElement('canvas');
-              canvasB.width = bitmapB.width;
-              canvasB.height = bitmapB.height;
-              const ctxB = canvasB.getContext('2d', { willReadFrequently: true });
-              ctxB?.drawImage(bitmapB, 0, 0);
-              bitmapB.close();
-              if (ctxB) {
-                compareImg = ctxB.getImageData(0, 0, canvasB.width, canvasB.height);
-              }
-            }
-
-            if (!diffImg && baseImg && compareImg) {
-              diffImg = pixelDiff(baseImg, compareImg, sensitivity);
-            }
-          } finally {
-            if (handleA) await api.closeDocument(handleA).catch(() => {});
-            if (handleB) await api.closeDocument(handleB).catch(() => {});
-          }
-        });
-      } catch (error) {
-        throw internal(
-          translate('Could not render page {page} for visual-diff export: {message}', {
-            page: i + 1,
-            message: error instanceof Error ? error.message : String(error)
-          })
+      if (supplied?.diffImage) {
+        // A caller already has the overlay: an honest diff page needs nothing more.
+        const built = visualDiffRaster(
+          supplied.baseImage,
+          supplied.compareImage,
+          sensitivity,
+          supplied.diffImage
         );
-      }
-    }
-
-    const w = diffImg?.width ?? baseImg?.width ?? compareImg?.width ?? 612;
-    const h = diffImg?.height ?? baseImg?.height ?? compareImg?.height ?? 792;
-    const pixelCount = w * h;
-    const rgbSamples = new Uint8Array(pixelCount * 3);
-
-    const bgData = compareImg?.data ?? baseImg?.data;
-    const diffData = diffImg?.data;
-
-    for (let p = 0; p < pixelCount; p++) {
-      const idx = p * 4;
-      const rgbIdx = p * 3;
-
-      let isDiff = false;
-      if (diffData) {
-        const r = diffData[idx];
-        const g = diffData[idx + 1];
-        const b = diffData[idx + 2];
-        const a = diffData[idx + 3];
-        if (a > 0 && r === 255 && g === 0 && b === 0) {
-          isDiff = true;
-        }
-      }
-
-      if (isDiff) {
-        rgbSamples[rgbIdx] = 255;
-        rgbSamples[rgbIdx + 1] = 0;
-        rgbSamples[rgbIdx + 2] = 0;
-      } else if (bgData && bgData.length > idx + 3) {
-        rgbSamples[rgbIdx] = bgData[idx];
-        rgbSamples[rgbIdx + 1] = bgData[idx + 1];
-        rgbSamples[rgbIdx + 2] = bgData[idx + 2];
-      } else if (diffData && diffData.length > idx + 3 && diffData[idx + 3] > 0) {
-        rgbSamples[rgbIdx] = diffData[idx];
-        rgbSamples[rgbIdx + 1] = diffData[idx + 1];
-        rgbSamples[rgbIdx + 2] = diffData[idx + 2];
+        raster = deflateRaster(built);
+        size = sizeFromImage(supplied.baseImage ?? supplied.compareImage);
       } else {
-        rgbSamples[rgbIdx] = 255;
-        rgbSamples[rgbIdx + 1] = 255;
-        rgbSamples[rgbIdx + 2] = 255;
+        try {
+          const [bitmapA, bitmapB] = await Promise.all([
+            openedA && i < pageCountA
+              ? openedA.client.lease(api => api.renderPage(openedA!.handle, i, RENDER_SCALE))
+              : Promise.resolve(null),
+            openedB && i < pageCountB
+              ? openedB.client.lease(api => api.renderPage(openedB!.handle, i, RENDER_SCALE))
+              : Promise.resolve(null)
+          ]);
+          if (options.signal?.aborted) {
+            bitmapA?.close();
+            bitmapB?.close();
+            throw cancelled();
+          }
+          const transfers = [bitmapA, bitmapB].filter((b): b is ImageBitmap => b !== null);
+          // X-6 — the diff, the sample packing and the compression run in the
+          // cv worker; the bitmaps move there without a copy.
+          raster = await cvWorker.lease(api =>
+            api.visualDiffPage(Comlink.transfer({ a: bitmapA, b: bitmapB }, transfers), sensitivity)
+          );
+        } catch (error) {
+          if (isCancellation(error)) throw error;
+          throw internal(
+            translate('Could not render page {page} for visual-diff export: {message}', {
+              page: i + 1,
+              message: error instanceof Error ? error.message : String(error)
+            })
+          );
+        }
+        // The diff is drawn at the "before" page's size when there is one.
+        size = (i < pageCountA ? openedA?.pageSizes[i] : undefined) ?? openedB?.pageSizes[i];
       }
+
+      const pageSize = size ?? FALLBACK_SIZE;
+      const pdfPage = pdfDoc.addPage([pageSize.width, pageSize.height]);
+      drawImageRef(pdfPage, embedFlateRaster(pdfDoc, raster), {
+        x: 0,
+        y: 0,
+        width: pageSize.width,
+        height: pageSize.height
+      });
     }
-
-    const pngBytes = encodePng({
-      width: w,
-      height: h,
-      bitDepth: 8,
-      colorType: 2,
-      samples: rgbSamples
-    });
-
-    const embeddedImage = await pdfDoc.embedPng(pngBytes);
-    const pdfPage = pdfDoc.addPage([pageWidthPt, pageHeightPt]);
-    pdfPage.drawImage(embeddedImage, {
-      x: 0,
-      y: 0,
-      width: pageWidthPt,
-      height: pageHeightPt
-    });
+  } finally {
+    await Promise.all([closeOpened(openedA), closeOpened(openedB)]);
   }
 
+  if (options.signal?.aborted) throw cancelled();
+  options.onProgress?.(1, translate('Saving the comparison'));
   return pdfDoc.save();
 }

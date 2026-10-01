@@ -43,14 +43,137 @@ export function splitSentences(text: string, locale?: string): TextRange[] {
       raw.push({ start: match.index, end: match.index + match[0].length });
     }
   }
-  const out: TextRange[] = [];
+  const trimmed: TextRange[] = [];
   for (const range of raw) {
-    let { start, end } = range;
-    while (start < end && /\s/.test(text[start])) start += 1;
-    while (end > start && /\s/.test(text[end - 1])) end -= 1;
-    if (end > start) out.push({ start, end });
+    const r = trimRange(text, range.start, range.end);
+    if (r) trimmed.push(r);
   }
+  // UI-4 — the segmenter breaks after "Dr.", "Mr.", "p.m.", initials, …
+  const merged: TextRange[] = [];
+  for (const range of trimmed) {
+    const previous = merged[merged.length - 1];
+    if (previous && endsInAbbreviation(text, previous, range)) {
+      previous.end = range.end;
+    } else {
+      merged.push({ ...range });
+    }
+  }
+  // UI-4 — and nothing capped an utterance: a table page with no full stops
+  // became one page-long utterance, which Chrome cuts off part-way.
+  const out: TextRange[] = [];
+  for (const range of merged) capRange(text, range, out);
   return out;
+}
+
+/**
+ * UI-4 — the longest single utterance, in UTF-16 code units. Chrome stops
+ * some voices after roughly 15 seconds of speech; 250 characters stays well
+ * inside that at any offered rate.
+ */
+export const MAX_UTTERANCE_CHARS = 250;
+
+function trimRange(text: string, start: number, end: number): TextRange | null {
+  while (start < end && /\s/.test(text[start])) start += 1;
+  while (end > start && /\s/.test(text[end - 1])) end -= 1;
+  return end > start ? { start, end } : null;
+}
+
+/** Abbreviations that are (almost) never the end of a sentence: a title or "e.g." before a name or phrase. */
+const ALWAYS_ABBREVIATIONS = new Set([
+  'dr.',
+  'mr.',
+  'mrs.',
+  'ms.',
+  'st.',
+  'prof.',
+  'sr.',
+  'jr.',
+  'mt.',
+  'vs.',
+  'cf.',
+  'fig.',
+  'no.',
+  'e.g.',
+  'i.e.'
+]);
+
+/** Abbreviations that also often end a sentence: merged only when the text runs on in lower case or digits. */
+const SOMETIMES_ABBREVIATIONS = new Set([
+  'a.m.',
+  'p.m.',
+  'etc.',
+  'approx.',
+  'jan.',
+  'feb.',
+  'mar.',
+  'apr.',
+  'jun.',
+  'jul.',
+  'aug.',
+  'sep.',
+  'sept.',
+  'oct.',
+  'nov.',
+  'dec.'
+]);
+
+/**
+ * Whether `previous` ends in an abbreviation, so the boundary the segmenter
+ * put between it and `next` is not really a sentence end.
+ */
+function endsInAbbreviation(text: string, previous: TextRange, next: TextRange): boolean {
+  const segment = text.slice(previous.start, previous.end);
+  const lastWord = segment.slice(segment.search(/\S+$/)).replace(/^[("'“‘[]+/, '');
+  if (!lastWord.endsWith('.')) return false;
+  const lower = lastWord.toLowerCase();
+  // A single initial: "J. Smith", "Harry S. Truman".
+  if (/^\p{Lu}\.$/u.test(lastWord)) return true;
+  if (ALWAYS_ABBREVIATIONS.has(lower)) return true;
+  const runsOn = /^[\p{Ll}\d]/u.test(text.slice(next.start, next.start + 1));
+  if (!runsOn) return false;
+  if (SOMETIMES_ABBREVIATIONS.has(lower)) return true;
+  // Dotted letters ("U.S.", "a.k.a.") and ordinal numbers ("3. Juni", "the 3. edition").
+  return /^(?:\p{L}\.){2,}$/u.test(lastWord) || /^\d+\.$/.test(lastWord);
+}
+
+/** Separators a long run of text may be broken after, best first. */
+const SOFT_BREAKS = /[,;:，、；：،؛]/u;
+
+/** Pushes `range` onto `out`, split into pieces of at most {@link MAX_UTTERANCE_CHARS}. */
+function capRange(text: string, range: TextRange, out: TextRange[]): void {
+  let start = range.start;
+  while (range.end - start > MAX_UTTERANCE_CHARS) {
+    const limit = start + MAX_UTTERANCE_CHARS;
+    // Prefer a break in the back half of the window, so pieces stay sizeable.
+    const floor = start + Math.floor(MAX_UTTERANCE_CHARS / 2);
+    let cut = -1;
+    for (let i = limit; i > floor; i--) {
+      // Not inside a number such as "1,000".
+      if (SOFT_BREAKS.test(text[i - 1]) && !/\d/.test(text[i] ?? '')) {
+        cut = i;
+        break;
+      }
+    }
+    if (cut < 0) {
+      for (let i = limit; i > floor; i--) {
+        if (/\s/.test(text[i])) {
+          cut = i;
+          break;
+        }
+      }
+    }
+    if (cut < 0) {
+      // No break at all (CJK, a URL): a hard cut, never inside a surrogate pair.
+      cut = limit;
+      const code = text.charCodeAt(cut);
+      if (code >= 0xdc00 && code <= 0xdfff) cut -= 1;
+    }
+    const piece = trimRange(text, start, cut);
+    if (piece) out.push(piece);
+    start = cut;
+  }
+  const rest = trimRange(text, start, range.end);
+  if (rest) out.push(rest);
 }
 
 /**

@@ -1,10 +1,16 @@
+import * as Comlink from 'comlink';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
-import { encodePng } from './png';
-import { pixelDiff } from './pixel-diff';
 import type { StaplerDoc } from './store';
 import { composeDocument } from './operations';
-import { renderWorker } from './workers';
+import { cvWorker, renderWorker } from './workers';
 import { internal, cancelled } from './errors';
+import { translate } from './i18n';
+import {
+  drawImageRef,
+  embedFlateRaster,
+  redlinePageRaster,
+  type RedlinePageRaster
+} from './compare-raster';
 import {
   REDLINE_BANNER_BG_RGB,
   REDLINE_BANNER_TEXT_RGB,
@@ -16,6 +22,8 @@ export interface ExportRedlineOptions {
   /** AC: unchanged pages are either skipped or clearly marked, per this option. */
   unchangedPages?: 'skip' | 'mark';
   signal?: AbortSignal;
+  /** X-6 — determinate progress, one step per page pair. */
+  onProgress?: (fraction: number | null, label: string) => void;
 }
 
 /**
@@ -44,63 +52,41 @@ const PLACEHOLDER_H_PT = 400;
  * *is* `doc.pages[i]`, rotation included, so no index translation is needed
  * anywhere below this point.
  */
-async function loadDocBytes(doc: StaplerDoc): Promise<Uint8Array> {
-  return composeDocument({ pages: doc.pages, annotations: doc.annotations });
+async function loadDocBytes(doc: StaplerDoc, signal?: AbortSignal): Promise<Uint8Array> {
+  return composeDocument({ pages: doc.pages, annotations: doc.annotations }, { signal });
 }
 
-/** Renders every page of `bytes` once, loading the document a single time. */
-async function renderAllPages(
-  bytes: Uint8Array,
-  pageCount: number,
-  signal?: AbortSignal
-): Promise<(ImageData | undefined)[]> {
-  const images: (ImageData | undefined)[] = [];
-  await renderWorker.lease(async api => {
-    const { handle } = await api.loadDocument(bytes);
-    try {
-      for (let i = 0; i < pageCount; i++) {
-        if (signal?.aborted) throw cancelled();
-        const bitmap = await api.renderPage(handle, i, RENDER_SCALE);
-        const canvas = document.createElement('canvas');
-        canvas.width = bitmap.width;
-        canvas.height = bitmap.height;
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        ctx?.drawImage(bitmap, 0, 0);
-        bitmap.close();
-        images.push(ctx ? ctx.getImageData(0, 0, canvas.width, canvas.height) : undefined);
-      }
-    } finally {
-      await api.closeDocument(handle).catch(() => {});
-    }
-  });
-  return images;
+type PageSize = { width: number; height: number };
+
+/** A composed document, loaded once into its own pinned render-worker instance. */
+interface OpenedDoc {
+  client: ReturnType<typeof renderWorker.pin>;
+  handle: string;
+  pageSizes: PageSize[];
 }
 
-/** A page missing on one side, or resized, or containing any diff pixel all count as changed. */
-function pageHasChanges(
-  a: ImageData | undefined,
-  b: ImageData | undefined,
-  sensitivity: number
-): boolean {
-  if (!a || !b) return true;
-  if (a.width !== b.width || a.height !== b.height) return true;
-  const diff = pixelDiff(a, b, sensitivity);
-  const data = diff.data;
-  for (let i = 3; i < data.length; i += 4) {
-    if (data[i] > 0) return true;
+async function openDoc(doc: StaplerDoc, signal?: AbortSignal): Promise<OpenedDoc | null> {
+  if (doc.pages.length === 0) return null;
+  const bytes = await loadDocBytes(doc, signal);
+  const client = renderWorker.pin();
+  try {
+    const info = await client.lease(api => api.loadDocument(bytes));
+    return { client, handle: info.handle, pageSizes: info.pageSizes };
+  } catch (error) {
+    client.release();
+    throw error;
   }
-  return false;
 }
 
-function imageDataToPng(img: ImageData): Uint8Array {
-  const { width, height, data } = img;
-  const samples = new Uint8Array(width * height * 3);
-  for (let p = 0; p < width * height; p++) {
-    samples[p * 3] = data[p * 4];
-    samples[p * 3 + 1] = data[p * 4 + 1];
-    samples[p * 3 + 2] = data[p * 4 + 2];
-  }
-  return encodePng({ width, height, bitDepth: 8, colorType: 2, samples });
+async function closeDoc(opened: OpenedDoc | null): Promise<void> {
+  if (!opened) return;
+  await opened.client.lease(api => api.closeDocument(opened.handle)).catch(() => {});
+  opened.client.release();
+}
+
+async function renderOne(opened: OpenedDoc | null, i: number): Promise<ImageBitmap | null> {
+  if (!opened || i >= opened.pageSizes.length) return null;
+  return opened.client.lease(api => api.renderPage(opened.handle, i, RENDER_SCALE));
 }
 
 /**
@@ -130,105 +116,151 @@ export async function exportRedlinePdf(
   const totalPages = Math.max(docA.pages.length, docB.pages.length);
   if (totalPages === 0) throw internal('There are no pages to export.');
 
-  let imagesA: (ImageData | undefined)[];
-  let imagesB: (ImageData | undefined)[];
-  if (rendered) {
-    imagesA = rendered.a;
-    imagesB = rendered.b;
-  } else {
-    const [bytesA, bytesB] = await Promise.all([loadDocBytes(docA), loadDocBytes(docB)]);
-    [imagesA, imagesB] = await Promise.all([
-      renderAllPages(bytesA, docA.pages.length, options.signal),
-      renderAllPages(bytesB, docB.pages.length, options.signal)
-    ]);
-  }
-
   const pdfDoc = await PDFDocument.create();
   const boldFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
 
-  for (let i = 0; i < totalPages; i++) {
-    // `break` would exit quietly with whatever pages were already built and
-    // save that as if the export had finished — a truncated PDF with no
-    // error, indistinguishable from a genuinely short document. Cancellation
-    // has to fail loudly instead, the same way `renderAllPages` already does.
-    if (options.signal?.aborted) throw cancelled();
-
-    const imgA = imagesA[i];
-    const imgB = imagesB[i];
-    const changed = pageHasChanges(imgA, imgB, sensitivity);
-    if (!changed && unchangedMode === 'skip') continue;
-
-    const wA = imgA
-      ? imgA.width / RENDER_SCALE
-      : (imgB?.width ?? 0) / RENDER_SCALE || PLACEHOLDER_W_PT;
-    const hA = imgA
-      ? imgA.height / RENDER_SCALE
-      : (imgB?.height ?? 0) / RENDER_SCALE || PLACEHOLDER_H_PT;
-    const wB = imgB ? imgB.width / RENDER_SCALE : wA;
-    const hB = imgB ? imgB.height / RENDER_SCALE : hA;
-
-    const paneHeight = Math.max(hA, hB);
-    const bannerBand = changed ? 0 : LABEL_BAND_PT;
-    const pageWidth = MARGIN_PT * 2 + wA + GUTTER_PT + wB;
-    const pageHeight = MARGIN_PT * 2 + bannerBand + LABEL_BAND_PT + paneHeight;
-
-    const page = pdfDoc.addPage([pageWidth, pageHeight]);
-    const imagesY = MARGIN_PT;
-    const captionY = imagesY + paneHeight;
-    const bxA = MARGIN_PT;
-    const bxB = MARGIN_PT + wA + GUTTER_PT;
-
-    if (!changed) {
-      const bannerY = captionY + LABEL_BAND_PT;
-      page.drawRectangle({
-        x: 0,
-        y: bannerY,
-        width: pageWidth,
-        height: LABEL_BAND_PT,
-        color: rgb(...REDLINE_BANNER_BG_RGB)
-      });
-      page.drawText('UNCHANGED', {
-        x: MARGIN_PT,
-        y: bannerY + 5,
-        size: 11,
-        font: boldFont,
-        color: rgb(...REDLINE_BANNER_TEXT_RGB)
-      });
+  // X-5 — page by page: each pair is rendered, compared, compressed and
+  // embedded before the next is rendered, so memory holds one pair, not every
+  // page of both documents (about 1.7 GB for a 200-page pair).
+  let openedA: OpenedDoc | null = null;
+  let openedB: OpenedDoc | null = null;
+  try {
+    if (!rendered) {
+      openedA = await openDoc(docA, options.signal);
+      if (options.signal?.aborted) throw cancelled();
+      openedB = await openDoc(docB, options.signal);
     }
 
-    page.drawText('Before', { x: bxA, y: captionY + 5, size: 11, font: boldFont });
-    page.drawText('After', { x: bxB, y: captionY + 5, size: 11, font: boldFont });
+    for (let i = 0; i < totalPages; i++) {
+      // `break` would exit quietly with whatever pages were already built and
+      // save that as if the export had finished — a truncated PDF with no
+      // error, indistinguishable from a genuinely short document. Cancellation
+      // has to fail loudly instead.
+      if (options.signal?.aborted) throw cancelled();
+      options.onProgress?.(
+        i / totalPages,
+        translate('Comparing page {page} of {total}', { page: i + 1, total: totalPages })
+      );
 
-    if (imgA) {
-      const embedded = await pdfDoc.embedPng(imageDataToPng(imgA));
-      page.drawImage(embedded, { x: bxA, y: imagesY, width: wA, height: hA });
-    } else {
-      page.drawRectangle({
-        x: bxA,
-        y: imagesY,
-        width: wA,
-        height: hA,
-        borderColor: rgb(...REDLINE_PLACEHOLDER_BORDER_RGB),
-        borderWidth: 1
-      });
-      page.drawText('No corresponding page', { x: bxA + 8, y: imagesY + hA / 2, size: 10 });
-    }
+      let pair: RedlinePageRaster;
+      let sizeA: PageSize | undefined;
+      let sizeB: PageSize | undefined;
+      if (rendered) {
+        const imgA = rendered.a[i];
+        const imgB = rendered.b[i];
+        pair = redlinePageRaster(imgA, imgB, sensitivity, unchangedMode);
+        sizeA = imgA && { width: imgA.width / RENDER_SCALE, height: imgA.height / RENDER_SCALE };
+        sizeB = imgB && { width: imgB.width / RENDER_SCALE, height: imgB.height / RENDER_SCALE };
+      } else {
+        const [bitmapA, bitmapB] = await Promise.all([
+          renderOne(openedA, i),
+          renderOne(openedB, i)
+        ]);
+        if (options.signal?.aborted) {
+          bitmapA?.close();
+          bitmapB?.close();
+          throw cancelled();
+        }
+        const transfers = [bitmapA, bitmapB].filter((b): b is ImageBitmap => b !== null);
+        // X-6 — the diff and the compression run in the cv worker.
+        pair = await cvWorker.lease(api =>
+          api.redlinePage(
+            Comlink.transfer({ a: bitmapA, b: bitmapB }, transfers),
+            sensitivity,
+            unchangedMode
+          )
+        );
+        // The real page size (CropBox, rotation applied), not the bitmap's
+        // pixels over the scale — which a clamped render would shrink.
+        sizeA = bitmapA ? openedA?.pageSizes[i] : undefined;
+        sizeB = bitmapB ? openedB?.pageSizes[i] : undefined;
+      }
+      const changed = pair.changed;
+      if (!changed && unchangedMode === 'skip') continue;
+      const imgA = pair.a;
+      const imgB = pair.b;
 
-    if (imgB) {
-      const embedded = await pdfDoc.embedPng(imageDataToPng(imgB));
-      page.drawImage(embedded, { x: bxB, y: imagesY, width: wB, height: hB });
-    } else {
-      page.drawRectangle({
-        x: bxB,
-        y: imagesY,
-        width: wB,
-        height: hB,
-        borderColor: rgb(...REDLINE_PLACEHOLDER_BORDER_RGB),
-        borderWidth: 1
-      });
-      page.drawText('No corresponding page', { x: bxB + 8, y: imagesY + hB / 2, size: 10 });
+      const wA = sizeA?.width ?? sizeB?.width ?? PLACEHOLDER_W_PT;
+      const hA = sizeA?.height ?? sizeB?.height ?? PLACEHOLDER_H_PT;
+      const wB = sizeB?.width ?? wA;
+      const hB = sizeB?.height ?? hA;
+
+      const paneHeight = Math.max(hA, hB);
+      const bannerBand = changed ? 0 : LABEL_BAND_PT;
+      const pageWidth = MARGIN_PT * 2 + wA + GUTTER_PT + wB;
+      const pageHeight = MARGIN_PT * 2 + bannerBand + LABEL_BAND_PT + paneHeight;
+
+      const page = pdfDoc.addPage([pageWidth, pageHeight]);
+      const imagesY = MARGIN_PT;
+      const captionY = imagesY + paneHeight;
+      const bxA = MARGIN_PT;
+      const bxB = MARGIN_PT + wA + GUTTER_PT;
+
+      if (!changed) {
+        const bannerY = captionY + LABEL_BAND_PT;
+        page.drawRectangle({
+          x: 0,
+          y: bannerY,
+          width: pageWidth,
+          height: LABEL_BAND_PT,
+          color: rgb(...REDLINE_BANNER_BG_RGB)
+        });
+        page.drawText('UNCHANGED', {
+          x: MARGIN_PT,
+          y: bannerY + 5,
+          size: 11,
+          font: boldFont,
+          color: rgb(...REDLINE_BANNER_TEXT_RGB)
+        });
+      }
+
+      page.drawText('Before', { x: bxA, y: captionY + 5, size: 11, font: boldFont });
+      page.drawText('After', { x: bxB, y: captionY + 5, size: 11, font: boldFont });
+
+      if (imgA) {
+        drawImageRef(page, embedFlateRaster(pdfDoc, imgA), {
+          x: bxA,
+          y: imagesY,
+          width: wA,
+          height: hA
+        });
+      } else {
+        page.drawRectangle({
+          x: bxA,
+          y: imagesY,
+          width: wA,
+          height: hA,
+          borderColor: rgb(...REDLINE_PLACEHOLDER_BORDER_RGB),
+          borderWidth: 1
+        });
+        page.drawText('No corresponding page', { x: bxA + 8, y: imagesY + hA / 2, size: 10 });
+      }
+
+      if (imgB) {
+        drawImageRef(page, embedFlateRaster(pdfDoc, imgB), {
+          x: bxB,
+          y: imagesY,
+          width: wB,
+          height: hB
+        });
+      } else {
+        page.drawRectangle({
+          x: bxB,
+          y: imagesY,
+          width: wB,
+          height: hB,
+          borderColor: rgb(...REDLINE_PLACEHOLDER_BORDER_RGB),
+          borderWidth: 1
+        });
+        page.drawText('No corresponding page', { x: bxB + 8, y: imagesY + hB / 2, size: 10 });
+      }
     }
+  } finally {
+    await Promise.all([closeDoc(openedA), closeDoc(openedB)]);
   }
+
+  if (options.signal?.aborted) throw cancelled();
+  options.onProgress?.(1, translate('Saving the comparison'));
 
   if (pdfDoc.getPageCount() === 0) {
     const page = pdfDoc.addPage([PLACEHOLDER_W_PT, 100]);

@@ -19,6 +19,8 @@ import singlePageStyles from '../../shell/SinglePageView.module.css';
 import styles from './ReflowView.module.css';
 import { useTranslation } from '../../../core/i18n';
 import { reflowFontSize } from './state';
+import { pageListKey } from '../../../core/page-version';
+import { logEvent } from '../../../core/errors';
 
 export interface ReflowViewProps {
   docId: string;
@@ -31,37 +33,60 @@ export function ReflowView({ docId, pages, pageIndex, onPageIndexChange }: Reflo
   const t = useTranslation();
   const [bytes, setBytes] = useState<Uint8Array | null>(null);
   const [paragraphs, setParagraphs] = useState<string[] | null>(null);
-  const bytesDocId = useRef<string | null>(null);
+  // X-11 — a failed byte build or text extraction shows a message instead of
+  // "Reading…" for ever.
+  const [failed, setFailed] = useState(false);
+  // X-11 — keyed on the page list, not just the document id: after a page
+  // is deleted or moved, the cached bytes would show another page's text.
+  const docKey = pageListKey({ id: docId, pages });
+  const bytesKey = useRef<string | null>(null);
 
   useEffect(() => {
-    if (bytesDocId.current === docId) return;
-    bytesDocId.current = docId;
+    if (bytesKey.current === docKey) return;
+    bytesKey.current = docKey;
     setBytes(null);
+    setParagraphs(null);
+    setFailed(false);
     // Without this, a slower stale fetch for a document switched away from
     // can resolve after a faster one for the document switched *to*, and
     // silently overwrite its already-loaded, correct bytes with the wrong
     // document's.
     let cancelled = false;
-    void currentDocumentBytes().then(loaded => {
-      if (!cancelled) setBytes(loaded);
-    });
+    currentDocumentBytes()
+      .then(loaded => {
+        if (!cancelled) setBytes(loaded);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        logEvent('warn', 'reflow.bytes', String(err));
+        setFailed(true);
+      });
     return () => {
       cancelled = true;
+      // Superseded before it landed: let the next run fetch afresh.
+      if (bytesKey.current === docKey) bytesKey.current = null;
     };
-  }, [docId]);
+  }, [docKey]);
 
   useEffect(() => {
     if (!bytes) return;
     let cancelled = false;
     setParagraphs(null);
-    void extractPageText(bytes, pageIndex, 'text').then(text => {
-      if (cancelled) return;
-      const parts = text
-        .split(/\n{2,}/)
-        .map(p => p.replace(/\n/g, ' ').trim())
-        .filter(Boolean);
-      setParagraphs(parts);
-    });
+    setFailed(false);
+    extractPageText(bytes, pageIndex, 'text')
+      .then(text => {
+        if (cancelled) return;
+        const parts = text
+          .split(/\n{2,}/)
+          .map(p => p.replace(/\n/g, ' ').trim())
+          .filter(Boolean);
+        setParagraphs(parts);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        logEvent('warn', 'reflow.text', String(err));
+        setFailed(true);
+      });
     return () => {
       cancelled = true;
     };
@@ -71,7 +96,11 @@ export function ReflowView({ docId, pages, pageIndex, onPageIndexChange }: Reflo
     <div className={singlePageStyles.wrapper}>
       <div className={styles.stage} tabIndex={0} aria-label={t('Reflowed page text, scrollable')}>
         <div className={styles.page} style={{ fontSize: `${reflowFontSize.value}px` }}>
-          {paragraphs === null ? (
+          {failed ? (
+            <p className={styles.status} role="alert">
+              {t('The text of this page could not be read.')}
+            </p>
+          ) : paragraphs === null ? (
             <p className={styles.status}>{t('Reading…')}</p>
           ) : paragraphs.length === 0 ? (
             <p className={styles.status}>{t('This page has no extractable text.')}</p>
