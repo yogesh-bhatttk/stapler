@@ -25,7 +25,8 @@ import {
   commit,
   forgetDocumentInHistory,
   historySourceIds,
-  historySourceRefCount
+  historySourceRefCount,
+  rebaseHistory
 } from './history';
 import { normalizeRotation } from './rotation';
 import { checkOpenCapacity, knownSourceBytes, type OpenCapacity } from './workspace-limits';
@@ -109,6 +110,13 @@ export interface StaplerDoc {
    * not push undo history or flip `dirty`.
    */
   baseline: PageRef[];
+  /**
+   * AUDIT-2026-10-01 RT-1 — `annotations` as of the last successful save, so
+   * undo/redo can tell whether the state it lands on differs from the file on
+   * disk. Absent until the first save: every open path starts a document with
+   * no annotations, so absent means `[]`.
+   */
+  baselineAnnotations?: Annotation[];
 }
 
 /** Workspace documents — what the file tabs show. */
@@ -438,11 +446,21 @@ export function switchDocument(id: string): void {
  * flip `dirty` or push an undo entry.
  */
 export function refreshBaseline(docId: string, pages: PageRef[]): void {
+  const doc = documents.value.find(d => d.id === docId);
+  if (!doc) return;
+  // The annotations written are the live ones only when the page list is; an
+  // edit made while the save was in flight leaves the previous anchor (and
+  // `dirty`, below) as they were.
+  const baselineAnnotations = doc.pages === pages ? doc.annotations : doc.baselineAnnotations;
+  // RT-1 (AUDIT-2026-10-01) — undo past this save must land dirty against
+  // what is now on disk, so the whole history is re-anchored here too.
+  rebaseHistory(docId, pages, baselineAnnotations);
   documents.value = documents.value.map(d =>
     d.id === docId
       ? {
           ...d,
           baseline: pages,
+          baselineAnnotations,
           // RT-17 — what was just written is the document as it stands, so it
           // no longer has unsaved changes. Before, `dirty` was never cleared:
           // the dot stayed after a save and closing the tab still asked to

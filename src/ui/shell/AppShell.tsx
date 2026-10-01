@@ -1,4 +1,5 @@
 import { tPlural, translate } from '../../core/i18n';
+import { MAX_OPEN_DOCUMENTS } from '../../core/workspace-limits';
 /**
  * The application shell: top bar, rail, canvas, options panel, action bar, plus the
  * global overlays (palette, toasts, confirmations, first-run, shortcuts).
@@ -123,19 +124,31 @@ export function AppShell({ children }: { children: ComponentChildren }) {
     // RT-23/RT-4/RT-14 — see `runStartupRecovery`: always ends with
     // `sessionRecoveryChecked` true, sweeps orphaned OPFS sources once the
     // decision is made, and flags the prompt so imports refuse under it.
-    void runStartupRecovery(({ record, droppedDocuments }) => {
+    void runStartupRecovery(({ record, droppedDocuments, droppedOverLimit }) => {
       const count = record.documents.length;
       const found = tPlural(
         'Stapler found {count} documents open from before this tab closed. Restore them exactly as they were, undo history included, or start with a clean workspace.',
         count
       );
-      const body =
-        droppedDocuments > 0
-          ? `${found} ${tPlural(
+      // RT-6: documents left out for the open-document ceiling still exist on
+      // disk; only the rest have truly lost their saved data.
+      const missing = droppedDocuments - droppedOverLimit;
+      const notes = [
+        missing > 0
+          ? tPlural(
               '{count} other documents from that session could not be recovered — its saved data no longer exists.',
-              droppedDocuments
-            )}`
-          : found;
+              missing
+            )
+          : null,
+        droppedOverLimit > 0
+          ? tPlural(
+              '{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk.',
+              droppedOverLimit,
+              { max: MAX_OPEN_DOCUMENTS }
+            )
+          : null
+      ].filter(Boolean);
+      const body = notes.length > 0 ? `${found} ${notes.join(' ')}` : found;
       return confirmAction({
         title: translate('Restore your previous session?'),
         body,

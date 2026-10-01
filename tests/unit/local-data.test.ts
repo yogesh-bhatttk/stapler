@@ -25,6 +25,7 @@ const storeRecords: Record<string, number> = {};
 const clearedStores: string[][] = [];
 
 vi.mock('../../src/core/db', () => ({
+  DB_OPEN_TIMEOUT_MS: 4000,
   STAPLER_STORES: ['handles', 'signatures', 'presets', 'settings', 'searchIndex', 'recipes'],
   readSetting: vi.fn(async (key: string) => settings.get(key)),
   readSettingResult: vi.fn(async (key: string) => ({ ok: true, value: settings.get(key) })),
@@ -203,6 +204,43 @@ describe('GAP-9 — requestPersistenceOnce', () => {
     expect(await requestPersistenceOnce('session-save')).toBe('denied');
     expect(persist).toHaveBeenCalledTimes(1);
     expect(toasts.value).toHaveLength(0);
+  });
+
+  it('RT-9: asks at most once per session, and stays quiet, when the outcome cannot be stored', async () => {
+    const { writeSetting } = await import('../../src/core/db');
+    vi.mocked(writeSetting).mockImplementation(async () => false); // IndexedDB refuses
+    const g2 = globalThis as unknown as { sessionStorage?: unknown };
+    const originalSession = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage');
+    Object.defineProperty(globalThis, 'sessionStorage', {
+      value: fakeLocalStorage({}),
+      configurable: true,
+      writable: true
+    });
+    try {
+      const persist = vi.fn(async () => false);
+      nav.storage = { persist, persisted: async () => false };
+      expect(await requestPersistenceOnce('session-save')).toBe('denied');
+      expect(persist).toHaveBeenCalledTimes(1);
+      // Not remembered, so a "once ever" warning would repeat on every visit.
+      expect(toasts.value).toHaveLength(0);
+
+      // A reload of the tab: the module's memory is gone, the session flag is not.
+      const flag = (g2.sessionStorage as { getItem: (k: string) => string | null }).getItem(
+        'stapler.persistence.asked'
+      );
+      expect(flag).toBe('denied');
+      persistence.__forgetInMemoryRequestForTests();
+      expect(await requestPersistenceOnce('ocr-model')).toBe('denied');
+      expect(persist).toHaveBeenCalledTimes(1);
+      expect(toasts.value).toHaveLength(0);
+    } finally {
+      vi.mocked(writeSetting).mockImplementation(async (key: string, value: unknown) => {
+        settings.set(key, value);
+        return true;
+      });
+      if (originalSession) Object.defineProperty(globalThis, 'sessionStorage', originalSession);
+      else delete g2.sessionStorage;
+    }
   });
 
   it('treats a non-boolean answer as unsupported, not as a denial', async () => {
@@ -398,6 +436,49 @@ describe('GAP-12 — the confirmed clear-all flow', () => {
     expect(await confirmAndClearAllLocalData(reload)).toBe(false);
     expect(confirmRequest.value).toBeNull();
     expect(toasts.value.at(-1)?.title).toContain('other tabs');
+  });
+
+  it('RT-4 — refuses when another tab opens while the confirm dialog is up', async () => {
+    let holders = 1;
+    nav.locks = {
+      request: (_name: string, _opts: unknown, cb: () => unknown) => {
+        void cb();
+        return Promise.resolve();
+      },
+      query: async () => ({
+        held: Array.from({ length: holders }, () => ({ name: 'stapler.workspace' })),
+        pending: []
+      })
+    };
+    settings.set('theme', 'dark');
+    const reload = vi.fn();
+    const pending = confirmAndClearAllLocalData(reload);
+    for (let i = 0; i < 50 && !confirmRequest.value; i++) await settle();
+    holders = 2; // a second Stapler tab starts while the user reads the dialog
+    confirmRequest.value!.resolve(true);
+    expect(await pending).toBe(false);
+    expect(settings.get('theme')).toBe('dark');
+    expect(reload).not.toHaveBeenCalled();
+    expect(toasts.value.at(-1)?.title).toContain('other tabs');
+  });
+
+  it('RT-3 — warns when a stored file could not be deleted', async () => {
+    fakeLocks(1);
+    const fake = fakeRoot({ 'locked.pdf': 3, 'free.pdf': 3 });
+    fake.root.removeEntry = async (name: string) => {
+      if (name === 'locked.pdf') throw new DOMException('locked', 'NoModificationAllowedError');
+      fake.entries.delete(name);
+    };
+    nav.storage = { getDirectory: async () => fake.root };
+    g.localStorage = fakeLocalStorage({});
+    const reload = vi.fn();
+    const pending = confirmAndClearAllLocalData(reload);
+    await answerConfirm(true);
+    expect(await pending).toBe(true);
+    expect([...fake.entries.keys()]).toEqual(['locked.pdf']);
+    const warning = toasts.value.find(t => t.tone === 'warning');
+    expect(warning?.title).toBe('Some local data could not be cleared.');
+    expect(warning?.detail).toContain('could not be deleted: 1.');
   });
 
   it('does nothing when cancelled', async () => {

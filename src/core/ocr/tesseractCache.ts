@@ -27,6 +27,8 @@
  *    the bytes `OcrConsentDialog` already wrote to OPFS) land there.
  */
 
+import { DB_OPEN_TIMEOUT_MS } from '../db';
+
 const DB_NAME = 'keyval-store';
 const STORE_NAME = 'keyval';
 
@@ -34,18 +36,54 @@ function cacheKey(lang: string): string {
   return `./${lang}.traineddata`;
 }
 
-function openDb(): Promise<IDBDatabase> {
+/**
+ * AUDIT-2026-10-01 RT-5 — bounded like `db.ts`'s `openBounded`: an open
+ * blocked by another tab's connection (or one the browser simply never
+ * answers) rejects after `DB_OPEN_TIMEOUT_MS` instead of pending forever. Every
+ * caller already treats a rejection as "storage unavailable"; Clear-all used to
+ * hang on this open with autosave already suspended.
+ */
+function openDb(timeoutMs = DB_OPEN_TIMEOUT_MS): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME);
+    let settled = false;
+    const timer = setTimeout(() => {
+      settled = true;
+      reject(new Error('Timed out opening the OCR model cache (blocked by another tab?)'));
+    }, timeoutMs);
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    let request: IDBOpenDBRequest;
+    try {
+      request = indexedDB.open(DB_NAME);
+    } catch (err) {
+      finish(() => reject(err));
+      return;
+    }
     request.onupgradeneeded = () => {
       if (!request.result.objectStoreNames.contains(STORE_NAME)) {
         request.result.createObjectStore(STORE_NAME);
       }
     };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      // A connection that arrives after the timeout gave up is closed, not
+      // leaked — a leaked one would block the next upgrade in turn.
+      if (settled) request.result.close();
+      else finish(() => resolve(request.result));
+    };
+    request.onerror = () => finish(() => reject(request.error));
+    // Another tab holds a connection the open has to wait for. The open may
+    // still go through once it closes, so this waits — but only until the
+    // timeout above.
+    request.onblocked = () => {};
   });
 }
+
+/** Test hook: the bounded open, with a short timeout. */
+export const __openDbForTests = openDb;
 
 /** True only when `lang`'s traineddata bytes are actually sitting in tesseract's own cache right now. */
 export async function hasCachedModel(lang: string): Promise<boolean> {

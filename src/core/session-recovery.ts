@@ -38,6 +38,7 @@ import { announceTab, sourceBytesExist, sweepOrphanedSourceBytesIfSoleTab } from
 import { notify } from './notify';
 import { translate } from './i18n';
 import { noteSessionSaved } from './storage-persistence';
+import { MAX_OPEN_DOCUMENTS } from './workspace-limits';
 
 const SESSION_KEY = 'session.recovery';
 const SAVE_DEBOUNCE_MS = 500;
@@ -208,8 +209,28 @@ export function scheduleSessionSave(): void {
 
 export interface RecoveryCheck {
   record: SessionRecord;
-  /** Documents dropped because their source bytes no longer exist. */
+  /**
+   * Documents dropped: their source bytes no longer exist, or (RT-6) they
+   * were past the open-document ceiling — {@link RecoveryCheck.droppedOverLimit}
+   * of them.
+   */
   droppedDocuments: number;
+  /** How many of `droppedDocuments` were dropped only for the document ceiling. */
+  droppedOverLimit: number;
+}
+
+/**
+ * AUDIT-2026-10-01 RT-6 — at most `MAX_OPEN_DOCUMENTS` of `docs`, in their
+ * saved order, always keeping the active one. A record saved before the
+ * ceiling existed (or by a build with a higher one) used to restore whole,
+ * putting the workspace past the limit every other open path enforces.
+ */
+function withinDocumentCap(docs: StaplerDoc[], activeId: string | null): StaplerDoc[] {
+  if (docs.length <= MAX_OPEN_DOCUMENTS) return docs;
+  const kept = docs.slice(0, MAX_OPEN_DOCUMENTS);
+  const active = docs.find(d => d.id === activeId);
+  if (active && !kept.includes(active)) kept[kept.length - 1] = active;
+  return kept;
 }
 
 /**
@@ -260,8 +281,17 @@ export async function checkRecovery(record: SessionRecord): Promise<RecoveryChec
   }
   const allHistoryKept =
     Object.keys(usableHistory.docs).length === Object.keys(history.docs).length;
-  if (existing.size === ids.length && allHistoryKept && record.documents.every(docUsable)) {
-    return { record: { ...record, history: usableHistory }, droppedDocuments: 0 };
+  if (
+    existing.size === ids.length &&
+    allHistoryKept &&
+    record.documents.length <= MAX_OPEN_DOCUMENTS &&
+    record.documents.every(docUsable)
+  ) {
+    return {
+      record: { ...record, history: usableHistory },
+      droppedDocuments: 0,
+      droppedOverLimit: 0
+    };
   }
 
   // A document with even one page whose source is gone is dropped whole:
@@ -276,17 +306,37 @@ export async function checkRecovery(record: SessionRecord): Promise<RecoveryChec
   // in baseline, so checking `pages` alone would restore a document that
   // exports fine today but throws the moment its diff (or a discard) tries
   // to read the baseline page whose bytes are already gone.
-  const survivingDocs = record.documents.filter(docUsable);
+  const usableDocs = record.documents.filter(docUsable);
+  if (usableDocs.length === 0) return null;
+  const survivingDocs = withinDocumentCap(usableDocs, record.activeDocId);
+  const droppedOverLimit = usableDocs.length - survivingDocs.length;
   const droppedDocuments = record.documents.length - survivingDocs.length;
-  if (survivingDocs.length === 0) return null;
 
-  const survivingSources: Record<string, SourceDocument> = {};
+  let survivingSources: Record<string, SourceDocument> = {};
   for (const id of ids) {
     if (existing.has(id)) survivingSources[id] = record.sources[id];
+  }
+  if (droppedOverLimit > 0) {
+    // A source only a document dropped for the ceiling used is not registered:
+    // nothing could ever close it, and the startup sweep then frees its bytes.
+    const referenced = new Set<string>();
+    const note = (doc: StaplerDoc) => {
+      for (const page of [...doc.pages, ...(doc.baseline ?? [])]) referenced.add(page.sourceDocId);
+    };
+    survivingDocs.forEach(note);
+    for (const doc of survivingDocs) {
+      const entry = usableHistory.docs[doc.id];
+      if (!entry) continue;
+      for (const state of [...entry.undoStack, ...entry.redoStack]) note(state.doc);
+    }
+    survivingSources = Object.fromEntries(
+      Object.entries(survivingSources).filter(([id]) => referenced.has(id))
+    );
   }
 
   return {
     droppedDocuments,
+    droppedOverLimit,
     record: {
       ...record,
       documents: survivingDocs,
@@ -320,12 +370,16 @@ export function restoreSession(record: SessionRecord): void {
   // gets; it just means edits from the session that crashed aren't visible
   // in the very next review, which is the honest answer when there is no
   // real baseline to recover.
+  // RT-6 — the backstop for a record that did not come through
+  // `checkRecovery` (which trims and reports): never past the ceiling.
+  const docs = withinDocumentCap(record.documents, record.activeDocId);
   batch(() => {
-    documents.value = record.documents.map(doc => ({
+    documents.value = docs.map(doc => ({
       ...doc,
       baseline: doc.baseline ?? doc.pages
     }));
     sources.value = record.sources;
+    // `withinDocumentCap` always keeps the active document.
     activeDocId.value = record.activeDocId;
     selectedPageKeys.value = new Set(record.selection);
     cropBoxes.value = record.cropBoxes;
@@ -333,7 +387,7 @@ export function restoreSession(record: SessionRecord): void {
   });
   restoreHistoryFromRecord(
     record.history,
-    record.documents.map(doc => doc.id)
+    docs.map(doc => doc.id)
   );
 }
 

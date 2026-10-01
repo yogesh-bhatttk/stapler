@@ -33,3 +33,6 @@ tests/fixtures/*
 # Agent worktrees (see eslint.config.js ignores) — transient per-session tooling
 # artifacts, never part of the codebase itself.
 .claude/worktrees/
+
+# Merge leftovers (AUDIT-2026-10-01 RT-10)
+*.orig

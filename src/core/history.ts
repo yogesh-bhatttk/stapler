@@ -43,6 +43,7 @@ import {
   activePageIndex,
   documents,
   selectedPageKeys,
+  type Annotation as DocAnnotation,
   type PageRef,
   type StaplerDoc
 } from './store';
@@ -203,9 +204,22 @@ function enforceTotalCap(exceptDocId: string): void {
       if (id === exceptDocId || history.undoLog.length === 0) continue;
       if (!oldest || history.undoLog[0].timestamp < oldest.undoLog[0].timestamp) oldest = history;
     }
-    if (!oldest) return;
-    oldest.undoStack.shift();
-    oldest.undoLog.shift();
+    if (oldest) {
+      oldest.undoStack.shift();
+      oldest.undoLog.shift();
+      continue;
+    }
+    // No other document has an undo step left to give up (only reachable
+    // after a restore, whose redo stacks can be deep): drop the farthest redo
+    // step of whichever other document holds the most.
+    let deepest: DocHistory | null = null;
+    for (const [id, history] of histories) {
+      if (id === exceptDocId || history.redoStack.length === 0) continue;
+      if (!deepest || history.redoStack.length > deepest.redoStack.length) deepest = history;
+    }
+    if (!deepest) return;
+    deepest.redoStack.shift();
+    deepest.redoLog.shift();
   }
 }
 
@@ -226,13 +240,64 @@ function push(docId: string, label?: string): boolean {
   return true;
 }
 
+function samePages(a: readonly PageRef[], b: readonly PageRef[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  return a.every((page, i) => {
+    const other = b[i];
+    return (
+      page.key === other.key &&
+      page.sourceDocId === other.sourceDocId &&
+      page.sourceIndex === other.sourceIndex &&
+      page.rotation === other.rotation
+    );
+  });
+}
+
+function sameAnnotations(a: readonly DocAnnotation[], b: readonly DocAnnotation[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * AUDIT-2026-10-01 RT-1 — what a document becomes when `state` is restored
+ * over `current`. Only the *edit* rides the snapshot. Where the document was
+ * last saved, and the file handle it saves back to, are facts about the disk,
+ * not about the edit history, so they come from the live document:
+ *
+ *  • `baseline`/`baselineAnnotations` — every snapshot of this document is
+ *    re-anchored to the saved state by {@link rebaseHistory} whenever a save
+ *    lands (`refreshBaseline`), so the snapshot's own anchor *is* the live
+ *    one after a save. It still differs when the step being undone moved the
+ *    baseline itself (`replaceWithSource`), and undoing that must move it back.
+ *  • `sourceHandle` — always the live document's.
+ *  • `dirty` — recomputed: the restored pages or annotations differ from what
+ *    was last saved. It used to be copied from the snapshot, so rotate → Save
+ *    over original → Ctrl+Z showed the reverted (now unsaved) document as
+ *    clean, and closing the tab lost it without a prompt.
+ */
+function restoredDoc(current: StaplerDoc, state: DocSnapshot): StaplerDoc {
+  const doc = state.doc;
+  const baseline = doc.baseline ?? doc.pages;
+  // A document never saved in this build carries no annotation anchor; every
+  // open path starts with no annotations, so that is the anchor. A record from
+  // an older build that had been saved with annotations errs towards dirty —
+  // an extra prompt, never a lost edit.
+  const savedAnnotations = doc.baselineAnnotations ?? [];
+  const dirty =
+    !samePages(doc.pages, baseline) || !sameAnnotations(doc.annotations, savedAnnotations);
+  return { ...doc, baseline, sourceHandle: current.sourceHandle, dirty };
+}
+
 function restore(docId: string, state: DocSnapshot): void {
   const current = documents.value.find(d => d.id === docId);
   if (!current) return;
   const keys = pageKeysOf(current);
   for (const key of pageKeysOf(state.doc)) keys.add(key);
+  const next = restoredDoc(current, state);
   batch(() => {
-    documents.value = documents.value.map(d => (d.id === docId ? state.doc : d));
+    documents.value = documents.value.map(d => (d.id === docId ? next : d));
     cropBoxes.value = mergeScoped(cropBoxes.value, keys, state.cropBoxes);
     pageAnnotations.value = mergeScoped(pageAnnotations.value, keys, state.pageAnnotations);
     if (activeDocId.value === docId) {
@@ -245,6 +310,50 @@ function restore(docId: string, state: DocSnapshot): void {
 
 function resolveDocId(docId: string | null | undefined): string | null {
   return docId ?? activeDocId.value;
+}
+
+/**
+ * AUDIT-2026-10-01 RT-1 — a save re-anchors the whole of one document's
+ * history. Called by `refreshBaseline` with the page list (and annotations)
+ * just written to disk: every undo/redo snapshot of `docId` is given that as
+ * its baseline, so undoing past the save lands on a document that is dirty
+ * against the file as it now is on disk, not clean against the pre-save one.
+ *
+ * Crop boxes and page annotations for a newly saved page key the snapshot
+ * never covered are copied in from the live maps, so restoring the snapshot
+ * does not drop state a baseline-only page still has.
+ */
+export function rebaseHistory(
+  docId: string,
+  baseline: PageRef[],
+  baselineAnnotations: DocAnnotation[] | undefined
+): void {
+  const history = histories.get(docId);
+  if (!history) return;
+  const rebase = (state: DocSnapshot): DocSnapshot => {
+    const covered = pageKeysOf(state.doc);
+    let crops = state.cropBoxes;
+    let pageNotes = state.pageAnnotations;
+    for (const page of baseline) {
+      if (covered.has(page.key)) continue;
+      if (page.key in cropBoxes.value) {
+        if (crops === state.cropBoxes) crops = { ...crops };
+        crops[page.key] = cropBoxes.value[page.key];
+      }
+      if (page.key in pageAnnotations.value) {
+        if (pageNotes === state.pageAnnotations) pageNotes = { ...pageNotes };
+        pageNotes[page.key] = pageAnnotations.value[page.key];
+      }
+    }
+    return {
+      ...state,
+      doc: { ...state.doc, baseline, baselineAnnotations },
+      cropBoxes: crops,
+      pageAnnotations: pageNotes
+    };
+  };
+  history.undoStack = history.undoStack.map(rebase);
+  history.redoStack = history.redoStack.map(rebase);
 }
 
 /**
@@ -534,15 +643,20 @@ export function restoreHistoryFromRecord(data: unknown, liveDocIds?: Iterable<st
   histories.clear();
   for (const [id, history] of Object.entries(normalized.docs)) {
     if (live && !live.has(id)) continue;
-    const undoStack = history.undoStack.slice(-MAX_DEPTH);
-    const undoLog = history.undoLog.slice(-MAX_DEPTH);
+    // AUDIT-2026-10-01 RT-7 — the same per-document depth `push` keeps, on
+    // both sides. The redo stack's *top* (the next step to redo) is its last
+    // element, so the farthest-future steps are the ones dropped.
     histories.set(id, {
-      undoStack,
-      undoLog,
-      redoStack: [...history.redoStack],
-      redoLog: [...history.redoLog],
+      undoStack: history.undoStack.slice(-MAX_DEPTH),
+      undoLog: history.undoLog.slice(-MAX_DEPTH),
+      redoStack: history.redoStack.slice(-MAX_DEPTH),
+      redoLog: history.redoLog.slice(-MAX_DEPTH),
       openTransaction: null
     });
   }
+  // …and the workspace-wide cap, which a record saved with many documents
+  // could otherwise exceed by more than double. The active document's history
+  // is the last to give anything up.
+  enforceTotalCap(activeDocId.value ?? '');
   historyVersion.value++;
 }

@@ -42,6 +42,12 @@ export interface Recipe {
   id: string;
   name: string;
   tools: string[];
+  // `any` on purpose (AUDIT-2026-10-01 X-15): a snapshot of whichever tool
+  // settings the recipe captured, keyed by tool (`compress`, `watermark`, …),
+  // each in that tool's own settings type — and possibly written by an older
+  // build, so it is read back from storage, not trusted. `batch/runner.ts`
+  // hands each slice to the tool that owns its type; a precise type here would
+  // claim a shape storage cannot guarantee.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   settings: any;
 }

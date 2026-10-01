@@ -6,24 +6,42 @@
  * open. With a document open and nothing chosen, the open document's own file
  * is what gets repaired.
  */
-import { FilePlus, FolderOpen } from 'lucide-preact';
+import { FilePlus, FileText, FolderOpen } from 'lucide-preact';
 import { platform } from '../../../platform/current';
-import { activeDoc, addDocument, makePageRefs } from '../../../core/store';
+import { activeDoc, documents } from '../../../core/store';
 import { registerSourceFromBytes } from '../../../core/import';
 import { activeJob, notify, notifyError } from '../../../core/notify';
 import { translate, useTranslation } from '../../../core/i18n';
 import { Button } from '../../components/Button';
 import { formatBytes } from '../../components/Feedback';
 import { panelStyles } from '../../shell/panelStyles';
-import { lastRepair, repairCandidate } from './state';
+import { MAX_OPEN_DOCUMENTS } from '../../../core/workspace-limits';
+import {
+  clearRepairCandidate,
+  lastRepair,
+  openingRepaired,
+  openRepairedCopy,
+  repairCandidate
+} from './state';
 
 const PDF_ONLY = { 'application/pdf': ['.pdf'] };
+
+/** The same refusal every other open path shows at the document ceiling. */
+function notifyDocumentCeiling(): void {
+  notify('warning', translate('Too many documents are open.'), {
+    detail: translate(
+      'Stapler can keep up to {max} documents open at once (open now: {open}). Close some tabs, then open your files again.',
+      { max: MAX_OPEN_DOCUMENTS, open: documents.value.length }
+    )
+  });
+}
 
 export function RepairPanel() {
   const t = useTranslation();
   const doc = activeDoc.value;
   const candidate = repairCandidate.value;
   const run = lastRepair.value;
+  const opening = openingRepaired.value;
 
   const choose = async () => {
     if (activeJob.value !== null) {
@@ -40,18 +58,17 @@ export function RepairPanel() {
     }
   };
 
+  // AUDIT-2026-10-01 RT-2 — see `openRepairedCopy`: refused at the document
+  // ceiling (no false "Opened" toast, no orphaned bytes), and one copy per
+  // double-click.
   const openRepaired = async () => {
     if (!run) return;
     try {
-      const source = await registerSourceFromBytes(run.result.bytes, run.name);
-      addDocument({
-        id: crypto.randomUUID(),
-        name: run.name,
-        pages: makePageRefs(source.id, source.pageCount),
-        annotations: [],
-        dirty: false
-      });
-      notify('success', translate('Opened {name}', { name: run.name }));
+      const outcome = await openRepairedCopy(run, registerSourceFromBytes);
+      if (outcome === 'full') notifyDocumentCeiling();
+      else if (outcome === 'opened') {
+        notify('success', translate('Opened {name}', { name: run.name }));
+      }
     } catch (err) {
       notifyError('repair.open', err);
     }
@@ -70,6 +87,11 @@ export function RepairPanel() {
         <Button variant="secondary" icon={FolderOpen} onClick={() => void choose()}>
           {candidate || doc ? t('Choose a different file…') : t('Choose a PDF…')}
         </Button>
+        {candidate && doc && (
+          <Button variant="ghost" icon={FileText} onClick={clearRepairCandidate}>
+            {t('Use the open document instead')}
+          </Button>
+        )}
       </div>
 
       <p className={`${panelStyles.note} ${panelStyles.noteInfo}`}>
@@ -120,7 +142,13 @@ export function RepairPanel() {
               })}
             </p>
             {run.result.changed && (
-              <Button variant="secondary" icon={FilePlus} onClick={() => void openRepaired()}>
+              <Button
+                variant="secondary"
+                icon={FilePlus}
+                disabled={opening}
+                aria-busy={opening}
+                onClick={() => void openRepaired()}
+              >
                 {t('Open the repaired copy')}
               </Button>
             )}

@@ -15,7 +15,12 @@ import { activeJob, confirmAction, notify, notifyError } from '../core/notify';
 import { tKey, tPlural, translate } from '../core/i18n';
 import { documents } from '../core/store';
 import { suspendAutosave } from '../core/session-recovery';
-import { clearAllLocalData, gatherLocalDataReport, type LocalDataReport } from '../core/local-data';
+import {
+  clearAllLocalData,
+  gatherLocalDataReport,
+  isPartialClear,
+  type LocalDataReport
+} from '../core/local-data';
 import { otherStaplerTabsOpen, clearStaplerFiles } from '../core/opfs';
 import { clearStaplerStores, clearSearchIndexStore } from '../core/db';
 import { clearSignatureLibrary } from '../core/signatures';
@@ -77,6 +82,17 @@ export function describeClearAll(report: LocalDataReport, openDocuments: number)
 
 let clearing = false;
 
+/** Refuses (with the reason) while another Stapler tab shares this storage. */
+async function refuseWhileOtherTabsOpen(): Promise<boolean> {
+  if ((await otherStaplerTabsOpen()) !== true) return false;
+  notify('warning', translate('Close Stapler’s other tabs first.'), {
+    detail: translate(
+      'Another Stapler tab is open. Its documents share this storage, and it would save its session again straight away.'
+    )
+  });
+  return true;
+}
+
 /**
  * Asks, then deletes everything Stapler stored and reloads the page. Returns
  * false when refused or cancelled (the reload means a `true` is rarely seen).
@@ -87,14 +103,7 @@ export async function confirmAndClearAllLocalData(
   if (clearing || refuseWhileBusy()) return false;
   clearing = true;
   try {
-    if ((await otherStaplerTabsOpen()) === true) {
-      notify('warning', translate('Close Stapler’s other tabs first.'), {
-        detail: translate(
-          'Another Stapler tab is open. Its documents share this storage, and it would save its session again straight away.'
-        )
-      });
-      return false;
-    }
+    if (await refuseWhileOtherTabsOpen()) return false;
     const report = await gatherLocalDataReport();
     const open = documents.value.length;
     const ok = await confirmAction({
@@ -107,13 +116,25 @@ export async function confirmAndClearAllLocalData(
       tone: 'danger'
     });
     if (!ok || refuseWhileBusy()) return false;
+    // AUDIT-2026-10-01 RT-4 — asked again: a tab opened while the dialog was
+    // up would save its session straight back, and its documents' bytes would
+    // be deleted from under it.
+    if (await refuseWhileOtherTabsOpen()) return false;
     suspendAutosave();
     const result = await clearAllLocalData();
-    if (!result.databaseCleared) {
+    // RT-3 — a file that could not be deleted (locked by another tab) is
+    // reported, never counted as cleared.
+    if (isPartialClear(result)) {
       notify('warning', translate('Some local data could not be cleared.'), {
-        detail: translate(
-          'Browser storage did not respond. Use your browser’s “Clear site data” to remove the rest.'
-        )
+        detail:
+          result.filesFailed > 0
+            ? translate(
+                'Stored files that could not be deleted: {count}. Close every other Stapler tab and try again, or use your browser’s “Clear site data”.',
+                { count: result.filesFailed }
+              )
+            : translate(
+                'Browser storage did not respond. Use your browser’s “Clear site data” to remove the rest.'
+              )
       });
     }
     // Nothing left to protect: skip the "leave page?" prompt on the reload.
@@ -167,11 +188,15 @@ async function clearCategory(category: ClearCategory): Promise<boolean> {
       return clearStaplerStores(['handles']);
     case 'searchIndex':
       return clearSearchIndexStore();
-    case 'ocrModels':
+    case 'ocrModels': {
       await removeAllOcrModels();
-      await clearCachedModels().catch(() => 0);
-      await clearStaplerFiles(['ocr-model']);
-      return true;
+      const cacheCleared = await clearCachedModels().then(
+        () => true,
+        () => false
+      );
+      const { failed } = await clearStaplerFiles(['ocr-model']);
+      return cacheCleared && failed === 0;
+    }
   }
 }
 
