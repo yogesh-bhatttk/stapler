@@ -8,6 +8,7 @@
  */
 import { signal } from '@preact/signals';
 import type { ImagesToPdfOptions } from '../../core/operations';
+import { DEFAULT_EXACT_SIZE, type ExactSizeSettings } from './image-size/state';
 
 export type SplitMode = 'extract' | 'individual' | 'every_n' | 'custom' | 'bookmarks' | 'size';
 
@@ -40,6 +41,13 @@ export interface PdfToImageSettings {
   targetKb: number;
   /** Longest side limit in pixels, or null for none. Applies in both modes. */
   maxDimension: number | null;
+  /**
+   * CNV-14 — an exact width × height, the same control as Image to size's.
+   * When on it replaces both `maxDimension` and `dpi`: the pixel size is what
+   * was asked for. Locked, the side typed is exact and the other follows each
+   * page's own (rotated) proportions; unlocked, every page is exactly W × H.
+   */
+  exact?: ExactSizeSettings;
 }
 
 export const pdfToImageSettings = signal<PdfToImageSettings>({
@@ -47,7 +55,8 @@ export const pdfToImageSettings = signal<PdfToImageSettings>({
   dpi: 150,
   sizeMode: 'resolution',
   targetKb: 200,
-  maxDimension: null
+  maxDimension: null,
+  exact: DEFAULT_EXACT_SIZE
 });
 
 /** OPS-05 sensitivity, 0 (strict) to 100 (forgiving). */

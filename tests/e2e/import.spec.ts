@@ -230,7 +230,10 @@ test.describe('DOC-02 import and validation', () => {
    * the pipeline is designed to produce. A generic internal error ("Something went
    * wrong inside Stapler") fails this test, which is the whole point.
    */
-  test('every PDF in the corpus imports or is refused with a specific reason', async ({ page }) => {
+  test('every PDF in the corpus imports or is refused with a specific reason', async ({
+    page,
+    context
+  }) => {
     test.setTimeout(900_000);
     const { readdirSync } = await import('node:fs');
 
@@ -261,34 +264,44 @@ test.describe('DOC-02 import and validation', () => {
     // first dismissal a plain reload is enough — and waiting 10s per fixture for a
     // dialog that will never reappear is what made this sweep time out.
     await openApp(page);
-    const recovery = page.getByRole('dialog', { name: 'Restore your previous session?' });
+    await page.close();
     for (const name of names) {
-      await page.goto('/');
-      await expect(page.locator('header')).toBeVisible();
-      // The previous fixture's import was autosaved, so the reload offers to
-      // restore it. Imports are refused until that prompt is answered
-      // (AUDIT-2026-09-25 RT-14) — answer it the way a user would.
-      await recovery.waitFor({ state: 'visible', timeout: 2_000 }).catch(() => {});
-      if (await recovery.isVisible().catch(() => false)) {
-        await page.getByRole('button', { name: 'Start fresh' }).click();
-        await expect(recovery).toBeHidden();
-      }
-      await page.locator('input[type="file"]').setInputFiles(`${FIXTURES_DIR}/${name}`);
+      // A fresh tab per fixture, in the same context (so the dismissed welcome
+      // flag in IndexedDB carries over): reloading one tab ~40 times made the
+      // renderer run out of resources (net::ERR_INSUFFICIENT_RESOURCES) on a
+      // low-memory machine, and the sweep failed on a page that never rendered.
+      const tab = await context.newPage();
+      try {
+        await tab.goto('/');
+        await expect(tab.locator('header')).toBeVisible();
+        // The previous fixture's import was autosaved, so the reload offers to
+        // restore it. Imports are refused until that prompt is answered
+        // (AUDIT-2026-09-25 RT-14) — answer it the way a user would.
+        const recovery = tab.getByRole('dialog', { name: 'Restore your previous session?' });
+        await recovery.waitFor({ state: 'visible', timeout: 2_000 }).catch(() => {});
+        if (await recovery.isVisible().catch(() => false)) {
+          await tab.getByRole('button', { name: 'Start fresh' }).click();
+          await expect(recovery).toBeHidden();
+        }
+        await tab.locator('input[type="file"]').setInputFiles(`${FIXTURES_DIR}/${name}`);
 
-      const grid = page.getByRole('listbox', { name: /Pages of/ });
-      const status = page.getByRole('status');
-      await expect(grid.or(status).first()).toBeVisible({ timeout: 60_000 });
+        const grid = tab.getByRole('listbox', { name: /Pages of/ });
+        const status = tab.getByRole('status');
+        await expect(grid.or(status).first()).toBeVisible({ timeout: 60_000 });
 
-      if (await grid.isVisible().catch(() => false)) {
-        results[name] = 'imported';
-        continue;
+        if (await grid.isVisible().catch(() => false)) {
+          results[name] = 'imported';
+          continue;
+        }
+        const text = (await status.allTextContents()).join(' ');
+        results[name] = text;
+        expect(
+          specific.some(re => re.test(text)),
+          `${name} was refused without a specific reason: ${text}`
+        ).toBe(true);
+      } finally {
+        await tab.close();
       }
-      const text = (await status.allTextContents()).join(' ');
-      results[name] = text;
-      expect(
-        specific.some(re => re.test(text)),
-        `${name} was refused without a specific reason: ${text}`
-      ).toBe(true);
     }
     // Recorded in the run log so a reviewer can see what each fixture actually did.
     console.log(JSON.stringify(results, null, 2));

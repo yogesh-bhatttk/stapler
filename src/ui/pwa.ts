@@ -8,21 +8,23 @@
  *    and follows an update applied in another tab (PLT-4);
  *  - queues files the OS opens with the installed app (`launchQueue`) and
  *    files shared to it (`share_target`, stored by the worker) for
- *    `useExternalOpen` to import.
+ *    `useExternalOpen` to import — asking first when the worker could not
+ *    trace the share to this app (PLT-3).
  */
 import { platform } from '../platform/current';
 import { consumeLaunchQueue, type LaunchQueueLike } from '../platform/pwa/launch-queue';
 import { registerServiceWorker } from '../platform/pwa/register';
 import {
   sweepStaleSharedFiles,
-  takeSharedFiles,
-  type CacheStorageLike
+  takeSharedBatch,
+  type CacheStorageLike,
+  type SharedBatch
 } from '../platform/pwa/share-inbox';
 import { SHARE_TARGET_PARAM } from '../platform/pwa/sw-routing';
 import { queueExternalOpen } from '../core/external-open';
 import { documents } from '../core/store';
-import { notify } from '../core/notify';
-import { translate } from '../core/i18n';
+import { confirmAction, notify } from '../core/notify';
+import { tPlural, translate } from '../core/i18n';
 
 /**
  * The e2e build (`VITE_E2E_TEST_HOOKS`) registers the worker only when a test
@@ -66,6 +68,40 @@ export async function sweepShareInboxOnStart(
   return true;
 }
 
+/** How many file names the "Open shared files?" dialog lists before "…and N more". */
+const LISTED_NAMES = 10;
+
+/**
+ * Audit 2026-10-01 PLT-3 — whether to import a batch from the share inbox.
+ * A share the worker positively traced to this origin opens at once. One it
+ * could not — no `Origin`, no referrer, no client it can see: what the OS
+ * share sheet sends, and also what a foreign page sends by opening the POST
+ * in a new no-referrer window — is only opened when the user says so. The
+ * batch has already left the inbox, so "Discard" (or Escape) leaves nothing
+ * behind. `confirm` is a seam for the unit tests.
+ */
+export async function shouldOpenSharedBatch(
+  batch: SharedBatch,
+  confirm: typeof confirmAction = confirmAction
+): Promise<boolean> {
+  if (batch.files.length === 0) return false;
+  if (batch.verified) return true;
+  const names = batch.files.map(file => file.name);
+  const details = names.slice(0, LISTED_NAMES);
+  if (names.length > LISTED_NAMES) {
+    details.push(tPlural('…and {count} more', names.length - LISTED_NAMES));
+  }
+  return confirm({
+    title: tPlural('Open {count} shared files?', names.length),
+    body: translate(
+      'Stapler can’t tell whether these came from your device’s share menu or from a website. Open them only if you just shared them.'
+    ),
+    details,
+    confirmLabel: translate('Open'),
+    cancelLabel: translate('Discard')
+  });
+}
+
 async function receiveSharedFiles(): Promise<void> {
   const url = new URL(window.location.href);
   if (!url.searchParams.has(SHARE_TARGET_PARAM)) {
@@ -75,15 +111,15 @@ async function receiveSharedFiles(): Promise<void> {
   url.searchParams.delete(SHARE_TARGET_PARAM);
   // A reload must not look for the same files again.
   history.replaceState(history.state, '', url.href);
-  let files: File[];
+  let batch: SharedBatch;
   try {
     const storage = cacheStorage();
-    files = storage ? await takeSharedFiles(storage) : [];
+    batch = storage ? await takeSharedBatch(storage) : { files: [], verified: true };
   } catch {
-    files = [];
+    batch = { files: [], verified: true };
   }
-  if (files.length > 0) {
-    queueExternalOpen({ files });
+  if (batch.files.length > 0) {
+    if (await shouldOpenSharedBatch(batch)) queueExternalOpen({ files: batch.files });
     return;
   }
   notify('warning', translate('The shared files could not be received.'), {

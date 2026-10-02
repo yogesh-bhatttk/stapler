@@ -181,8 +181,8 @@ describe('PDF-2 — annotations on a rasterised page', () => {
   });
 
   it('colour the verification still finds on a converted page is reported, not passed', async () => {
-    const real = processWorkerImpl.grayscaleApply.bind(processWorkerImpl);
-    vi.spyOn(processWorkerImpl, 'grayscaleApply').mockImplementation(async (...args) => {
+    const real = processWorkerImpl.grayscaleFinish.bind(processWorkerImpl);
+    vi.spyOn(processWorkerImpl, 'grayscaleFinish').mockImplementation(async (...args) => {
       const applied = await real(...args);
       return {
         ...applied,
@@ -226,7 +226,7 @@ describe('PDF-5 — bounded memory', () => {
     const input = await doc.save({ useObjectStreams: false });
 
     const decode = vi.spyOn(renderWorkerImpl, 'decodeImagesGray');
-    const apply = vi.spyOn(processWorkerImpl, 'grayscaleApply');
+    const apply = vi.spyOn(processWorkerImpl, 'grayscaleApplyBatch');
     const indices = Array.from({ length: PAGES + 1 }, (_, i) => i);
     const result = await grayscaleDocument(input, indices, PAGES + 1, {
       mode: 'gray',
@@ -243,13 +243,19 @@ describe('PDF-5 — bounded memory', () => {
     expect(asked.length).toBe(new Set(asked).size);
     expect(asked.length).toBe(PAGES + 1);
 
-    const handed = apply.mock.calls[0][1];
-    expect(handed.images.length).toBe(PAGES + 1);
-    for (const item of [...handed.images, ...handed.rasters]) {
+    // Applied a batch at a time too: never more than 8 pages per call, and
+    // every image and the raster handed over exactly once, encoded.
+    expect(apply.mock.calls.length).toBe(Math.ceil((PAGES + 1) / 8));
+    const handedImages = apply.mock.calls.flatMap(([, batch]) => batch.images);
+    const handedRasters = apply.mock.calls.flatMap(([, batch]) => batch.rasters);
+    for (const [, batch] of apply.mock.calls)
+      expect(batch.pageIndices.length).toBeLessThanOrEqual(8);
+    expect(handedImages.length).toBe(PAGES + 1);
+    for (const item of [...handedImages, ...handedRasters]) {
       expect(item.gray).toBeUndefined();
       expect(item.encoded?.data.length).toBeGreaterThan(0);
     }
-    expect(handed.rasters.length).toBe(1);
+    expect(handedRasters.length).toBe(1);
 
     expect(result.colourLeft).toEqual([]);
     expect(result.pages.slice(0, PAGES).every(p => p.route === 'vector')).toBe(true);

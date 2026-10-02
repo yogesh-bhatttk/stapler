@@ -64,8 +64,10 @@ export const RETIRED_KEY = '__stapler-retired.json';
 export const CLIENT_READY_MESSAGE = 'stapler:client-ready';
 
 /**
- * Scratch cache for a one-off request whose response is served but not kept
- * (PLT-6); emptied after every use and deleted on activation.
+ * Name prefix of the scratch caches for a one-off request whose response is
+ * served but not kept (PLT-6). Each request gets its own
+ * (`TRANSIENT_CACHE + '-' + uuid`), deleted after use; any a stopped worker
+ * left behind are deleted on activation.
  */
 export const TRANSIENT_CACHE = 'stapler-transient';
 
@@ -96,11 +98,21 @@ export type Route =
    * A file of the previous version, still needed by a tab that loaded it
    * before this version took over (PLT-4): served from that version's cache.
    */
-  | { kind: 'retired'; key: string };
+  | { kind: 'retired'; key: string }
+  /**
+   * PLT-4 — the worker has just (re)started and is still reading back which
+   * previous-version cache it keeps (`RouteTable.retiredLoading`). A request
+   * that could be one of that cache's files is held until it knows, then
+   * served from the kept cache or, if it is not there, forwarded to the
+   * network unchanged (`passthrough.ts`) — exactly as if it had been `ignore`.
+   */
+  | { kind: 'retired-pending'; key: string };
 
 export interface RouteInput {
   url: string;
   method: string;
+  /** `Request.mode`; a navigation is never a retired file. */
+  mode?: string;
 }
 
 /** Precomputed lookups, so the fetch handler doesn't rebuild sets per request. */
@@ -111,6 +123,14 @@ export interface RouteTable {
   assets: Set<string>;
   /** Files of the retired previous version's cache, while it is kept (PLT-4). */
   retired?: Set<string>;
+  /**
+   * PLT-4 — true from the worker's start until it has read the kept cache's
+   * record back from Cache Storage. A service worker is stopped when idle and
+   * restarted for the next event, so this in-memory table starts empty every
+   * time; while it does, `routeRequest` holds every possible retired file
+   * (`retired-pending`) instead of letting it go to the network unanswered.
+   */
+  retiredLoading?: boolean;
 }
 
 export function buildRouteTable(scope: string, manifest: PrecacheManifest): RouteTable {
@@ -166,7 +186,11 @@ export function routeRequest(request: RouteInput, table: RouteTable): Route {
   if (page) return { kind: 'page', key: page };
   if (table.assets.has(rel)) return { kind: 'asset', key: rel };
   // Never a page: an old tab that navigates gets this version's page.
-  if (table.retired?.has(rel) && !rel.startsWith('__')) return { kind: 'retired', key: rel };
+  if (rel.startsWith('__') || request.mode === 'navigate') return { kind: 'ignore' };
+  if (table.retired?.has(rel)) return { kind: 'retired', key: rel };
+  if (table.retiredLoading && rel !== '' && !rel.endsWith('/')) {
+    return { kind: 'retired-pending', key: rel };
+  }
   return { kind: 'ignore' };
 }
 
@@ -244,35 +268,46 @@ export interface ShareRequestInput {
 }
 
 /**
- * Whether a share-target POST may store its files. A share from the OS sheet
- * carries no foreign origin, referrer or client; a website auto-submitting a
- * form at `/share-target` carries at least one of them. Rejected: a
- * `cross-site`/`same-site` fetch site, an `Origin` or referrer of another
- * origin, and a navigation started by a page of another origin. Allowed:
- * `Origin: null` with no referrer and no initiating client (what a browser-
- * initiated share looks like) and this app's own origin.
+ * What the worker does with a share-target POST (audit 2026-10-01 PLT-3):
  *
- * Not closable here: a foreign page that opens the POST in a *new window* with
- * `no-referrer` sends exactly that browser-initiated shape (probed). That
- * still needs a click on the foreign page, and the files only open as a new
- * document — nothing is uploaded or overwritten.
+ *  - `'reject'` — the request carries a sign of another origin: a
+ *    `cross-site`/`same-site` fetch site, an `Origin` or referrer of another
+ *    origin, or a navigation started by a page of another origin. Nothing is
+ *    stored.
+ *  - `'verified'` — positively this app's own origin: an `Origin` header or a
+ *    referrer of this origin, or an initiating client that is one of this
+ *    app's pages (and no foreign sign at all). The app imports it at once.
+ *  - `'unverified'` — no sign either way: `Origin` absent or `null`, no
+ *    referrer, no client the worker can see. That is what the OS share sheet
+ *    sends (a browser-initiated navigation), but it is also what a foreign page
+ *    sends when it opens the POST in a *new window* with `no-referrer`
+ *    (probed). The worker cannot tell the two apart, so the files are stored
+ *    marked unverified and the app asks before opening them
+ *    (`src/ui/pwa.ts`, "Open N shared files?").
  */
-export function isShareRequestAllowed(input: ShareRequestInput, scopeOrigin: string): boolean {
+export type ShareVerdict = 'reject' | 'verified' | 'unverified';
+
+export function classifyShareRequest(input: ShareRequestInput, scopeOrigin: string): ShareVerdict {
   const site = input.secFetchSite?.toLowerCase();
-  if (site === 'cross-site' || site === 'same-site') return false;
-  if (input.origin !== null && input.origin !== 'null' && input.origin !== scopeOrigin) {
-    return false;
+  if (site === 'cross-site' || site === 'same-site') return 'reject';
+  let sameOrigin = false;
+  if (input.origin !== null && input.origin !== 'null') {
+    if (input.origin !== scopeOrigin) return 'reject';
+    sameOrigin = true;
   }
   if (input.referrer) {
     let referrerOrigin: string;
     try {
       referrerOrigin = new URL(input.referrer).origin;
     } catch {
-      return false;
+      return 'reject';
     }
-    if (referrerOrigin !== scopeOrigin) return false;
+    if (referrerOrigin !== scopeOrigin) return 'reject';
+    sameOrigin = true;
   }
-  return input.initiator !== 'foreign';
+  if (input.initiator === 'foreign') return 'reject';
+  if (input.initiator === 'same-origin' || site === 'same-origin') sameOrigin = true;
+  return sameOrigin ? 'verified' : 'unverified';
 }
 
 /** Caches an activating worker deletes: older precache versions, nothing else. */

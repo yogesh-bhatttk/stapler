@@ -578,6 +578,24 @@ export class GrayConverter {
     return this.images === null;
   }
 
+  /**
+   * PDF-5 — drops the decoded samples of every image already converted (or
+   * found to need nothing). Once an object is memoised its samples are never
+   * read again, and the grey payload now lives in the document, so the batch
+   * that delivered them can be let go. Returns how many entries were dropped.
+   */
+  releaseUsedImageData(): number {
+    if (!this.images) return 0;
+    let dropped = 0;
+    for (const objectNumber of [...this.images.keys()]) {
+      if (this.imageMemo.has(objectNumber)) {
+        this.images.delete(objectNumber);
+        dropped++;
+      }
+    }
+    return dropped;
+  }
+
   private mapGray(v: number): number {
     return this.mode === 'bw' ? (v < 0.5 ? 0 : 1) : clamp01(v);
   }
@@ -1792,65 +1810,111 @@ export async function planGrayscale(
   return plans;
 }
 
-export interface ApplyGrayscaleInput {
+/** One batch of pages for {@link GrayscaleApplication.applyBatch}. */
+export interface GrayApplyBatch {
+  /** The pages to convert now, in order. */
   pageIndices: readonly number[];
-  mode: GrayMode;
-  images: Map<number, GrayImageData>;
-  rasters: Map<number, GrayRaster>;
-  /** True when every page of the document is being converted. */
-  wholeDocument: boolean;
-  jpegQuality?: number;
+  /**
+   * Decoded images first used by these pages — plus any delivered early. An
+   * image is delivered once, in (or before) the batch of the first page that
+   * uses it; later batches reuse the memoised grey copy.
+   */
+  images: readonly GrayImageData[];
+  /** Rasters for those of `pageIndices` that are rasterised. */
+  rasters: readonly GrayRaster[];
 }
 
-/** Rewrites `doc` in place. The caller saves (and verifies) the result. */
-export async function applyGrayscale(
-  doc: PDFDocument,
-  input: ApplyGrayscaleInput,
-  onPage?: (done: number, total: number) => Promise<void>
-): Promise<GrayPageOutcome[]> {
-  const converter = new GrayConverter(doc, input.mode, input.images, input.jpegQuality);
-  const outcomes: GrayPageOutcome[] = [];
-  for (let i = 0; i < input.pageIndices.length; i++) {
-    await onPage?.(i, input.pageIndices.length);
-    const pageIndex = input.pageIndices[i];
-    const raster = input.rasters.get(pageIndex);
-    const { effects, wrote } = converter.convertPage(pageIndex, raster !== undefined);
-    const converted = [...effects.images].filter(n => converter.convertedImages.has(n)).length;
-    const leftInColour = effects.images.size - converted;
-    if (raster) {
-      const flattened = converter.applyRaster(pageIndex, raster);
-      outcomes.push({
-        pageIndex,
-        route: 'raster',
-        reasons: [
-          ...effects.reasons,
-          ...(flattened > 0
-            ? [translate('its annotations and form fields were flattened into the page image')]
-            : [])
-        ],
-        imagesConverted: 0,
-        imagesLeftInColour: 0
-      });
-      continue;
+/**
+ * PDF-5 — rewrites `doc` in place, a batch of pages at a time, so only one
+ * batch's decoded images and page rasters are in hand at once. The converter
+ * (and its image, form and soft-mask memos) lives across batches: an image or
+ * form shared by pages in different batches is written once, exactly as when
+ * every page is converted in one call. The caller calls {@link finish} once,
+ * then saves (and verifies) the result.
+ */
+export class GrayscaleApplication {
+  private readonly images = new Map<number, GrayImageData>();
+  private readonly converter: GrayConverter;
+  private finished = false;
+
+  constructor(
+    doc: PDFDocument,
+    private readonly options: {
+      mode: GrayMode;
+      /** True when every page of the document is being converted. */
+      wholeDocument: boolean;
+      jpegQuality?: number;
     }
-    if (effects.reasons.size > 0) {
-      outcomes.push({
-        pageIndex,
-        route: 'failed',
-        reasons: [...effects.reasons],
-        imagesConverted: 0,
-        imagesLeftInColour: effects.images.size
-      });
-      continue;
-    }
-    outcomes.push({
-      pageIndex,
-      route: wrote || effects.constructs > 0 ? 'vector' : 'unchanged',
-      reasons: [],
-      imagesConverted: converted,
-      imagesLeftInColour: leftInColour
-    });
+  ) {
+    this.converter = new GrayConverter(doc, options.mode, this.images, options.jpegQuality);
   }
-  if (input.wholeDocument) converter.convertAcroFormDefaults();
-  return outcomes;
+
+  /** Decoded images received and not yet consumed — what this batch still holds. */
+  get heldImages(): number {
+    return this.images.size;
+  }
+
+  async applyBatch(
+    batch: GrayApplyBatch,
+    onPage?: (done: number, total: number) => Promise<void>
+  ): Promise<GrayPageOutcome[]> {
+    if (this.finished) throw new Error('grayscale application already finished');
+    const converter = this.converter;
+    for (const image of batch.images) this.images.set(image.objectNumber, image);
+    const rasters = new Map(batch.rasters.map(raster => [raster.pageIndex, raster]));
+    const outcomes: GrayPageOutcome[] = [];
+    for (let i = 0; i < batch.pageIndices.length; i++) {
+      await onPage?.(i, batch.pageIndices.length);
+      const pageIndex = batch.pageIndices[i];
+      const raster = rasters.get(pageIndex);
+      const { effects, wrote } = converter.convertPage(pageIndex, raster !== undefined);
+      const converted = [...effects.images].filter(n => converter.convertedImages.has(n)).length;
+      const leftInColour = effects.images.size - converted;
+      if (raster) {
+        const flattened = converter.applyRaster(pageIndex, raster);
+        // The raster's payload now lives in the document; drop this batch's handle on it.
+        rasters.delete(pageIndex);
+        outcomes.push({
+          pageIndex,
+          route: 'raster',
+          reasons: [
+            ...effects.reasons,
+            ...(flattened > 0
+              ? [translate('its annotations and form fields were flattened into the page image')]
+              : [])
+          ],
+          imagesConverted: 0,
+          imagesLeftInColour: 0
+        });
+        continue;
+      }
+      if (effects.reasons.size > 0) {
+        outcomes.push({
+          pageIndex,
+          route: 'failed',
+          reasons: [...effects.reasons],
+          imagesConverted: 0,
+          imagesLeftInColour: effects.images.size
+        });
+        continue;
+      }
+      outcomes.push({
+        pageIndex,
+        route: wrote || effects.constructs > 0 ? 'vector' : 'unchanged',
+        reasons: [],
+        imagesConverted: converted,
+        imagesLeftInColour: leftInColour
+      });
+    }
+    this.converter.releaseUsedImageData();
+    return outcomes;
+  }
+
+  /** Document-level work done once, after every page. Releases what is left. */
+  finish(): void {
+    if (this.finished) return;
+    this.finished = true;
+    if (this.options.wholeDocument) this.converter.convertAcroFormDefaults();
+    this.images.clear();
+  }
 }

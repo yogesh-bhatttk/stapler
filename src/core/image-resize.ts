@@ -10,8 +10,11 @@
 import { DOC_PAGE_WHITE } from './doc-colors';
 import { corrupt } from './errors';
 import { translate } from './i18n';
+import { assertExactSizeWithinLimit } from './render-limits';
 import {
+  exactOutputSize,
   searchImageTargetSize,
+  type ExactDimensions,
   type ImageSize,
   type ImageTargetOutcome,
   type ImageTrial
@@ -41,8 +44,9 @@ export async function encodeScaledJpeg(
   return bytes;
 }
 
-export interface SizedImageRequest {
+export interface SizedImageRequest extends ExactDimensions {
   targetBytes: number | null;
+  /** Longest side limit. Ignored when an exact `width`/`height` is given. */
   maxDimension: number | null;
   /**
    * The source file's own byte length, when known. The quality search then
@@ -101,12 +105,19 @@ export async function resizeToTarget(
   } = {}
 ): Promise<SizedImageResult> {
   const size = { width: source.width, height: source.height };
+  // CNV-14: an exact size is worked out from the decoded — so already
+  // EXIF-oriented — source, and refused before any canvas is allocated when
+  // a browser could not draw it: the same area and per-side limit as a page
+  // render, so a locked side that follows a panorama is caught too.
+  const exactSize = exactOutputSize(size, request);
+  if (exactSize) assertExactSizeWithinLimit(exactSize);
   let pending: Promise<void> | void = undefined;
   const outcome = await searchImageTargetSize<Uint8Array>({
     width: size.width,
     height: size.height,
     targetBytes: request.targetBytes,
     maxDimension: request.maxDimension,
+    exactSize,
     preferAtMostBytes: request.sourceBytes,
     signal: hooks.signal,
     onTrial: (index, max) => {

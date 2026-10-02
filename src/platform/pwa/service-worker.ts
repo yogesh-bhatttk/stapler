@@ -22,7 +22,9 @@
  *    at all and reaches the browser exactly as if there were no worker;
  *  - receives files from the OS share sheet (`share_target`) into a same-origin
  *    cache for the app to open (`share-inbox.ts`) — never from a POST another
- *    website started (PLT-3, `isShareRequestAllowed`);
+ *    website started (PLT-3, `classifyShareRequest`); a share it cannot
+ *    trace to this origin is stored marked unverified, and the app asks
+ *    before opening it;
  *  - activate: deletes older precache versions — except, while tabs loaded by
  *    the previous version are still open, that version's cache, whose files
  *    it keeps serving them until they have all reloaded or closed (PLT-4).
@@ -31,9 +33,14 @@
  *    document; every other tab is then told by `controllerchange`
  *    (`register.ts`) and reloads, or asks first if it has unsaved changes.
  *
- * It makes no request of its own except for this origin's build files, and
- * only through the Cache API (`cache.add`/`addAll`) with a URL built from a
- * manifest path and the worker's own scope — never a URL taken from a request.
+ * It makes no request of its own except for this origin's files, and only
+ * through the Cache API (`cache.add`/`addAll`) with a URL built from a
+ * manifest path and the worker's own scope. The one exception is a request it
+ * held while reading back the kept cache after a restart (PLT-4) that turns
+ * out not to be a kept file: that request — the browser's own same-origin GET
+ * object, query, headers and all — is forwarded unchanged (`passthrough.ts`),
+ * so it gets exactly the response it would have got with no worker at all.
+ * Never another origin, never a URL as given.
  * A build file fetched on a cache miss is kept only if its bytes match this
  * build's recorded hash, so one version never stores another's file.
  * No telemetry, no remote code, no third-party origin.
@@ -49,7 +56,7 @@ import {
   TRANSIENT_CACHE,
   buildRouteTable,
   cacheName,
-  isShareRequestAllowed,
+  classifyShareRequest,
   parseRetiredRecord,
   pickRetiredCache,
   planInstall,
@@ -62,6 +69,7 @@ import {
   type ShareRequestInput
 } from './sw-routing';
 import { storeSharedFiles } from './share-inbox';
+import { passThrough } from './passthrough';
 
 /** Replaced with the real manifest by `scripts/pwa.mjs` when it compiles `sw.js`. */
 declare const __STAPLER_PRECACHE__: PrecacheManifest;
@@ -130,11 +138,14 @@ async function sha256Hex(response: Response): Promise<string> {
 
 /**
  * One request for a build file of this origin, through a scratch cache (the
- * Cache API is the only way this worker requests anything), abandoned after
- * `timeoutMs`. Nothing is kept: the response is returned, not stored.
+ * Cache API is how this worker requests its own files), abandoned after
+ * `timeoutMs`. Nothing is kept: the response is returned, not stored. Each
+ * call has its own scratch cache, so two at once for one URL never share —
+ * or delete — each other's entry.
  */
 async function networkOnce(path: string, timeoutMs: number): Promise<Response | null> {
   const url = urlOf(path);
+  const scratchName = `${TRANSIENT_CACHE}-${crypto.randomUUID()}`;
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<null>(resolve => {
@@ -144,14 +155,14 @@ async function networkOnce(path: string, timeoutMs: number): Promise<Response | 
     }, timeoutMs);
   });
   const attempt = (async () => {
-    const scratch = await caches.open(TRANSIENT_CACHE);
     try {
+      const scratch = await caches.open(scratchName);
       await scratch.add(new Request(url, { cache: 'no-cache', signal: controller.signal }));
       return (await scratch.match(url)) ?? null;
     } catch {
       return null;
     } finally {
-      await scratch.delete(url);
+      await caches.delete(scratchName);
     }
   })();
   try {
@@ -166,36 +177,70 @@ async function networkOnce(path: string, timeoutMs: number): Promise<Response | 
  * ---------------------------------------------------------------- */
 
 let retired: RetiredRecord | null = null;
+/** Bumped by every change of `retired`, so a slower, older read never overwrites a newer one. */
+let retiredGeneration = 0;
 
 async function useRetired(record: RetiredRecord | null): Promise<void> {
-  retired = null;
-  TABLE.retired = undefined;
-  if (!record || !(await caches.has(record.cache))) return;
-  const keys = await (await caches.open(record.cache)).keys();
-  const paths = new Set<string>();
-  for (const key of keys) {
-    const rel = scopeRelative(key.url, SCOPE);
-    if (rel) paths.add(rel);
+  const generation = ++retiredGeneration;
+  let paths: Set<string> | undefined;
+  if (record && (await caches.has(record.cache))) {
+    paths = new Set<string>();
+    for (const key of await (await caches.open(record.cache)).keys()) {
+      const rel = scopeRelative(key.url, SCOPE);
+      if (rel) paths.add(rel);
+    }
   }
-  retired = record;
+  if (generation !== retiredGeneration) return;
+  // Assigned together, after every await: a request never sees half a change.
+  retired = paths ? record : null;
   TABLE.retired = paths;
 }
 
 /**
- * Read back on every start of this worker (it is stopped when idle). The
- * first request after a restart can race this; it then simply goes to the
- * network, which is what happened before the cache was kept at all.
+ * PLT-4 — the kept cache is recorded in Cache Storage (`RETIRED_KEY`), and
+ * read back on every start of this worker: it is stopped when idle and
+ * restarted for the next event, with this module's state gone. Until the
+ * read finishes, `TABLE.retiredLoading` makes `routeRequest` hold every
+ * request that could be a kept file (`retired-pending`), so the first
+ * request after a cold start is answered from the kept cache like any other
+ * instead of going to the network.
+ *
+ * The hold is as short as it can be made. A service worker has no
+ * synchronous storage, so whether a record exists is only known after one
+ * Cache Storage lookup — but that one lookup is all a cold start without a
+ * kept cache (the usual case) waits for: no record means `useRetired(null)`,
+ * which finishes without another await, and the hold ends. Only while a
+ * previous version really is kept does it also wait for that cache's key
+ * list.
  */
 async function loadRetired(): Promise<void> {
+  const generation = retiredGeneration;
   try {
     const stored = await caches.match(urlOf(RETIRED_KEY), { cacheName: CURRENT });
-    if (!stored) return;
-    await useRetired(parseRetiredRecord(await stored.json()));
+    const record = stored ? parseRetiredRecord(await stored.json()) : null;
+    // `activate` (or a prune) decided in the meantime: its state is newer.
+    if (generation === retiredGeneration) await useRetired(record);
   } catch {
     // A missing or unreadable record: nothing is kept.
   }
 }
-void loadRetired();
+TABLE.retiredLoading = true;
+const retiredLoaded = loadRetired().finally(() => {
+  TABLE.retiredLoading = false;
+});
+
+/**
+ * A request that arrived while the kept cache was still being read back: the
+ * kept cache's copy if it has one; otherwise the browser's own request,
+ * forwarded unchanged — same URL and query, method, headers (`Range`…),
+ * credentials and cache mode, the real status (a 404 stays a 404), and no
+ * timeout — exactly what it would have got had this worker not intercepted it.
+ */
+async function heldRequest(request: Request, key: string): Promise<Response> {
+  await retiredLoaded;
+  if (TABLE.retired?.has(key)) return retiredFile(key);
+  return passThrough(request, SCOPE_ORIGIN);
+}
 
 /** Deletes the kept cache once every tab that needed it has reloaded or closed. */
 async function pruneRetired(): Promise<void> {
@@ -281,7 +326,8 @@ async function describeCache(name: string): Promise<CacheCandidate> {
 }
 
 async function activate(): Promise<void> {
-  const stale = staleCaches(await caches.keys(), MANIFEST.version);
+  const names = await caches.keys();
+  const stale = staleCaches(names, MANIFEST.version);
   // Every tab open right now was loaded by an older version: this one has
   // not served a page yet.
   const windows = await sw.clients.matchAll({ type: 'window', includeUncontrolled: true });
@@ -290,7 +336,10 @@ async function activate(): Promise<void> {
       ? pickRetiredCache(await Promise.all(stale.map(describeCache)))
       : null;
   await Promise.all(stale.filter(name => name !== keep).map(name => caches.delete(name)));
-  await caches.delete(TRANSIENT_CACHE);
+  // Scratch caches a stopped worker left behind (`networkOnce`).
+  await Promise.all(
+    names.filter(name => name.startsWith(TRANSIENT_CACHE)).map(name => caches.delete(name))
+  );
 
   const cache = await caches.open(CURRENT);
   await cache.put(urlOf(ACTIVATED_KEY), json({ at: Date.now() }));
@@ -359,7 +408,7 @@ async function initiatorOf(clientId: string): Promise<ShareRequestInput['initiat
 
 async function receiveShare(event: FetchEvent): Promise<Response> {
   const { request } = event;
-  const allowed = isShareRequestAllowed(
+  const verdict = classifyShareRequest(
     {
       origin: request.headers.get('origin'),
       secFetchSite: request.headers.get('sec-fetch-site'),
@@ -370,12 +419,17 @@ async function receiveShare(event: FetchEvent): Promise<Response> {
   );
   // PLT-3: a share another website posted is dropped unread — nothing is
   // stored, and the app opens as if it had been launched normally.
-  if (!allowed) return Response.redirect(urlOf('./'), 303);
+  if (verdict === 'reject') return Response.redirect(urlOf('./'), 303);
   let stored = 0;
   try {
     const form = await request.formData();
     const files = form.getAll('files').filter((value): value is File => typeof value !== 'string');
-    stored = await storeSharedFiles(caches, SCOPE, files);
+    // A share the worker could not positively trace to this origin (the OS
+    // share sheet, or a foreign page posting from a new no-referrer window —
+    // indistinguishable here) is stored marked unverified, and the app asks
+    // before opening it (`src/ui/pwa.ts`).
+    const now = Date.now();
+    stored = await storeSharedFiles(caches, SCOPE, files, now, now, verdict === 'verified');
   } catch {
     // The app says "nothing was received" when the inbox is empty.
   }
@@ -394,7 +448,10 @@ sw.addEventListener('message', event => {
 });
 
 sw.addEventListener('fetch', event => {
-  const route = routeRequest(event.request, TABLE);
+  const route = routeRequest(
+    { url: event.request.url, method: event.request.method, mode: event.request.mode },
+    TABLE
+  );
   switch (route.kind) {
     case 'ignore':
       return;
@@ -410,6 +467,9 @@ sw.addEventListener('fetch', event => {
       return;
     case 'retired':
       event.respondWith(retiredFile(route.key));
+      return;
+    case 'retired-pending':
+      event.respondWith(heldRequest(event.request, route.key));
       return;
   }
 });

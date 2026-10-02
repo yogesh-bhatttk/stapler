@@ -10,15 +10,17 @@ name: Release
 #            dist/release (chrome, firefox and web zips, one `.sha256` per zip,
 #            SHA256SUMS) as the `release` artifact. Nothing later rebuilds it.
 #   check    lint, types, tokens, invariants, unit tests (source-level).
-#   bundle-network, e2e-extension
+#   bundle-network, e2e-extension, e2e-web-shipped
 #            unpack the artifact's zips and test *those*: the bundle scan runs
 #            on all three, the packaged-extension e2e loads the shipped Chrome
-#            zip.
+#            zip, and the zero-network, offline (PWA), share-target and
+#            worker-network suites run against the unzipped web zip as it is,
+#            with no test hooks (`tests/e2e/pwa-shipped.config.ts`).
 #   e2e-web, perf
-#            the web suites need the e2e test hooks (`VITE_E2E_TEST_HOOKS`),
-#            which the shipped site deliberately does not contain, so they
-#            build their own instrumented copy of the same commit. They gate
-#            the release; they cannot test the shipped web bytes themselves.
+#            every other web suite needs the e2e test hooks
+#            (`VITE_E2E_TEST_HOOKS`), which the shipped site deliberately does
+#            not contain, so these build their own instrumented copy of the
+#            same commit. They gate the release too.
 #   release  needs every job above, re-verifies the artifact's checksums and
 #            creates a *draft* release with the artifact's files. A human
 #            reviews and publishes the draft (RELEASE_CHECKLIST.md).
@@ -147,6 +149,48 @@ jobs:
           path: playwright-report/
           retention-days: 14
 
+  e2e-web-shipped:
+    # Audit 2026-10-01 PLT-7 — the shipped web bytes themselves, no rebuild and
+    # no test hooks: zero-network, offline after one visit, share target,
+    # and the service worker's own requests.
+    name: E2E (the shipped web zip)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+      - name: Unpack the shipped web zip
+        run: unzip -q release/stapler-*-web.zip -d shipped/web
+      - name: Confirm it is the shipped build (no test hooks)
+        run: |
+          # The e2e build's service-worker opt-in key (src/ui/pwa.ts) is
+          # compiled out of a build without VITE_E2E_TEST_HOOKS.
+          if grep -rlq --exclude='*.map' 'stapler:e2e-service-worker' shipped/web; then
+            echo "::error::The shipped web zip contains the e2e opt-in hook"
+            exit 1
+          fi
+      - run: pnpm exec playwright test -c tests/e2e/pwa-shipped.config.ts
+        env:
+          STAPLER_SHIPPED_WEB: shipped/web
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-release-web-shipped
+          path: playwright-report/
+          retention-days: 14
+
   e2e-web:
     name: E2E (web preview, instrumented build)
     runs-on: ubuntu-latest
@@ -196,7 +240,7 @@ jobs:
 
   release:
     name: Draft the GitHub Release
-    needs: [build, check, bundle-network, e2e-extension, e2e-web, perf]
+    needs: [build, check, bundle-network, e2e-extension, e2e-web-shipped, e2e-web, perf]
     runs-on: ubuntu-latest
     permissions:
       # Creating a release and uploading its assets.

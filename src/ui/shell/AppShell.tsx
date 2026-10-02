@@ -67,7 +67,7 @@ import {
   runImportJob
 } from '../../core/open-document';
 import { platform } from '../../platform/current';
-import { notify, confirmAction } from '../../core/notify';
+import { notify, confirmAction, confirmRequest } from '../../core/notify';
 import { readSetting, writeSetting } from '../../core/db';
 import {
   eventMatchesRedoShortcut,
@@ -358,7 +358,9 @@ export function AppShell({ children }: { children: ComponentChildren }) {
       {isShortcutSheetOpen.value && (
         <ShortcutModal onClose={() => (isShortcutSheetOpen.value = false)} />
       )}
-      {showWelcome && (
+      {/* Waits for any open confirm (a share or session-restore prompt) so the
+          two never stack; it shows once that is answered. */}
+      {showWelcome && !confirmRequest.value && (
         <WelcomeModal
           onClose={() => {
             setShowWelcome(false);

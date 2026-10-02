@@ -60,7 +60,14 @@ export function applyToolParams(toolId: string | null, params: URLSearchParams):
               targetKb: Math.round(sizeParamBytes(target) / 1000)
             }
           : {}),
-        ...(max !== null ? { maxDimension: max } : {})
+        // As for Image to size: a `max=` link asks for a longest side, so an
+        // exact size (CNV-14) is switched off rather than left to override it.
+        ...(max !== null
+          ? {
+              maxDimension: max,
+              ...(current.exact ? { exact: { ...current.exact, on: false } } : {})
+            }
+          : {})
       };
       return true;
     }
@@ -72,7 +79,14 @@ export function applyToolParams(toolId: string | null, params: URLSearchParams):
       imageSizeSettings.value = {
         ...current,
         ...(target ? { useTarget: true, target } : {}),
-        ...(max !== null ? { maxDimension: max } : {})
+        // A `max=` link asks for a longest side: switch an exact size (CNV-14)
+        // off, or it would silently override the size the link asked for.
+        ...(max !== null
+          ? {
+              maxDimension: max,
+              ...(current.exact ? { exact: { ...current.exact, on: false } } : {})
+            }
+          : {})
       };
       return true;
     }

@@ -307,9 +307,14 @@ so it gets its own explicit step below rather than being buried inside "run veri
         bundle scan on them;
       - `e2e-extension` unpacks the shipped Chrome zip into `dist/ext` and runs the
         packaged-extension suite against it;
+      - `e2e-web-shipped` unpacks the shipped web zip and, with no test hooks and
+        no rebuild, runs the zero-network, offline (PWA), share-target and
+        service-worker-network suites against it
+        (`tests/e2e/pwa-shipped.config.ts`; locally:
+        `STAPLER_SHIPPED_WEB=<unzipped dir> pnpm exec playwright test -c tests/e2e/pwa-shipped.config.ts`);
       - `e2e-web` and `perf` build their own *instrumented* copy of the same commit
-        (the web suites need `VITE_E2E_TEST_HOOKS`, which the shipped site must not
-        contain) — they gate the release but do not test the shipped web bytes;
+        for every other web suite (they need `VITE_E2E_TEST_HOOKS`, which the shipped
+        site must not contain) — they gate the release too;
       - `check` runs lint, types, tokens, invariants and the unit tests;
       - `release` needs all of the above, re-verifies `SHA256SUMS` and every
         `<zip>.sha256`, and creates a **draft** GitHub Release with the three zips,
@@ -332,4 +337,9 @@ so it gets its own explicit step below rather than being buried inside "run veri
       never installs for offline use. To check, open the deployed site, then in DevTools
       → Application → Service workers confirm that `sw.js` is *activated* and that Cache
       Storage holds a `stapler-precache-<version>` cache.
+- [ ] **Share to the installed web app (Android, manual — no CI can do this):**
+      install the deployed site, share a PDF to it from another app. Expected: the app
+      opens and asks "Open 1 shared file?" naming the file (the service worker cannot
+      tell an OS share from a website posting one, audit 2026-10-01 PLT-3); **Open**
+      imports it, **Discard** opens nothing and a reload does not bring it back.
 - [ ] **Celebrate:** Grab a coffee! ☕

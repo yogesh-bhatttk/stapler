@@ -178,8 +178,9 @@ import {
 } from '../pdf/encrypt';
 import { applyAltTextToDoc } from '../pdf/accessibility';
 import {
-  applyGrayscale,
+  GrayscaleApplication,
   planGrayscale,
+  type GrayApplyBatch,
   type GrayImageData,
   type GrayMode,
   type GrayPageOutcome,
@@ -914,30 +915,54 @@ export interface ProcessJob extends LocaleAware {
     job?: JobHandle
   ): Promise<GrayPagePlan[]>;
   /**
-   * GAP-6 — rewrites the pages with the decoded image pixels and page rasters
-   * in hand, saves, and re-plans the *output* as verification: every converted
-   * page must come back with nothing left to convert.
+   * GAP-6 / PDF-5 — opens a greyscale application on `bytes`, kept on this
+   * worker instance (call inside one lease). Pages are then converted batch by
+   * batch with {@link grayscaleApplyBatch}, so only one batch's decoded images
+   * and page rasters are ever handed over at once, and the converter's memos
+   * persist across batches: shared images and forms are still written once.
+   * Returns the session id.
    */
-  grayscaleApply(
+  grayscaleBegin(
     bytes: Uint8Array,
-    input: GrayscaleApplyInput,
+    options: { mode: GrayMode; wholeDocument: boolean },
     job?: JobHandle
-  ): Promise<GrayscaleApplyResult>;
+  ): Promise<string>;
+  /** Converts one batch of pages with the images and rasters first needed by them. */
+  grayscaleApplyBatch(
+    session: string,
+    batch: GrayApplyBatch,
+    job?: JobHandle
+  ): Promise<GrayscaleBatchResult>;
+  /**
+   * Finishes the session: document-level conversion, unreachable-object
+   * sweep, save, and a re-plan of the *output* as verification — every
+   * converted page must come back with nothing left to convert. Closes the
+   * session whatever happens.
+   */
+  grayscaleFinish(
+    session: string,
+    converted: number[],
+    job?: JobHandle
+  ): Promise<GrayscaleFinishResult>;
+  /** Closes a session without saving (cancelled or failed). Never throws. */
+  grayscaleDiscard(session: string): Promise<void>;
   /** GAP-6 — re-saves a damaged PDF through the tolerant parser (`pdf/repair.ts`). */
   repairDocument(bytes: Uint8Array, job?: JobHandle): Promise<RepairOutcome>;
 }
 
-export interface GrayscaleApplyInput {
-  pageIndices: number[];
-  mode: GrayMode;
-  images: GrayImageData[];
-  rasters: GrayRaster[];
-  wholeDocument: boolean;
+export interface GrayscaleBatchResult {
+  outcomes: GrayPageOutcome[];
+  /**
+   * Bytes of decoded image and raster payload this call received — the
+   * measured PDF-5 bound: one batch's worth, never the document's.
+   */
+  payloadBytes: number;
+  /** Decoded images still held by the session after the batch (not yet used). */
+  heldImages: number;
 }
 
-export interface GrayscaleApplyResult {
+export interface GrayscaleFinishResult {
   bytes: Uint8Array;
-  outcomes: GrayPageOutcome[];
   /** The output re-planned (always in `gray` mode) for every converted page. */
   verification: GrayPagePlan[];
 }
@@ -985,6 +1010,34 @@ function transfer(bytes: Uint8Array): Uint8Array {
  */
 function transferOut<T extends { bytes: Uint8Array }>(result: T): T {
   return Comlink.transfer(result, [result.bytes.buffer as ArrayBuffer]);
+}
+
+/**
+ * PDF-5 — open greyscale applications on this worker instance, by session
+ * id. Each holds the parsed document being rewritten; batches of decoded
+ * images and rasters arrive one call at a time and are dropped once written.
+ */
+const graySessions = new Map<string, { doc: PDFDocument; application: GrayscaleApplication }>();
+let graySessionCounter = 0;
+
+function graySession(id: string): { doc: PDFDocument; application: GrayscaleApplication } {
+  const entry = graySessions.get(id);
+  if (!entry) throw new Error(`unknown greyscale session ${id}`);
+  return entry;
+}
+
+/** Bytes of image/raster payload in one batch (encoded data, raw samples, alpha). */
+function grayPayloadBytes(
+  images: readonly GrayImageData[],
+  rasters: readonly GrayRaster[]
+): number {
+  let total = 0;
+  for (const item of [...images, ...rasters]) {
+    total += item.encoded?.data.byteLength ?? 0;
+    total += item.gray?.byteLength ?? 0;
+    if ('alpha' in item) total += item.alpha?.byteLength ?? 0;
+  }
+  return total;
 }
 
 /* ------------------------------------------------------------------ *
@@ -7076,36 +7129,55 @@ Q
     );
   },
 
-  async grayscaleApply(bytes, input, job) {
+  async grayscaleBegin(bytes, options, job) {
+    await checkpoint(job, 0, translate('Reading…'));
     const doc = await load(bytes);
-    const outcomes = await applyGrayscale(
-      doc,
-      {
-        pageIndices: input.pageIndices,
-        mode: input.mode,
-        images: new Map(input.images.map(image => [image.objectNumber, image])),
-        rasters: new Map(input.rasters.map(raster => [raster.pageIndex, raster])),
-        wholeDocument: input.wholeDocument
-      },
-      (done, total) =>
+    const id = `gray-${++graySessionCounter}`;
+    graySessions.set(id, { doc, application: new GrayscaleApplication(doc, options) });
+    return id;
+  },
+
+  async grayscaleApplyBatch(session, batch, job) {
+    const entry = graySession(session);
+    const payloadBytes = grayPayloadBytes(batch.images, batch.rasters);
+    const outcomes = await entry.application.applyBatch(batch, (done, total) =>
+      checkpoint(
+        job,
+        done / Math.max(1, total),
+        translate('Converting page {page}', { page: batch.pageIndices[done] + 1 })
+      )
+    );
+    const last = batch.pageIndices[batch.pageIndices.length - 1] ?? 0;
+    await checkpoint(job, 1, translate('Converting page {page}', { page: last + 1 }));
+    return { outcomes, payloadBytes, heldImages: entry.application.heldImages };
+  },
+
+  async grayscaleFinish(session, converted, job) {
+    const { doc, application } = graySession(session);
+    try {
+      await checkpoint(job, 0, translate('Saving'));
+      application.finish();
+      // Colour images no page uses any more would otherwise stay in the file at
+      // full size, invisible — and still in colour.
+      sweepUnreachableObjects(doc);
+      await checkpoint(job, 0.1, translate('Saving'));
+      const output = await doc.save({ useObjectStreams: true });
+      await checkpoint(job, 0.5, translate('Verifying the result'));
+      const verification = await planGrayscale(await load(output), converted, 'gray', done =>
         checkpoint(
           job,
-          (done / Math.max(1, total)) * 0.8,
-          translate('Converting page {page}', { page: input.pageIndices[done] + 1 })
+          0.5 + (0.5 * done) / Math.max(1, converted.length),
+          translate('Verifying the result')
         )
-    );
-    // Colour images no page uses any more would otherwise stay in the file at
-    // full size, invisible — and still in colour.
-    sweepUnreachableObjects(doc);
-    await checkpoint(job, 0.85, translate('Saving'));
-    const output = await doc.save({ useObjectStreams: true });
+      );
+      return transferOut({ bytes: output, verification });
+    } finally {
+      graySessions.delete(session);
+    }
+  },
 
-    await checkpoint(job, 0.9, translate('Verifying the result'));
-    const converted = outcomes
-      .filter(o => o.route === 'vector' || o.route === 'raster')
-      .map(o => o.pageIndex);
-    const verification = await planGrayscale(await load(output), converted, 'gray');
-    return transferOut({ bytes: output, outcomes, verification });
+  async grayscaleDiscard(session) {
+    graySessions.delete(session);
   },
 
   async repairDocument(bytes, job) {

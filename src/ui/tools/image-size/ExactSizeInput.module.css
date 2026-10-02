@@ -1,0 +1,12 @@
+/* Width · lock · height on one line; the lock sits level with the inputs. */
+.row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: end;
+  gap: var(--space-xs);
+}
+
+.input {
+  width: 100%;
+  min-width: 0;
+}

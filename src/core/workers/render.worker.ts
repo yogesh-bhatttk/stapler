@@ -36,7 +36,8 @@ import { loadBundledFaceModelWeights } from '../faceblur/model';
 import { cropUnitRect, intersectionOverUnion, matchTemplate } from '../faceblur/logoMatch';
 import { decodeBarcodesFromImage, type DecodedBarcode } from '../barcode';
 import { fillPolygonMask, polygonOverlapsBox, shrinkMask } from '../geometry';
-import { clampRenderScale } from '../render-limits';
+import { assertExactSizeWithinLimit, clampRenderScale } from '../render-limits';
+import { exactOutputSize } from '../image-target';
 import { applyAdaptiveThreshold } from '../cv/enhance';
 import type { GrayImageData, GrayMode, GrayRaster } from '../pdf/grayscale';
 import { encodeGraySamples } from '../gray-encode';
@@ -1289,22 +1290,45 @@ const api: RenderJob = {
   async pageToSizedImage(handle, pageIndex, format, dpi, request, job) {
     const page = await entry(handle).doc.getPage(pageIndex + 1);
     try {
+      // The rotated viewport (the page's own `/Rotate`), so a turned page is
+      // sized on the sides it is seen with.
       const base = page.getViewport({ scale: 1 });
-      let scale = dpi / 72;
-      const longestPt = Math.max(base.width, base.height);
-      if (request.maxDimension && longestPt * scale > request.maxDimension) {
-        scale = request.maxDimension / longestPt;
+      // CNV-14 — an exact size replaces both `dpi` and the longest-side box:
+      // the page is rendered straight to those pixels (vector, so nothing is
+      // upscaled from a smaller raster), stretched per axis when unlocked.
+      const exact = exactOutputSize(base, request);
+      if (exact) assertExactSizeWithinLimit(exact);
+      let viewport: pdfjsLib.PageViewport;
+      let canvasSize: { width: number; height: number };
+      let transform: number[] | undefined;
+      if (exact) {
+        const sx = exact.width / base.width;
+        const sy = exact.height / base.height;
+        viewport = page.getViewport({ scale: sx });
+        // Applied before the viewport's own transform, in canvas pixels: this
+        // takes the height from `base.height × sx` to `base.height × sy`.
+        transform = Math.abs(sy - sx) > 1e-9 ? [1, 0, 0, sy / sx, 0, 0] : undefined;
+        // Allocated at exactly the integers asked for, never via `ceil`.
+        canvasSize = exact;
+      } else {
+        let scale = dpi / 72;
+        const longestPt = Math.max(base.width, base.height);
+        if (request.maxDimension && longestPt * scale > request.maxDimension) {
+          scale = request.maxDimension / longestPt;
+        }
+        scale = clampRenderScale(base.width, base.height, scale).scale;
+        viewport = page.getViewport({ scale });
+        // IMG-6 — "longest side at most N" is a promise about pixels: never let
+        // rounding up a fractional edge give N + 1.
+        const box = request.maxDimension ?? Infinity;
+        canvasSize = {
+          width: Math.min(box, viewport.width),
+          height: Math.min(box, viewport.height)
+        };
       }
-      scale = clampRenderScale(base.width, base.height, scale).scale;
-      const viewport = page.getViewport({ scale });
-      // IMG-6 — "longest side at most N" is a promise about pixels: never let
-      // rounding up a fractional edge give N + 1.
-      const box = request.maxDimension ?? Infinity;
-      const { canvas, ctx } = offscreen(
-        Math.min(box, viewport.width),
-        Math.min(box, viewport.height)
-      );
-      await page.render(renderParams(ctx, viewport)).promise;
+      const { canvas, ctx } = offscreen(canvasSize.width, canvasSize.height);
+      await page.render({ ...renderParams(ctx, viewport), ...(transform ? { transform } : {}) })
+        .promise;
       try {
         if (format === 'png') {
           const blob = await canvas.convertToBlob({ type: 'image/png' });
@@ -1324,8 +1348,12 @@ const api: RenderJob = {
         }
         const result = await resizeToTarget(
           canvas,
-          // The box was already applied by rendering smaller.
-          { targetBytes: request.targetBytes, maxDimension: null },
+          // The box (or the exact size) was already applied by rendering at
+          // it. An exact size is still passed on, as the canvas's own, so the
+          // target search only ever lowers quality and never the pixel size.
+          exact
+            ? { targetBytes: request.targetBytes, maxDimension: null, ...exact }
+            : { targetBytes: request.targetBytes, maxDimension: null },
           {
             onTrial: (index, max) =>
               checkpoint(

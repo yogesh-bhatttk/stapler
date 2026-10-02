@@ -27,6 +27,7 @@ import {
   flattenOnWhite,
   gifFrameCount,
   imageOriginalSatisfies,
+  orientedHeaderSize,
   sniffWebImageFormat,
   type LibHeif,
   type RasterKind,
@@ -40,6 +41,8 @@ import {
   type SizedImageRequest,
   type SizedImageResult
 } from '../image-resize';
+import { exactOutputSize, matchesExactSize } from '../image-target';
+import { assertExactSizeWithinLimit } from '../render-limits';
 
 /** Which decoder a single-image resize needs: the worker's own, or the browser's. */
 export type ResizeSourceKind = RasterKind | 'bitmap';
@@ -267,6 +270,12 @@ const api: ImageJob = {
     // so the result can say so rather than drop them silently.
     const frames =
       kind === 'bitmap' && sniffWebImageFormat(bytes) === 'gif' ? gifFrameCount(bytes) : 1;
+    // CNV-14: an exact size past what a canvas can hold is refused from the
+    // header, before the source is decoded at all; `resizeToTarget` checks
+    // again from the decoded size (a HEIC/TIFF, or a header that said nothing).
+    const header = kind === 'bitmap' ? orientedHeaderSize(bytes) : null;
+    const early = header ? exactOutputSize(header, request) : null;
+    if (early) assertExactSizeWithinLimit(early);
     const { source, pages } = await decodeForResize(kind, bytes, name, job);
     try {
       // The source's own size steers the quality search away from a "fit"
@@ -274,8 +283,11 @@ const api: ImageJob = {
       // keeping that file is possible. A HEIC, a TIFF or a sideways JPEG must
       // be converted whatever its size, so capping its JPEG at the source's
       // byte length would only cost quality for nothing.
+      // An exact size the source does not already have (CNV-14) rules the
+      // original out too.
       const keepable =
         kind === 'bitmap' &&
+        matchesExactSize({ width: source.width, height: source.height }, request) &&
         imageOriginalSatisfies(
           bytes,
           { sourceWidth: source.width, sourceHeight: source.height },

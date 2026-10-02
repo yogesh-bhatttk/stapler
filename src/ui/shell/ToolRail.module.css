@@ -10,6 +10,13 @@
   padding: var(--space-md);
   flex-shrink: 0;
   overflow-y: auto;
+  /* The containing block for the visually hidden labels and summaries
+     (`position: absolute`). Without it they were positioned against the shell's
+     `.layout`, past both this scroller and `.main`'s clip, and grew the layout's
+     scroll height (1580px in a 1000px window at 800px wide); scrolling a low
+     rail item into view then scrolled the whole shell, top bar, page grid and
+     options sheet with it, up off the screen. */
+  position: relative;
   z-index: 100;
 }
 

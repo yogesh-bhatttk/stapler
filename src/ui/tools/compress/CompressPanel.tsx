@@ -17,6 +17,7 @@ import { Field, RadioGroup, Select, Slider } from '../../components/Field';
 import { SizeDelta, formatBytes, formatTargetMiss } from '../../components/Feedback';
 import { panelStyles } from '../../shell/panelStyles';
 import {
+  compressColour,
   compressMeasurement,
   compressMode,
   compressReport,
@@ -35,6 +36,7 @@ import { useEffect } from 'preact/hooks';
 import { useJob } from '../../useJob';
 import { fromUnknown, isCancellation, logEvent } from '../../../core/errors';
 import { tKey, translate, useTranslation } from '../../../core/i18n';
+import type { CompressColour } from '../../../core/compress-gray';
 
 const DPI_OPTIONS = [
   { value: 72, label: tKey('72 DPI — smallest') },
@@ -54,6 +56,24 @@ const MODE_OPTIONS = [
     hint: tKey(
       'Stapler tries up to {trials} real settings and reports the size it actually reached.'
     )
+  }
+] as const;
+
+/**
+ * OPS-19 — grey as a compression lever. The two grey hints are the Grayscale
+ * tool's own strings: it is the same conversion, so it is described the same way.
+ */
+const COLOUR_OPTIONS = [
+  { value: 'keep' as CompressColour, label: tKey('Keep colour') },
+  {
+    value: 'gray' as CompressColour,
+    label: tKey('Shades of grey'),
+    hint: tKey('Every colour becomes the grey of the same brightness.')
+  },
+  {
+    value: 'bw' as CompressColour,
+    label: tKey('Black and white'),
+    hint: tKey('For scans: pure black on white, usually the smallest file.')
   }
 ] as const;
 
@@ -116,6 +136,7 @@ export function CompressPanel() {
   const target = compressTarget.value;
   const outcome = compressTargetOutcome.value;
   const targetBytes = targetSizeBytes(target);
+  const colour = compressColour.value;
 
   const exportReport = async () => {
     if (!report) return;
@@ -261,17 +282,45 @@ export function CompressPanel() {
               />
             )}
           </Field>
+
+          <RadioGroup
+            legend={t('Colour')}
+            name="compress-colour"
+            value={colour}
+            options={COLOUR_OPTIONS.map(option => ({
+              value: option.value,
+              label: t(option.label),
+              hint: 'hint' in option ? t(option.hint) : undefined
+            }))}
+            onChange={next => (compressColour.value = next)}
+          />
+          {colour !== 'keep' && (
+            <p className={panelStyles.note} data-compress-colour-note>
+              {t(
+                'The projection and the preview show compression only, in colour. The converted file is measured before saving. If it is not smaller than the original, the colour-compressed file is saved instead, and if that is not smaller either, the original is kept.'
+              )}
+            </p>
+          )}
         </>
       ) : (
         // In target mode these two are chosen by the search, not by the user, so
         // showing them as editable controls would misrepresent what the export
         // will do. The preview keeps rendering at whatever the search last used.
-        <p className={panelStyles.note}>
-          {t(
-            'Resolution and quality are chosen by the search. The preview shows {dpi} DPI, {quality}%.',
-            { dpi: settings.dpi, quality: Math.round(settings.quality * 100) }
+        <>
+          <p className={panelStyles.note}>
+            {t(
+              'Resolution and quality are chosen by the search. The preview shows {dpi} DPI, {quality}%.',
+              { dpi: settings.dpi, quality: Math.round(settings.quality * 100) }
+            )}
+          </p>
+          {colour !== 'keep' && (
+            <p className={panelStyles.note} data-compress-colour-note>
+              {t(
+                'Converting to grey is not used when aiming for a size: each attempt is measured in colour, and converting afterwards would make that measurement untrue. Choose quality to convert while compressing.'
+              )}
+            </p>
           )}
-        </p>
+        </>
       )}
 
       <Button variant="secondary" icon={Gauge} onClick={analyse}>
@@ -338,7 +387,9 @@ export function CompressPanel() {
             </p>
           )}
 
-          {report.alreadyOptimized && (
+          {/* "Not worth the time" judges re-encoding alone; with grey on (quality
+              mode) a scan can still shrink a lot, and commit does not ask either. */}
+          {report.alreadyOptimized && (colour === 'keep' || mode === 'target') && (
             <p className={panelStyles.note}>
               {t(
                 'This document is already optimized — about {percent}% is all that is available from {size}. Compressing it is not worth the time.',

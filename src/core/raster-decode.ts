@@ -378,6 +378,47 @@ export function declaredImageSize(bytes: Uint8Array): { width: number; height: n
 }
 
 /**
+ * CNV-14 — the size an image is drawn at (EXIF orientation applied, as
+ * `createImageBitmap(…, { imageOrientation: 'from-image' })` does), read from
+ * the head of the file without decoding it. A JPEG's start-of-frame size is
+ * turned by its EXIF orientation (5–8 swap the sides); a PNG, GIF or WebP's
+ * header size is used as is. Null when that is not known from the header: a
+ * HEIC or TIFF (only the worker decodes those), a PNG/WebP that carries EXIF
+ * a browser may rotate it by, or a header that is truncated or garbled.
+ */
+export function orientedHeaderSize(head: Uint8Array): { width: number; height: number } | null {
+  if (sniffWebImageFormat(head) === 'jpeg') {
+    const info = readJpegInfo(head);
+    if (!info || !(info.width > 0) || !(info.height > 0)) return null;
+    return info.orientation >= 5 && info.orientation <= 8
+      ? { width: info.height, height: info.width }
+      : { width: info.width, height: info.height };
+  }
+  const stored = storedImageSize(head);
+  if (!stored || stored.hasExif || !(stored.width > 0) || !(stored.height > 0)) return null;
+  return { width: stored.width, height: stored.height };
+}
+
+/**
+ * How much of a file {@link orientedHeaderSizeOf} reads: as for the IMG-8
+ * probe in `image.ts`, a JPEG's frame header follows the APPn segments (each
+ * at most 64 KB), so 1 MB covers any real file without reading a large one.
+ */
+export const ORIENTED_SIZE_PROBE_BYTES = 1_000_000;
+
+/** {@link orientedHeaderSize} of a file, reading only its head. Never throws. */
+export async function orientedHeaderSizeOf(
+  file: Blob
+): Promise<{ width: number; height: number } | null> {
+  try {
+    const head = new Uint8Array(await file.slice(0, ORIENTED_SIZE_PROBE_BYTES).arrayBuffer());
+    return orientedHeaderSize(head);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * How many frames (image descriptors) a GIF holds: more than one is an
  * animation, of which a still-image tool can only use the first. Counts by
  * walking the block structure; stops at the trailer or the first malformed

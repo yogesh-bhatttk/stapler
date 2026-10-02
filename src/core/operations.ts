@@ -62,7 +62,13 @@ import {
 } from '../ui/tools/watermark/state';
 import type { WatermarkData } from './workers/process.worker';
 import { internal, unsupported, cancelled, isCancellation, fromUnknown, corrupt } from './errors';
-import type { GrayImageData, GrayMode, GrayPageOutcome, GrayRaster } from './pdf/grayscale';
+import type {
+  GrayImageData,
+  GrayMode,
+  GrayPageOutcome,
+  GrayPagePlan,
+  GrayRaster
+} from './pdf/grayscale';
 import type { RepairOutcome } from './pdf/repair';
 import { tPlural, translate } from './i18n';
 import { hasXfaMarker, xfaConvertMessage } from './pdf/xfa';
@@ -1838,8 +1844,8 @@ export interface SizedImageArchive {
 }
 
 /**
- * GAP-5 — PDF pages as images within a longest-side pixel box and, for JPEG,
- * at or under a per-image file size. Each page is rendered once in the render
+ * GAP-5 — PDF pages as images within a longest-side pixel box (or, CNV-14, at
+ * an exact width × height) and, for JPEG, at or under a per-image file size. Each page is rendered once in the render
  * worker and the measured quality/scale search runs there (`image-target.ts`),
  * so nothing heavy touches the main thread. The per-page report is measured on
  * the bytes that go into the ZIP: a page that could not reach the target is
@@ -1851,7 +1857,17 @@ export async function pagesToSizedImageArchive(
   pageIndices: number[],
   format: 'png' | 'jpeg',
   dpi: number,
-  request: { targetBytes: number | null; maxDimension: number | null },
+  request: {
+    targetBytes: number | null;
+    maxDimension: number | null;
+    /**
+     * CNV-14 — an exact size; when either side is set it replaces `dpi` and
+     * `maxDimension`. One side follows each page's own rotated proportions;
+     * both is exactly that size for every page.
+     */
+    width?: number | null;
+    height?: number | null;
+  },
   options: JobOptions = {}
 ): Promise<SizedImageArchive> {
   const { zipSync } = await import('fflate');
@@ -2992,7 +3008,7 @@ export {
  * ------------------------------------------------------------------ */
 
 /** Maps a job's progress into `[from, to]` of the caller's bar. */
-function progressBand(options: JobOptions, from: number, to: number): JobOptions {
+export function progressBand(options: JobOptions, from: number, to: number): JobOptions {
   return {
     signal: options.signal,
     onProgress: (fraction, label) =>
@@ -3003,13 +3019,74 @@ function progressBand(options: JobOptions, from: number, to: number): JobOptions
   };
 }
 
-/** Pages whose images the render worker decodes per call (PDF-5). */
-const GRAY_PAGES_PER_BATCH = 8;
+/**
+ * Pages decoded, rendered and applied per batch (PDF-5). What is in flight
+ * at once — decoded images, page rasters, the apply call's payload — is one
+ * batch's worth.
+ */
+export const GRAY_PAGES_PER_BATCH = 8;
+
+export interface GrayBatchSchedule {
+  /** `plans` cut into consecutive batches of at most `pagesPerBatch` pages. */
+  batches: GrayPagePlan[][];
+  /** Per batch: the decode requests to send with it (page → images to decode there). */
+  requests: { pageIndex: number; objectNumbers: number[] }[][];
+}
+
+/**
+ * PDF-5 — which images to decode with which batch. An image is decoded once,
+ * on the first page that will be converted as vectors and uses it (pdf.js
+ * resolves it through that page, as it always has). It is *delivered* with
+ * the batch holding the first page of all that references it, even a page
+ * that will be rasterised (its annotations are still converted): once the
+ * converter has seen an image it memoises it, so it must have the samples by
+ * then — exactly as when every page was applied in one call.
+ */
+export function scheduleGrayBatches(
+  plans: readonly GrayPagePlan[],
+  rasterPages: ReadonlySet<number>,
+  pagesPerBatch: number
+): GrayBatchSchedule {
+  const size = Math.max(1, Math.floor(pagesPerBatch));
+  const batches: GrayPagePlan[][] = [];
+  for (let from = 0; from < plans.length; from += size) {
+    batches.push(plans.slice(from, from + size));
+  }
+  const requestPage = new Map<number, number>();
+  for (const plan of plans) {
+    if (rasterPages.has(plan.pageIndex)) continue;
+    for (const n of plan.images) if (!requestPage.has(n)) requestPage.set(n, plan.pageIndex);
+  }
+  const order = new Map(plans.map((p, i) => [p.pageIndex, i]));
+  const delivered = new Set<number>();
+  const requests = batches.map(batch => {
+    const byPage = new Map<number, number[]>();
+    for (const plan of batch) {
+      for (const n of plan.images) {
+        const page = requestPage.get(n);
+        if (page === undefined || delivered.has(n)) continue;
+        delivered.add(n);
+        const list = byPage.get(page);
+        if (list) list.push(n);
+        else byPage.set(page, [n]);
+      }
+    }
+    return [...byPage]
+      .sort(([a], [b]) => (order.get(a) ?? 0) - (order.get(b) ?? 0))
+      .map(([pageIndex, objectNumbers]) => ({ pageIndex, objectNumbers }));
+  });
+  return { batches, requests };
+}
 
 export interface GrayscaleSettings {
   mode: GrayMode;
   /** Resolution for pages that cannot be converted as vectors. */
   rasterDpi: number;
+  /**
+   * Pages per batch; defaults to {@link GRAY_PAGES_PER_BATCH}. Only tests set
+   * it, to compare batched output with a single batch.
+   */
+  pagesPerBatch?: number;
 }
 
 export interface GrayscaleResult {
@@ -3068,112 +3145,137 @@ export async function grayscaleDocument(
   }
 
   const rasterPages = new Set(plans.filter(p => p.rasterReasons.length > 0).map(p => p.pageIndex));
-  const planByPage = new Map(plans.map(p => [p.pageIndex, p]));
-  // PDF-5 — memory. The render worker encodes every image and page raster as
-  // soon as it has its pixels, and is asked for a few pages at a time, so
-  // what accumulates here is compressed payloads (about the size of the
-  // output, which has to exist anyway) — never every page's raw pixels at once.
-  const images: GrayImageData[] = [];
-  const rasters: GrayRaster[] = [];
-  await renderWorker.lease(async api => {
-    const { handle } = await api.loadDocument(bytes.slice());
+  const schedule = scheduleGrayBatches(
+    plans,
+    rasterPages,
+    settings.pagesPerBatch ?? GRAY_PAGES_PER_BATCH
+  );
+  const lossyImages = new Set(plans.flatMap(p => p.lossy));
+  const wholeDocument = pageIndices.length === totalPages;
+
+  // PDF-5 — memory. Plan, decode, render and apply run a batch of pages at a
+  // time: the render worker decodes the images first needed by the batch and
+  // renders its rasterised pages (each encoded as soon as its pixels exist),
+  // and the process worker writes them into the document it keeps open across
+  // batches, then drops them. What is in flight at once is one batch's
+  // payloads, never the whole document's. The converter's memos live in that
+  // session, so an image or form shared across batches is still written once.
+  const decodedNumbers = new Set<number>();
+  const outcomes: GrayPageOutcome[] = [];
+  let applied: { bytes: Uint8Array; verification: GrayPagePlan[] } | undefined;
+  await processWorker.lease(async pApi => {
+    const session = await pApi.grayscaleBegin(
+      bytes,
+      { mode: settings.mode, wholeDocument },
+      createJobHandle(progressBand(options, 0.15, 0.17))
+    );
+    let closed = false;
     try {
-      const requests = plans
-        .filter(p => !rasterPages.has(p.pageIndex) && p.images.length > 0)
-        .map(p => ({ pageIndex: p.pageIndex, objectNumbers: p.images, lossy: p.lossy }));
-      // An image shared by several pages is decoded (and encoded) once, even
-      // when its pages fall in different batches.
-      const requested = new Set<number>();
-      for (let from = 0; from < requests.length; from += GRAY_PAGES_PER_BATCH) {
-        if (options.signal?.aborted) throw cancelled();
-        const batch: typeof requests = [];
-        for (const r of requests.slice(from, from + GRAY_PAGES_PER_BATCH)) {
-          const fresh = r.objectNumbers.filter(n => !requested.has(n));
-          for (const n of fresh) requested.add(n);
-          if (fresh.length > 0) batch.push({ ...r, objectNumbers: fresh });
+      await renderWorker.lease(async api => {
+        const { handle } = await api.loadDocument(bytes.slice());
+        try {
+          const batches = schedule.batches;
+          for (let k = 0; k < batches.length; k++) {
+            if (options.signal?.aborted) throw cancelled();
+            const batch = batches[k];
+            const lo = 0.17 + (0.73 * k) / batches.length;
+            const width = 0.73 / batches.length;
+            const band = (from: number, to: number) =>
+              createJobHandle(progressBand(options, lo + width * from, lo + width * to));
+
+            const requests = (schedule.requests[k] ?? []).map(r => ({
+              ...r,
+              lossy: r.objectNumbers.filter(n => lossyImages.has(n))
+            }));
+            const images: GrayImageData[] =
+              requests.length > 0
+                ? await api.decodeImagesGray(handle, requests, settings.mode, band(0, 0.4))
+                : [];
+            for (const image of images) decodedNumbers.add(image.objectNumber);
+            // An image pdf.js did not deliver that is *not* in an encoding it
+            // lacks a decoder for (an image inside a tiling pattern, say) is
+            // still drawn by its renderer — so that page is rendered instead of
+            // left in colour. Every image a page uses was asked for in this
+            // batch or an earlier one, so the cumulative set is complete here.
+            for (const plan of batch) {
+              if (rasterPages.has(plan.pageIndex)) continue;
+              const missing = plan.images.filter(
+                n => !decodedNumbers.has(n) && !plan.undecodable.includes(n)
+              );
+              if (missing.length > 0) {
+                rasterPages.add(plan.pageIndex);
+                plan.rasterReasons.push(
+                  translate('has an image that could only be converted by rendering the page')
+                );
+              }
+            }
+            const toRender = batch.filter(p => rasterPages.has(p.pageIndex));
+            const rasters: GrayRaster[] = [];
+            for (let i = 0; i < toRender.length; i++) {
+              if (options.signal?.aborted) throw cancelled();
+              rasters.push(
+                await api.renderPageGray(
+                  handle,
+                  toRender[i].pageIndex,
+                  settings.rasterDpi,
+                  settings.mode,
+                  // PDF-2 — an annotation that could not be converted is drawn into
+                  // the raster (in grey) and hidden on the page, rather than left in
+                  // colour on top of it.
+                  toRender[i].flattenAnnotations,
+                  band(0.4 + (0.3 * i) / toRender.length, 0.4 + (0.3 * (i + 1)) / toRender.length)
+                )
+              );
+            }
+            if (options.signal?.aborted) throw cancelled();
+
+            const payloads = new Set<ArrayBuffer>();
+            for (const item of [...images, ...rasters]) {
+              for (const buffer of [
+                item.encoded?.data,
+                item.gray,
+                'alpha' in item ? item.alpha : undefined
+              ])
+                if (buffer) payloads.add(buffer.buffer as ArrayBuffer);
+            }
+            const result = await pApi.grayscaleApplyBatch(
+              session,
+              // Handed over, not copied: these buffers die at this call.
+              Comlink.transfer({ pageIndices: batch.map(p => p.pageIndex), images, rasters }, [
+                ...payloads
+              ]),
+              band(0.7, 1)
+            );
+            outcomes.push(...result.outcomes);
+          }
+        } finally {
+          await api.closeDocument(handle).catch(() => {});
         }
-        if (batch.length === 0) continue;
-        const band = progressBand(
-          options,
-          0.15 + (0.4 * from) / requests.length,
-          0.15 + (0.4 * Math.min(requests.length, from + GRAY_PAGES_PER_BATCH)) / requests.length
-        );
-        images.push(
-          ...(await api.decodeImagesGray(handle, batch, settings.mode, createJobHandle(band)))
-        );
-      }
-      // An image pdf.js did not deliver that is *not* in an encoding it lacks
-      // a decoder for (an image inside a tiling pattern, say) is still drawn
-      // by its renderer — so that page is rendered instead of left in colour.
-      const decoded = new Set(images.map(i => i.objectNumber));
-      for (const plan of plans) {
-        if (rasterPages.has(plan.pageIndex)) continue;
-        const missing = plan.images.filter(n => !decoded.has(n) && !plan.undecodable.includes(n));
-        if (missing.length > 0) {
-          rasterPages.add(plan.pageIndex);
-          plan.rasterReasons.push(
-            translate('has an image that could only be converted by rendering the page')
-          );
-        }
-      }
-      const toRender = [...rasterPages];
-      for (let i = 0; i < toRender.length; i++) {
-        if (options.signal?.aborted) throw cancelled();
-        const band = progressBand(
-          options,
-          0.55 + (0.2 * i) / toRender.length,
-          0.55 + (0.2 * (i + 1)) / toRender.length
-        );
-        rasters.push(
-          await api.renderPageGray(
-            handle,
-            toRender[i],
-            settings.rasterDpi,
-            settings.mode,
-            // PDF-2 — an annotation that could not be converted is drawn into
-            // the raster (in grey) and hidden on the page, rather than left in
-            // colour on top of it.
-            planByPage.get(toRender[i])?.flattenAnnotations ?? false,
-            createJobHandle(band)
-          )
-        );
-      }
+      });
+      if (options.signal?.aborted) throw cancelled();
+      const converted = outcomes
+        .filter(o => o.route === 'vector' || o.route === 'raster')
+        .map(o => o.pageIndex);
+      closed = true; // finish closes the session, success or not
+      applied = await pApi.grayscaleFinish(
+        session,
+        converted,
+        createJobHandle(progressBand(options, 0.9, 1))
+      );
     } finally {
-      await api.closeDocument(handle).catch(() => {});
+      if (!closed) await pApi.grayscaleDiscard(session).catch(() => {});
     }
   });
-  if (options.signal?.aborted) throw cancelled();
-
-  const input = {
-    pageIndices,
-    mode: settings.mode,
-    images,
-    rasters,
-    wholeDocument: pageIndices.length === totalPages
-  };
-  const payloads = new Set<ArrayBuffer>();
-  for (const item of [...images, ...rasters]) {
-    for (const buffer of [item.encoded?.data, item.gray, 'alpha' in item ? item.alpha : undefined])
-      if (buffer) payloads.add(buffer.buffer as ArrayBuffer);
-  }
-  const applied = await processWorker.lease(api =>
-    api.grayscaleApply(
-      bytes,
-      // Handed over, not copied: these buffers die at this call.
-      Comlink.transfer(input, [...payloads]),
-      createJobHandle(progressBand(options, 0.75, 1))
-    )
-  );
+  if (!applied) throw new Error('greyscale conversion produced no output');
 
   // Raster reasons are known from the plan; the apply pass skipped that
   // content. Anything the apply pass adds (annotations it flattened) is kept.
   const reasonsByPage = new Map(plans.map(p => [p.pageIndex, p.rasterReasons]));
-  const pages = applied.outcomes.map(o => {
+  const pages = outcomes.map(o => {
     if (o.route !== 'raster') return o;
     const planned = reasonsByPage.get(o.pageIndex) ?? [];
     return { ...o, reasons: [...new Set([...planned, ...o.reasons])] };
   });
-  const decodedNumbers = new Set(images.map(i => i.objectNumber));
   const undecodable = plans
     .filter(p => !rasterPages.has(p.pageIndex))
     .map(p => ({
