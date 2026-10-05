@@ -295,7 +295,7 @@ export function AppShell({ children }: { children: ComponentChildren }) {
     // canvas space — never had its default handled, so the browser's default
     // action (navigating the tab to the dropped file) could fire and silently
     // destroy the whole open workspace with no confirmation
-    // (AUDIT-EDGE-CASES-2026-09-15.md §1.1). Block that globally.
+    // (AUDIT-EDGE-CASES-2026-09-15 §1.1). Block that globally.
     const isFileDrag = (transfer: DataTransfer | null) =>
       Array.from(transfer?.types ?? []).includes('Files');
 

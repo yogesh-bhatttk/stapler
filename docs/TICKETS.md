@@ -21,6 +21,12 @@ Every ticket must satisfy this **definition of done**, in addition to its own cr
 - [ ] No new manifest permission; no new runtime network request
 - [ ] No main-thread block >50ms (verify in a performance trace)
 - [ ] Errors surface a human-readable message; document bytes are never silently altered
+- [ ] Anything touching workers, WASM or a third-party decoder is verified in the loaded
+      extension (`dist/ext`), not only the web preview (AUDIT-2026-09-25 M4)
+- [ ] Regression tests run the user flow through the real pipeline, including the default
+      path where the user skips optional buttons, and assert on real output bytes; a
+      "fixed"/"fails CI" claim cites such a test or says it is a manual check
+      (AUDIT-2026-09-25 M8)
 
 ---
 
@@ -128,9 +134,9 @@ Implement DESIGN-ADAPTATION §3 in `src/ui/styles/tokens.css`.
 ### DS-03 · Component library — `L` `P0`
 
 **Status: Done** — All 20 components built, including a `#/dev/components` gallery
-exercising every state. **Missing:** the gallery's axe-core pass (blocked on NFR-01, which
-wires axe-core in at all) and `forwardRef` on the pre-existing components from before this
-pass (not retrofitted here — no current call site needs a forwarded ref).
+exercising every state. `forwardRef` was retrofitted to all 23 library components on
+2026-08-17 (`mergeRefs`, `forwardRefGeneric`; AUDIT-FINDINGS §10.2, HRD-20). **Missing:**
+the gallery's axe-core pass (blocked on NFR-01, which wires axe-core in at all).
 
 Build the primitives and app components listed in DESIGN-ADAPTATION §5.
 
@@ -208,7 +214,7 @@ hardcoded "0 requests" string that stayed at 0 after a consented OCR model downl
 increments once per completed, verified download (`tests/unit/ocr.test.ts` asserts the
 count). The panel also links to the shipped `privacy.html` and `THIRD_PARTY_LICENSES.txt`
 (`tests/e2e/a11y-and-perf.spec.ts`). What is *kept* on the device — the other half of the
-trust claim — is DS-12 (in progress). The chip's mobile presentation is DS-10.
+trust claim — is DS-12 (Done). The chip's mobile presentation is DS-10.
 
 - **Requirements:** Persistent `Offline · 0 requests` chip in the top bar. Click opens a
   panel explaining no upload / no account / no limits, with instructions to verify in
@@ -413,7 +419,7 @@ reset button, and undo of the reset.
 
 ### OPS-07 · N-up and booklet imposition — `M` `P1`
 
-**Status: Done** — Fully implemented in the UI and worker.
+**Status: Done (fixed AUDIT-2026-09-25 PDF-12, 2026-09-26)** — All source pages are embedded in one `embedPages` call (was one copier per cell, ~10× size), the user is told which links, comments and fields n-up drops, and pages with no `/Contents` work. Test: `tests/unit/rebuild-page-links.test.ts`.
 
 - **Requirements:** 2-up and 4-up layouts; booklet fold ordering; configurable margins
   and gutter.
@@ -427,6 +433,7 @@ rotation, start-at numbering, a comma-separated page range, and CJK-safe refusal
 watermark (PNG/JPEG, same grid/opacity/rotation/page-range) and a real header/footer (fixed
 margin band, own page range, left/center/right alignment, `{n}`/`{total}`) were added in
 a later pass; the image-watermark and header/footer AC below reflect what shipped.
+AUDIT-2026-10-01 X-7 (HRD-67, 2026-10-02): the AC "live preview matches output" failed on page ranges — a whitespace-only range selected every page in the preview and none in the export, and an en dash, `;`, `0` or `-` selected nothing silently. Preview and worker now share `parsePageRange` (`src/core/page-range.ts`), and a non-empty range that selects zero pages is flagged (`tests/unit/ui-audit-2026-10-01.test.ts`).
 
 - **Requirements:** Position (9-point grid), font size, opacity, colour, start-at value,
   page-range targeting, and a text or image watermark with rotation.
@@ -506,7 +513,7 @@ real output, and dedicated CJK (`cjk.pdf`, CID-keyed "中文") and RTL (`rtl.pdf
 
 ### CNV-05 · Markdown → PDF — `S` `P1`
 
-**Status: Done** — Fully implemented in the UI and worker.
+**Status: Done (re-audited 2026-08-17); non-WinAnsi glyphs are substituted, not rendered** — AUDIT-2026-08-17 §1/§3 #27 found links drawn as literal `[text](url)`, table cells cut at 30 characters, and CJK silently turned into `?` (which later regressed to a crash). Now links are real `/Link` annotations with safe `/URI`s (`safeLinkUri`, http(s)/mailto/tel), cells word-wrap to their column, and characters outside Windows-1252's real range are substituted with a visible warning (`sanitizeWinAnsiText` reports `substituted`). Verified on output bytes: the URIs read back and no literal markdown syntax remains. **Open (feature):** rendering CJK/RTL glyphs needs an embedded Unicode font (HRD-05).
 
 - **AC:** Headings, lists, tables, code blocks, and links render; page breaks are sensible;
   output text is selectable.
@@ -517,7 +524,7 @@ real output, and dedicated CJK (`cjk.pdf`, CID-keyed "中文") and RTL (`rtl.pdf
 
 ### SGN-01 · Signature capture and library — `M` `P0`
 
-**Status: Done** — Draw/type/import, PNG with real alpha, white-paper removal. Initials supported.
+**Status: Done, one DoD gap** — Draw/type/import, PNG with real alpha, white-paper removal. Initials supported. Open: `trimTransparentToPng` and `removeWhiteBackground` (`src/core/image.ts`) loop over every pixel on the main thread from `SignatureModal.tsx`, so a large imported photo (4000×3000) blocks it for seconds. That breaks the definition of done's 50 ms rule. Fix: move them to a worker (AUDIT-FINDINGS §14 H3, HRD-27).
 
 - **Requirements:** Three creation modes — draw on canvas (pointer + stylus pressure where
   available), type with a script-style face, or import a transparent PNG. Auto-trim
@@ -528,7 +535,7 @@ real output, and dedicated CJK (`cjk.pdf`, CID-keyed "中文") and RTL (`rtl.pdf
 
 ### SGN-02 · Placement on page — `M` `P0`
 
-**Status: Done** — Real single-page view at true scale, drag, resize, arrow nudge. 
+**Status: Done (fixed AUDIT-2026-09-25 PDF-9, 2026-09-26)** — Real single-page view at true scale, drag, resize, arrow nudge. Placement goes through `src/core/pdf/display-frame.ts` (CropBox ∩ MediaBox, origin and `/Rotate`); before, a signature on a cropped or bleed page could land outside the visible page. Tests: `tests/unit/display-frame-geometry.test.ts`. Open (reverse direction): `getFormFields` still reports field rects against the raw MediaBox (HRD-42).
 
 - **Requirements:** Single-page view; click to place; drag, resize (aspect-locked), rotate;
   duplicate to other pages; snap to detected signature lines. Also place date stamps, text,
@@ -559,13 +566,7 @@ real output, and dedicated CJK (`cjk.pdf`, CID-keyed "中文") and RTL (`rtl.pdf
 
 ### CMP-01 · Page analyzer and routing — `M` `P0`
 
-**Status: Done** — Real inventory-driven classification, 23 unit tests covering every skip
-reason. **Now validated against the real static corpus**, not just hand-built `ImageFacts`
-mocks: `tests/unit/compress-plan-fixtures.test.ts` loads `jbig2.pdf`, `jpx.pdf`, `cmyk.pdf`,
-`cmyk-text.pdf`, and `encrypted.pdf` directly and asserts on the real parsed inventory (filter
-detection, DeviceCMYK resolution from a real ImageMagick-encoded JPEG, an indirect
-`/ColorSpace` reference, encryption detection) — these five committed fixtures existed in the
-corpus but no test had ever loaded them.
+**Status: Done (re-audited 2026-08-17); one fixture test is stale** — Inventory-driven classification. AUDIT-2026-08-17 §1 found only 5 real fixtures classified against the AC's "all 15". `tests/unit/compress-plan-fixtures.test.ts` now classifies 14 real fixtures against their bytes. The skip list covers the whole filter chain and mask filters (AUDIT-EDGE-CASES §2.4). Any real text, however short, keeps a page off `raster` (§1.6 and AUDIT-2026-08-17 §3 #12). Bit depth below 8 blocks surgical only (§2.9). **Gap (AUDIT-EDGE-CASES §6 #2):** the `jbig2.pdf`/`jpx.pdf` cases assert `reencode: []` but not `route`, and their comment claims a raster route the planner doesn't take (`blocked()` ⇒ `already-optimized`). The `indexed`/`icc`/`soft-mask` cases overwrite the fixtures' dimensions before classifying (HRD-39).
 
 Implements PLAN §4.1 classification.
 
@@ -734,7 +735,7 @@ progress and is cancellable at the same per-page boundary.
 
 ### RED-02 · True content removal — `XL` `P1`
 
-**Status: Done** — Operator-level removal is implemented and geometrically verified. Redacted regions have their underlying intersecting text structurally removed from the content stream, while keeping text outside the regions fully selectable.
+**Status: Done (reopened by AUDIT-2026-09-25 PDF-1/PDF-4/PDF-5/PDF-11, closed 2026-09-26)** — Operator-level removal is implemented. The audit found redacted text still in the file (an orphan page copy whenever an annotation, link or widget referenced the page), 45°-rotated images escaping, hidden layers un-hidden by the scrub, and form values surviving on sibling widgets; fixed by the single-copier rebuild and verified on output bytes (HRD-40, HRD-41).
 
 Implements PLAN §4.2 steps 2–3.
 
@@ -743,11 +744,13 @@ Implements PLAN §4.2 steps 2–3.
   final guarantee. Never rely on an overlay rectangle alone.
 - **AC:** After applying, text extraction of the output contains **zero** redacted strings.
   Copy-paste from three external viewers over the redacted area yields nothing. Content
-  outside regions is unchanged (asserted by text diff).
+  outside regions is unchanged (asserted by text diff). No decoded stream anywhere in the
+  output contains a redacted string, and no /Type /Page object exists outside the page tree
+  (strings/qpdf check).
 
 ### RED-03 · Verification report gate — `M` `P1`
 
-**Status: Done** — Verification is geometric and per region; saving is blocked on any failure. **The old verifier reported "passed" for regions it never checked.**
+**Status: Done (reopened by AUDIT-2026-09-25 M7, closed 2026-09-26)** — Per-region geometric verification (four-corner quads, independent of the redaction's plan) plus a whole-file scan of every decoded stream for the redacted strings and a check that no page exists outside the page tree; saving is blocked on any failure. **Earlier verifiers reported "passed" for regions they never checked, and then for leaking output (PDF-1, PDF-4).** See HRD-41.
 
 - **Requirements:** Re-extract text and assert absence of every redacted string; render each
   region and check for residual glyphs; present a per-region pass/fail table. **Saving is
@@ -756,6 +759,8 @@ Implements PLAN §4.2 steps 2–3.
   verifier. Report renders in both themes and is exportable as text.
 
 ### RED-04 · Metadata inspector and scrubber — `M` `P1`
+
+**Reopened by AUDIT-2026-09-25 UI-1 (🔴), PDF-13, PDF-5, R-PDF-2; closed 2026-09-26.** "Strip & export" without a prior "Inspect" stripped nothing (`{}` settings are truthy and skipped the strip-all default) and settings carried over to the next document; a scrub with nothing ticked dropped bookmarks, page labels, the tag tree, `/Lang` and OutputIntents (and so did every redaction); the default scrub kept bookmark JavaScript. Tests: `metadata-default-scrub.test.ts`, `rebuild-page-links.test.ts`, `pdf-regression-review.test.ts`. See HRD-40, HRD-47.
 
 **Status: Done** — Inspector plus rebuild-on-strip so removed objects are absent, with a
 checkbox per finding and `Select all` / `Select none` above the list for the one-click
@@ -793,19 +798,7 @@ inside `applyRedactions` (`src/core/operations.ts`).
 
 ### ANN-01 · Highlight, freehand, shapes, text, sticky notes — `L` `P1`
 
-**Status: Done** — `src/ui/tools/annotate/` is a real annotation layer: highlight, freehand,
-rectangle, text, **sticky note, and whiteout** (both added this pass — `AnnotationType` now
-carries all six), colour/stroke picker, separate from the SGN-02 signature-stamp layer it used
-to share. **Undo/redo now reaches it**: `pageAnnotations` previously wasn't in
-`core/history.ts`'s snapshot at all, so ⌘Z/Ctrl+Z was a no-op for every annotation
-(`AnnotateOverlay.tsx` calls `commit()`/history mutators itself, mirroring `CropOverlay.tsx`,
-since `state.ts` can't import `history.ts` back without a cycle). No keyboard path existed on
-the canvas at all (now Enter adds/arrows move/Delete removes); panel labels pointed at i18n
-keys missing from every locale, rendering literally; stroke width was not scale-normalised
-between the on-screen canvas and the exported PDF; and swatch colours were written as
-`'#' + 'FFEB3B'` to dodge the raw-colour check — all fixed in an earlier pass, still holding.
-Covered by `tests/unit/history.test.ts` (undo/redo reaching the overlay layer) and
-`tests/e2e/tool-flows.spec.ts` (a pointer-drawn whiteout, exported, undone before export).
+**Status: Done (re-audited 2026-08-17)** — `src/ui/tools/annotate/` is a real annotation layer separate from SGN-02 stamps. `AnnotationType` carries all eight required tools: highlight, freehand, rectangle, text, sticky note, whiteout, **arrow and ellipse**. The last two were missing until AUDIT-2026-08-17 §1. **Any** annotation can be reselected and re-edited, not only the most recently created one. Undo and redo reach the layer (`tests/unit/history.test.ts` › "reaches the ANN-01 overlay layer, not just SGN-02 stamps"). The canvas is keyboard-operable (Enter adds, arrows move, Delete removes), stroke width is normalised between screen and PDF, and swatches come from tokens. `tests/e2e/tool-flows.spec.ts` covers a pointer-drawn whiteout exported and undone. Not automated: "three external viewers" (QA-05 manual).
 
 - **Requirements:** Overlay layer per page; tools for highlight (multiply blend over text),
   freehand ink, arrow, rectangle, ellipse, text box, sticky note, and whiteout. Colour and
@@ -815,7 +808,7 @@ Covered by `tests/unit/history.test.ts` (undo/redo reaching the overlay layer) a
 
 ### ANN-02 · Compare two PDFs — `M` `P1`
 
-**Status: Done** — [x] **ANN-02** — Compare two PDFs.
+**Status: Done (re-audited 2026-08-17 and 2026-10-01)** — Visual pixel diff and word diff. AUDIT-2026-08-17 §1 found that the AC's fixture didn't exist, the only test was a crash smoke test, and only the visible page was diffed. Now the committed `contract-v1.pdf`/`contract-v2.pdf` pair backs a real assertion. Every page is diffed in the cv worker with determinate progress (`compare-export-audit-2026-10-01.test.ts` › "X-6: …"). Sensitivity is no longer inverted, and pages of different sizes are compared at real size (HRD-07).
   - *Context*: Visual pixel-diffing for architectural plans or word-by-word diffing for contracts.
   - *AC*: Two revisions of the contract fixture surface every real change with no false positives above default sensitivity.
 
@@ -825,7 +818,7 @@ Covered by `tests/unit/history.test.ts` (undo/redo reaching the overlay layer) a
 
 ### BAT-01 · Batch processing over a folder — `L` `P1`
 
-**Status: Done** — Fully implemented in the UI and worker.
+**Status: Done (re-audited 2026-08-17, re-verified 2026-10-05)** — AUDIT-2026-08-17 §1 found three gaps: no ZIP output, failures shown only as transient toasts, and no `role="progressbar"`. All three are fixed: a real ZIP via `fflate` (`zipSync` in `runner.ts`), a persistent per-file `notes` summary, and `role="progressbar"` on the progress region. Hardened since then: a reentrancy guard (AUDIT-EDGE-CASES §2.1), the same validation gate as single-file import (§1.8), and rollback that keeps later tools (§4 #3). See HRD-32, HRD-33 and HRD-38. Not automated: the AC's 200-file live-queue run.
 
 - **Requirements:** `showDirectoryPicker()` → apply one operation to every matching file;
   per-file progress, per-file error isolation (one failure never aborts the run), summary
@@ -849,7 +842,7 @@ proving the discard, one proving a genuine reduction is still kept).
 
 ### BAT-02 · Saved recipes — `M` `P1`
 
-**Status: Done** — Fully implemented in the UI and worker.
+**Status: Done (re-audited 2026-08-17)** — AUDIT-2026-08-17 §1 found recipes in `localStorage`, no JSON export or import, and a hard-coded 4-tool chain. Recipes now live in IndexedDB (`recipes` store, `core/db.ts`, with a one-time `localStorage` migration), export and import as JSON (partial imports are reported), and the chain is a checkbox-and-reorder UI. An unchecked tool is verified to be excluded, and a recipe survives a reload. A malformed stored recipe stops the run with a clear message (`batch-runner.test.ts` › "X-15: …"). Not automated: the AC's 50-file "identical to manual" comparison.
 
 - **Requirements:** Chain operations (e.g. compress → watermark → number pages), save
   named recipes to IndexedDB, one-click apply to a file or a batch. Export/import recipes
@@ -863,7 +856,7 @@ proving the discard, one proving a genuine reduction is still kept).
 
 ### OCR-01 · Tesseract integration with disclosed model download — `L` `P2`
 
-**Status: Done** — Merged via `worktree-agent-aa5957858ee912aab`. Lazy `tesseract.js` with user-confirmed model download, cached offline in CacheStorage/IndexedDB. Searchable text layer produced over the original scan.
+**Status: Done (hardened by AUDIT-2026-09-25 CONV-2/CONV-8/CONV-16, 2026-09-26)** — Lazy `tesseract.js` with user-confirmed, SHA-256-pinned model download, cached offline. Tesseract can never fetch on its own (`cacheMethod: 'readOnly'`, a `langPath` with no network, engine-load failure fatal for the run); an uploaded model is trial-loaded before it is kept and stored models can be removed; the download streams with progress and is cut off past twice the pinned size. The CSP's `connect-src` allows only the pinned model paths. Searchable text layer produced over the original scan. See HRD-51, HRD-52.
 
 - **Requirements:** Lazy `tesseract.js`; language model fetched **once** on explicit user
   confirmation, cached in CacheStorage/IndexedDB, then fully offline. Confirmation dialog
@@ -874,11 +867,7 @@ proving the discard, one proving a genuine reduction is still kept).
 
 ### OCR-02 · Folder index and search — `L` `P2`
 
-**Status: Done** — `indexDirectory` / `searchFolderIndex` in
-`src/core/ocr/folder-index.ts`. Inverted-index in IndexedDB (`searchIndex` store in
-`src/core/db.ts`); tokenises text and OCR layers; serves keyword queries with snippets,
-page numbers, and jump-to-page in < 500 ms. Incremental re-index skips unchanged
-files via `lastModified` hash. FolderSearchPanel UI wired into OcrPanel tab.
+**Status: Done except "OCR scans on demand"** (re-verified 2026-10-05) — `indexDirectory` / `searchFolderIndex` in `src/core/ocr/folder-index.ts` keep an inverted index in IndexedDB (`searchIndex` store), with snippets, page numbers and jump-to-page. Incremental re-index skips unchanged files. Stale responses are dropped (`searchSeq`, AUDIT-EDGE-CASES §3 #9). A real pdf.js multi-page extraction is tested (`tests/unit/folder-index.test.ts`). **Unmet requirement:** AUDIT-2026-08-17 §1 found `enableOcr` declared but never used. It was deleted rather than implemented, so a scanned PDF with no text layer still indexes as empty. Either implement on-demand OCR through `runOcr`, behind OCR-01's consent, or drop the clause from the Requirements.
 
 - **Evidence:** `pnpm check && pnpm test` on master after merge at commit `e2488b9`.
   37 test files · 416 tests · 0 failures. New test file: `tests/unit/folder-index.test.ts`
@@ -1002,7 +991,7 @@ silently dropped from the invisible text layer.
 
 ### NFR-01 · Accessibility pass — `M` `P0`
 
-**Status: Done** — Focus traps, roving-tabindex grid, accessible names, live regions, reduced motion — each asserted in E2E. axe-core is wired in via Playwright tests.
+**Status: Done in the light theme; the dark-theme sweep runs at phone width only** (re-verified 2026-10-05) — Focus traps, the roving-tabindex grid, accessible names, live regions and reduced motion are each asserted in e2e. AUDIT-2026-08-17 §1/§3 #20 found a serious `nested-interactive` + `aria-allowed-role` violation on Home (`DropZone`), hidden because the sweep skipped Home and never opened a document. Now `a11y-and-perf.spec.ts` › "every route has one main landmark, a title, and no positive tabindex" scans Home and every registered tool with a document open. That sweep surfaced further violations, all fixed (HRD-09). **AC gap:** that desktop sweep runs only in the default theme. Dark mode is axe-scanned only by `mobile.spec.ts` › "axe finds nothing at phone width, light and dark", on key screens. The AC's "every route in both themes" needs a dark pass of the desktop sweep.
 
 - **AC:** axe-core: zero violations on every route in both themes. Full keyboard walkthrough
   of merge, organize, sign, and compress flows documented. Screen-reader pass on the page
@@ -1010,7 +999,7 @@ silently dropped from the invisible text layer.
 
 ### NFR-02 · Performance budget enforcement — `M` `P0`
 
-**Status: Done** — Every budget in `tests/e2e/a11y-and-perf.spec.ts` is asserted for real:
+**Status: Done** — Every budget in `tests/e2e/perf.spec.ts` (the never-retried `perf` project, AUDIT-2026-09-25 PLT-18; formerly in `a11y-and-perf.spec.ts`) is asserted for real:
 interactive <500ms, first thumbnail <1.5s, all-100-thumbnails-scrolled-through <6s, windowed
 mounting, merge 10×5MB <8s, peak heap on heavy/300-page fixtures, **and** the 50ms main-thread
 rule — a `requestAnimationFrame` monitor during the 10×5MB merge asserts the max frame gap
@@ -1037,7 +1026,7 @@ silently structured-clones, now passes locally.
 
 ### NFR-03 · Memory safety on large documents — `M` `P0`
 
-**Status: Done** — Tested via Playwright to ensure a 100-page heavy document and a 300-page text document process within the memory ceiling. Virtualized thumbnails and stream cleanup prevent OOM errors.
+**Status: Done for the main thread; worker heaps unmeasured** — `tests/e2e/perf.spec.ts` keeps the 100-page heavy and 300-page text fixtures under the 200 MB ceiling as `performance.memory` reports it. That covers the main realm's heap only. Re-encoded pages and decoded images live in the render/process worker heaps, which nothing measures. `measureUserAgentSpecificMemory()` would need COOP/COEP, which neither target sets (AUDIT-FINDINGS §2.5, HRD-12). No heap-snapshot retention check exists either.
 
 - **AC:** 300-page and 100MB fixtures complete every P0 operation within the memory ceiling.
   A heap snapshot after processing three large files in sequence shows no bitmap retention.
@@ -1081,19 +1070,14 @@ README describing what each one is for and what must not regress.
 
 ### QA-02 · Unit and golden-file suites — `M` `P0`
 
-**Status: Done** — 610 unit tests across 56 files, including `tests/unit/golden.test.ts`: one
-golden-file test per pdf-lib-based P0 operation (merge, organize, split, extract, insert,
-images→PDF, plus crop and normalize), each driving the real code path and re-parsing the output
-for page count, order, and text content. PDF→images, PDF→text/Markdown, and both compress routes
-need pdf.js's real decode/render path (no Node/vitest equivalent available) and are covered end
-to end by `tests/e2e/tool-flows.spec.ts` instead.
+**Status: Done** — The unit suite (176 files in `tests/unit/` on 2026-10-05; count it with `pnpm test` rather than quoting a number here, see HRD-01) includes `tests/unit/golden.test.ts`: one golden-file test per pdf-lib-based P0 operation (merge, organize, split, extract, insert, images→PDF, plus crop and normalize). Each drives the real code path and re-parses the output for page count, order and text content. PDF→images, PDF→text/Markdown and both compress routes need pdf.js's real decode/render path (there is no Node/vitest equivalent) and are covered end to end by `tests/e2e/tool-flows.spec.ts` instead.
 
 - **AC:** Every `core/ops` function has unit coverage. Every operation has a golden-file
   test that re-parses output and asserts page count, order, and text content.
 
 ### QA-03 · Zero-network CI test — `S` `P0`
 
-**Status: Done (re-audited 2026-09-26)** — Runs against the built preview server, sweeps every tool plus a render, fails on any non-local request. pdf.js data files are bundled.
+**Status: Done (re-audited 2026-09-26)** — Layered: the web-preview sweep of every tool, the `extension` Playwright project on the real `dist/ext` (smoke set, not every tool), an AST network guard, a post-build bundle scan and a strict CSP in both builds (HRD-53, HRD-54). pdf.js data files are bundled.
 
 **Reopened by AUDIT-2026-09-25 §4 (PLT-2, PLT-6, PLT-7), now closed again.** "CI fails if…"
 was not true when this was marked Done: CI had never run, the sweep only ever ran against
@@ -1129,7 +1113,8 @@ The test that protects the entire product claim.
 **Status: Done** — Flows for every P0 tool asserting real output bytes, including sign
 (text stamp, AcroForm fill, XFA refusal), redact (drawn-region removal, keyboard-only
 marking), and cleanup (B&W preset alters the page, verified by re-import and pixel sample) —
-each has its own QA-01 fixture. Full suite: 55 tests, ~3 minutes headless.
+each has its own QA-01 fixture. The per-tool flows run on the web preview; the packaged extension has a smoke set (see
+the re-audit note below and HRD-54).
 
 **Re-audited 2026-09-26 (AUDIT-2026-09-25 §4, PLT-2 / PLT-7 / M4): Done, with the scope
 stated.** "Runs headless in CI" was not true when this was marked Done — CI had never run —
@@ -1641,7 +1626,7 @@ converted is asking for CNV-02.
 
 ### CNV-07 · Paste image as page — `S` `P2`
 
-**Status: Done**
+**Status: Done in code; AC partly untested** — the paste handler reads `ClipboardEvent.clipboardData` first (with `preventDefault()`), falls back to the async Clipboard API, and calls `insertPages(doc.id, …, at)` for an open document. But the only e2e (`tests/e2e/import.spec.ts`) sets a production test hook (`window.__mockClipboardImage`, in `src/platform/file-system.ts`), dispatches a bare `Event('paste')`, and only reaches the empty-workspace branch. "Inserts at the expected index" is unverified (AUDIT-FINDINGS §11.10, HRD-23).
 
 - **Requirements:** Read an image directly off the OS clipboard (Clipboard API) and
   insert it as a new page at the current insertion point, reusing CNV-01's image-to-PDF
@@ -1672,6 +1657,7 @@ document dominated by JPX/JBIG2/Separation/stencil/colour-key/pre-blended images
 skipped constructs when it says so. Progress spans the whole search
 ("*300 DPI at 75% — Processing page 2*") and the abort signal is checked between
 trials as well as inside them.
+AUDIT-2026-10-01 (HRD-64, 2026-10-02): the "Reached" toast is gated on the final written size, Protect's encryption overhead included (IMG-5); the target field validates against `PDF_TARGET_BOUNDS` with a 10 KB minimum, matching the deep link (IMG-12); a missed size is rounded up (IMG-3). Tests: `tests/unit/size-honesty-commit.test.ts`.
 
 Evidence, all against real output byte counts:
 
@@ -1715,7 +1701,7 @@ better.
 
 ### DOC-08 · Linearize export ("fast web view") — `S` `P2`
 
-**Status: Done**
+**Status: Open (AC unmet on export paths)** — every user-export save in `process.worker.ts` (16 sites) passes `useObjectStreams: true` (DOC-05's requirement, restored per AUDIT-2026-08-17), so pdf-lib moves page dicts, the page tree and the catalog into object streams after the content streams. "First page's objects precede later pages' in byte offset" holds only for the content streams. `setFastWebViewOrdering` has no UI caller, although the ticket calls the behaviour optional. Next step: resolve the DOC-05/DOC-08 conflict, either with a "Fast web view" option that saves with a plain xref or by re-scoping this ticket. See HRD-23 (AUDIT-FINDINGS §11.8).
 
 - **Requirements:** Reorder the exported PDF's objects so the first page's content is
   available from the start of the byte stream (linearized/optimized structure), improving
@@ -1861,7 +1847,7 @@ direction, and narrowing it belongs to `findText`, not here.
 
 ### CMP-06 · Compression report export — `S` `P2`
 
-**Status: Done** — `generateCompressionReportText` and JSON export breakdown in `src/core/compress-report.ts`. Tested in `tests/unit/compress-report.test.ts`.
+**Status: Done in code; AC cross-check untested** — `generateCompressionReportText` and JSON export breakdown in `src/core/compress-report.ts`. The measured result is scoped to its document, carries per-image stats from `rebuildCompressed`, and records `finalBytes` after RED-06 protection (`commit.ts`). But `tests/unit/compress-report.test.ts` uses only hand-written data, so "totals match the actual output file size" is never checked against a real saved file (AUDIT-FINDINGS §11.9, HRD-23).
 
 - **Requirements:** Alongside CMP-04's on-screen honest-reporting summary, an exportable
   per-page/per-image breakdown (sizes before/after, which images were re-encoded vs.
@@ -1871,7 +1857,7 @@ direction, and narrowing it belongs to `findText`, not here.
 
 ### ANN-05 · Export visual diff — `S` `P2`
 
-**Status: Done** — `exportVisualDiff` in `src/core/visual-diff-export.ts` renders visual diff overlays into PDF. Tested in `tests/unit/visual-diff-export.test.ts`.
+**Status: Done (re-audited 2026-08-17 and 2026-10-01, fixed 2026-10-02)** — `exportVisualDiff` (`src/core/visual-diff-export.ts`) renders the real diff into a PDF, or reports an error. AUDIT-2026-08-17 §3 #16 found that the Compare panel passed an empty result set and swallowed render failures in a bare `catch {}`, writing an all-white page that "succeeded". `visual-diff-export.test.ts` now asserts real embedded XObjects, not just byte length (§3 #31). e2e: `tool-flows.spec.ts` › "compare: visual pixel diff exports a real rendered image, not text mode". AUDIT-2026-10-01 fixes (HRD-66): a cancelled export saves nothing (X-1); each page keeps its real CropBox size and rotation instead of 612×792 (X-2); mixed sizes are resampled rather than refused (X-3); each document is loaded once (X-4); the diff and encode run in the cv worker with per-page progress (X-6). Tests: `tests/unit/compare-export-audit-2026-10-01.test.ts`, `tests/e2e/audit-2026-10-01-ui.spec.ts`.
 
 - **Requirements:** Extend the Compare tool (ANN-02) to export its side-by-side or overlay
   diff view — changed regions highlighted — as a new PDF, rather than only viewing diffs
@@ -1891,7 +1877,7 @@ direction, and narrowing it belongs to `findText`, not here.
 
 ### ACC-01 · Alt-text editor for images — `M` `P1`
 
-**Status: Done**
+**Status: Done (re-audited 2026-08-17)** — `/Alt` is written as UTF-16BE hex (`PDFHexString.of(utf16BeHex(…))`, `src/core/pdf/accessibility.ts`). AUDIT-2026-08-17 §3 #21 found it written one byte per JS char code, which corrupted any non-Latin-1 alt text. The alt-text input has a real `<label for>`, and alt text reads back on re-import (AUDIT-FINDINGS). AC addition: alt text outside Latin-1 (for example `日本語の写真 — café`) round-trips byte-exact.
 
 - **Requirements:** Let the user attach alt-text to each image XObject on a page, written
   as real structure-tree/`/Alt` metadata on export — basic PDF/UA-style accessibility
@@ -2304,7 +2290,7 @@ always had. New UI strings fall back to English until the next `i18n-extract` pa
 
 ### RED-08 · On-device face/logo blur — `L` `P2`
 
-**Status: Done, with the logo half deliberately narrowed — see "Scope narrowed" below.**
+**Status: Done, with the logo half deliberately narrowed — see "Scope narrowed" below.** **Superseded in part by AUDIT-2026-09-25 CONV-6 / PLT-8 (2026-09-26):** the `tinyFaceDetector` weights are now bundled, so there is no download, no consent dialog and no CSP allowance — OCR is again the only network exception. The paragraphs below on the "second disclosed network exception", `download.ts`, `modelState.ts` and AC 2's decline path describe the first implementation (`tests/unit/faceblur-offline.test.ts` replaces `faceblur-consent.test.ts`). Faces inside Form XObjects are found since PDF-14; images drawn only from annotation appearances or tiling patterns are still skipped (HRD-41).
 
 **The second disclosed network exception.** Invariant #1 allowed exactly one fetch — OCR's
 language model. This adds the second, and the two are now enumerated together in
@@ -2416,8 +2402,8 @@ worktree but does not carry over.
   blur/pixelate the detected regions in the exported image, never uploading pixels
   anywhere.
 - **AC:** A fixture with a known face position blurs a region overlapping that position
-  and no others; declining the model download leaves the tool disabled with a clear
-  message, never a silent no-op on export.
+  and no others; face blur makes zero network requests (bundled weights); an image the
+  detector cannot reach is reported as skipped, never a silent "no faces found".
 
 ### RED-09 · Batch metadata scrub — `S` `P1`
 
@@ -2462,6 +2448,7 @@ and stripped — the kind of disclosure RED-04 exists for in the first place.
 **Status: Done** — A "Split by target file size" mode alongside OPS-03/OPS-12, planned by
 `planSizeSplitBoundaries`/`planRangesBySize` in `src/core/operations.ts` since a slice's
 real size is only known after composing, not from page count alone.
+AUDIT-2026-10-01 IMG-4 (HRD-64, 2026-10-02): the target is decimal (`targetSizeKb * 1000`); it was `* 1024`, so "5000 KB" allowed 5.12 MB parts that fail a 5 MB portal limit.
 
 **First version had a real bug, found by an independent AC verification pass, not by
 inspection: it over-split documents whose pages share a large resource.** That version
@@ -2575,13 +2562,14 @@ suite green (643 tests), `tsc --noEmit` clean, lint/format clean.
 
 ### ANN-06 · Redline export — `S` `P2`
 
-**Status: Done** — A new `exportRedlinePdf` (`src/core/redline-export.ts`), wired in as a
+**Status: Done (2026-10-02)** — A new `exportRedlinePdf` (`src/core/redline-export.ts`), wired in as a
 third `diffMode` alongside ANN-05's `'visual'`/`'text'` in `compare-export.ts`'s existing
 dispatcher and `ComparePanel.tsx`'s `RadioGroup`. Each source page is rasterised once
 (`renderAllPages` loads the whole document a single time rather than once per page, unlike
 `exportVisualDiff`'s per-page load) and drawn into its own output PDF page next to its
 counterpart, "Before"/"After" labelled, rather than merged into one overlay image the way
 ANN-05 does.
+AUDIT-2026-10-01 X-5 (HRD-66): the export now works page by page instead of rasterising every page of both documents at once (~1.7 GB for a 200-page pair), and its diff/encode runs in the cv worker with per-page progress (X-6). Tests: `tests/unit/compare-export-audit-2026-10-01.test.ts`, `tests/e2e/audit-2026-10-01-ui.spec.ts` (each pane at its own page size).
 
 - **AC met — before/after side by side at matching scale:** both panes are placed at their
   *true* point size — pixel dimensions divided by the same `RENDER_SCALE` (1.5) constant
@@ -5645,8 +5633,10 @@ one page selected, and the disabled in-between state.
 
 ## EPIC-18 · Product gaps from AUDIT-2026-09-25
 
-The product gaps in [`AUDIT-2026-09-25.md`](AUDIT-2026-09-25.md) §5, turned into tickets
-(2026-09-26). GAP-1 ("Done means works in the shipped build") is not a ticket of its own:
+The ten product gaps of the 2026-09-25 robustness audit (GAP-2…GAP-12), turned into
+tickets (2026-09-26); the audit's 98 findings and root causes are kept as requirements
+in EPIC-19 (HRD-40…HRD-55). GAP-1 ("Done means works in the shipped build") is not a
+ticket of its own:
 it is the extension e2e project, CI on `master` and the post-build network scan that
 already landed with the audit fixes, and it is recorded on the tickets it reopened (DS-07,
 CNV-03, NFR-02, NFR-04, QA-03, QA-04, DIST-03, ACC-02, DOC-12, OPS-13). Every ticket here
@@ -5658,7 +5648,7 @@ web twin's service worker precaches same-origin build output only).
 
 ### DIST-06 · Installable, offline-capable web twin (PWA) — `M` `P1` · GAP-2
 
-**Status: Done (2026-09-27)** — service worker precaches the web build (same-origin only, cross-origin requests untouched), `manifest.webmanifest` with `file_handlers` + `launchQueue` and a `share_target`; offline reload + import, share POST and manifest checks pass in e2e. Not verified here: a real OS "Open with" launch, a real Android share sheet, the update toast in a live browser.
+**Status: Done (2026-10-02) in code and CI; not verified on a device** — service worker precaches the web build (same-origin only, cross-origin requests untouched), `manifest.webmanifest` with `file_handlers` + `launchQueue` and a `share_target`; offline reload + import, share POST and manifest checks pass in e2e. AUDIT-2026-10-01 found "never swaps code under an open document" unmet; fixed (HRD-63): hashed entry names, cache-first pages from the controlling worker's own cache with SHA-256-checked installs (PLT-1), an update in one tab keeps the old cache until its clients are gone and other tabs are told (PLT-4), a 3 s network-fallback timeout (PLT-6), a confirmed "Open N shared files?" for shares the worker cannot trace to this origin and rejection of cross-site ones (PLT-3), and a worker-side network guard (PLT-2). Not verified here: Lighthouse installability, a real OS "Open with" launch, a real Android share sheet (manual step in RELEASE_CHECKLIST.md).
 
 The web twin is branded "Offline PDF tools" and is the only path for locked-down
 machines and phones, yet it has no service worker and no web app manifest.
@@ -5677,7 +5667,7 @@ machines and phones, yet it has no service worker and no web app manifest.
 
 ### DIST-07 · Automated release packaging — `S` `P1` · GAP-8
 
-**Status: Done (2026-09-27)** — `.github/workflows/release.yml` on `v*` tags: version check, check/test, builds + bundle network scan, web and extension e2e, `pnpm package`, checksum verify, GitHub Release with zips + SHA256SUMS. Not yet exercised by a real tag push.
+**Status: Done (2026-10-02) in CI; not yet run on a real tag** — `.github/workflows/release.yml` on `v*` tags builds once (version check first), then runs check/test, the bundle network scan, web and extension e2e, perf, and `e2e-web-shipped` (the unzipped shipped web zip: no test hooks, zero-network, offline and share specs) against those exact artifacts, and creates a **draft** GitHub Release with the Chrome, Firefox and web zips, a `.sha256` per zip and `SHA256SUMS`. AUDIT-2026-10-01's gaps (no web zip, no `--draft`, no per-file `.sha256`, rebuild instead of shipping the tested bytes, `perf` not in `needs`, RELEASE_CHECKLIST.md describing a manual release) are fixed (PLT-7, HRD-63); RELEASE_CHECKLIST.md points at the workflow.
 
 Release packaging was a 277-line manual checklist with a hand-made zip that included
 sourcemaps. `pnpm package` (build ext / firefox / web → strip maps → zip → SHA-256) landed
@@ -5693,7 +5683,7 @@ with the audit fixes (PLT-13); the tag-triggered workflow did not.
 
 ### DS-10 · Phone-width layout — `M` `P1` · GAP-3
 
-**Status: Done (2026-09-27)** — tools sheet below 600px, icon trust chip, opaque pinned options sheet, shortcut hints hidden on coarse pointers; `tests/e2e/mobile.spec.ts` (360/390/414px, four locales, axe on key screens, light + dark) passes.
+**Status: Done (2026-10-02)** — tools sheet below 600px, icon trust chip, opaque pinned options sheet, shortcut hints hidden on coarse pointers; `tests/e2e/mobile.spec.ts` (360/390/414px, four locales, axe on key screens, light + dark) passes. AUDIT-2026-10-01's AC gaps are closed: `tests/e2e/mobile-export.spec.ts` walks Home → a tool → options → export and checks the saved file, with confirm and review dialogs stacked above the sheet; the options sheet no longer covers the preview or the grid below 1100px (the canvas reserves the sheet's measured height); the rail's hidden labels no longer stretch the layout at tablet width; the pager wraps at phone width so zoom-in stays on screen. The tooltip Escape race that made `mobile.spec.ts` flaky under load is fixed (UI-11, HRD-65).
 
 At 390px the trust chip is clipped, the icon rail takes ~15% of the width, the Compress
 options sheet overlaps the preview with text showing through, the ⌘K hint shows on touch
@@ -5710,7 +5700,7 @@ building DS-12).
 
 ### DIST-08 · Compress-to-size landing pages — `S` `P1` · GAP-4
 
-**Status: Done (2026-09-27)** — five web-only pages (100 KB, 200 KB, 500 KB, 1 MB, custom) deep-link into Compress "Aim for a size" via `#/tool/compress?target=…`; the same link works in the extension editor. Landing-page copy is English only, like the existing landing pages.
+**Status: Done (2026-10-02)** — five web-only pages (100 KB, 200 KB, 500 KB, 1 MB, custom) deep-link into Compress "Aim for a size" via `#/tool/compress?target=…`; the same link works in the extension editor. AUDIT-2026-10-01 copy gaps fixed (HRD-64): "Reached" is gated on the final written size with Protect's overhead included (IMG-5), and a missed size is rounded up so "unreachable" never shows the target as the result (IMG-3); the Compress field shares the deep link's 10 KB minimum (IMG-12). Tests: `tests/unit/size-honesty-commit.test.ts`, `tests/unit/bytes-and-size-guard.test.ts`. Landing-page copy is English only, like the existing landing pages.
 
 "Compress PDF to 100 KB" is the top search intent and has no landing page, although
 DOC-07 already compresses to a target size.
@@ -5726,7 +5716,7 @@ DOC-07 already compresses to a target size.
 
 ### CNV-14 · Image target size and resize output — `M` `P2` · GAP-5
 
-**Status: Done (2026-09-27)** — PDF→Images "Aim for a file size" + longest-side limit, and a new "Image to size" tool; bounded JPEG quality/scale search in workers, cancellable, per-image fits/over report; e2e measures outputs byte-for-byte.
+**Status: Done (2026-10-02)** — PDF→Images "Aim for a file size" + longest-side limit, and a new "Image to size" tool; bounded JPEG quality/scale search in workers, cancellable, per-image fits/over report; e2e measures outputs byte-for-byte. AUDIT-2026-10-01 gaps fixed (HRD-64, HRD-69): an exact width × height in both tools, aspect-locked by default, with output pixels exact on the decoded files and an unlocked edit kept on re-lock (`tests/unit/cnv14-exact-size.test.ts`); one area and one per-side limit (`render-limits.ts`) checked before any canvas is allocated (`tests/unit/cnv14-exact-limit.test.ts`); "longest side at most N" never gives N+1 px (IMG-6); misses say by how much; TIFF orientation is applied (IMG-9); an original that already fits is never replaced by a bigger re-encode (IMG-1); dimensions come from the file header.
 
 Portals ask for "a photo under 20 KB" or a fixed pixel size.
 
@@ -5739,7 +5729,7 @@ Portals ask for "a photo under 20 KB" or a fixed pixel size.
 
 ### OPS-19 · Grayscale / black-and-white — `S` `P2` · GAP-6
 
-**Status: Done (2026-09-27)** — vector-preserving grayscale (colour operators, images, patterns, forms, annotations) with per-page raster fallback that is reported, 1-bit B&W for scans; output re-verified for leftover colour. Batch recipes don't include it yet.
+**Status: Done (2026-10-02)** — vector-preserving grayscale (colour operators, images, patterns, forms, annotations) with per-page raster fallback that is reported, 1-bit B&W for scans. AUDIT-2026-10-01 found three AC gaps, all fixed (HRD-61, HRD-64): a page rasterised for an annotation kept its colour annotation on top and passed verification (PDF-2: raster pages now render annotations and count as colour left, `tests/unit/grayscale-audit.test.ts`); growth was saved with only a warning (UI-OPS19: growth is warned with both sizes, including Protect-only growth, and the export review shows both before writing; it warns rather than blocks by design); and "offered as a compression lever for scans" was missing — Compress now has a Colour option (Keep colour / Shades of grey / Black and white), compresses first, and never saves a file larger than the input (grey not smaller → the colour-compressed file; that not smaller → the original), naming pages it could not convert (`tests/unit/ops19-compress-gray.test.ts`). The option is not applied to compress-to-target-size. Text is not extractable on rasterised pages (disclosed in the UI). Batch recipes don't include it yet.
 
 - **Requirements:** Convert pages to grayscale, or threshold to 1-bit black and white, as
   a page tool; images are re-encoded, vector/text colours mapped to gray; also offered as a
@@ -5750,7 +5740,7 @@ Portals ask for "a photo under 20 KB" or a fixed pixel size.
 
 ### OPS-20 · Duplex interleave — `XS` `P2` · GAP-6
 
-**Status: Done (2026-09-27)** — "Duplex scan" in Merge and Organize, reverse-backs on by default, unequal counts warned and nothing dropped; undoable.
+**Status: Done (2026-10-02)** — "Duplex scan" in Merge and Organize, reverse-backs on by default, unequal counts warned and nothing dropped; undoable. The AC's "verified by text on each output page" is now checked on the saved PDF (`tests/e2e/duplex-merge.spec.ts`), and the interleave button is disabled until the order changes, so a second press can no longer scramble it (AUDIT-2026-10-01 UI-8, HRD-65, `tests/unit/ui-audit-2026-10-01.test.ts`).
 
 - **Requirements:** Merge an odd-pages scan and an even-pages scan into one document, with
   a "reverse the even pages" option (sheet-feeder order). Pure page-order logic on page
@@ -5760,7 +5750,7 @@ Portals ask for "a photo under 20 KB" or a fixed pixel size.
 
 ### DOC-13 · Repair — `S` `P2` · GAP-6
 
-**Status: Done (2026-09-27)** — tolerant re-save with salvage, verified in pdf.js and pdf-lib before it is offered; a PDF refused as corrupt gets a "Try to repair" toast action. Encrypted files are refused.
+**Status: Done (2026-10-02)** — tolerant re-save with salvage, verified in pdf.js and pdf-lib before it is offered; a PDF refused as corrupt gets a "Try to repair" toast action. AUDIT-2026-10-01 found three AC failures, all fixed (HRD-61, HRD-65, HRD-68): an encrypted file with a lost trailer was "repaired" into ciphertext (PDF-1: also refused on a security-handler dict or a raw `/Encrypt` outside stream data, `tests/unit/repair.test.ts`); an intact file with obj-like text in a stream was reported damaged (PDF-3: salvage only on evidence of damage, outside stream ranges; eleven intact fixtures round-trip as already valid with unchanged text, `tests/unit/repair-intact.test.ts`, `tests/e2e/repair-intact.spec.ts`); and the open document's edits were dropped (UI-3: an untouched document is repaired from its raw file, an edited one from its own pages, rotations, crops and annotations, never with panel settings, `tests/unit/size-honesty-commit.test.ts`).
 
 - **Requirements:** Re-save a damaged PDF through the tolerant parser (xref rebuild,
   dropped broken objects) and report what was fixed. Never claims success for a file it
@@ -5771,7 +5761,7 @@ Portals ask for "a photo under 20 KB" or a fixed pixel size.
 
 ### DS-11 · Discoverability: omnibox, What's new, rail labels — `S` `P2` · GAP-7
 
-**Status: Done (2026-09-27)** — `pdf` omnibox keyword (no permission, `permissions: []` asserted), What's-new page on version update (stored outside `chrome.storage`), rail tooltips on hover and focus with grouped sections. Omnibox suggestions are English only (the service worker cannot load locale chunks).
+**Status: Done (2026-10-02)** — `pdf` omnibox keyword (no permission, `permissions: []` asserted), What's-new page on version update (stored outside `chrome.storage`), rail tooltips on hover and focus with grouped sections. Re-audited 2026-10-01 with no AC gap; the rail tooltip now meets WCAG 1.4.13 (hoverable bubble with a hide delay, a static hidden summary per rail item for `aria-describedby`; AUDIT-2026-10-01 UI-11, HRD-65). Omnibox suggestions are English only (the service worker cannot load locale chunks).
 
 - **Requirements:** An `omnibox` keyword that opens a tool by name (manifest key, no
   permission); a "What's new" page opened from `onInstalled` with reason `update`
@@ -5784,7 +5774,7 @@ Portals ask for "a photo under 20 KB" or a fixed pixel size.
 
 ### DOC-14 · Storage persistence and quota warnings — `S` `P2` · GAP-9
 
-**Status: Done (2026-09-27)** — persistence requested once after the first real save or model download, usage/quota and persistence state in the trust panel, one-time warnings when denied or near quota.
+**Status: Done (2026-10-02)** — persistence requested once after the first real save or model download, usage/quota and persistence state in the trust panel, one-time warnings when denied or near quota. "Never asked again" no longer depends on an IndexedDB write succeeding: a per-session flag stops a re-ask, and no toast shows when the outcome could not be recorded (AUDIT-2026-10-01 RT-9, HRD-62, `tests/unit/local-data.test.ts`).
 
 Everything kept between visits (the session-recovery record and the OPFS bytes it points
 at, downloaded OCR models, signatures) lives in best-effort storage the browser may evict.
@@ -5812,7 +5802,7 @@ at, downloaded OCR models, signatures) lives in best-effort storage the browser 
 
 ### ACC-04 · Read-aloud basics — `S` `P2` · GAP-10
 
-**Status: Done (2026-09-27)** — one utterance per sentence with sentence highlight (word highlight when the voice fires `boundary`), remembered voice and rate, in-panel keyboard control, polite live status; local voices only. Real voices' `boundary` behaviour checked only with a scripted voice.
+**Status: Done (2026-10-02)** — one utterance per sentence with sentence highlight (word highlight when the voice fires `boundary`), remembered voice and rate, in-panel keyboard control, polite live status; local voices only. AUDIT-2026-10-01 gaps fixed: a remembered voice that is no longer installed (or is now a network voice) falls back with a notice (`tests/unit/ui-audit-2026-10-01.test.ts`), and voice and rate surviving a reload has an e2e (`tests/e2e/read-aloud-preferences.spec.ts`). Read-aloud defects UI-1, UI-2, UI-4 and UI-10 are fixed (HRD-65). Real voices' `boundary` behaviour checked only with a scripted voice.
 
 - **Requirements:** A voice picker listing only local voices (`localService === true`,
   ACC-02/PLT-5); sentence highlighting driven by the utterance `boundary` event; the
@@ -5823,7 +5813,7 @@ at, downloaded OCR models, signatures) lives in best-effort storage the browser 
 
 ### DOC-15 · Per-document undo and an open-document cap — `M` `P1` · GAP-11
 
-**Status: Done (2026-09-27)** — each document has its own undo/redo stack (50 steps per document, 400 total); opening and closing are no longer undo steps; history-aware source liveness and recovery kept (old records migrate by dropping history); 20-document cap and a 1.5 GiB soft-limit confirmation.
+**Status: Done (2026-10-02)** — each document has its own undo/redo stack (50 steps per document, 400 total); opening and closing are no longer undo steps; history-aware source liveness and recovery kept (old records migrate by dropping history); 20-document cap and a 1.5 GiB soft-limit confirmation. AUDIT-2026-10-01 gaps fixed (HRD-62, HRD-68): undo past a save no longer marks the document clean (RT-1: `rebaseHistory()` on save, `dirty` recomputed, an annotation added mid-save stays unsaved); Repair's "Open repaired" is refused at the cap with a message and opens one copy on double-click (RT-2); restored sessions and redo stacks obey the cap and `MAX_TOTAL_SNAPSHOTS` (RT-6, RT-7). Tests: `tests/unit/runtime-audit-2026-10-01.test.ts`.
 
 G1/G2 from earlier audits. RT-2, RT-3 and RT-6 all came from one global undo stack shared
 by every open document.
@@ -5839,7 +5829,7 @@ by every open document.
 
 ### DS-12 · "Stored on this device" and Clear all local data — `M` `P1` · GAP-12
 
-**Status: Done (2026-09-27)** — "Stored on this device" list with per-category clear, and "Clear all local data" (refused while a job runs or another tab is open; lists what goes; reloads to a clean state).
+**Status: Done (2026-10-02)** — "Stored on this device" list with per-category clear, and "Clear all local data" (refused while a job runs or another tab is open; lists what goes; reloads to a clean state). AUDIT-2026-10-01 gaps fixed (HRD-62, HRD-63): OPFS failures are counted and shown as a partial clear (RT-3); the other-tab check runs again after the confirm (RT-4); the tesseract-cache open is bounded (RT-5); the `stapler-meta` database and the `stapler-share-inbox` cache are deleted (RT-8, PLT-5). Tests: `tests/unit/runtime-audit-2026-10-01.test.ts`, `tests/unit/local-data.test.ts`, `tests/e2e/local-data.spec.ts`. Known limit: the web-twin precache survives (app code, not user data).
 
 "Nothing is uploaded" is half the privacy story; the trust panel never said what *is*
 kept locally, and the only way to delete it was the browser's own "clear site data" —
@@ -5873,6 +5863,2146 @@ which is also how RT-4's pre-redaction originals were meant to be cleaned up.
   `tests/e2e/local-data.spec.ts`. Known limits: the "disclosed downloads" count is not
   storage and simply resets with the reload; a web-twin precache (DIST-06) is app code,
   not user data, and is not cleared; granted persistence cannot be revoked by a page.
+
+---
+
+## EPIC-19 · Hardening requirements from the audits
+
+Every finding of the five audits — AUDIT-2026-08-17, AUDIT-FINDINGS (opened 2026-08-16,
+extended 2026-08-17 and 2026-09-15), AUDIT-EDGE-CASES-2026-09-15, AUDIT-2026-09-25 (a
+whole-codebase robustness audit of v0.2.1 whose 98 findings all passed `pnpm check` and the
+full test suite) and AUDIT-2026-10-01 (54 findings over the EPIC-18 tickets plus a repo-wide
+pattern sweep) — and of their post-fix reviews, recorded as lasting requirements. The audit
+documents themselves were removed; this epic is where their findings live. A finding that
+belongs to one ticket's acceptance criteria is recorded on that ticket's Status line; the
+tickets here hold what spans tickets or has no ticket of its own. Each requirement starts
+with its original tag (for example `AUDIT-2026-09-25 RT-14`, `AUDIT-FINDINGS §4`,
+`AUDIT-EDGE-CASES-2026-09-15 §1.1`), which is what code comments and tests cite, so
+`grep -r "<ID>"` leads from a requirement to its fix and regression test (some comments
+spell the tag `Audit 2026-10-01 <ID>`, add a file suffix to the edge-case tag, or cite the
+bare ID). IDs restart per audit: `AUDIT-2026-09-25 PDF-1` and `AUDIT-2026-10-01 PDF-1` are
+different findings. AUDIT-2026-08-17 has two numbering schemes (`§2 R#N` is its remediation
+table's "Finding #N", `§3 #N` its §3 list; for example R#17 = §3 #15 = F-03);
+AUDIT-FINDINGS sub-tags `§N.k` number a section's findings in document order and §14 keeps
+its C/H/M/L/G numbering; the unnumbered edge-case bullets are numbered in document order
+(`§3 #1` …); AUDIT-2026-09-25 severity maps to priority as 🔴/🟠 → `P0`, 🟡 → `P1`,
+⚪ → `P2`. Each requirement says what must hold, and "was:" records the defect it replaced.
+Status reflects the code as of 2026-10-05, not the audits' own check-marks. Same hard
+invariants and definition of done as every other epic.
+
+### HRD-01 · Release gates pass on a clean tree, and measure the real thing — `S` `P0`
+
+**Status: Done (re-verified 2026-10-05)** — `pnpm check` passes, `check:tokens`/`check:invariants` find no raw colours, the bundle gate measures the editor graph, and CI runs on `master`. Open: none. QA-02's Status now carries the current test count.
+
+On 2026-08-17, `pnpm check` failed on a clean `master`. Several gates also passed while
+measuring nothing. A gate that cannot fail is worse than no gate, because it certifies the
+build anyway.
+
+- **Requirements:**
+  - **AUDIT-2026-08-17 §0 baseline #3** / **§2 R-gate**: `pnpm check` passes on a clean tree. Was: 5 `rgb()` literals in `src/core/text-diff-export.ts`, which broke the release-gate AC of F-01, DS-01 and DIST-05. Diff colours now come from the central document-colour constants.
+  - **AUDIT-2026-08-17 §3 #14** / **§2 R#15**: the 900 KB gzip budget measures the complete statically imported editor graph (`scripts/check-bundle-size.js`). Was: it measured a 0.26 KB entry stub and could never fail.
+  - **AUDIT-2026-08-17 §3 #35**: the zero-network e2e and the full suite run in CI on every push and PR (`.github/workflows/ci.yml`; later extended by DIST-07). Was: no CI existed, although the README claimed it did.
+  - **AUDIT-2026-08-17 §3 #39** / **§2 R#41**: `RELEASE_CHECKLIST.md` ships with every per-release box unticked, and its own gate (`pnpm check` clean) can pass. Was: the QA-05 box was pre-ticked.
+  - **AUDIT-2026-08-17 §3 #33** / **§2 R#35**: DS-02's contrast results are committed (`docs/CONTRAST-AUDIT.md`, from `scripts/check-contrast.mjs --markdown`).
+  - **AUDIT-2026-08-17 §3 #34** / **§2 R#36**: every URL that `robots.txt` advertises exists in `dist/web` (`sitemap.xml`). Was: masked locally because the SPA fallback returns 200 for any path.
+  - **AUDIT-2026-08-17 §3 #38** / **§2 R#40**: any test count or measured number quoted in `TICKETS.md` is either current or dated. Was: "196 unit tests across 13 files" against a real 609/56, and a "0.0% surgical" CMP-05 projection that re-measured at 5.8%. **Regressed:** QA-02 again says "610 unit tests across 56 files" (176 unit files today).
+  - **AUDIT-2026-08-17 §3 #29** / **§2 R#31**: comments about save options match the code. Was: `linearize.ts` claimed most saves pass `useObjectStreams: true` when none did. Today all 16 `process.worker.ts` save sites pass `true` (see DOC-05).
+  - **AUDIT-2026-08-17 §3 #36** / **§2 R#38**: no `TODO(<ticket>)` marker survives in a ticket the status calls finalized (the `gecko.id` TODO).
+- **AC:** On a fresh clone, `pnpm check && pnpm test` pass. A raw colour added anywhere outside `tokens.css` fails `pnpm check`. Bloating the editor graph past 900 KB gzip fails the bundle gate. CI runs all three gates on a PR.
+
+### HRD-02 · Redaction hardening from the 08-17 bug hunt — `M` `P0`
+
+**Status: Done (re-verified 2026-10-05)** — every item holds in code. R#2 has since been superseded by a stronger behaviour (see below). Open: none.
+
+The audit's §4 put these first because of their privacy and legal consequences. They are
+listed only in the remediation table (R#8 was never listed).
+
+- **Requirements:**
+  - **AUDIT-2026-08-17 §2 R#1**: redacted output carries no `/Outlines`, so copying bookmarks cannot pull source page dictionaries back into the file. Test: `tests/unit/process.test.ts` › "drops source outlines from redacted output". The loss is disclosed in `RedactPanel` (AUDIT-EDGE-CASES §3 #5, HRD-36).
+  - **AUDIT-2026-08-17 §2 R#2**: a mark that partly overlaps a Form XObject never deletes the whole form. Was: the whole form was deleted, losing unmarked content. The 08-17 fix refused instead. Since AUDIT-EDGE-CASES §3 #4 (HRD-36), the form's own content is filtered, and it refuses only when that content can't be read (`process.test.ts` › "filters inside a partly covered Form XObject rather than deleting the whole form").
+  - **AUDIT-2026-08-17 §2 R#3**: redaction materialises a page-local `/Resources` before deleting XObject entries, so a shared image is never removed from sibling pages (`process.test.ts` › "does not delete a shared XObject dictionary from sibling pages").
+  - **AUDIT-2026-08-17 §2 R#4**: pointer coordinates go through the page rotation before a mark is stored, so marks land on the displayed content on `/Rotate 90/270` pages (`tests/unit/redact-polygon.test.ts` › "maps a rectangle's own four corners to that rectangle at …°").
+  - **AUDIT-2026-08-17 §2 R#5**: text search, pattern suggestions and signature-line detection map text runs through the viewport corners. Was: raw x/y shortcuts on rotated pages.
+  - **AUDIT-2026-08-17 §2 R#9**: the redaction unit test proves the removed text is absent from the decoded page stream, not merely that the bytes changed.
+  - **AUDIT-2026-08-17 §2 R#10**: the verifier checks text against rotation-aware character boxes. Was: a top-left shortcut that rotated or skewed text escaped.
+  - **AUDIT-2026-08-17 §2 R#11**: the page-text helper throws when stream inflation fails. Was: a decode failure read as an empty page, which passed verification.
+- **AC:** On a `/Rotate 90` fixture, a mark drawn over a word removes exactly that word: absent from the inflated content stream, verifier passes. A shared image on page 2 survives a redaction on page 1. A stream that fails to inflate fails verification instead of passing it.
+
+### HRD-03 · Tests fail on the bug they guard; no test hook ships — `S` `P0`
+
+**Status: Done (re-verified 2026-10-05)** — Open: none from this audit. The general rule recurs as M7/M8 in AUDIT-2026-09-25.
+
+A test that passes on broken output certifies the bug. Several 08-17 "Done" verdicts
+rested on tests of that kind.
+
+- **Requirements:**
+  - **AUDIT-2026-08-17 §3 #13**: an assertion band matches its AC. Was: CMP-02 accepted `>0.7 && <0.95` against a stated 70–90% reduction. Now `<0.9` (`tests/e2e/tool-flows.spec.ts` › "compress: CMP-02 raster path reduces scanned fixture by 70-90%").
+  - **AUDIT-2026-08-17 §3 #31**: export tests assert content, not just length or count. Was: `annotation-summary.test.ts` and `visual-diff-export.test.ts` would pass on an all-white export. Both now assert real content and embedded XObjects.
+  - **AUDIT-2026-08-17 §3 #32**: a test's comment and docstring match its assertions. Was: "< 200MB" in the comment against `< 300` in the code, and a "three-file" docstring over a two-file test. Now `tests/e2e/perf.spec.ts` › "NFR-03: processes heavy documents within memory limits" asserts three readings, each < 200 MB.
+  - **AUDIT-2026-08-17 §2 R#16**: a benchmark drives the real UI flow it names. The 10×5MB merge goes through the merge panel into one workspace document (`perf.spec.ts` › "merges 10 × 5MB PDFs within 8 seconds").
+  - **AUDIT-2026-08-17 §3 #30** / **§2 R#32**: no test backdoor is reachable in a release build. Was: `window.__mockClipboardImage` was read before the real clipboard in shipped code. Now it is gated behind the `VITE_E2E_TEST_HOOKS` build flag, which `scripts/package.mjs` and the extension e2e build keep out of release output.
+- **AC:** Reverting any one listed fix makes its named test fail. `grep -r __mockClipboardImage dist/ext dist/web` after `pnpm package` finds nothing.
+
+### HRD-04 · Tab focus with zero permissions, on every browser — `S` `P0`
+
+**Status: Done (re-verified 2026-10-05)** — `service-worker.ts` uses `runtime.getContexts`. The Firefox manifest adds no permission. Open: none. Firefox < 127 opens a new tab per click by design (AUDIT-EDGE-CASES §4 #5, HRD-38).
+
+- **Requirements:**
+  - **AUDIT-2026-08-17 §3 #15** / **§2 R#17**: the toolbar click finds and focuses the existing editor tab without the `tabs` permission. Was: `chrome.tabs.query({url})` silently returned `[]` without `tabs`, so every click opened a new tab. Tests: `tests/unit/service-worker.test.ts` › "focuses the existing tab via getContexts when it is available", "opens a fresh tab when getContexts finds nothing", "falls back to opening a fresh tab when getContexts does not exist (pre-127 Firefox)".
+  - **AUDIT-2026-08-17 §3 #25** / **§1 DIST-04**: the Firefox manifest transform changes only `browser_specific_settings` and the background shape. Permissions, CSP and icons match the Chrome manifest exactly. Was: `transformManifestForFirefox` added `tabs`, and its own test asserted that. Test: `tests/unit/firefox-manifest.test.ts`.
+- **AC:** Both built manifests have `permissions: []`, no `host_permissions` and no `optional_permissions`. Two toolbar clicks in a loaded Chrome build leave one editor tab, focused.
+
+### HRD-05 · No silent data loss on import or export — `M` `P0`
+
+**Status: Done, with two open items (re-verified 2026-10-05)** — Open: (1) no multi-page TIFF fixture or test proves N IFDs → N pages; (2) Markdown→PDF still substitutes non-WinAnsi text, with a warning, rather than rendering it.
+
+CLAUDE.md: never silently corrupt a document. Each item below dropped or garbled user
+content while reporting success.
+
+- **Requirements:**
+  - **AUDIT-2026-08-17 §3 #26**: a multi-page TIFF imports every IFD as a page. Was: `ifds[0]` only, so a 12-page scan became 1 page with no warning. Now `src/core/raster-decode.ts` `decodeTiffPages` loops every IFD (`tests/unit/raster-decode.test.ts` › "decodes sample.tiff page by page with a checkpoint before each page"). **Open:** `sample.tiff` has one page and the test asserts `count >= 1`, so N pages is not proven.
+  - **AUDIT-2026-08-17 §3 #27**: Markdown→PDF never silently replaces or drops text. Out-of-range characters are substituted only outside Windows-1252's real range (`sanitizeWinAnsiText`), the result reports `substituted`, and the UI warns. Table cells word-wrap instead of being cut at 30 characters. Was: silent `?`, which then regressed to a crash. **Open (feature, not bug):** rendering CJK/RTL glyphs needs an embedded Unicode font.
+  - **AUDIT-2026-08-17 §3 #21**: text written into PDF strings outside Latin-1 round-trips as UTF-16BE hex (`PDFHexString`). Was: ACC-01 alt text written one byte per JS char code. Same bug class as OPS-10's outline titles.
+  - **AUDIT-2026-08-17 §2 R#6**: radio-group extraction keeps widget rectangles and export labels aligned by widget index (`tests/unit/form-fields-create.test.ts` › "keeps radio options aligned with the widgets that still have appearances").
+  - **AUDIT-2026-08-17 §2 R#7**: the outline loader records the page signature it loaded, so a stale in-flight read is retried instead of leaving bookmarks empty.
+  - **AUDIT-2026-08-17 §3 #22** / **§2 R#24**: a folder-picker failure that is not an abort (permission denied, `SecurityError`) shows a visible warning. Was: `console.error` only.
+- **AC:** A 3-page TIFF fixture imports as 3 pages (open). Alt text `日本語の写真 — café` reads back byte-exact after export and re-import. A Markdown file with CJK exports with a visible substitution warning, and its table cells keep their full text.
+
+### HRD-06 · Undo, redo and shortcut remapping are always keyboard-reachable — `XS` `P1`
+
+**Status: Done (re-verified 2026-10-05)** — Open: none.
+
+- **Requirements:**
+  - **AUDIT-2026-08-17 §3 #23** / **§2 R#25**: Redo answers both `Mod+Y` and `Mod+Shift+Z`, unless the user has remapped redo (`src/core/shortcuts.ts`, macOS-convention branch). Was: only `mod+y`, which contradicted DOC-06.
+  - **AUDIT-2026-08-17 §3 #24** / **§2 R#26** / **§0 baseline #2 (DS-09 e2e)**: the shortcuts tool works without an open document (`worksWithoutDocument: true`). Was: "Open a document to use this tool", so remapping was unreachable (`tests/e2e/a11y-and-perf.spec.ts` › "shortcut rows are keyboard operable").
+  - **AUDIT-2026-08-17 §5 follow-up (remap race)**: the remap-cancel listener lives for the component's whole lifetime and reads state through a ref. Was: an Escape pressed before the effect attached was dropped, and the UI stuck in "editing". The recorder also refuses navigation keys (UI-5; `tests/unit/shortcuts.test.ts` › "refuses bindings that would trap keyboard navigation (UI-5)").
+- **AC:** With no document open, ⌘K → Shortcuts → rebind → Escape all work by keyboard. `Ctrl+Shift+Z` redoes.
+
+### HRD-07 · Compare and diff export report real differences or fail loudly — `S` `P1`
+
+**Status: Done (re-verified 2026-10-05)** — The ANN-02 and ANN-05 Status lines are patched to record this. Open: none.
+
+- **Requirements:**
+  - **AUDIT-2026-08-17 §3 #16** / **§2 R#18**: "Export Diff PDF" renders the real diff or reports an error. Was: `exportVisualDiff(docA, docB, [], …)` plus a bare `catch {}` wrote an all-white PDF and reported success (`tests/e2e/tool-flows.spec.ts` › "compare: visual pixel diff exports a real rendered image, not text mode").
+  - **AUDIT-2026-08-17 §3 #17** / **§2 R#19**: higher sensitivity means stricter matching. Was: inverted, so at 100% nothing was ever marked.
+  - **AUDIT-2026-08-17 §3 #18** / **§2 R#20**: images of different dimensions fail explicitly or are compared at real size. They are never indexed past the end of the shorter buffer (`NaN > t` read as "unchanged"). Since X-6 (AUDIT-2026-10-01), every page is diffed at its real size (`tests/e2e/audit-2026-10-01-ui.spec.ts` › "visual diff: every page at its real size, A4 against Letter exported, not refused").
+  - **AUDIT-2026-08-17 §1 ANN-02**: the diff covers the whole document, not only the visible page, against the committed `contract-v1.pdf`/`contract-v2.pdf` pair (`tests/unit/compare-export-audit-2026-10-01.test.ts` › "X-6: diffs every page in the cv worker, page by page, with determinate progress").
+- **AC:** Comparing a document with itself exports no highlighted region. Comparing the contract pair highlights every real change. A deliberately throwing renderer makes the export fail visibly.
+
+### HRD-08 · Verification the audits could not do — `M` `P1`
+
+**Status: Open** — These need a human, a store account, a deploy or special hardware. Each line says what remains and where it is tracked.
+
+- **Requirements:**
+  - **AUDIT-2026-08-17 §0 cannot-verify #1**: real store loads and AMO/Edge Add-ons review (DIST-04's "passes review"). **Open**, needs a store account.
+  - **AUDIT-2026-08-17 §0 cannot-verify #2**: rendering in Chrome's PDFium viewer for RED-06 and SGN-06 (pdf.js and poppler were used as proxies). **Open**, part of QA-05's manual pass.
+  - **AUDIT-2026-08-17 §0 cannot-verify #3** / **§1 DIST-03** / **§5 still-open #1**: Lighthouse ≥ 95 on the default throttled profile against a real deploy. The code fix landed (landing critical-path JS cut from ~289 KB to ~37 KB gzip by lazy-loading `OptionsPanel`/`ActionBar`). **Open**, as DIST-03's status already says.
+  - **AUDIT-2026-08-17 §0 cannot-verify #4** / **§5 still-open #2**: QA-05's four-viewer check (Chrome viewer, Acrobat, macOS Preview, Firefox pdf.js). **Open by design**: a human-run step every release.
+  - **AUDIT-2026-08-17 §0 cannot-verify #5**: OCR-01's real model download. **Done**: an e2e runs consent → real fetch → tesseract → text layer (see HRD-09).
+  - **AUDIT-2026-08-17 §0 cannot-verify #6**: HEIC colour and orientation. **Done** in the web build (`sample.heic`, `photo-rotated.heic`, `tests/e2e/import.spec.ts`). **Open:** `tests/e2e/extension/extension.spec.ts` has no HEIC case (CNV-03's status already says so).
+  - **AUDIT-2026-08-17 §0 cannot-verify #7**: wall-clock and memory ACs (DOC-03 1.5 s/6 s thumbnails, DOC-04 300 pages at 60 fps, CNV-01 20 photos < 10 s, CNV-02 DPI-exact dimensions and memory ceiling, F-05 200 ms cancel with no orphan worker). DOC-03's budgets are asserted in the never-retried `perf` project (`perf.spec.ts`). **Open:** no committed test found for DOC-04's 60 fps, CNV-01's < 10 s, CNV-02's memory ceiling or F-05's 200 ms cancel.
+  - **AUDIT-2026-08-17 §0 cannot-verify #8**: OPS-07 booklet fold order on paper, and SCN-03's "visually convincing" screenshot. **Open**, human judgement.
+  - **AUDIT-2026-08-17 §0 weak-spot #1**: the bug hunt was a single pass. Later audits (AUDIT-FINDINGS, AUDIT-EDGE-CASES-2026-09-15, AUDIT-2026-09-25, AUDIT-2026-10-01) found 98+ more. **Ongoing**: re-audit after each epic.
+  - **AUDIT-2026-08-17 §0 weak-spot #2**: no dedicated UI visual and interaction pass. **Partly addressed**: the `ui-review` skill exists and DS-10/mobile axe landed. No full ui-review record is committed.
+  - **AUDIT-2026-08-17 §0 weak-spot #3** / **§5 still-open #3**: translation quality across the 10 non-English locales. **Open**: needs a native-speaker or professional review (NFR-04's status already says so).
+  - **AUDIT-2026-08-17 §0 weak-spot #4**: no adversarial cross-check of the auditors' own claims. **Partly addressed**: AUDIT-2026-09-25 §4 found five contradicted claims, and the `ac-verifier` agent exists.
+  - **AUDIT-2026-08-17 §0 weak-spot #5**: per-ticket nits were folded into parentheticals in the confirmed-done list. They are lost with the doc. Accepted.
+  - **AUDIT-2026-08-17 §5 still-open #4**: the remaining OCR-01/HEIC unknowns, and full CJK glyph rendering in Markdown→PDF. The latter is a feature (embedded Unicode font), tracked in HRD-05.
+- **AC:** Each line is either closed with evidence (a test, a recorded manual run or a measured deploy) or explicitly accepted in the owning ticket's Status.
+
+### HRD-09 · Record of what the follow-up found and what was confirmed — `XS` `P2`
+
+**Status: Done (re-verified 2026-10-05)** — An evidence record, so the deleted audit's positive findings survive. Open: none.
+
+- **Requirements:**
+  - **AUDIT-2026-08-17 §0 baseline #1**: the baseline at audit time was 56 files / 609 unit tests, all green, and 86/88 e2e (two failures, below).
+  - **AUDIT-2026-08-17 §0 baseline #2** / **§2 R#12** / **§3 #37**: OPS-13 "cleanup: flatten background preserves text" failed. Flatten now reports a content rewrite as a change even when pdf-lib makes the file bigger. The separate "Page cleaned." timeout (#37) was already passing at follow-up. OPS-13 was later reopened and refixed for PDF-3 (its status records that).
+  - **AUDIT-2026-08-17 §5 follow-up #1**: the extended axe sweep found and fixed nested-focusable thumbnails and file tabs, an invalid `tablist`, an h1→h3 skip in about a dozen panels, an unlabeled Annotate slider, and two keyboard-unreachable scroll regions (crop and compare previews). Requirement: the axe sweep scans Home, and every tool with a document open (`a11y-and-perf.spec.ts` › "every route has one main landmark, a title, and no positive tabindex"). See the NFR-01 patch for the dark-theme gap.
+  - **AUDIT-2026-08-17 §5 follow-up #2**: an OCR-01 e2e exercises the real consented model download and recognition into the exported text layer.
+  - **AUDIT-2026-08-17 §5 follow-up #3**: every fixture a test reads is committed. `sample.heic` had been silently excluded by `.gitignore`'s allow-list. `photo-rotated.heic` (EXIF 6) was added, with a corner-pixel orientation check.
+  - **AUDIT-2026-08-17 §2 confirmed-done**: confirmed done by independent reproduction on 2026-08-17: F-02, F-04, F-06, DS-06, DS-07, QA-01, QA-02, QA-05, DIST-05, DOC-01, DOC-04, DOC-06, DOC-07, DOC-08, OPS-01, OPS-02, OPS-04, OPS-06, OPS-08, OPS-09, OPS-10, OPS-11, OPS-12, CNV-01, CNV-04, CNV-06, SGN-03, SGN-05, SGN-06, CMP-03, CMP-04, CMP-05, SCN-02, RED-03, RED-04, RED-05, RED-06, ANN-03, ANN-04, BAT-03, OCR-01. Later audits reopened some (DS-07, QA-03 and others, per EPIC-18's header), and each ticket's own Status is authoritative.
+  - **AUDIT-2026-08-17 §1 NFR-04** / **§3 #19** / **§2 R#21**: the locale persists across reloads, `pt-BR` resolves exactly, English is the fallback dictionary, and `translate()` has `params` substitution (`tests/e2e/i18n.spec.ts` › "an exact regional tag (pt-BR) resolves to its own dictionary", "switching language renders real translated text, not English fallback"). Was: never persisted, regional tags unresolved, about 83 `notify()` calls and 29 `aria-label`s hard-coded. NFR-04's status ("RTL layout and translation review are not verified") already holds.
+  - **AUDIT-2026-08-17 §1 DS-05** / **§2 R#22**: the Home `DropZone` no longer gives a button role or tab stop to a label wrapping a file input. Recorded on NFR-01's Status, and DS-05's status holds.
+  - **AUDIT-2026-08-17 §1 DIST-02** / **§3 #28** / **§2 R#30**: the MIT `LICENSE` exists, and the README link resolves. The status already says "MIT licence".
+  - **AUDIT-2026-08-17 §1 DOC-05** / **§3 #29**: `useObjectStreams: true` at all 16 `process.worker.ts` save sites (counted 2026-10-05), so the Requirement holds. `encrypt.ts` saves with `false`, which is intended: an `/Encrypt` rewrite needs a classic xref.
+  - **AUDIT-2026-08-17 §1 SCN-01**: the de-warp half is tested (`warp-target-size.test.ts` › "de-warp end to end", "turns a square on a tilted page back into a square"). The status holds.
+  - **AUDIT-2026-08-17 §1 OPS-03**: directory output is real (`platform.openDirectory` at the split and extract-images commit sites, behind an "Output Folder" option). The status holds.
+  - **AUDIT-2026-08-17 §1 DIST-03** and **§1 DIST-04**: the status already holds (DIST-03 is "Partly done — Lighthouse ≥95 unverified"; DIST-04's "permissions untouched" is true again). See HRD-08 and HRD-04.
+  - **AUDIT-2026-08-17 §4 priority**: fix order was gates → redaction → Compare → F-03/DS-09 → the rest. All done.
+- **AC:** None beyond the referenced tests staying green.
+
+### HRD-10 · Rebuilds keep the catalog and share one object copier — `S` `P0`
+
+**Status: Done (re-fixed under AUDIT-2026-09-25 M1)** — the 2026-08-17 claim that the redact rebuild "shares one `PDFObjectCopier`" was false. PDF-7 found a copier per page (4.7 MB → 46.8 MB), which was also the root of the PDF-1 leak. Every rebuild now uses one copier per rebuild, in `src/core/pdf/rebuild.ts`. Known limit noted under PDF-7: a text-only 100-page file still roughly doubles through redaction (75 KB → 150 KB); not investigated.
+
+Canonical tag: `AUDIT-FINDINGS §0` (cited by `tests/unit/rebuild-catalog.test.ts`). Rebuilding
+a document page by page with `copyPages` silently dropped the catalog and duplicated every
+shared resource. It was the same bug in three places.
+
+- **Requirements:**
+  - **AUDIT-FINDINGS §0.1** — A page-by-page rebuild (compress, redact, compose) never
+    silently strips the document catalog. Compress keeps `/Outlines`, `/PageLabels`,
+    `/OCProperties` and `/StructTreeRoot`. Redaction keeps page-independent entries and
+    `/PageLabels`, and carries `/OCProperties` through `preserveOptionalContent` so hidden
+    layers stay hidden (AUDIT-2026-09-25 PDF-5). It deliberately drops page-linked trees
+    such as `/Outlines` (`REDACTION_CATALOG_KEYS`, `process.worker.ts`). Was: a shared
+    copier was claimed for both paths but never tested, and on the redaction path it was
+    untrue until M1.
+  - **AUDIT-FINDINGS §0.2** — The base export path dedupes objects shared across pages. It
+    uses one copier per source document, so a logo on every page is embedded once. Was:
+    claimed, with no test.
+- **AC:** Checked on re-parsed output bytes, not intent: `tests/unit/rebuild-catalog.test.ts`
+  ("§0 — catalog survives the compression rebuild", "§0 — page-independent catalog survives
+  a redaction", "drops page-linked catalog entries during applyRedactions", "embeds a logo
+  used on every page exactly once"); `tests/unit/rebuild-page-links.test.ts` (M1 link
+  remapping). `shared-image.pdf` comes out of redaction at about its input size.
+
+### HRD-11 · Redaction removes content, and the gate proves it — `L` `P0`
+
+**Status: Done** — every §1 item was fixed or verified on 2026-08-17, with byte-level tests. AUDIT-2026-09-25 hardened it further (PDF-1 orphan-page leak, PDF-4 rotated images, M7 independent verifier).
+
+Canonical tag: `AUDIT-FINDINGS §1` (cited by `src/core/pdf/text-search.ts`,
+`tests/unit/interpreter.test.ts`, `tests/unit/text-search.test.ts`). RED-01..06 affect
+security: content under a redaction mark must be removed, not just covered.
+
+- **Requirements:**
+  - **AUDIT-FINDINGS §1.1** — Vector content (stroked and filled paths: `S s f F f* B B* b b*`,
+    `re`) is removed from the content stream when its CTM-transformed geometry overlaps a
+    region. Geometry outside every region, and `W n` clip paths, are kept. `cm` is honoured.
+    Was: the audit said this content was only covered; the code already removed it but had
+    no test.
+  - **AUDIT-FINDINGS §1.2** — The verification gate has an independent pixel half.
+    `checkRegionPixels` renders each region and fails any region more than 2% off the fill
+    colour (24/255 per-channel tolerance, 8% edge inset). A region that cannot be rendered
+    fails **closed** and blocks the save. Was: the text-only gate passed a region that still
+    held a vector shape.
+  - **AUDIT-FINDINGS §1.3** — When a region covers part of an image, only the covered pixels
+    are painted (`src/core/pdf/image-redaction.ts`). An image fully inside a region has its
+    XObject removed. An image pdf.js cannot decode is refused as `unsupported` and never
+    reported as `verified: true`. Was: a region deleted the whole image.
+  - **AUDIT-FINDINGS §1.4** — Rotation is read through the inheritance-aware
+    `page.getRotation()`. Was: a `/Rotate` lookup that ignored inherited values.
+  - **AUDIT-FINDINGS §1.5** — Each `q` nesting level costs O(1) (`saveSnapshot`). Depth 40
+    completes in well under a second, and the CTM unwinds back to identity. Was: the audit
+    alleged an exponential clone.
+  - **AUDIT-FINDINGS §1.6** — Glyph widths come from the font: `/Widths`/`/FirstChar`/
+    `/MissingWidth`, and `/W`/`/DW` for Type0 fonts, which also decide one- or two-byte
+    decoding. `Tz`, `Tc`, `Tw`, the `"` operands and TJ kerning are applied to the decoded
+    strings. Was: a fixed 0.6 em guess.
+  - **AUDIT-FINDINGS §1.7** — Find-and-mark matches text split across pdf.js runs
+    (`findAcrossRuns`), but never across a line break. Was: it matched within a single run
+    only.
+  - **AUDIT-FINDINGS §1.8** — The success toast and the copyable report state the number of
+    verified regions. No `rasterizedPages` field claims rasterisation that never happens.
+    Was: a dead message that was always wrong.
+  - **AUDIT-FINDINGS §1.9** — Tests cover an image under a region, a vector under a region,
+    page rotation, and content outside the region surviving. Was: tests only checked that
+    the output bytes differed.
+- **AC:** `tests/unit/interpreter.test.ts` ("removes a stroked path that overlaps the
+  region, not just covers it", "keeps a path that does not reach the region", plus the
+  depth-40 and glyph-width cases); `tests/unit/redaction-verify.test.ts` ("catches vector
+  content that the text-only check passes", "fails closed when the region cannot be rendered
+  at all", "actually calls the pixel check — the gate is not text-only");
+  `tests/unit/image-redaction.test.ts`; `tests/unit/text-search.test.ts` ("finds a match
+  split across two runs — the whole point", "does not match across a line break");
+  `tests/unit/rotation-placement.test.ts`.
+
+### HRD-12 · Compression reports only what it measured — `M` `P0`
+
+**Status: Done, one limit open** — §2.1–§2.5 were fixed on 2026-08-17. Still open (§2.5): the memory budget only measures the main-thread heap, and worker heaps are not measured.
+
+Canonical tag: `AUDIT-FINDINGS §2`.
+
+- **Requirements:**
+  - **AUDIT-FINDINGS §2.1** — A page with no text and an image that is unsafe to re-encode
+    (e.g. `/Separation`) is never rasterised. It goes to the `already-optimized` route with
+    a stated reason. Was: the safety skip list was computed and then ignored on the raster
+    route.
+  - **AUDIT-FINDINGS §2.2** — A replacement image is used only when it is smaller than the
+    stream it replaces. A run that saves nothing returns the input byte-for-byte, marked
+    `keptOriginal`. Was: a run that did no work, or made the file bigger, could still report
+    savings.
+  - **AUDIT-FINDINGS §2.3** — A report written before any compression has run is labelled as
+    an estimate ("Estimated Size" in text, `summary.estimated` in the JSON). It never uses
+    the measured labels. Was: the projection was printed as if it were a measurement.
+  - **AUDIT-FINDINGS §2.4** — Each distinct image is decoded and encoded once per document,
+    at the largest size any page displays it (`extractSharedImages`), holding at most
+    `MAX_HELD_PAGES` pages while it waits. Was: "encoded once" was true of storage, not of
+    the encoding work.
+  - **AUDIT-FINDINGS §2.5** — `rebuildCompressed` measures each image's stored size before
+    and after, plus any skip reason, and those figures reach CMP-06's sidecar. Was: the
+    sidecar's per-image list was always empty. **Open:** the memory budget is not verified
+    for worker heaps. `performance.memory` sees only the main realm, and
+    `measureUserAgentSpecificMemory()` needs COOP/COEP, which neither build sets. The
+    limitation is stated in `tests/e2e/perf.spec.ts`.
+- **AC:** `tests/unit/compress-plan.test.ts` ("never rasterises a textless page whose image
+  is unsafe to re-encode"); `tests/unit/compress-rebuild.test.ts` ("keeps the original
+  bytes for an empty compression plan", "refuses a replacement that is larger than the
+  stream it replaces", "reports the original and replacement byte lengths of a real swap");
+  `tests/unit/compress-report.test.ts` (estimate cases); `tests/unit/compress-encode-once.test.ts`
+  ("still encodes once when six pages reference the same image"). Remaining: measure the
+  worker heaps, or record on NFR-03 an explicit decision that they stay unmeasured.
+
+### HRD-13 · One display frame for every placement — `M` `P0`
+
+**Status: Done (crop/origin half re-fixed under AUDIT-2026-09-25 M2)** — the 2026-08-17 fix only covered rotation. Tools still mapped positions onto the MediaBox and ignored the CropBox and its origin (PDF-8/9/10). All placement now goes through `src/core/pdf/display-frame.ts`, which combines CropBox ∩ MediaBox, the origin and `/Rotate`.
+
+Canonical tag: `AUDIT-FINDINGS §3` (cited by `tests/unit/rotation-placement.test.ts`). One
+root cause broke five tools, and the same bug came back in SGN-06 (HRD-22) and in raster
+compression.
+
+- **Requirements:**
+  - **AUDIT-FINDINGS §3.1** — Crop, watermark, header/footer, Bates and stamps all place
+    content against the shared display frame. Edge-anchored content is laid out against the
+    crop box. Output for unrotated, uncropped pages is unchanged. Was: on a rotated page,
+    content was placed in the wrong frame.
+  - **AUDIT-FINDINGS §3.2** — A signature placed before the page is rotated in the grid does
+    not move or spin, because placements take their frame from the source `/Rotate` only.
+    Was: rotating after signing moved the signature.
+  - **AUDIT-FINDINGS §3.3** — Page ranges for watermark, header/footer and Bates are parsed
+    against the document's total page count and matched against `pageOffset + i`, so they
+    stay correct across split slices. A duplicated page keeps its first instance. Bookmarks
+    resolve both `/Dests` and `/Names /Dests`. Was: every split slice was stamped as if it
+    were pages 1–3.
+- **AC:** `tests/unit/rotation-placement.test.ts` (all four rotations, checked against a
+  transcription of pdf.js `PageViewport`; "rotating a page after signing it does not move or
+  spin the signature (§3)"; "keeps the Bates number inside a crop box applied by the same
+  export"; "does not restamp every split slice as if it started at page 1");
+  `tests/unit/display-frame-geometry.test.ts` ("pageDisplayFrame reproduces the pdf.js
+  viewport exactly", plus the PDF-9/PDF-10 cases on rotated, cropped, offset-origin pages).
+
+### HRD-14 · Worker hand-off, cancellation and error surfacing — `M` `P0`
+
+**Status: Mostly done; one regression test missing** — §4.1–§4.3 were closed on 2026-08-17. Still open: `tests/unit/source-transfer-hazard.test.ts`, the §4.1 regression test, was deleted in commit `6d0e9fc` ("wip", 2026-08-18) and never restored. Only the refcount half survives, in `tests/unit/store.test.ts`.
+
+Canonical tag: `AUDIT-FINDINGS §4` (cited by `src/core/operations.ts` `handOver`,
+`src/background/service-worker.ts` and `tests/unit/store.test.ts`). The docblock in
+`operations.ts` sends readers here for what would have to change before the transfer gate
+could open.
+
+- **Requirements:**
+  - **AUDIT-FINDINGS §4.1** — Bytes are transferred to a worker, rather than cloned, only
+    when the caller provably owns them and never reads them again (`handOver`, used by
+    `flattenDocument` and the redaction-internal `scrubMetadata`). `compose`,
+    `rebuildCompressed` and `applyRedactions` keep the clone, because their bytes are the
+    store's canonical `source.bytes`. `canTransferSourceBytes` decides on three things:
+    page and document reference counts (a `computed`, never hand-incremented), whether the
+    undo history can still reach the bytes, and whether a render handle holds them. Opening
+    the gate would require three changes, each costing more than the clone it saves: make
+    those operations non-undoable (or have the history keep its own copy), stop
+    `currentDocumentBytes` returning store-owned bytes, and close the render handle before
+    the call. Was: every call into a worker cloned the whole document. The fix was measured,
+    and the measurement said not to transfer.
+  - **AUDIT-FINDINGS §4.2** — Every long operation takes a `JobHandle` with real checkpoints
+    (getting and filling form fields, flatten, scrub, protect). `encryptPdf` checkpoints
+    inside its object loop every 50 ms or 64 objects, whichever comes first, and reports
+    into the 0.1–0.95 progress band through `subJob`. An abort leaves the input
+    byte-identical. Cancellation is cooperative by design: no worker is terminated on
+    abort, which keeps the warm pdf.js instance and other work in the pool alive. Was:
+    cancellation was polling, and several operations had no job handle at all.
+  - **AUDIT-FINDINGS §4.3** — If a worker fails to boot, a `danger` toast appears with a
+    copyable diagnostic, never just a bare `console.error`. A second click on the extension
+    icon joins the open already in progress (a promise guard). A tab without an `id` opens a
+    fresh editor tab with a warning. Was: errors went unreported to the user, and a double
+    click raced.
+- **AC:** `tests/unit/store.test.ts` ("source reference counting", "canTransferSourceBytes");
+  `tests/unit/encrypt.test.ts` ("cancellation inside the object loop");
+  `tests/unit/service-worker.test.ts`. **Remaining:** restore the deleted hazard test. It
+  set up two documents sharing one source, ran compose, applyRedactions and
+  rebuildCompressed on one of them, and asserted the other could still export. It also did
+  a manual `structuredClone(buf, { transfer: [buf] })` to prove the test catches the
+  failure, and checked structurally that `handOver` is not applied to those three calls.
+
+### HRD-15 · Document core: grid keys, contact sheet, thumbnails, ordering, import — `S` `P0`
+
+**Status: Done** — all five §5 items were fixed on 2026-08-17. HRD-23 §11.8 reopens the DOC-08 ordering claim.
+
+Canonical tag: `AUDIT-FINDINGS §5`.
+
+- **Requirements:**
+  - **AUDIT-FINDINGS §5.1** — Home, End and the arrow keys work on a virtualised grid: the
+    target row is scrolled into view first and the tile is focused once it renders
+    (`pendingFocusRef`). Was: the keys did nothing for tiles outside the overscan window.
+  - **AUDIT-FINDINGS §5.2** — Contact Sheet's main export button produces a contact sheet.
+    It lays out 20 cells per A4 sheet, keeps cells legible at 300 pages, and both export
+    routes read one shared `contactSheetColumns` setting. Was: the action-bar button
+    exported something else, with the column count hardcoded to 4.
+  - **AUDIT-FINDINGS §5.3** — Rotating a page re-renders its thumbnail (`page.rotation` is a
+    dependency of the render effect). Was: the stale bitmap was stretched with CSS.
+  - **AUDIT-FINDINGS §5.4** — First-page-first object ordering is named honestly: it is not
+    ISO 32000-1 §F linearization, and no `/Linearized` dictionary is fabricated. It can be
+    turned off per save or process-wide, and its object-stream caveat is asserted in tests.
+    Was: the naming implied real linearization.
+  - **AUDIT-FINDINGS §5.5** — Import can be cancelled between its real stages (read, header
+    check, parse, inspect), and each stage reports its own progress fraction and label.
+    Was: progress jumped from 0 to 100%.
+- **AC:** `tests/unit/rotation-placement.test.ts` ("spreads 300 pages over many sheets,
+  keeping every cell legible"); `tests/unit/linearize.test.ts` ("does not claim to be ISO
+  32000 linearization", "can be switched off per document and process-wide").
+
+### HRD-16 · Scan cleanup, OCR and folder search fail visibly — `M` `P1`
+
+**Status: Done** — all seven §6 items were fixed on 2026-08-17.
+
+Canonical tag: `AUDIT-FINDINGS §6`.
+
+- **Requirements:**
+  - **AUDIT-FINDINGS §6.1** — Edge detection measures how confident it is, by comparing
+    luminance inside and outside each edge against the sample noise. When it is not
+    confident, the warp is skipped. Was: a failed detection still cropped a blind 2% inset.
+  - **AUDIT-FINDINGS §6.2** — Despeckle updates the preview, and "Apply to all" cleans
+    every page. Flatten always runs against the original vector page, because OPS-13 must
+    preserve text; the cleanup settings apply only on the rasterise path. Was: despeckle did
+    nothing.
+  - **AUDIT-FINDINGS §6.3** — After flatten or cleanup, a page is repointed at the page
+    index the result actually holds (`sourceIndex` or `0`). Was: the index was hardcoded to
+    `0`.
+  - **AUDIT-FINDINGS §6.4** — Folder search skips any file pdf.js refuses (encrypted,
+    corrupt or unsupported) and tells the user why, instead of scraping its raw bytes. An
+    incremental re-index deletes index records only for the files it rewrites. Was: those
+    files went into the index as garbage, and re-indexing lost the entries of files that had
+    not changed.
+  - **AUDIT-FINDINGS §6.5** — Table extraction's main button exports the grid on screen,
+    using page, cells and format state shared with the panel. With nothing previewed it
+    extracts first, and it warns when no table is found. It writes through
+    `platform.saveFileAs`, never through PDF encryption. Was: the button did nothing.
+  - **AUDIT-FINDINGS §6.6** — The zero-network e2e visits the `ocr`, `table-extract`, `acc`,
+    `contact-sheet`, `outline` and `shortcuts` routes. Was: it never visited the OCR route.
+  - **AUDIT-FINDINGS §6.7** — Signature-line detection also finds a horizontal vector rule
+    drawn near a "Signature", "Date", "Sign here" or "Printed name" label. Was: it looked at
+    text and underscores only.
+- **AC:** `tests/unit/edge-detection.test.ts`; `tests/e2e/tool-flows.spec.ts` ("cleanup:
+  flatten background preserves text"); the route sweep in `tests/e2e/zero-network.spec.ts`;
+  `tests/unit/signature-lines.test.ts`.
+
+### HRD-17 · A form Stapler creates resolves its own fonts — `XS` `P0`
+
+**Status: Done** — fixed on 2026-08-17. Sign's default no longer flattens its own fields (HRD-22 §11.5).
+
+Canonical tag: `AUDIT-FINDINGS §7` (cited by `tests/unit/acroform-defaults.test.ts`).
+
+- **Requirements:**
+  - **AUDIT-FINDINGS §7.1** — A generated `/AcroForm` carries a `/DR` with a registered
+    Helvetica font and a document-level `/DA` (`ensureAcroFormDefaults`). It never
+    overwrites a `/DR` that came from the source document. With flattening off the field
+    survives the export; with flattening on it is baked in cleanly. Was: the default export
+    settings deleted the fields the tool had just created.
+- **AC:** `tests/unit/acroform-defaults.test.ts` ("writes /DR with a Helvetica font resource
+  and a document /DA", "resolves every field's /DA font name inside /DR", "flattens the
+  generated form without refusing", "does not overwrite a /DR carried in from the source
+  document"); the Sign export cases in `tests/e2e/tool-flows.spec.ts`.
+
+### HRD-18 · Batch filenames, recipe isolation, alt-text read-back — `S` `P1`
+
+**Status: Done** — all three §8 items were fixed on 2026-08-17.
+
+Canonical tag: `AUDIT-FINDINGS §8`.
+
+- **Requirements:**
+  - **AUDIT-FINDINGS §8.1** — Batch output names are indexed by each file's own position in
+    the run, so a failure never shifts the names of later files. Was: the index came from a
+    counter that only advanced on success.
+  - **AUDIT-FINDINGS §8.2** — When a recipe step has a setting that was never configured,
+    that tool is skipped with a warning naming it. It never picks up a live global setting
+    from another tool. Was: settings open in another tool were picked up silently.
+  - **AUDIT-FINDINGS §8.3** — Alt text round-trips. Each tagged page gets a unique
+    `/StructParents` key into the `ParentTree`, which is built as a real `PDFArray` rather
+    than a wrapped JS array. A reader (`readAltTextFromDoc`) fills the panel when a document
+    loads. Was: alt text was never read back.
+- **AC:** `tests/unit/batch-runner.test.ts`; `tests/unit/accessibility.test.ts` ("round-trips
+  alt text through a real save and re-parse of the bytes", "keeps each tagged page on its
+  own /StructParents key across multiple pages").
+
+### HRD-19 · Invariant tooling scans everything that ships — `XS` `P0`
+
+**Status: Done** — both §9 items were fixed on 2026-08-17.
+
+Canonical tag: `AUDIT-FINDINGS §9` (cited by `scripts/check-invariants.mjs`).
+
+- **Requirements:**
+  - **AUDIT-FINDINGS §9.1** — The colour check catches colour keywords and literals inside
+    quoted and backtick JS strings, across all colour-bearing properties (`background`,
+    `border-color`, `fill`, `stroke`, `box-shadow`, …), not just bare CSS `color:`. Was: one
+    raw colour literal got past the hook.
+  - **AUDIT-FINDINGS §9.2** — The whole-repo invariant scan (`scripts/check-invariants.mjs`,
+    part of `pnpm check`) covers every file that ships, not just files written or edited
+    under `src/`. `public/privacy.html` follows the same rule as `tokens.css`: a raw colour
+    may appear only in a `--token: value;` declaration line. Was: a blanket exemption hid
+    that page's hex literals.
+- **AC:** `pnpm check` fails when a raw colour is added to any shipped file, including as a
+  quoted JS literal, or anywhere in `public/privacy.html` outside a custom-property
+  declaration.
+
+### HRD-20 · Locale completeness and ref-forwarding components — `S` `P1`
+
+**Status: Done; translation review open** — NFR-04's coverage test has superseded §10.1 (AUDIT-2026-09-25 UI-8 found 383 keys in use that were missing from every locale). A native-speaker review has still not been done; that is tracked on NFR-04. §10.2 is done for the DS-03 primitives.
+
+Canonical tag: `AUDIT-FINDINGS §10`.
+
+- **Requirements:**
+  - **AUDIT-FINDINGS §10.1** — Every key used in `src/` (UI and workers) has a real
+    translation in all 10 locales, enforced by a test. No string is identical to the English
+    because a translation was left out. Was: six `tool.annotate.*` strings were untranslated
+    in nine locales. The translations of the "Annotate" tool name (de/ru/ar/hi) were also
+    flagged for a native speaker to check.
+  - **AUDIT-FINDINGS §10.2** — Library components forward their ref to their root DOM
+    element. `mergeRefs` is used where a component already has its own ref, and
+    `forwardRefGeneric` keeps the generic type of `Select`, `RadioGroup` and
+    `SegmentedControl`. App-level sections added since (`JobStatusRow`,
+    `OpenDocumentPrompt`, `LocalDataSection`, `FloatingTooltip`) do not forward refs, which
+    is fine unless they are moved into the library. `ErrorBoundary` is a class component.
+    Was: none of the 23 components forwarded refs.
+- **AC:** NFR-04's locale coverage test passes, and every DS-03 primitive accepts a `ref`
+  that resolves to its root element.
+
+### HRD-21 · Flatten background never destroys the page — `S` `P1`
+
+**Status: Done (re-fixed under AUDIT-2026-09-25 PDF-3)** — §11.1–§11.4 were fixed on 2026-08-17. But flatten still dropped only the paint operator and left the path construction, so the next fill on the page painted the whole page. It now removes the whole path-construction run together with its painter (OPS-13, re-audited 2026-09-26).
+
+Canonical tag: `AUDIT-FINDINGS §11` (findings §11.1–§11.4, OPS-13).
+
+- **Requirements:**
+  - **AUDIT-FINDINGS §11.1** — A full-page `Do` image (a scan) is never a candidate for
+    removal; only a qualifying full-page vector fill is. When no background is found, the
+    operation returns an explicit "unchanged" result. Was: it produced a blank white page.
+  - **AUDIT-FINDINGS §11.2** — Flatten never changes `/Resources`, which can be inherited
+    and shared by sibling pages. Was: it deleted a resource entry that other pages shared.
+  - **AUDIT-FINDINGS §11.3** — Flatten loads the file through the normal `load(bytes)`, which
+    refuses encrypted files, and never uses `ignoreEncryption: true`. Was: it processed
+    encrypted files.
+  - **AUDIT-FINDINGS §11.4** — The cover rectangle uses the crop box's origin. Nothing is
+    injected when nothing was detected. The save is refused unless the output is smaller
+    than the input. The operation has real tests. Was: it had no tests, took its geometry
+    from `getSize()`, and always reported success.
+- **AC:** `tests/unit/flatten-background.test.ts` ("never mistakes a full-page scan for a
+  removable background", "removes the construction run with its painter, so a later fill
+  stays small", "keeps the stroke of a fill-and-stroke background (B → S)", "refuses a
+  page-sized path that is also a clip"); `tests/e2e/tool-flows.spec.ts` ("cleanup: flatten
+  background preserves text").
+
+### HRD-22 · Created form fields: interactive by default, placed in the display frame — `S` `P1`
+
+**Status: Done** — §11.5–§11.7 were fixed on 2026-08-17. Widget placement has since moved onto the shared `display-frame.ts` (AUDIT-2026-09-25 M2).
+
+Canonical tag: `AUDIT-FINDINGS §11` (findings §11.5–§11.7, SGN-06).
+
+- **Requirements:**
+  - **AUDIT-FINDINGS §11.5** — Sign leaves its exported form fields interactive by default,
+    while Annotate keeps finalising by default. Each tool has its own flatten toggle. Was:
+    SGN-06's own default deleted the fields it had just created.
+  - **AUDIT-FINDINGS §11.6** — A widget's rectangle is computed by mapping its displayed
+    corners through the crop-aware display frame (rotation, crop and origin). Was: it was
+    computed from raw `page.getSize()`, so on `/Rotate 90` it came out transposed — the §3
+    bug class again.
+  - **AUDIT-FINDINGS §11.7** — If the document already has a field with the same name but a
+    different type, export throws a named `UnsupportedFeature` error that includes the field
+    name. Was: pdf-lib's raw `FieldAlreadyExistsError` aborted the export.
+- **AC:** `tests/unit/form-fields-create.test.ts` (widget rectangle on a rotated, cropped
+  page; field type conflict); in `tests/e2e/tool-flows.spec.ts`, Sign's default export is
+  fillable and the keyboard path can opt into flattening.
+
+### HRD-23 · Export claims match the bytes: fast web view, report size, paste — `M` `P2`
+
+**Status: Open (2 of 3 items)** — §11.8 has regressed. All 16 export saves in `process.worker.ts` pass `useObjectStreams: true` again, because DOC-05 requires it (restored under AUDIT-2026-08-17). So DOC-08's byte-order AC fails on every real export, and `setFastWebViewOrdering` still has no caller in the UI. §11.9 is fixed in code (the result is scoped to its document, and `finalBytes` is measured after protection), but no test checks the report against the real file. The §11.10 e2e gap is open.
+
+Canonical tag: `AUDIT-FINDINGS §11` (findings §11.8–§11.11).
+
+- **Requirements:**
+  - **AUDIT-FINDINGS §11.8** — DOC-08's first-page-first ordering reaches the output bytes
+    of user exports, or the ticket says that it does not. DOC-05 (object streams) and DOC-08
+    (ordering, which needs a plain xref) conflict, and the conflict must be resolved
+    explicitly: either add a user-facing "Fast web view" option that saves with a plain
+    xref, or drop the claim. Was: fixed on 2026-08-17 by saving with a plain xref, and that
+    fix has since been reverted.
+  - **AUDIT-FINDINGS §11.9** — CMP-06's exported report always describes the last measured
+    run on the open document: the result is tagged with its document and cleared on a
+    switch through `docScoped`. Its totals use the size actually written to disk after
+    RED-06 protection (`finalBytes`). Was: it could show another document's stale numbers,
+    and it used the size measured before encryption.
+  - **AUDIT-FINDINGS §11.10** — Paste-as-page reads `ClipboardEvent.clipboardData` first and
+    calls `preventDefault()`, falls back to the async Clipboard API, and inserts the page at
+    the current position in an open document. Was: the e2e exercised only a production test
+    hook (`window.__mockClipboardImage`, still in `src/platform/file-system.ts`) and only the
+    empty-workspace branch.
+  - **AUDIT-FINDINGS §11.11** — These had no findings and are kept as baselines to re-check
+    whenever they change: RED-05's pattern precedence and Luhn check; RED-06's encryption,
+    cross-verified against poppler, with per-object cancellation; OPS-11's Bates numbering
+    through the display frame; OPS-12's split-by-bookmarks dedupe; DOC-07's bounded,
+    measured bisection.
+- **AC:** A plain user export of a multi-page fixture places page 1's objects before later
+  pages' by byte offset, or DOC-08 is re-scoped. An e2e compresses with a password and
+  asserts the exported report's total equals the saved file's byte length. An e2e pastes a
+  real `ClipboardEvent` with image data into an open 3-page document at page 2 and asserts
+  the new page lands at index 2, and the `__mockClipboardImage` hook is removed.
+
+### HRD-24 · Tool state never bleeds across documents — `M` `P0`
+
+**Status: Done (pattern finished under AUDIT-2026-09-25 M3)** — §12 fixed three tools on 2026-08-17, but the same pattern remained in others (UI-1/3/11/12/18/25). `src/ui/tools/docScoped.ts` now scopes tool state to `{docId, pagesVersion}`. Two minor items are still open (§12.10, §12.11).
+
+Canonical tag: `AUDIT-FINDINGS §12`. The root cause was module-level signals holding
+per-document data with no document scoping. The staleness guard in OPS-10's
+`useOutline.ts` was the model for the fix.
+
+- **Requirements:**
+  - **AUDIT-FINDINGS §12.1** — Alt text keys each image by page plus image name, which
+    survives compose and rebuild. The writer still accepts the legacy object-number key.
+    Was: it used the wrong object numbering and silently failed to attach.
+  - **AUDIT-FINDINGS §12.2** — `altTextMap` is cleared on a document switch, and a late scan
+    result from the previous document is dropped. Was: it was never cleared.
+  - **AUDIT-FINDINGS §12.3** — The annotation summary lists an annotation whose `pageKey` is
+    not in the current document as `Detached`, never as page 1. Was: stale annotations from
+    another document bled in.
+  - **AUDIT-FINDINGS §12.4** — Every shortcut-remap row is a real button, reachable with Tab
+    and activated with Enter or Space. Was: the rows could not be reached by keyboard.
+  - **AUDIT-FINDINGS §12.5** — Conflict detection treats Delete and Backspace as equivalent
+    through the same helper the runtime matcher uses. Was: the two disagreed.
+  - **AUDIT-FINDINGS §12.6** — Compare's "Export diff" follows the mode on screen (visual,
+    text or redline). Was: it always exported a pixel diff.
+  - **AUDIT-FINDINGS §12.7** — Annotate search re-checks the active document after the
+    worker returns, and drops the results if it has changed. Was: there was no guard.
+  - **AUDIT-FINDINGS §12.8** — A batch name pattern that already ends in `.pdf` never
+    produces `.pdf.pdf`. Was: the extension was doubled.
+  - **AUDIT-FINDINGS §12.9** — Contact-sheet export reuses cached thumbnails, and on a cache
+    miss it renders the page and adds it to the cache. Was: it re-rendered every page.
+  - **AUDIT-FINDINGS §12.10** — **Open (minor):** the bookmark editor's move, indent and
+    outdent `IconButton`s are not disabled at the edges of the tree (`OutlinePanel.tsx`).
+  - **AUDIT-FINDINGS §12.11** — **Open (minor):** the annotation-summary export does not go
+    through `useJob()`, so it has no progress and no cancel, unlike every other export
+    (`AnnotatePanel.tsx`).
+- **AC:** `tests/unit/doc-scoped-state.test.ts` ("clears table rows, extracted text,
+  compress results and sign state on tab switch"); `tests/unit/accessibility.test.ts` ("also
+  accepts the stable image-name key used by the alt-text editor");
+  `tests/unit/annotation-summary.test.ts` (Detached); `tests/e2e/a11y-and-perf.spec.ts`
+  ("shortcut rows are keyboard operable"); `tests/unit/shortcuts.test.ts` ("treats Delete and
+  Backspace as the same shortcut for conflict detection"); `tests/unit/compare-export.test.ts`;
+  `tests/unit/annotate-search.test.ts`; `tests/unit/batch-runner.test.ts`;
+  `tests/unit/contact-sheet-export.test.ts`. Remaining: disable the boundary buttons with an
+  accessible reason, and route the summary export through `useJob` with determinate
+  progress.
+
+### HRD-25 · Every build target honours zero permissions; CI stays green — `XS` `P0`
+
+**Status: Done** — §13.1 is superseded: the Firefox build no longer adds `tabs` at all, because the service worker uses `chrome.runtime.getContexts`. That is stricter than the exemption the audit recorded.
+
+Canonical tag: `AUDIT-FINDINGS §13`.
+
+- **Requirements:**
+  - **AUDIT-FINDINGS §13.1** — The Firefox manifest ships with empty `permissions`, like the
+    Chrome manifest, and the invariant and build validators check the Firefox output too.
+    Was: `tabs` was added unconditionally and treated as an exemption.
+  - **AUDIT-FINDINGS §13.2** — `pnpm test:e2e` is green on `master`. The batch route's
+    primary button passes axe's colour-contrast check through the shared primary token,
+    which was fixed in `tokens.css`, not waived. Was: the e2e suite was red on a clean tree.
+- **AC:** `tests/unit/firefox-manifest.test.ts` ("leaves host_permissions/content_scripts
+  intact and does not add tabs"); `node scripts/check-contrast.mjs`; the batch route scan in
+  `tests/e2e/a11y-and-perf.spec.ts`.
+
+### HRD-26 · Concurrency: queued modals, safe storage, bounded diffs — `S` `P0`
+
+**Status: Done** — all five §14 Critical items were fixed on 2026-09-16.
+
+Canonical tag: `AUDIT-FINDINGS §14` (Critical C1–C5).
+
+- **Requirements:**
+  - **AUDIT-FINDINGS §14 C1** — `confirmAction`, `requestOcrConsent` and
+    `requestExportReview` go through `createModalQueue()`. A concurrent request waits its
+    turn, and every caller's promise settles. Was: a second call orphaned the first.
+  - **AUDIT-FINDINGS §14 C2** — Every OPFS access goes through `tryGetOpfsRoot()`, which
+    falls back to memory when `getDirectory()` throws (Firefox private browsing, a sandboxed
+    iframe). Was: the throw took down the whole app.
+  - **AUDIT-FINDINGS §14 C3** — `useJob`'s cleanup clears its controller ref, so a late
+    `finally` cannot clear another job's `activeJob`. Was: it wiped another job's progress
+    bar.
+  - **AUDIT-FINDINGS §14 C4** — The text diff is bounded by `MAX_DIFF_WORDS`, with a coarse
+    line-level fallback past it (it has since moved to a worker, CONV-14). Was: an unbounded
+    `(n+1)×(m+1)` table.
+  - **AUDIT-FINDINGS §14 C5** — No worker proxy is handed out without a lease. The unused
+    `api()` was removed; `pin()`/`release()` is the way to hold a proxy across several
+    calls. Was: the idle timer could kill a worker in the middle of a call.
+- **AC:** The fixes are present in `src/core/notify.ts`, `src/core/opfs.ts`,
+  `src/ui/useJob.ts`, `src/core/diff.ts` and `src/core/workers/client.ts`, and the full unit
+  suite is green.
+
+### HRD-27 · Resource lifecycle and error paths — `M` `P1`
+
+**Status: Done except H3** — H1–H13 were fixed or resolved on 2026-09-16 (H11 was not a live bug; PLT-19 and DOC-15 have since superseded H5 and H6). **Open: H3** — `trimTransparentToPng` and `removeWhiteBackground` (`src/core/image.ts`) still loop over every pixel on the main thread when called from `SignatureModal.tsx`.
+
+Canonical tag: `AUDIT-FINDINGS §14` (High H1–H13).
+
+- **Requirements:**
+  - **AUDIT-FINDINGS §14 H1** — The render cache never closes a bitmap that is still in
+    use. An invalidated entry with users is marked orphaned and closed when its last user
+    calls `release()`.
+  - **AUDIT-FINDINGS §14 H2** — `useImageImportOptions` queues concurrent requests.
+  - **AUDIT-FINDINGS §14 H3** — **Open:** signature trimming and white-background removal
+    must run in a worker, or in bounded chunks, so importing a 4000×3000 image never blocks
+    the main thread for more than 50 ms. Was: a synchronous loop lasting several seconds.
+  - **AUDIT-FINDINGS §14 H4** — A failure in `requestImageOptions()` goes through
+    `notifyError('import', …)`, not an unhandled rejection.
+  - **AUDIT-FINDINGS §14 H5** — A dismissed file picker always settles. It now uses the
+    `cancel` event, with focus as a last resort (PLT-19).
+  - **AUDIT-FINDINGS §14 H6** — Closing a document never wipes other documents' undo
+    history. History is now per document (DOC-15).
+  - **AUDIT-FINDINGS §14 H7** — The theme listener's `MediaQueryList` is kept for the
+    module's lifetime, so WebKit cannot garbage-collect it.
+  - **AUDIT-FINDINGS §14 H8** — An unnamed created field falls back to `field_${ann.id}`,
+    never to a shared literal name that would link the fields together.
+  - **AUDIT-FINDINGS §14 H9** — A `closeDocument` rejection in a `finally` block never masks
+    the original error (all 18 call sites).
+  - **AUDIT-FINDINGS §14 H10** — `activePageIndex` is clamped after `deletePages`.
+  - **AUDIT-FINDINGS §14 H11** — A restore never points at deleted OPFS bytes, because
+    `checkRecovery()` confirms `sourceBytesExist()` before offering it. This was not a live
+    bug.
+  - **AUDIT-FINDINGS §14 H12** — `splitDocument` refuses an empty page list, as compose
+    already did.
+  - **AUDIT-FINDINGS §14 H13** — Scratch canvases are zeroed after their `ImageData` is
+    extracted.
+- **AC:** The fixes are present at the cited sites. **Remaining (H3):** a performance trace
+  of importing a 4000×3000 signature image shows no main-thread task longer than 50 ms.
+
+### HRD-28 · Edge-case bounds and small correctness fixes — `S` `P2`
+
+**Status: Done; four Low items accepted** — M1–M19 were resolved on 2026-09-16 (M1 is deliberate, M13 was inaccurate, M19 is not actionable). L1–L18 are resolved except four: L1 (deferred), L5 (cannot be verified here), L8 (won't fix) and L16 (accepted). L18 is moot because the face-detector weights are now bundled (RED-08).
+
+Canonical tag: `AUDIT-FINDINGS §14` (Medium M1–M19, Low L1–L18).
+
+- **Requirements:**
+  - **AUDIT-FINDINGS §14 M1** — Deleting every page is allowed, on purpose; export then
+    says "Nothing to export" instead of failing.
+  - **AUDIT-FINDINGS §14 M2** — Tooltip runs a child's own event handlers before its own,
+    rather than overwriting them.
+  - **AUDIT-FINDINGS §14 M3** — `revokeHandle` only touches IndexedDB when
+    `hasFileSystemAccess()` is true.
+  - **AUDIT-FINDINGS §14 M4** — Pixel diff sums RGB only, to match its 765 threshold.
+  - **AUDIT-FINDINGS §14 M5** — Markdown table column width is safe when the header is
+    empty.
+  - **AUDIT-FINDINGS §14 M6** — A Markdown table row taller than a page flows onto the next
+    pages.
+  - **AUDIT-FINDINGS §14 M7** — `toRgba` refuses images over 40 MP instead of allocating
+    around 400 MB.
+  - **AUDIT-FINDINGS §14 M8** — HEIC and TIFF import checks the `AbortSignal` for each frame
+    and each image.
+  - **AUDIT-FINDINGS §14 M9** — `bytesForPages` reads distinct sources concurrently.
+  - **AUDIT-FINDINGS §14 M10** — `cropBoxes` and `pageAnnotations` entries are pruned once
+    no document's pages or baseline reference the key (`pruneOrphanedPageState`, called
+    only from the mutators).
+  - **AUDIT-FINDINGS §14 M11** — The first render waits for `initLocale()`, so there is no
+    flash of unlocalised text.
+  - **AUDIT-FINDINGS §14 M12** — The in-memory search-index fallback is capped at 20,000
+    records.
+  - **AUDIT-FINDINGS §14 M13** — `listSignatures()` never rejects (it is wrapped in
+    `guard()`), so no change was needed.
+  - **AUDIT-FINDINGS §14 M14** — `localStorage` reads and writes in i18n are wrapped in
+    try/catch.
+  - **AUDIT-FINDINGS §14 M15** — The shortcuts settings promise chain has a `.catch`.
+  - **AUDIT-FINDINGS §14 M16** — `douglasPeucker` is iterative, so it cannot overflow the
+    stack.
+  - **AUDIT-FINDINGS §14 M17** — `rotateImageData` caps its `fit` output at 40 MP.
+  - **AUDIT-FINDINGS §14 M18** — The formula tokenizer uses a trie, so each lookup costs
+    O(name length).
+  - **AUDIT-FINDINGS §14 M19** — Freeing tensors when a worker is terminated externally is
+    the browser's job; not actionable here.
+  - **AUDIT-FINDINGS §14 L1** — Deferred: `supportsFileSystemAccess` is evaluated once at
+    module load. That is acceptable because browser globals exist before any module runs.
+  - **AUDIT-FINDINGS §14 L2** — Tooltip clears its hide timer on unmount.
+  - **AUDIT-FINDINGS §14 L3** — `isAbort` treats `NotAllowedError` as a silent cancel.
+  - **AUDIT-FINDINGS §14 L4** — `saveViaDownload` returns `false` on a synchronous failure,
+    and documents that `true` does not guarantee the download completed.
+  - **AUDIT-FINDINGS §14 L5** — Unverified: the action listener returns the open promise
+    (`openEditorOnce`). Confirming the MV3 service-worker lifetime window needs a real
+    Chrome.
+  - **AUDIT-FINDINGS §14 L6** — TIFF decode zeroes each frame's canvas after use.
+  - **AUDIT-FINDINGS §14 L7** — `open-document.ts` uses `imported.pages` instead of making a
+    second set of page refs.
+  - **AUDIT-FINDINGS §14 L8** — Won't fix: the 200-entry diagnostic log keeps using
+    `shift()`.
+  - **AUDIT-FINDINGS §14 L9** — Text-layout line grouping is O(items).
+  - **AUDIT-FINDINGS §14 L10** — Shortcut writes are serialised on one `writeChain`.
+  - **AUDIT-FINDINGS §14 L11** — QR data too large to encode gets a clear message.
+  - **AUDIT-FINDINGS §14 L12** — Logo matching uses Rec. 709 luma, like `enhance.ts`.
+  - **AUDIT-FINDINGS §14 L13** — If a locale fails to load, the previous locale stays
+    active.
+  - **AUDIT-FINDINGS §14 L14** — A summary card taller than a page is truncated with an
+    "N more lines not shown" note.
+  - **AUDIT-FINDINGS §14 L15** — Highlight height falls back to a square aspect when the
+    page aspect is `NaN`.
+  - **AUDIT-FINDINGS §14 L16** — Accepted: `FinalizationRegistry` is only a backstop, since
+    every `pin()` caller calls `release()` explicitly.
+  - **AUDIT-FINDINGS §14 L17** — OCR model downloads use `Promise.allSettled` and report
+    every failure.
+  - **AUDIT-FINDINGS §14 L18** — Moot: the face-detector weights are bundled (RED-08). The
+    finding was a `Content-Length` pre-check on a download that no longer exists.
+- **AC:** The fixes are present at the cited sites, and the existing formula, text-layout,
+  edge-detection, logo-match and OCR suites pass unchanged.
+
+### HRD-29 · Architecture: per-document undo, document cap, modal queue, worker death — `M` `P1`
+
+**Status: Done** — G1 and G2 shipped as DOC-15, and G3 with §14 C1. G4's premise was wrong (AUDIT-2026-09-25 RT-1): a crashed worker made every call *hang*, not reject. That is fixed, and calls on a dead worker now reject. Automatic retry is deliberately not implemented.
+
+Canonical tags: `AUDIT-FINDINGS G1` to `AUDIT-FINDINGS G4` (§14 Architectural).
+
+- **Requirements:**
+  - **AUDIT-FINDINGS G1** — Each document has its own undo/redo stack, and closing one never
+    touches another's history. Was: one global stack of whole-workspace snapshots (H6 had
+    narrowed the damage).
+  - **AUDIT-FINDINGS G2** — There is a ceiling on open documents, with a clear message: 20
+    documents, plus a confirmation past a 1.5 GiB soft limit. Was: no ceiling.
+  - **AUDIT-FINDINGS G3** — Confirmation-style requests share one FIFO queue (§14 C1).
+  - **AUDIT-FINDINGS G4** — When a worker crashes or fails to boot, every in-flight and
+    pinned call rejects promptly (each call is in a reject set and removed when it
+    settles). Render handles owned by the dead instance are evicted, the user is told to
+    retry, and the next call gets a fresh worker. There is no automatic retry, because a
+    retry is not provably safe for an operation that was partly applied. Was: the audit said
+    "the lease just rejects"; in fact it hung forever.
+- **AC:** DOC-15's AC; `tests/unit/worker-crash.test.ts` ("rejects an in-flight lease when
+  the worker errors, instead of hanging", "a pinned client whose instance died throws
+  immediately and reports dead", "reopens on a fresh instance instead of handing out the
+  dead handle").
+
+### HRD-30 · The raster compression route never corrupts what it re-renders — `M` `P0`
+
+**Status: Done (re-verified 2026-10-05)** — Open: none.
+
+CMP-02's raster route is the most common real input path: landscape phone scans with a
+stamp or a link.
+
+- **Requirements:**
+  - **AUDIT-EDGE-CASES-2026-09-15 §1.2**: a `/Rotate 90/180/270` page is rotated exactly once. pdf.js already bakes rotation into the raster, so the rebuilt page doesn't re-apply `/Rotate`. Was: double-rotated, and a 792×612 raster squeezed into a 612×792 box. Tests: `tests/unit/compress-raster-page.test.ts` › "the raster route does not rotate a page twice (§1.2)" (unrotated fill, `/Rotate 90/270` upright, "turns a /Rotate 180 page exactly once").
+  - **AUDIT-EDGE-CASES-2026-09-15 §1.3**: a rasterised page keeps its `/Annots` (links with URI actions, comments, widgets) at unchanged geometry, and does not drag the replaced page in with them. Was: `/Annots [ ]`. Tests: `compress-raster-page.test.ts` › "the raster route carries annotations forward (§1.3)".
+  - **AUDIT-EDGE-CASES-2026-09-15 §1.6**: any real selectable text, however short (a Bates number, "Page 1 of 12"), keeps a page off the raster route. Was: `MEANINGFUL_TEXT_CHARS = 24`, so 23 characters were flattened into a JPEG while the report said "no extractable text". Tests: `tests/unit/compress-plan.test.ts` › "never rasterises a page that has extractable text", "keeps a sparse text-only page out of the raster path". This also closes AUDIT-2026-08-17 §3 #12.
+- **AC:** Compressing a textless `/Rotate 90` scan that has one `/Link` gives an upright page of the same box, whose `/Annots` holds that link. A page with 1 character of real text is never routed `raster`.
+
+### HRD-31 · Redaction, Protect and XFA never weaken a guarantee silently — `M` `P0`
+
+**Status: Done (re-verified 2026-10-05)** — Open: none.
+
+- **Requirements:**
+  - **AUDIT-EDGE-CASES-2026-09-15 §1.4**: the redaction verifier and the strip step cover every place a string can live off the painted page. That means `/A /URI` (including chained `/Next`), `/RC` with no `/Contents` (string or stream), `/TU`, `/DV`, check box `/V`/`/AS`, values on widgetless and `/Kids` fields, and `FileAttachment` `/FS /EF` contents and names. Was: only `/Contents` and text/choice values were scanned, so the save passed with the secret still in the bytes. Tests: `tests/unit/redaction-offpage-text.test.ts` › "collectOffPageText sees text a viewer never paints (§1.4)", "the redaction strip step clears the same values (§1.4)".
+  - **AUDIT-EDGE-CASES-2026-09-15 §1.5**: turning Protect on never re-grants a bit the input's `/P` forbids, including bits 6 (annotate), 9 (fill forms) and 12 (high-quality print), which have no UI toggle. Was: they were re-granted from the `-4` base flags. Tests: `tests/unit/permission-restrictions.test.ts` › "turning Protect on never loosens an inherited restriction (§1.5)" (per-bit cases, "writes the preserved bit into the encrypted output bytes").
+  - **AUDIT-EDGE-CASES-2026-09-15 §1.7**: XFA is detected by the parsed catalog check as well as the byte scan, so an object-stream-encoded XFA form is refused for compose, fill and flatten, and reported at import. Was: `hasXfaMarker` alone missed it, and pdf-lib had already stripped `/XFA` (no `preserveXFA`). Tests: `tests/unit/xfa-object-stream.test.ts` › "an object-stream-encoded XFA form is still detected (§1.7)".
+- **AC:** Redacting a string that also appears in a URI, a tooltip, an `/RC` and an attachment either removes it from all of them or blocks the save. A `/P` forbidding only bit 9 still forbids it after Protect. An object-stream XFA form refuses compose with `XFA_COMPOSE_MESSAGE`.
+
+### HRD-32 · Import and session safety — `S` `P0`
+
+**Status: Done, one test gap (re-verified 2026-10-05)** — Open: §1.1 has no automated regression test (see below).
+
+- **Requirements:**
+  - **AUDIT-EDGE-CASES-2026-09-15 §1.1**: a file dragged from the OS and dropped anywhere in the app never triggers the browser's default navigation. Was: `PageGrid` called `preventDefault` only for internal reorder drags, so a drop navigated the tab away and lost the whole workspace. Now a window-level `dragover`/`drop` guard in `src/ui/shell/AppShell.tsx` points at "Add PDF" when a document is open. **Follow-on regression, fixed:** the window handler double-imported Home drops (AUDIT-2026-09-25 UI-2). It now skips `defaultPrevented` events (`tests/e2e/audit-2026-09-25.spec.ts` › "UI-2: a PDF dropped on the Home drop zone opens exactly one tab"). **Open:** no test drops a file onto an open document and asserts the tab stays put with its documents.
+  - **AUDIT-EDGE-CASES-2026-09-15 §1.8**: batch input goes through the same gate as `importPdf`: empty check, PDF header sniff, then a pdf.js parse with page count > 0. A bad file fails with a classified message and the run continues. Was: a raw `TypeError` from `getOrCreateAcroForm`, or a 95%-truncated 100-page file silently processed as 74 pages. Tests: `tests/unit/batch-runner.test.ts` › "§1.8: a bad file in a batch folder fails cleanly" ("rejects a file with no PDF header…", "rejects an empty file cleanly"). Probed 2026-10-05: a 95% or 80% truncated file is refused by pdf.js ("Invalid PDF structure"), so the gate holds. There is no committed truncated-file case in `batch-runner.test.ts`.
+  - **AUDIT-EDGE-CASES-2026-09-15 §1.9**: OPFS `writeSourceBytes` turns `QuotaExceededError` into the same actionable "Local storage is full…" message IndexedDB already gives. Was: "Something went wrong". Tests: `tests/unit/opfs.test.ts` › "turns a QuotaExceededError into a clear, actionable message", "writes normally when there is room".
+- **AC:** An e2e drops a PDF onto the page grid of an open document: the URL is unchanged, the open tabs survive, and the "Add PDF" hint shows (open). A batch folder holding `not-a-pdf.pdf`, an empty file and `truncated-mid-body.pdf` reports three classified failures and still processes the good files.
+
+### HRD-33 · Concurrency and partial failure never cost the whole job — `M` `P0`
+
+**Status: Done (re-verified 2026-10-05)** — §2.2 was completed by AUDIT-2026-09-25 RT-8. §2.6 is moot because the face weights are now bundled (AUDIT-2026-09-25 CONV-6). Open: none.
+
+- **Requirements:**
+  - **AUDIT-EDGE-CASES-2026-09-15 §2.1**: `runBatch` has a synchronous reentrancy guard set before its first `await`, and only the owning run's `AbortController` is replaced. Was: a double click ran two interleaved batches, and Cancel stopped only the newer one. Tests: `batch-runner.test.ts` › "§2.1: a second concurrent runBatch() call is a no-op" ("only the first call actually processes files", "a run started after the first one finishes is not blocked").
+  - **AUDIT-EDGE-CASES-2026-09-15 §2.2**: undo and redo refuse to run while a job is active, so a slow export can't stamp a stale baseline. Was: Ctrl+Z during a pending save made the next Export Review diff wrong. Tests: `tests/unit/history.test.ts` › "undo/redo refuse to run while a job is active (§2.2)". Extended by RT-8: every user-facing page mutator is guarded via `src/ui/busy.ts`.
+  - **AUDIT-EDGE-CASES-2026-09-15 §2.3**: OCR renders each page inside its own try/catch, with the render scale clamped (`clampRenderScale`). A page that can't be rendered is recorded in `skippedPages` and reported, and every other page's recognition is kept. Was: one oversized page (legal up to 14,400 pt) discarded the whole run. Tests: `tests/unit/ocr.test.ts` › "skips only the page that failed and keeps recognition from the others".
+  - **AUDIT-EDGE-CASES-2026-09-15 §2.6**: face-detector weights can't be corrupted or stuck in a cache. Was: a truncated shard was cached forever, with no delete path. **Superseded:** the weights are bundled (`src/core/faceblur/bundledWeights.ts`), with no download, consent or CSP path. Tests: `tests/unit/faceblur-offline.test.ts` › "decodes to exactly the files shipped in the installed face-api package", "checks the shard length against the tensor shapes its manifest declares", "has no network allowance left: model.ts names no host and no URL".
+- **AC:** Double-pressing Run Batch processes each file once. Ctrl+Z during an export is a no-op. OCR over a document with one 14,400 pt page returns text for the other pages and names the skipped one.
+
+### HRD-34 · Compression classification: decode, mask and size edge cases — `M` `P0`
+
+**Status: Done (re-verified 2026-10-05)** — Open: none in code. See HRD-39 §6 #2 for a stale fixture test.
+
+- **Requirements:**
+  - **AUDIT-EDGE-CASES-2026-09-15 §2.4**: the undecodable-filter skip list checks an image's `/SMask`/`/Mask` filter chain as well as its own (`maskFilters`). Was: a FlateDecode photo with a JPX soft mask went to `surgical`. Tests: `tests/unit/compress-edge-cases.test.ts` › "§2.4 the skip list inspects the mask's filter chain, not just the image's".
+  - **AUDIT-EDGE-CASES-2026-09-15 §2.5**: a replacement JPEG that pdf-lib can't parse (`embedJpg` throws) skips one image on the surgical route, or one page on the raster route, and keeps the original. Was: `SOI not found in JPEG` aborted `rebuildCompressed`. Tests: `compress-edge-cases.test.ts` › "§2.5 an unparseable replacement JPEG skips one image, not the whole run".
+  - **AUDIT-EDGE-CASES-2026-09-15 §2.9**: bit depth below 8 keeps an image off the surgical route only. It never blocks rasterising the page. Was: 1-bit fax scans got zero compression and a false "already optimized". Tests: `compress-edge-cases.test.ts` › "§2.9 a 1-bit bilevel scan can still be rasterised".
+  - **AUDIT-EDGE-CASES-2026-09-15 §2.10**: a stream whose stored size can't be read is "unmeasurable, skip", which is distinct from a real 0-byte stream. Was: both returned `0`, hiding a 0 → 20,000-byte growth. Tests: `compress-edge-cases.test.ts` › "§2.10 a stream whose size cannot be read is not treated as empty".
+- **AC:** Each of the four cases, built from real pdf-lib objects, gives the stated route or skip, and output never exceeds input (CMP-04).
+
+### HRD-35 · Scan cleanup survives degenerate geometry and blank pages — `S` `P1`
+
+**Status: Done (re-verified 2026-10-05)** — Open: none.
+
+- **Requirements:**
+  - **AUDIT-EDGE-CASES-2026-09-15 §2.7**: a degenerate crop quad (collinear, coincident, near-collinear or pinpoint corners) returns the page unchanged. A genuinely thin page at a sharp angle still warps. Was: a solid black page or a 1×1 image, despite a comment promising otherwise. Tests: `tests/unit/warp-target-size.test.ts` › "degenerate quads" ("returns the page unchanged for three collinear corners, not a black page", "…for four coincident corners, not a 1x1 image", "still warps a genuinely thin page photographed at a sharp angle").
+  - **AUDIT-EDGE-CASES-2026-09-15 §2.8**: deskew reports zero skew when no angle beats the others (blank, uniform or faint pages), and never resizes such a page. Was: `bestScore = -1` let the first candidate win (−16° on a blank page, output 399×468). Tests: `tests/unit/enhance.test.ts` › "a page with no skew signal" ("reports no skew for a blank page rather than the first angle tried", "does not resize a blank page on its way through deskew", "holds the ±maxDegrees bound even when the winner is at the edge").
+- **AC:** Cleanup with default deskew on an all-white page returns the same dimensions. Dragging three handles into a line leaves the page as it was.
+
+### HRD-36 · Redaction fidelity: layers, notes, Type 3, forms, disclosure — `M` `P0`
+
+**Status: Done (re-verified 2026-10-05)** — The §3 #1 fix was undone by the mandatory scrub (AUDIT-2026-09-25 PDF-5 ⟲ regression) and fixed again. Open: no dedicated test for a Form XObject without `/BBox`.
+
+- **Requirements:**
+  - **AUDIT-EDGE-CASES-2026-09-15 §3 #1**: redaction keeps a hidden optional-content layer hidden. `/OCProperties` is carried over and relinked (including `/OC` on XObjects), and survives the pipeline's mandatory metadata scrub. Was: `/OCProperties` was stripped, so an OFF layer rendered and printed. **Contradicted by AUDIT-2026-09-25 §4 / PDF-5, now true again:** the scrub keeps `/OCProperties` by default. Tests: `tests/unit/redaction-optional-content.test.ts` › "redaction keeps a hidden layer hidden (§3)", including "keeps the layer hidden through the pipeline's mandatory metadata scrub (PDF-5)".
+  - **AUDIT-EDGE-CASES-2026-09-15 §3 #2**: annotation text is read from pdf.js 6.x's `contentsObj.str`, so find-and-mark and the verifier see sticky notes. Was: `.contents`, always `undefined`. Tests: `tests/unit/annotation-contents-pdfjs.test.ts` › "pdf.js exposes annotation text as contentsObj, not contents (§3)".
+  - **AUDIT-EDGE-CASES-2026-09-15 §3 #3**: Type 3 glyphs are measured through their `/FontMatrix` (`glyphSpaceScale`). Was: LaTeX/dvips runs measured ~0.14 pt wide, so redaction was blocked on them. Tests: `tests/unit/redaction-type3-font.test.ts` › "applyRedactions on a real Type 3 document (§3)".
+  - **AUDIT-EDGE-CASES-2026-09-15 §3 #4**: a mark that partly covers a Form XObject filters the form's own content (recursively, up to `MAX_FORM_DEPTH`). A form with no `/BBox` is judged by its content, not the unit square. Refusal happens only when the content can't be read. Was: an outright refusal, unusable on producers that wrap the whole page in one form. Tests: `tests/unit/process.test.ts` › "filters inside a partly covered Form XObject rather than deleting the whole form". **Open:** no test builds a form with no `/BBox`.
+  - **AUDIT-EDGE-CASES-2026-09-15 §3 #5**: what redaction drops is disclosed before saving: bookmarks, attached files, named destinations, structure tree, metadata/XMP. Page labels and layer visibility are kept (`RedactPanel.tsx` copy). Was: dropped silently (`bookmarked-9.pdf` went from 3 bookmarks to 0).
+- **AC:** A hidden-layer secret stays hidden through `applyRedactions` plus the scrub. A sticky note containing the search term is marked. A Type 3 run under a mark is removed and its neighbour is kept. Redaction on a whole-page form succeeds.
+
+### HRD-37 · Save, reopen, search and convert error paths stay specific — `S` `P1`
+
+**Status: Done, with one accepted limitation (re-verified 2026-10-05)** — Open: XLSX RTL is sheet-level only. Recents, folder-search and the ZIP-picker fixes have no automated test (the repo has no component-test harness).
+
+- **Requirements:**
+  - **AUDIT-EDGE-CASES-2026-09-15 §3 #6**: `saveOverHandle` returns `false` when `createWritable()` throws (file moved or deleted, `NotFoundError`/`NoModificationAllowedError`), so the "Could not save over the original file… save a new file instead" copy appears. Tests: `tests/unit/file-system.test.ts` › "returns false, rather than throwing, when the file was moved or deleted since it was opened".
+  - **AUDIT-EDGE-CASES-2026-09-15 §3 #7**: reopening from Recents a handle that says `granted` but whose file is gone shows "Permission was declined, or the file has moved. Open it again from disk." (`HomeView.tsx`, `getFile()` guarded). No automated test.
+  - **AUDIT-EDGE-CASES-2026-09-15 §3 #8**: PDF→Word/Excel/PowerPoint mark RTL text right-to-left with each format's real API (`<w:bidi/>`/`<w:rtl/>`/`<w:bidiVisual/>`, `<sheetView rightToLeft="1"/>`, `rtl="1"`) via `src/core/convert/text-direction.ts`. Tests: `tests/unit/text-direction.test.ts`; `pdf-to-word.test.ts` › "CNV-08 — RTL text is flagged right-to-left, not silently left-to-right"; `pdf-to-excel.test.ts` › "CNV-10 — an RTL sheet is flagged right-to-left…"; `pdf-to-ppt.test.ts` › "CNV-12 — RTL text is flagged right-to-left…". **Open (accepted):** a mixed-direction XLSX sheet takes its majority direction. Per-cell `readingOrder` would need a styles part (documented in `xlsx-writer.ts`).
+  - **AUDIT-EDGE-CASES-2026-09-15 §3 #9**: folder-search results apply only for the latest query (`searchSeq` in `FolderSearchPanel.tsx`). Was: an earlier, slower query could overwrite a newer one. No automated test.
+  - **AUDIT-EDGE-CASES-2026-09-15 §3 #10**: Batch's ZIP-output picker checks `hasFileSystemAccess()` like its sibling buttons and says "Folder processing requires Chrome or Edge." Was: a raw "showSaveFilePicker is unavailable" on Firefox/Safari. No automated test.
+- **AC:** Saving over a deleted file shows the friendly copy. An Arabic PDF converted to DOCX, XLSX and PPTX opens right-to-left in each.
+
+### HRD-38 · Low-severity limits and process guards — `S` `P2`
+
+**Status: Done (re-verified 2026-10-05)** — §4 #5 is by design. Open: none.
+
+- **Requirements:**
+  - **AUDIT-EDGE-CASES-2026-09-15 §4 #1**: both invariant checkers (`.claude/hooks/check-invariants.mjs`, `scripts/check-invariants.mjs`) validate `content_security_policy.extension_pages` against the allowlist in `scripts/csp.mjs`. They read the real `public/manifest.json`. Was: the CSP wasn't checked per write, and the whole-repo script read a non-existent root `manifest.json`, so even its permissions check was a no-op. Tests: `tests/unit/csp.test.ts` › "refuses a bare CDN host, a remote source outside connect-src, and a missing default-src", "the invariant hook duplicates the same allowlist".
+  - **AUDIT-EDGE-CASES-2026-09-15 §4 #2**: the scan-cleanup warp target has an absolute pixel cap as well as `MAX_PIXEL_GROWTH = 2`. Was: 16851×7999 (~539 MB RGBA) from a 10000×8000 frame. Tests: `warp-target-size.test.ts` › "caps the output at a real canvas can allocate, even on a large source frame", "leaves an ordinary photo at its correctly-computed size, unaffected by the absolute cap".
+  - **AUDIT-EDGE-CASES-2026-09-15 §4 #3**: batch's never-grow rollback discards only the compression step. Tools after it (for example watermark) are replayed, and restrictions are re-applied to the replayed result. Was: the watermark was lost, and the note mentioned only compression. Tests: `batch-runner.test.ts` › "discarding compression does not also discard a tool that ran after it, and still restricts the result".
+  - **AUDIT-EDGE-CASES-2026-09-15 §4 #4**: PDF→Excel caps detected table columns at `MAX_SHEET_COLUMNS` (shared with `xlsx-reader.ts`) and says so. Tests: `pdf-to-excel.test.ts` › "caps a detected table at Excel's practical column limit and says so", "leaves an ordinary table under the column limit untouched, and says nothing about it".
+  - **AUDIT-EDGE-CASES-2026-09-15 §4 #5**: on Firefox < 127 (no `runtime.getContexts`), each toolbar click opens a new tab. This is an accepted trade-off for zero permissions, feature-detected rather than UA-sniffed. Test: `service-worker.test.ts` › "falls back to opening a fresh tab when getContexts does not exist (pre-127 Firefox)".
+- **AC:** Adding `https://cdn.example` to the manifest CSP fails the hook on write and fails `pnpm check`.
+
+### HRD-39 · Confirmed-clean baselines stay clean; coverage holes stay closed — `S` `P1`
+
+**Status: Done, two items open (re-verified 2026-10-05)** — Open: §6 #2 (stale fixture-routing test) and §6 #7's missing truncated-input batch case (tracked on HRD-32). One §5 claim (HEIC) was contradicted and later made true.
+
+§5 lists what the audit found clean. Each is now a requirement, so a regression is a
+defect, not a surprise. §6 lists the test holes behind §1–§2.
+
+- **Requirements:**
+  - **AUDIT-EDGE-CASES-2026-09-15 §5 #1**: no `src/` violation of zero network, zero permissions, no raw colours or the layer boundary. `fetch(FONT_URL)` in `src/core/ocr/devanagariFont.ts` stays a same-origin bundled asset. ESLint's `chrome` restriction stays scoped. Guarded by the hook, `pnpm check` and the zero-network e2e plus post-build network scan.
+  - **AUDIT-EDGE-CASES-2026-09-15 §5 #2**: compress, redact, scan cleanup, OCR and convert thread an `AbortSignal`/`JobHandle` through `checkpoint()` before any work that affects output.
+  - **AUDIT-EDGE-CASES-2026-09-15 §5 #3**: every locale has exactly `en.json`'s key set. Since UI-8 this is enforced by a coverage test that includes worker messages.
+  - **AUDIT-EDGE-CASES-2026-09-15 §5 #4**: picker cancellation, directory-picker feature detection, 0-byte and non-PDF rejection, the > 100 MB warning, IndexedDB quota handling and the web adapter stay implemented and tested.
+  - **AUDIT-EDGE-CASES-2026-09-15 §5 #5**: `encrypted.pdf` and `not-a-pdf.pdf` are refused with classified errors. AES-256/R6 permission-only round-trips keep `/P` exactly, including `0` and `2147483647`.
+  - **AUDIT-EDGE-CASES-2026-09-15 §5 #6**: the redaction save gate has one caller that both search and pattern redaction funnel through, and it does a full rewrite after `sweepUnreachableObjects`, leaving no incremental-update remnants.
+  - **AUDIT-EDGE-CASES-2026-09-15 §5 #7**: HEIC EXIF orientation, cancelling tesseract mid-run, oversized-file warnings, malformed docx/xlsx/pptx zips and empty sheets/slides/documents keep working with tests. **Contradicted by AUDIT-2026-09-25 §4 / CONV-1:** HEIC hung in the extension (heic2any's `new Function` vs the MV3 CSP). It is now true with the libheif WASM decoder. The extension e2e still has no HEIC case (CNV-03).
+  - **AUDIT-EDGE-CASES-2026-09-15 §6 #1**: `rebuildCompressed` is driven with an `/SMask`, a `/Mask` and a rotated page. **Closed** by `compress-raster-page.test.ts` and `compress-edge-cases.test.ts`.
+  - **AUDIT-EDGE-CASES-2026-09-15 §6 #2**: fixture tests assert the routing decision on the real fixture. **Open:** `tests/unit/compress-plan-fixtures.test.ts` still asserts only `reencode: []` for `jbig2.pdf`/`jpx.pdf`. Its comment ("still compressible via the raster route") is wrong: `blocked()` sets `raster: false`, so the textless page routes `already-optimized` with "cannot be safely rasterized". The `it.each` over `indexed`/`icc`/`soft-mask.pdf` still overwrites the fixture's dimensions (3000×4000) before classifying. Needed: assert `plan.pages[0].route` and fix the comment. Also decide whether JBIG2/JPX should block the raster route at all, since pdf.js renders both and the raster route never re-reads the stream (the same reasoning as §2.9). That would need its own ticket.
+  - **AUDIT-EDGE-CASES-2026-09-15 §6 #3**: `enhance.test.ts` covers blank and faint input, and the collinear quad goes through `warpPerspective`. **Closed** (HRD-35 tests).
+  - **AUDIT-EDGE-CASES-2026-09-15 §6 #4**: redaction tests cover annotations, form fields, outlines, embedded files, optional content, Type 3 and Form XObject recursion. **Closed** (HRD-31 and HRD-36 tests), except the no-`/BBox` form (HRD-36).
+  - **AUDIT-EDGE-CASES-2026-09-15 §6 #5**: an OCR test covers a page that fails to render. **Closed** (`ocr.test.ts` § 2.3 block, simulated render failure).
+  - **AUDIT-EDGE-CASES-2026-09-15 §6 #6**: face-model truncated, aborted and corrupt-cache cases. **Moot:** the weights are bundled (HRD-33 §2.6).
+  - **AUDIT-EDGE-CASES-2026-09-15 §6 #7**: batch is tested with a non-PDF input and a double "Run Batch". **Closed** (HRD-32, HRD-33). A truncated-input case is still missing (HRD-32).
+  - **AUDIT-EDGE-CASES-2026-09-15 §7**: the priority order (§1.1 → §1.2/§1.3 → §1.4 → §1.5 → rest) was followed, and all of it is done.
+- **AC:** `compress-plan-fixtures.test.ts` asserts the real route for `jbig2.pdf` and `jpx.pdf`, and classifies at the fixtures' own dimensions (open).
+
+### HRD-40 · One object copier per rebuild, page refs remapped (root cause M1) — `M` `P0`
+
+**Status: Done (AUDIT-2026-09-25 fixes, 2026-09-26; not regressed per AUDIT-2026-10-01 §0)** — `src/core/pdf/rebuild.ts` is the single rebuild path; `tests/unit/rebuild-page-links.test.ts` re-parses output bytes for every finding below. Still open: the lint rule banning per-page `copyPages`/`embedPage` loops (M1's "fix once") does not exist; a text-only 100-page file still roughly doubles through redaction (75 KB → 150 KB, not investigated); R-PDF-4 accepted as-is.
+
+Calling `copyPages(src, [i])` or `embedPage()` per page built a fresh `PDFObjectCopier`
+each time, so pdf-lib duplicated every shared font/image per page and made an orphan copy
+of any page something else pointed at (annot `/P`, link `/Dest`, sibling widget) — and the
+orphan kept the original, unredacted content stream. One root cause behind the audit's
+worst privacy leak, a page-exclusion leak and 10× output inflation.
+
+- **Requirements:**
+  - **AUDIT-2026-09-25 M1** — Every operation that rebuilds a document (compose, extract/
+    split, compress, scrub, redact, n-up, watermark) uses one copier per rebuild via
+    `rebuildDocument` (`src/core/pdf/rebuild.ts`): source→output page refs registered
+    *before* copying; `/Dest`, `/GoTo` and `/P` remapped; links to excluded pages nulled;
+    unreachable objects swept. A lint rule bans direct `copyPages`/`embedPage` inside
+    loops (not yet written). Was: a fresh copier per page in `process.worker.ts`.
+  - **AUDIT-2026-09-25 PDF-1** (🔴) — A redacted page's original content must not survive
+    anywhere in the output file — no orphan page copy with the old `/Contents`, `/Thumb` or
+    `/PieceInfo` — even when an annotation `/P`, a TOC `/Dest` or a widget references the
+    page, and including after the scrub step. Was: all three variants leaked, recoverable
+    with `strings`/qpdf, and the verifier said "verified" (see HRD-41 for M7).
+    Tests: `rebuild-page-links.test.ts`, `pdf-regression-review.test.ts`.
+  - **AUDIT-2026-09-25 PDF-6** (🟠) — Rebuilds keep internal links working, and
+    Extract/Split never ships a page the user excluded. Was: extracting page 1, which
+    linked to page 3, put page 3's full text in the output; merge, compress, scrub and
+    watermark killed TOC and footnote links. Test: `rebuild-page-links.test.ts`.
+  - **AUDIT-2026-09-25 PDF-7** (🟠, ⟲ REGRESSION) — Shared resources are copied once per
+    rebuild, not once per page. Was: `shared-image.pdf` redaction 4.7 MB → 46.8 MB (now
+    4.69 MB), and a 300-page file with a big font could crash the worker, while
+    AUDIT-FINDINGS §0 claimed redaction already shared one copier. Test:
+    `rebuild-page-links.test.ts`.
+  - **AUDIT-2026-09-25 PDF-11** (🟠) — A form value redacted on one widget is cleared on the
+    *merged* field, and every sibling widget's appearance is regenerated, so the value
+    neither reads back from the form nor sits in the bytes. Was: `ssn=SSN123456789`
+    survived on the field's other widgets and the result was marked verified. Test:
+    `rebuild-page-links.test.ts`.
+  - **AUDIT-2026-09-25 PDF-12** (🟡) — N-up embeds all source pages in one
+    `embedPages(allPages)` call (no per-cell duplication), and tells the user which links,
+    comments and fields it drops. Was: ~10× size and silent drops. Also: n-up must work on
+    pages with no `/Contents` (found in §8, present on master too). Test:
+    `rebuild-page-links.test.ts`.
+  - **AUDIT-2026-09-25 PDF-13** (🟡) — The metadata scrub (and so every redaction, which runs
+    it) carries bookmarks, page labels, the tag tree, `/Lang` and OutputIntents through
+    unless the user ticks them. Was: all dropped with nothing ticked — navigation,
+    accessibility and PDF/A conformance lost. Test: `rebuild-page-links.test.ts`.
+  - **AUDIT-2026-09-25 R-PDF-4** — Accepted limit: rebuilt files are 1–3.5% larger than
+    before the fix; removing it needs a whole-graph renumbering pass. Re-evaluate only with
+    a measured case where it matters.
+- **AC:** On fixtures where an annotation, link or widget references the redacted page,
+  `strings` and qpdf find no redacted text and no `/Type /Page` outside the page tree;
+  extract of a page that links to an excluded page contains none of the excluded page's
+  text and no dangling link; `shared-image.pdf` redaction output ≤ 1.05× input; n-up output
+  size does not scale with cell count; a no-op scrub keeps outline, page labels,
+  StructTreeRoot, `/Lang` and OutputIntents.
+
+### HRD-41 · Content-stream surgery that never corrupts, and a verifier independent of it (M7) — `M` `P0`
+
+**Status: Done (AUDIT-2026-09-25 fixes, 2026-09-26; not regressed per AUDIT-2026-10-01 §0)** — whole-file residual-text and orphan-page check in the verifier; four-corner image geometry; simple-TrueType font substitution. Still open: images drawn only from annotation appearances or tiling patterns are out of reach for face/logo blur (PDF-14).
+
+Three 🔴 findings were tools that reported success while visibly corrupting or failing to
+redact the page; two of them passed the redaction verifier because it read only page-tree
+text and recomputed the plan with the same geometry code as the redaction itself.
+
+- **Requirements:**
+  - **AUDIT-2026-09-25 M7** — The redaction verifier is independent of the redaction: it
+    (a) decodes and scans **every** stream in the output for the redacted strings, (b)
+    asserts no `/Type /Page` exists outside the page tree, and (c) uses an independent
+    coverage check (four-corner quads or render-and-diff), never the redaction's own plan.
+    Was: page-tree text only, same geometry — PDF-1 and PDF-4 both reported
+    `verified: true` on leaking output.
+  - **AUDIT-2026-09-25 PDF-2** (🔴) — "Embed missing font" (DOC-12) must leave every run of
+    text reading the same: write a *simple* `/TrueType` font with the original encoding
+    (including `/Differences`), `/FirstChar`/`/LastChar`/`/Widths` and `/FontFile2`;
+    re-extract the text after the change and return the original bytes if it differs.
+    Was: `embedFont`'s `Type0/Identity-H` read 1-byte WinAnsi codes as 2-byte CIDs, so text
+    rendered as `.notdef`, widths were lost, and the UI said "fixed". Test:
+    `font-embedding.test.ts` › "embedMissingFont keeps the text (PDF-2)";
+    `src/core/pdf/font-substitute.ts`.
+  - **AUDIT-2026-09-25 PDF-3** (🔴) — Flatten background (OPS-13) drops a background's whole
+    path-construction run (`re`/`m`/`l`…) together with its painter. Was: only `f` was
+    dropped, so the next fill painted the whole page (`… 0 0 612 792 re 0 0 0 rg 100 100 10
+    10 re f` → black page). Test: `flatten-background.test.ts` (re-parses output content
+    streams).
+  - **AUDIT-2026-09-25 PDF-4** (🟠) — An image at any rotation is tested as the quad of its
+    four transformed corners (as `formBoxOf` does), not a bounding box from two diagonal
+    corners. Was: at 45° the box had zero width, so the image was neither stripped nor
+    pixel-redacted, only overlaid, and verified. Test: `interpreter.test.ts`.
+  - **AUDIT-2026-09-25 PDF-5** (🟠, ⟲ REGRESSION) — Redaction's mandatory scrub keeps
+    `/OCProperties` (passes `hasOptionalContent: false`); whenever OCProperties is stripped,
+    content in OFF groups is removed with it, so hidden layers never become visible. Was:
+    the scrub deleted `/OCProperties` and un-hid layers the author set OFF, undoing the
+    09-15 audit's OCG fix, because the OCG test never ran the scrub. Test:
+    `redaction-optional-content.test.ts` › "keeps the layer hidden through the pipeline's
+    mandatory metadata scrub (PDF-5)".
+  - **AUDIT-2026-09-25 PDF-14** (🟡) — Face/logo blur finds images inside Form XObjects:
+    forms on the path to the image are cloned for the selected pages only (a form shared
+    with an unselected page keeps the original there), retired forms/images are purged
+    only when nothing references them, and anything still unreachable (annotation
+    appearances, tiling patterns) is reported as a skip reason. Was: "no faces found" on
+    Office/Quartz PDFs full of faces. Tests: `inherited-resources.test.ts`,
+    `faceblur-forms.test.ts`.
+  - **AUDIT-2026-09-25 PDF-15** (⚪) — The DOC-12 font inventory reads inherited
+    `/Resources` (`page.node.Resources()`) and walks fonts inside forms. Test:
+    `font-embedding.test.ts`.
+  - **AUDIT-2026-09-25 PDF-16** (⚪) — An OCR re-run removes a `BT…ET` span only when
+    *every* show operator in it is `3 Tr` (invisible). Was: visible text sharing a span
+    with invisible OCR text was deleted. Test: `interpreter.test.ts`.
+  - **AUDIT-2026-09-25 R-PDF-1** — The residual-text scan excludes structural keys and
+    dictionaries (`/Lang`, font names, `/DA`), so it does not false-fail legitimate
+    redactions. Test: `pdf-regression-review.test.ts`.
+  - **AUDIT-2026-09-25 R-PDF-2** — The default scrub purges inline and indirect JavaScript
+    actions from every reachable action, bookmarks included. Test:
+    `pdf-regression-review.test.ts`.
+  - **AUDIT-2026-09-25 U1** — The redaction's visible-text checks run first, so it never says
+    "no page shows it" for a word visible on another page.
+  - Checked clean by the audit, and must stay so: the compress never-grow gate;
+    SMask/colour-key/JBIG2/JPX refusals; encode-once; inline-image refusal in redaction;
+    the AES-256 pass; `q…Q` wrapping when appending to a content stream.
+- **AC:** A sabotaged build (overlay-only, or orphan page left in) is rejected by the
+  verifier; a 45°-rotated image under a mark is removed or pixel-redacted; a hidden-OCG
+  fixture stays hidden after redact → scrub; font substitution and flatten re-extract the
+  text and re-parse the content stream of real output and fail on any difference.
+
+### HRD-42 · Placement geometry against the visible frame (root cause M2) — `M` `P0`
+
+**Status: Done for placement (AUDIT-2026-09-25 fixes, 2026-09-26; not regressed per AUDIT-2026-10-01 §0)** — `src/core/pdf/display-frame.ts`, `tests/unit/display-frame-geometry.test.ts` on rotated, cropped, offset-origin pages. **Open:** `getFormFields` still reports field rectangles against the raw MediaBox (`page.getSize()`), the reverse direction of M2.
+
+Tools mapped UI coordinates (the pdf.js viewport: CropBox, rotated) onto `page.getSize()`
+(MediaBox, unrotated, no origin). The rotation half was fixed by an earlier audit; the
+origin/crop half was not. This was the third time this class of bug came up.
+
+- **Requirements:**
+  - **AUDIT-2026-09-25 M2** — Every placement and reverse-mapping path uses one
+    `displayFrame(page)` built from CropBox ∩ MediaBox with origin and `/Rotate`, checked
+    against the pdf.js viewport, with one golden test per tool on a rotated, cropped,
+    offset-origin page. This includes reading geometry back (`getFormFields` field rects —
+    still open).
+  - **AUDIT-2026-09-25 PDF-8** (🟠) — Raster compression sizes the new page from the visible
+    box (CropBox ∩ MediaBox in the original user space), keeps `/Rotate`, and places the
+    raster at the crop origin, so nothing is stretched, cropped margins stay cropped and
+    copied annotation `/Rect`s stay on their content. Was: cropped scans stretched,
+    margins returned, annotations moved.
+  - **AUDIT-2026-09-25 PDF-9** (🟠) — Signatures, stamps and incoming crop coordinates are
+    placed in the visible frame. Was: on a page with bleed or a crop, a signature placed
+    top-left landed outside the visible page and was effectively missing.
+  - **AUDIT-2026-09-25 PDF-10** (🟠) — Annotate drawings (including whiteout), text and
+    sticky notes map every point through the frame helper and are placed upright on
+    rotated pages; non-Latin `ann.text` gets the clear WinAnsi error, not a raw pdf-lib
+    throw. Was: whiteout drawn top-left on a `/Rotate 90` page exported top-right, leaving
+    the content visible.
+  - **AUDIT-2026-09-25 R-RT-3** — OCR words are placed at the DPI the page was actually
+    rendered at (after the render-size cap of HRD-43), not the requested DPI. Was: words
+    misplaced on A1/A0 pages. Test: `regression-review.test.ts`.
+- **AC:** For each of compress-raster, sign, stamp, crop, annotate/whiteout and OCR text
+  layer, a golden test on a `/Rotate 90`, cropped, non-zero-origin fixture shows the output
+  mark within 1 pt of where the pdf.js viewport showed it; `getFormFields` rects on the same
+  fixture match the viewport (open).
+
+### HRD-43 · Worker lifecycle and render-resource budgets — `M` `P0`
+
+**Status: Done (AUDIT-2026-09-25 fixes, 2026-09-26; not regressed per AUDIT-2026-10-01 §0)** — R-RT-10 accepted as-is.
+
+A worker crash or failed boot hung every in-flight call and pinned render handle until a
+reload, because Comlink 4.4.2 never rejects pending calls on termination. Render
+resources were budgeted by count, not bytes, and several paths leaked pdf.js documents.
+
+- **Requirements:**
+  - **AUDIT-2026-09-25 RT-1** (🟠) — Every call to a worker races an instance-death promise
+    that the worker's `error` handler rejects; render handles owned by a dead instance are
+    evicted; `activeJob` is released, so undo, tab close and new jobs still work. Was: one
+    worker error (e.g. a web-twin redeploy 404ing an old hashed worker URL) locked the app
+    until reload; G4 in AUDIT-FINDINGS wrongly said the lease "just rejects". Tests:
+    `worker-crash.test.ts`, `worker-client.test.ts`.
+  - **AUDIT-2026-09-25 R-RT-1** — The death race holds no reference to a settled call's
+    result: a per-call reject set, removed on settle. Was: 200 MB held after 20 × 10 MB
+    calls.
+  - **AUDIT-2026-09-25 RT-9** (🟡) — The render worker's `closeDocument` always destroys the
+    pdf.js document (`try { cleanup } catch {} finally { destroy }`), even with a render in
+    flight. Test: `render-worker-lifecycle.test.ts`.
+  - **AUDIT-2026-09-25 RT-10** (🟡) / **AUDIT-2026-09-25 UI-16** — The bitmap cache is
+    budgeted in bytes (192 MB); bitmaps in use are never closed; renders are clamped (8192²
+    px, 16384 px per side); single-page and side-by-side views do not cache zoomed renders,
+    cap at 4096² with a "Reduced detail" label, and cover the page with a loading/error
+    state while it changes, so no overlay is ever drawn against the previous page's
+    pixels. Was: a 120-entry count cap (gigabytes at zoom), blank A0 renders with no
+    message, Redact/Crop marks made over the wrong image. Test:
+    `render-budget-and-queues.test.ts`.
+  - **AUDIT-2026-09-25 R-RT-8** — The loading cover does not flash on every zoom step.
+  - **AUDIT-2026-09-25 R-RT-10** — Accepted limit: a rare thumbnail bitmap is freed by GC
+    rather than closed.
+  - **AUDIT-2026-09-25 RT-13** (⚪) — A failed pdf.js load (encrypted/corrupt) destroys its
+    loading task. Test: `render-worker-lifecycle.test.ts`.
+  - **AUDIT-2026-09-25 RT-19** (⚪) — A failed `renderHandleFor` deletes only its own cache
+    entry (compare by identity), never a newer handle's. Test: `worker-crash.test.ts`.
+  - **AUDIT-2026-09-25 RT-22** (⚪) — A section that opens a document in the render worker
+    closes it on the same lease (`renderWorker.pin()`); was `FontEmbeddingSection`
+    leaking the doc. Test: `open-import-audit.test.ts`.
+  - **AUDIT-2026-09-25 R-PDF-3** — Export-review preview sessions are per review, so one
+    review's cache can never close the next review's documents. Test:
+    `diff-preview-sessions.test.ts`.
+  - **AUDIT-2026-09-25 Comlink transfers** (found while fixing, §7) — Bytes cross a worker
+    boundary by real transfer: `Comlink.transfer` is honoured only on the top-level argument
+    or return value, so nested `{ bytes: transfer(x) }` must use `transferSourceBytes`
+    (`operations.ts`) / `transferOut` (`process.worker.ts`). Was: ~10 sites silently
+    structured-cloned (50 ms and 134 ms main-thread blocks on a 10 × 5 MB merge; the merge
+    perf budget failed 4/4); the export review re-posted both documents per page view.
+- **AC:** Terminating a worker mid-call rejects the call within one tick and leaves the app
+  usable without reload; heap after 20 × 10 MB calls returns to baseline; zooming an A0
+  page to max never exceeds the canvas limit and shows "Reduced detail"; the 10 × 5 MB
+  merge keeps the main-thread frame gap under budget.
+
+### HRD-44 · Source liveness, OPFS garbage collection and storage resilience (root cause M6) — `M` `P0`
+
+**Status: Done (AUDIT-2026-09-25 fixes, 2026-09-26; not regressed per AUDIT-2026-10-01 §0)** — tests in `tests/unit/runtime-data-safety.test.ts`, `db-open.test.ts`, `opfs.test.ts`.
+
+`closeDocument` freed sources that only the undo stack still referenced, and nothing ever
+swept OPFS — so unredacted originals stayed on disk forever. Storage calls could hang on a
+blocked IndexedDB upgrade or a slow open, which then read as "no session".
+
+- **Requirements:**
+  - **AUDIT-2026-09-25 M6** — Source liveness is computed from live documents, every
+    undo/redo snapshot (pages and baseline) and pending imports; a startup OPFS sweep runs
+    after the recovery decision.
+  - **AUDIT-2026-09-25 RT-2** (🟠) — Closing any tab never deletes bytes another document's
+    undo history needs, and `checkRecovery` validates every `sourceDocId`. Was:
+    redact A, close B, Ctrl+Z on A → blank thumbnails, failed export, and the broken state
+    autosaved and restored. Test: `runtime-data-safety.test.ts`.
+  - **AUDIT-2026-09-25 RT-4** (🟠, privacy) — OPFS `*.pdf` files not referenced by the
+    restored session are swept at startup (model files kept) and on "Start fresh"; the
+    sweep runs only when this is the sole Stapler tab (Web Lock) and is skipped without the
+    Web Locks API. Was: the pre-redaction original stayed on disk after redact → export →
+    close → Start fresh, and a full quota blamed "saved signatures". Tests:
+    `runtime-data-safety.test.ts`, `local-data.test.ts`.
+  - **AUDIT-2026-09-25 R-RT-2** — The tab lock is taken first, the sweep runs only when
+    `locks.query()` shows a sole holder, and bytes are re-checked before restore, so a
+    second tab can never delete what a first tab (still on its restore prompt) will restore.
+  - **AUDIT-2026-09-25 R-RT-4** — Unreadable storage is not "no record": a slow or failed
+    IndexedDB open never clears the record, never sweeps, and suspends autosave.
+  - **AUDIT-2026-09-25 RT-5** (🟡) — Sources registered by an in-progress import are live
+    (`pendingSources`), so closing a tab during a Home-screen import cannot delete them.
+    Test: `runtime-data-safety.test.ts`.
+  - **AUDIT-2026-09-25 RT-11** (🟡) — An IndexedDB upgrade blocked by an older tab can't hang
+    storage: `blocking(){ db.close() }` plus a timeout that falls back to the degraded
+    path. Was: recovery never finished, so autosave never armed and signatures, recents
+    and settings never loaded. Test: `db-open.test.ts` › "RT-11".
+  - **AUDIT-2026-09-25 RT-20** (⚪) — OPFS-vs-memory mode is probed once (write path
+    included) and memoised; a missing `createWritable` (older Safari) is handled. Tests:
+    `render-budget-and-queues.test.ts`, `opfs.test.ts`.
+  - **AUDIT-2026-09-25 R-RT-5** — The OPFS probe file name cannot clash with real files.
+  - **AUDIT-2026-09-25 RT-21** (⚪) — Quota-full is one persistent, rate-limited notice, not
+    a toast per autosave. Test: `db-open.test.ts` › "RT-21".
+  - **AUDIT-2026-09-25 RT-23** (⚪) — An error in the recovery check still sets
+    `sessionRecoveryChecked` (try/finally), so autosave is never silently disabled for the
+    session. Test: `runtime-data-safety.test.ts`.
+  - **AUDIT-2026-09-25 RT-18** (⚪) — Every `localStorage` access is guarded (try/catch);
+    was unguarded `setItem` in `shortcuts.ts`, and (found while fixing, §7)
+    `batch/state.ts` read `localStorage` at module load, so any importer threw in Safari
+    private mode.
+- **AC:** Closing B never breaks undo on A; after redact → export → close → Start fresh, no
+  pre-redaction `*.pdf` remains in OPFS; with a second tab on its restore prompt, the
+  first tab's sweep deletes nothing; a blocked or slow IndexedDB open neither hangs nor
+  clears the session record.
+
+### HRD-45 · Document open, import and close paths are one safe flow — `M` `P0`
+
+**Status: Done (AUDIT-2026-09-25 fixes, 2026-09-26; not regressed per AUDIT-2026-10-01 §0)** — RT-6's undo semantics were then superseded by per-document undo (DOC-15).
+
+- **Requirements:**
+  - **AUDIT-2026-09-25 RT-3** (🟠) — Deleting every page of a document is refused with a
+    message ("A document needs at least one page… close its tab instead"); nothing is ever
+    closed except through the tab-close confirmation. Was: Ctrl+A → Delete closed the
+    document with no confirmation, no undo, no busy check, and deleted its history and
+    OPFS bytes. Tests: `runtime-data-safety.test.ts`, `tests/e2e/tool-flows.spec.ts`.
+  - **AUDIT-2026-09-25 R-RT-9** — A refused delete does not move focus.
+  - **AUDIT-2026-09-25 RT-6** (🟡) — Opening a file never wipes another document's undo, and
+    every open path (drop, picker, Recents, paste) behaves the same. Was: `resetHistory()`
+    on open, while Recents and paste skipped it so Ctrl+Z removed the new document. Test:
+    `open-import-audit.test.ts`.
+  - **AUDIT-2026-09-25 R-RT-6** / **AUDIT-2026-09-25 R-RT-7** — Opening and closing are
+    workspace actions, not undo steps, so undo can never empty the workspace (resolved by
+    GAP-11 / DOC-15's per-document undo).
+  - **AUDIT-2026-09-25 RT-7** (🟡) — Opening files is a cancellable job (`runImportJob`) with
+    a Cancel button, including on Home (no action bar); a cancelled open adds nothing and
+    frees what it stored. Was: a 500 MB drop could not be stopped. Test:
+    `open-import-audit.test.ts`.
+  - **AUDIT-2026-09-25 RT-14** (⚪) — Imports are refused until the recovery check finishes,
+    so files dropped during the Restore prompt are not lost. Tests:
+    `open-import-audit.test.ts`, `tests/e2e/import.spec.ts`.
+  - **AUDIT-2026-09-25 RT-16** (⚪) — Import sniffs `%PDF` on `file.slice(0, 1024)` before
+    reading the whole file, and transfers buffers (no 3 copies at peak). Test:
+    `open-import-audit.test.ts`.
+  - **AUDIT-2026-09-25 RT-17** (⚪) — `dirty` is cleared after a save (`refreshBaseline`), so
+    close only asks when there is something to lose. Test: `runtime-data-safety.test.ts`.
+  - **AUDIT-2026-09-25 RT-12** (🟡) — Every operation that registers an output document gives
+    it real `pageSizes` (the `loadDocument` → `pageSizes` path in `commit.ts`). Was:
+    face-blur registered `pageSizes: []` — blank single-page view, a TypeError in cleanup
+    "apply to all", and empty sizes autosaved.
+  - **AUDIT-2026-09-25 UI-4** (🟠) — Folder-search "jump to result" imports the file through
+    `importFilesAsDocuments` and matches by handle, not name. Was: a phantom document with
+    no bytes (`makePageRefs(crypto.randomUUID(), 1)`) that never rendered, failed on
+    export, was saved by session recovery, and same-name files jumped into the wrong one.
+  - **AUDIT-2026-09-25 R-UI-5** — The folder-search file map is per indexed folder, so a
+    result never resolves to a same-named file from another folder.
+  - **AUDIT-2026-09-25 UI-27** (⚪) — Opening a Recent is guarded against double-click, and a
+    "Forget" rejection is handled.
+- **AC:** Ctrl+A → Delete on any document is refused and leaves it open; cancelling a large
+  drop leaves no document and no OPFS file; a file dropped during the Restore prompt is
+  open after Restore; double-clicking a Recent opens one tab.
+
+### HRD-46 · The job lock, cancellation and honest progress cover every long flow (root cause M5) — `M` `P1`
+
+**Status: Done (AUDIT-2026-09-25 fixes, 2026-09-26; not regressed per AUDIT-2026-10-01 §0)** — implemented as a call-site guard (`src/ui/busy.ts`), not in store mutators as M5 proposed, because detect-blank legitimately deletes pages inside its own job. Test: `tests/unit/busy-guard.test.ts`.
+
+Only undo/redo, tab switching and the primary CTA checked `activeJob`; page delete,
+rotate, reorder, paste, stamp, secondary buttons and imports did not, and `run()` refused
+silently.
+
+- **Requirements:**
+  - **AUDIT-2026-09-25 M5** — Every user-facing mutator (grid keys, drag, thumbnail
+    buttons, Organize, paste, stamp placement, secondary panel buttons, imports) is refused
+    with a message while a job runs; imports go through the job model so they set the lock
+    and are cancellable; a refused `run()` tells the user instead of returning `undefined`.
+  - **AUDIT-2026-09-25 RT-8** (🟡) / **AUDIT-2026-09-25 UI-10** — Edits made while a long job
+    runs are either blocked or survive it; the export stamps the right baseline. Was: a page
+    deleted during a redaction came back when it finished (`replaceWithSource`), and
+    `refreshBaseline` stamped a stale baseline so the next review diffed against the wrong
+    thing (§2.2 fix of an earlier audit was incomplete).
+  - **AUDIT-2026-09-25 UI-20** (🟡) — Secondary panel buttons are disabled or notify while a
+    job runs; the Merge picker never discards files the user just picked. Was:
+    `useJob.ts:61` returned `undefined` silently.
+  - **AUDIT-2026-09-25 UI-9** (🟡) — A batch run's controller lives in module state, so it can
+    be cancelled after navigating away and back; the primary "Run Batch" CTA runs the batch;
+    no Done button is a no-op (compare, read-aloud, reflow, history, side-by-side).
+  - **AUDIT-2026-09-25 UI-15** (🟡) — Leaving read-aloud stops speech for good: stop/unmount
+    mark the session idle and drop the utterance *before* `speechSynthesis.cancel()`, and
+    `speakPage` is token-guarded (`read-aloud/speech-session.ts`). Was: Chrome fires `onend`
+    on cancel, so it auto-advanced page after page. Test: `render-budget-and-queues.test.ts`.
+  - **AUDIT-2026-09-25 UI-19** (🟡) — The OCR consent dialog resets its "Uploading…" state in
+    `finally` and when the request changes. Was: disabled for the rest of the session after
+    one upload.
+  - **AUDIT-2026-09-25 UI-23** (⚪) — The cleanup editor has an error state and announces
+    "Page cleaned." once, after the work finishes.
+  - **AUDIT-2026-09-25 UI-24** (⚪) — Folder indexing is cancellable (AbortController +
+    Cancel) and never sets state after unmount.
+  - **AUDIT-2026-09-25 RT-15** (⚪) — The modal queue settles each request once (per-request
+    `settled` flag), so a double resolve cannot skip or hang the next dialog. Test:
+    `render-budget-and-queues.test.ts`.
+- **AC:** With a redaction running, Delete, Alt+arrow, paste, stamp and a secondary button
+  each show a refusal and change nothing; a batch started, navigated away from and back to
+  can be cancelled; leaving read-aloud mid-page produces no further speech.
+
+### HRD-47 · Tool state is scoped to the document it describes (root cause M3) — `S` `P0`
+
+**Status: Done (AUDIT-2026-09-25 fixes, 2026-09-26; not regressed per AUDIT-2026-10-01 §0)** — `resetOnDocumentChange` / `src/ui/tools/docScoped.ts`; `tests/unit/doc-scoped-state.test.ts`.
+
+Settings and results in module-level signals survived a document switch or edit, and
+export applied them to the wrong document. An earlier audit fixed three tools; the rest
+kept the pattern (`redact/state.ts` already showed the right one).
+
+- **Requirements:**
+  - **AUDIT-2026-09-25 M3** — Any tool state describing one document is tagged with
+    `{docId, pagesVersion}` and resets when either changes; a unit test iterates every
+    tool's state module.
+  - **AUDIT-2026-09-25 UI-1** (🔴) — Metadata "Strip & export" strips everything by default
+    without a prior "Inspect" (`scrubSettings` starts `undefined`, because `{}` is truthy
+    and skipped the strip-all default), and findings/settings never carry over to the next
+    document. Was: Author, Title, paths, XMP and JavaScript all survived with a success
+    toast; the e2e always clicked Inspect first. Test: `metadata-default-scrub.test.ts`.
+  - **AUDIT-2026-09-25 UI-3** (🟠) — Table-extract rows and extracted text never survive a
+    document switch. Was: `B-page3-table.csv` contained doc A's cells — wrong content and a
+    cross-document leak.
+  - **AUDIT-2026-09-25 UI-11** (🟡) — The Compress projection and "target reached" outcome
+    are for the current document and revision, with ordered, error-handled refreshes.
+  - **AUDIT-2026-09-25 UI-12** (🟡) — Sign's "Sign here" suggestions are per document and an
+    armed stamp is cleared on tool change. Was: clicking a page in Outline or Normalize
+    silently placed a signature.
+  - **AUDIT-2026-09-25 UI-18** (🟡) — The alt-text scan is keyed on document revision, aborts
+    the previous run, and shows distinct loading/empty/error states; typed alt text is not
+    wiped by a page edit (found while fixing, §7). Was: rescans on every edit, stuck on
+    "Loading…".
+  - **AUDIT-2026-09-25 UI-25** (⚪) — The Sign panel recomposes only when doc id or pages
+    version changes, and handles rejection.
+  - **AUDIT-2026-09-25 UI-14** (🟡) — "Discard all changes" clears signature stamps and form
+    fields as its dialog promises. Test: `discardAllChanges.test.ts`.
+  - **AUDIT-2026-09-25 R-UI-1** — A moved form field's input moves with it (field geometry
+    in the debounced refetch key).
+  - **AUDIT-2026-09-25 R-UI-8** — Fields are not cleared mid-typing by a refetch.
+- **AC:** For every tool, opening doc B after configuring the tool on doc A shows defaults;
+  "Strip & export" with no Inspect leaves no Author/Title/XMP/JS in the output bytes; a CSV
+  exported on doc B contains only doc B's cells.
+
+### HRD-48 · Overlays, focus and keyboard operation never trap or misfire — `M` `P0`
+
+**Status: Done (AUDIT-2026-09-25 fixes, 2026-09-26; not regressed per AUDIT-2026-10-01 §0)**
+
+- **Requirements:**
+  - **AUDIT-2026-09-25 UI-2** (🟠) — A drop on the Home drop zone imports once
+    (`stopPropagation()` in the zone / `defaultPrevented` check in the window handler). Was:
+    every PDF opened as two tabs, a side effect of the 09-15 §1.1 fix. Test:
+    `tests/e2e/audit-2026-09-25.spec.ts`.
+  - **AUDIT-2026-09-25 UI-7** (🟠) — Escape closes only the top overlay (modal stack,
+    `stopImmediatePropagation()`), and the command palette cannot open while a modal is
+    open. Was: Ctrl+K → Esc over the restore prompt resolved "Start fresh" and permanently
+    cleared the session, and the same sequence cancelled an export review. Test:
+    `tests/e2e/audit-2026-09-25.spec.ts`. Also (§7): the modal key listener attaches in a
+    layout effect, so an Escape right after a dialog appears is not lost.
+  - **AUDIT-2026-09-25 UI-5** (🟠) — The shortcut recorder rejects reserved keys (Tab,
+    arrows, Enter, Space) and Tab exits record mode; Reset is keyboard operable. Was:
+    binding the palette to Tab hijacked Tab app-wide across reloads; ArrowRight bound to
+    Delete page turned grid navigation into deletion. Test: `shortcuts.test.ts` › "refuses
+    bindings that would trap keyboard navigation (UI-5)".
+  - **AUDIT-2026-09-25 R-UI-9** — Saved shortcuts that are no longer valid are reported, not
+    dropped silently.
+  - **AUDIT-2026-09-25 UI-6** (🟠) — A keyboard user can create a signature: the signature
+    modal uses `components/Tabs.tsx` (arrow-key roving tabindex), and Type and Import are
+    reachable without a pointer.
+  - **AUDIT-2026-09-25 UI-13** (🟡) — Alt+arrow reorder moves the selection as a block from
+    its min/max, not the focused index. Was: no-op or double jump; a non-contiguous selection
+    collapsed to the end. Test: `reorder.test.ts`.
+  - **AUDIT-2026-09-25 UI-17** (🟡) — Toasts sit above the action bar and never cover the
+    primary CTA; the visible count is capped. Test: `busy-guard.test.ts` › "toast cap
+    (UI-17)".
+  - **AUDIT-2026-09-25 R-UI-6** — The toast cap never evicts an unread error. Test:
+    `busy-guard.test.ts`.
+  - **AUDIT-2026-09-25 UI-21** (⚪) — RTL: `<html lang>` is set, arrow keys and drop halves
+    mirror, layout uses logical CSS properties (was 66 physical ones). Test:
+    `reorder.test.ts`.
+  - **AUDIT-2026-09-25 UI-22** (⚪) — A modal keeps `onClose` in a ref, so a re-render never
+    moves focus to the close button.
+  - **AUDIT-2026-09-25 R-UI-4** — A queued dialog takes focus when it opens, not the previous
+    dialog's.
+  - **AUDIT-2026-09-25 R-UI-7** — `aria-controls` survives the fixes.
+  - **AUDIT-2026-09-25 UI-26** (⚪) — Crop/annotation drag listeners and the history
+    transaction end on unmount.
+  - **AUDIT-2026-09-25 UI-28** (⚪) — Below 1100px the options sheet can be collapsed so it
+    never covers overlays.
+  - Checked clean by the audit, and must stay so: no `innerHTML`/`dangerouslySetInnerHTML`
+    anywhere; every colour token resolves; locale files are structurally identical; the
+    page grid is virtualised; object URLs are revoked (watermark, export review, signature).
+- **AC:** A Playwright run drops one PDF on Home and gets one tab; Ctrl+K → Esc over the
+  restore prompt leaves the prompt open and the session intact; a keyboard-only run creates
+  and places a signature; recording Tab as a shortcut is refused.
+
+### HRD-49 · Every user-facing string is translated, in the UI and in workers — `M` `P0`
+
+**Status: Done (AUDIT-2026-09-25 fixes, 2026-09-26; not regressed per AUDIT-2026-10-01 §0)** — `tests/unit/i18n-coverage.test.ts`, `worker-locale.test.ts`, `i18n-plural.test.ts`. Not reviewed by native speakers (NFR-04).
+
+- **Requirements:**
+  - **AUDIT-2026-09-25 UI-8** (🟠) — Every key passed to `t`/`translate`/`tPlural`/`tKey`
+    anywhere in `src/` (workers included) exists in all ten locales with every CLDR plural
+    category its language needs (`Intl.PluralRules`) and every `{placeholder}`, enforced by
+    a coverage test; registry strings (`core/tools.ts`) are translated at render time;
+    sentences are whole keys with params (no fragments, no `'s'` plural hack); every worker
+    pool sends `setLocale` on spawn and on language change, and the first call after a
+    spawn waits for it. English by design only for: internal invariant errors a user can't
+    trigger, text written into output documents, the exported compression report, log
+    lines. Was: 383 of 710 used keys in no locale, 136 unused keys, dozens of JSX literals,
+    while NFR-04 was marked Done.
+  - **AUDIT-2026-09-25 R-UI-2** / **AUDIT-2026-09-25 R-UI-3** — Command-palette and Home
+    search score translated and English text separately, so "red" + Enter cannot run Redo
+    and ranking does not shift. Test: `regression-review.test.ts` › "R-UI-2/3".
+  - **AUDIT-2026-09-25 N1** — No message added by the fixes ships untranslated (the §8
+    regression review found one).
+- **AC:** The coverage test fails on a newly added `t('…')` missing from any locale; with
+  Spanish selected, a worker-generated error appears in Spanish.
+
+### HRD-50 · Conversion and export treat every input as hostile — `M` `P1`
+
+**Status: Done (AUDIT-2026-09-25 fixes, 2026-09-26; not regressed per AUDIT-2026-10-01 §0)** — R-CONV-9 accepted as-is.
+
+- **Requirements:**
+  - **AUDIT-2026-09-25 CONV-3** (🟠) — PDF→Word and PDF→PowerPoint never write a character
+    XML 1.0 forbids: the shared `stripInvalidXmlChars` applies to every text run, cell and
+    title in every OOXML writer. Was: only `xlsx-writer.ts` had it; Office rejected or
+    "repaired" (dropping content) after a success toast. Test: `convert-xml-chars.test.ts`.
+  - **AUDIT-2026-09-25 CONV-4** (🟡) — The PowerPoint reader is linear-time (one tokenizer
+    pass) with a size cap per XML part. Was: a 1.4 KB crafted .pptx pinned the convert worker
+    29 s, ~4× per doubling, uncancellable. Test: `convert-hostile-input.test.ts` › "CONV-4".
+  - **AUDIT-2026-09-25 CONV-5** (🟡) — docx/xlsx/pptx entries are inflated into buffers one
+    byte larger than their declared size and refused as a bomb if exceeded (damaged if
+    short), with total-uncompressed and entry-count caps; only needed parts are inflated;
+    mammoth and SheetJS receive only a stored-only repack of vetted entries. Was: a 1.5 MB
+    .pptx allocated >1 GB. Test: `convert-hostile-input.test.ts` › "CONV-5".
+  - **AUDIT-2026-09-25 R-CONV-9** — Accepted limit: the 256 MB unpack cap refuses very large
+    workbooks.
+  - **AUDIT-2026-09-25 CONV-9** (🟡) / **AUDIT-2026-09-25 PLT-11** — Parsers of untrusted
+    files carry no known advisory: SheetJS is 0.20.3 from its official tarball, pinned by
+    integrity in the lockfile (fixes CVE-2023-30533 prototype pollution and CVE-2024-22363
+    ReDoS); an uncalculated formula reads as blank. Was: abandoned `xlsx@0.18.5` on npm.
+  - **AUDIT-2026-09-25 CONV-7** (🟡) — CSV export neutralises formula injection: a cell
+    starting with `= + - @ \t \r` is prefixed with `'` and quoted. Test:
+    `table-extract.test.ts` › "formula injection (CONV-7)".
+  - **AUDIT-2026-09-25 R-CONV-5** — The CSV guard does not prefix plain amounts, phone numbers
+    or @mentions. Test: `conv-regression-fixes.test.ts`.
+  - **AUDIT-2026-09-25 CONV-11** (⚪) — Markdown→PDF link URIs go through `new URL().href`
+    (non-Latin URLs intact) and only http(s) and mailto are written; `javascript:`/`file:`
+    are dropped. Test: `markdown-links-nesting.test.ts`.
+  - **AUDIT-2026-09-25 R-CONV-7** — `#anchor` and `tel:` links are handled deliberately.
+  - **AUDIT-2026-09-25 CONV-12** (⚪) — Markdown→PDF survives hostile nesting (5k `>`) and
+    pathological emphasis, is cancellable with determinate progress (JobHandle
+    checkpoints), caps input, catches `RangeError`, and reports dropped images. Was: stack
+    overflow, 9 s on a 30 KB pattern, silent image drops. Tests: `markdown-cancel.test.ts`,
+    `markdown-links-nesting.test.ts`.
+  - **AUDIT-2026-09-25 R-CONV-4** — The markdown guard never mangles code spans or URLs.
+  - **AUDIT-2026-09-25 R-CONV-6** — The deep-list note is not repeated in other locales.
+  - **AUDIT-2026-09-25 CONV-13** (⚪) — Text-diff export warns when non-WinAnsi text (CJK,
+    Cyrillic, Hebrew, emoji) had to be replaced, instead of silently writing `????`. Test:
+    `text-diff-export.test.ts` › "warns (CONV-13)".
+  - **AUDIT-2026-09-25 CONV-14** (⚪) — The word diff is Myers O((N+M)·D) in the `cv` worker,
+    off the main thread. Was: ~217 ms and 132 MB per page switch. Test: `diff.test.ts` ›
+    "Text Diff — Myers (CONV-14)".
+  - **AUDIT-2026-09-25 R-CONV-8** — Moderately different texts still get a fine-grained diff.
+  - **AUDIT-2026-09-25 CONV-15** (⚪) — The formula evaluator uses `Object.hasOwn` /
+    `Object.create(null)`, so a field named `constructor`, `toString` or `__proto__` neither
+    crashes nor is swallowed. Test: `formula.test.ts` › "field names that collide with
+    Object.prototype (CONV-15)".
+  - Checked clean by the audit, and must stay so: mammoth HTML never reaches the DOM; the
+    xlsx writer uses inline strings; OCR SHA-256 verification is correct; shard path
+    traversal is blocked; zxing WASM is local; the formula parser has no eval and has
+    depth caps.
+- **AC:** The hostile-input corpus (quadratic pptx, zip bomb, invalid XML chars, `=cmd`
+  cells, `javascript:` links, 5k-deep quote, prototype-named fields) each produces either a
+  valid file re-parsed from bytes or a specific refusal, within a bounded time, cancellable.
+
+### HRD-51 · Image import is faithful and works in the shipped extension — `M` `P0`
+
+**Status: Done in code; HEIC-in-extension is a manual check (AUDIT-2026-09-25 fixes, 2026-09-26; not regressed per AUDIT-2026-10-01 §0)** — `tests/e2e/extension/extension.spec.ts` still has no HEIC case (CNV-03). libheif's LGPL-3.0 licence is an explicit legal-review gate in `RELEASE_CHECKLIST.md` §1 before the first store submission.
+
+- **Requirements:**
+  - **AUDIT-2026-09-25 CONV-1** (🟠) / **AUDIT-2026-09-25 PLT-1** — HEIC decodes in the
+    shipped extension under its MV3 CSP: libheif-js (WASM, no `eval`/`new Function`) in its
+    own bundled worker, with EXIF/HEIF orientation, cancel and a timeout that terminate the
+    worker; the ~1.9 MB WASM is a lazy chunk loaded only for HEIC. Was: heic2any's
+    `new Function` was blocked by the CSP and its promise never settled — a spinner forever
+    in both extension builds, while CNV-03 was Done on a web-preview e2e. Tests:
+    `raster-decode.test.ts`, `image-import.test.ts`; manual check in loaded `dist/ext`.
+  - **AUDIT-2026-09-25 CONV-10** (🟡) — "Maximum" image import never re-encodes losslessly
+    held data: PNG is embedded losslessly and original JPEG bytes pass through. Was: "100%
+    (Lossless)" was a lossy JPEG re-encode. Test: `image-import.test.ts` › "lossless image
+    import (CONV-10)".
+  - **AUDIT-2026-09-25 R-CONV-1** — Originals are embedded with EXIF applied at placement;
+    photos decoded from HEIC/TIFF/WebP are 95% JPEG; the option is labelled "Maximum
+    (originals kept where possible)". Was: 23 MB PNGs. Test: `image-import.test.ts`.
+  - **AUDIT-2026-09-25 R-CONV-2** — JPEG passthrough keeps the ICC profile. Test:
+    `image-import.test.ts`.
+  - **AUDIT-2026-09-25 R-CONV-3** — Concurrent HEIC/TIFF decodes queue instead of cancelling
+    each other. Test: `image-import.test.ts`.
+  - **AUDIT-2026-09-25 CONV-16** (⚪, cited in code as `audit 2026-09-25 CNV-16`) — TIFF
+    decodes in the image worker, not on the main thread; and the OCR model download
+    streams with byte progress against the expected total and is cut off past twice the
+    pinned size (or a too-large `Content-Length`) before hashing or buffering it all.
+    Tests: `raster-decode.test.ts` › "TIFF decode (CONV-16)", `ocr.test.ts` (CNV-16 cases).
+- **AC:** In the loaded `dist/ext`, `sample.heic` and `photo-rotated.heic` import upright with
+  zero CSP violations (automate in the extension project); an upright JPEG imported at
+  Maximum is byte-identical inside the PDF.
+
+### HRD-52 · Network exceptions are pinned, consented, counted — and nothing leaves the device unseen — `M` `P0`
+
+**Status: Done (AUDIT-2026-09-25 fixes, 2026-09-26; not regressed per AUDIT-2026-10-01 §0)** — OCR is now the only network exception; face weights are bundled.
+
+- **Requirements:**
+  - **AUDIT-2026-09-25 CONV-2** (🟠, cited in code as `audit 2026-09-25 CNV-2`) — Tesseract
+    can never fetch on its own: `cacheMethod: 'readOnly'`, a `langPath` that cannot reach the
+    network, an engine that can't load the model is fatal for the whole run (not a per-page
+    skip), and the CSP is path-scoped (HRD-53). Was: after a failed init, tesseract.js 7
+    deleted its cache and the next page fetched an unpinned, unhashed model from
+    `cdn.jsdelivr.net` without consent — a breach of invariant #1. Test: `ocr.test.ts` ›
+    "a tesseract cache miss can never fetch (CNV-2)".
+  - **AUDIT-2026-09-25 CONV-8** (🟡, cited in code as `audit 2026-09-25 CNV-8`) — An uploaded
+    offline model is trial-loaded before it is kept, and there is a control to remove stored
+    language models. Was: a bad upload was re-seeded before every run with no way to replace
+    it. Test: `conv-regression-fixes.test.ts`.
+  - **AUDIT-2026-09-25 CONV-6** (🟡, cited in code as `audit 2026-09-25 CNV-6`) /
+    **AUDIT-2026-09-25 PLT-8** — Face-detector weights are bundled from
+    `@vladmandic/face-api/model/`: no download, no consent dialog, no CSP allowance. Any
+    model that must stay remote is SHA-256-pinned like OCR's. Was: a length check against a
+    remote unverified manifest with `force-cache`, so tampered weights could report "no faces
+    found" and leave faces visible. Test: `faceblur-offline.test.ts`.
+  - **AUDIT-2026-09-25 PLT-5** (🟠, privacy) — Read-aloud speaks only with voices whose
+    `localService` is true; with none, the tool is disabled with an explanation. Was: on
+    ChromeOS, Linux without speech-dispatcher, or a "Google …" default voice, page text was
+    synthesised server-side — invisible to CSP, DevTools and Playwright — while the chip said
+    "0 requests". Test: `read-aloud-voices.test.ts`.
+  - **AUDIT-2026-09-25 PLT-16** (⚪) — The "Offline · 0 requests" chip is driven by a counter
+    (`core/disclosedDownloads.ts`) that each completed, verified consented download
+    increments. Was: a fixed string. Test: `ocr.test.ts` › "counts a completed, verified
+    download for the top-bar chip (PLT-16)".
+- **AC:** With a deliberately wrong offline model, a 3-page OCR run makes zero requests and
+  fails with a clear message; face blur in the loaded extension makes zero requests; with
+  only network voices available, read-aloud is disabled; the chip reads 1 after one
+  verified OCR download.
+
+### HRD-53 · Zero network is enforced by the runtime, not by regex (root cause M9) — `M` `P0`
+
+**Status: Done (AUDIT-2026-09-25 fixes, 2026-09-26; not regressed per AUDIT-2026-10-01 §0)** — `scripts/csp.mjs`, `scripts/network-guard.mjs`, `pnpm check:bundle-network`. Limit stated: static analysis cannot follow values across modules or through returns; the bundle scan and CSP cover that.
+
+- **Requirements:**
+  - **AUDIT-2026-09-25 M9** — The CSP is the real guarantee (strict, path-scoped, generated
+    from one source for both builds); ESLint `no-restricted-globals`/`-properties` ban
+    network APIs; a post-build scan of `dist/` checks hosts against an allowlist. Guards
+    must accept (indeed require) the tighter, path-scoped policy.
+  - **AUDIT-2026-09-25 PLT-3** (🟠) — The extension CSP is `default-src 'self'`,
+    `object-src`/`frame-src`/`base-uri`/`form-action` `'none'`, `img-src 'self' blob: data:`,
+    and `connect-src` limited to the exact pinned OCR model paths. Was: no `default-src`
+    (remote img/style/iframe went out, so `new Image().src` beacons worked) and
+    `connect-src https://cdn.jsdelivr.net`, which with `'wasm-unsafe-eval'` allowed fetching
+    and running remote WASM; the guards rejected anything tighter than a bare host. Tests:
+    `csp.test.ts`, `tests/e2e/manifest.spec.ts`.
+  - **AUDIT-2026-09-25 PLT-4** (🟠) — The web twin ships the same CSP as the first
+    `<meta http-equiv>` of every page (GitHub Pages cannot set headers), asserted in
+    `zero-network.spec`. Was: none of the 12 root HTML pages had a CSP. Tests: `csp.test.ts`,
+    `tests/e2e/zero-network.spec.ts`.
+  - **AUDIT-2026-09-25 PLT-6** (🟡) — Both invariant guards use one AST analyzer that
+    resolves aliases, constant-folded keys (`'fe'+'tch'`, templates, `join`, `atob`),
+    global-object aliases and unresolvable computed global access, remote `import()` and
+    workers, URL sinks, CSS `url()`/`@import`, HTML resource attributes, and scans root
+    `*.html`. Was: ~25 of 30 bypass payloads missed, root HTML never scanned
+    (`editor.html` had a raw `#ffffff`), no bundle scan. Test: `network-guard.test.ts`
+    (69 bypasses, 26 negatives).
+- **AC:** In the loaded extension and the CSP-protected web build: zero violations on load,
+  and remote img/style/iframe/fetch/WASM probes are all blocked; adding any of the 69
+  bypass payloads fails `pnpm check`; a remote URL in a built bundle fails
+  `check:bundle-network`.
+
+### HRD-54 · "Done" means it works in the shipped build, proven on output bytes (roots M4, M8; §4 claims) — `M` `P0`
+
+**Status: Partly done** — the extension Playwright projects, CI on `master` and the non-retried perf job landed with the fixes (2026-09-26) and AUDIT-2026-10-01 found no regression. M8's discipline and M4's "verified in the loaded extension" line are now in the Definition of Done at the top of this file. **Open:** the per-tool flows still run on the web preview only, the extension project being a smoke set; whether a GitHub CI run has happened was not confirmable from the audit environment.
+
+Every e2e spec ran against `vite preview` (no MV3 CSP, test hooks on), CI triggered on a
+branch that did not exist, and fixes were tested without the pipeline step that follows
+them. Five findings contradicted claims of earlier audits (⟲ REGRESSION), and ten tickets
+were Done on the strength of tests that could not have caught them.
+
+- **Requirements:**
+  - **AUDIT-2026-09-25 M4** — Anything touching workers, WASM or third-party decoders is
+    verified in the loaded extension (Playwright `--load-extension` on `dist/ext`), and
+    that is part of the Definition of Done. This is also the audit's GAP-1 ("make Done mean
+    works in the shipped build": extension e2e project, working CI, post-build host scan),
+    which EPIC-18 records on the tickets it reopened rather than as its own ticket.
+  - **AUDIT-2026-09-25 M8** — Regression tests run user flows end-to-end through the real
+    pipeline, including the default path where the user skips the optional button, and
+    assert on real output bytes. Was: the OCG test skipped the scrub (PDF-5), the metadata
+    e2e always clicked Inspect (UI-1), the HEIC e2e never saw the CSP (CONV-1).
+  - **AUDIT-2026-09-25 §4 claims** — A claim of "fixed", "Done" or "fails CI" in an audit or
+    ticket must cite a test that asserts on output bytes in the build that ships, or say it
+    is a manual check. Each contradicted claim stays recorded until it holds: redaction
+    "shares one copier" (PDF-7), OCG preserved by redaction (PDF-5), G4 lease "just rejects"
+    (RT-1), HEIC "working code paths" (CONV-1), "fails CI" (PLT-2), read-aloud "on-device"
+    (PLT-5), "Cloudflare Pages with headers" (PLT-4), "all locales complete" (UI-8), face
+    model "pinned like OCR" (CONV-6).
+  - **AUDIT-2026-09-25 PLT-2** (🟠) — CI triggers on push/PR to `master`, and
+    `package.json` pins `packageManager` so `pnpm/action-setup` resolves. Was: `branches:
+    [main]`; `gh run list` showed only Pages deploys, so every "fails CI" AC in QA-03, QA-04
+    and NFR-02 had never run.
+  - **AUDIT-2026-09-25 PLT-7** (🟡) — Playwright `extension` projects build and load the real
+    `dist/ext` and fail on any network request, CSP violation or page error (load, licence
+    file, PNG import, merge, face blur), as CI job `e2e-extension`; the zero-network sweep
+    also covers read-aloud, reflow, history, side-by-side, barcode scanning and face blur.
+    Tests: `tests/e2e/extension/*`.
+  - **AUDIT-2026-09-25 PLT-15** (⚪) — `tests/`, `scripts/` and configs are type-checked
+    (`tsconfig.test.json` in `check:type`). Found while fixing (§7): two `process.test.ts`
+    tests asserted nothing (wrong replacement key; a 3-byte base image the never-grow rule
+    always kept), and `ProcessJob.composeSplit`'s declared type omitted `fileCount` — both
+    repaired.
+  - **AUDIT-2026-09-25 PLT-18** (⚪) — Perf budgets run in their own never-retried `perf`
+    project/job (`tests/e2e/perf.spec.ts`) recording measured vs budget; functional e2e
+    allows at most one retry with `failOnFlakyTests`; e2e waits on conditions, never races
+    the UI (§7: a drag before render, one "Dismiss" for two toasts, a bare
+    `getByRole('status')`; the OCR-01 e2e never clicked through the export review; the
+    Compress preview reported `ready` for the wrong page).
+- **AC:** CI on a PR to `master` runs `e2e`, `e2e-extension`, `perf` and `bundle-network`;
+  a deliberately broken worker/WASM import fails `e2e-extension`; the Definition of Done in
+  TICKETS.md carries the M4 and M8 lines.
+
+### HRD-55 · Build output, packaging, browser floors and docs match what ships — `S` `P1`
+
+**Status: Done (AUDIT-2026-09-25 fixes, 2026-09-26; not regressed per AUDIT-2026-10-01 §0)** — floors accepted as final by the owner (2026-09-27).
+
+- **Requirements:**
+  - **AUDIT-2026-09-25 PLT-9** (🟡) — The manifests declare the floors the bundled pdf.js
+    really needs, tied to the pdf.js version by a test (`scripts/browser-floors.mjs`):
+    `minimum_chrome_version` 147 and gecko `strict_min_version` 144.0 (pdf.js 6 calls
+    `Math.sumPrecise`, `Map.prototype.getOrInsertComputed`, `Uint8Array.fromBase64`,
+    `Promise.try` unguarded); switching to `pdfjs-dist/legacy` is the only way to lower
+    them. Was: no Chrome floor and Firefox 112, so stores accepted installs that could not
+    render. Tests: `browser-floors.test.ts`, `firefox-manifest.test.ts`, `manifest.spec.ts`.
+  - **AUDIT-2026-09-25 PLT-10** (🟡) — Tooling hooks and documented commands actually run:
+    the Prettier PostToolUse hook calls `node_modules/.bin/prettier`, CLAUDE.md documents
+    pnpm, and the permission allowlist grants `pnpm *` and direct `node_modules/.bin/…`
+    tools. Was: `npm`/`npx` fail with `EBADDEVENGINES`, so the hook had never run.
+  - **AUDIT-2026-09-25 PLT-12** (⚪) — Both builds ship `THIRD_PARTY_LICENSES.txt` (Apache
+    NOTICE for pdf.js, tesseract, tfjs; LGPL for libheif) generated at build time. Tests:
+    `third-party-licenses.test.ts`, `a11y-and-perf.spec.ts`, `extension.spec.ts`.
+  - **AUDIT-2026-09-25 PLT-13** (⚪) — Sourcemaps are `hidden` and never in the store zip
+    (`pnpm package` strips `*.map`). Was: 23 MB of a 44 MB extension build.
+  - **AUDIT-2026-09-25 PLT-14** (⚪) — `public/` is filtered per target (no
+    `robots.txt`/`sitemap.xml` in the extension, no extension `manifest.json` on the web)
+    and modulepreload is off for the extension. Test: `extension.spec.ts`.
+  - **AUDIT-2026-09-25 PLT-17** (⚪) — Docs match reality: load `dist/ext`; OCR's first use
+    needs the network; the feature list matches the tool registry; workers live in
+    `src/core/workers/`; the web twin deploys to GitHub Pages.
+  - **AUDIT-2026-09-25 PLT-19** (⚪) — The `<input type=file>` fallback uses the `cancel`
+    event, with focus only as a last resort, so a slow selection is never dropped. Test:
+    `file-input-fallback.test.ts`.
+  - **AUDIT-2026-09-25 UI-29** (⚪) — The dev component gallery is gated on
+    `import.meta.env.DEV` and absent from production builds.
+- **AC:** `pnpm package` output contains no `*.map`, includes the licence file, and its
+  manifests carry the tested floors; `#/dev/components` 404s in `dist/ext`.
+
+### HRD-60 · Engineering rules from recurring bug patterns — `S` `P1`
+
+**Status: Done (2026-10-02) for the shared helpers; two guard rails remain open** — the shared
+helpers exist (`src/core/page-version.ts`, `size-guard.ts` `chooseSmaller`, `page-range.ts`
+`parsePageRange`, `bytes.ts` `formatBytes`/`formatBytesUp`) and every known instance is
+fixed. Still open: (1) `@typescript-eslint/no-floating-promises` is not enabled in
+`eslint.config.js`; (2) the i18n literal scan covers only `src/core/operations.ts`
+(`tests/unit/operations-i18n-labels.test.ts`), not every `stage()`/`progress()`/`detail`
+literal in `src/`.
+
+Nine root causes produced most of the audit's findings. Each is now a rule for new code,
+so the next instance is caught in review or by a gate, not by the next audit.
+
+- **Requirements:**
+  - **AUDIT-2026-10-01 pattern 1** — every per-document cache (bytes, text, rasters, diff
+    images) is keyed on the page list (`page-version.ts`), never on `doc.id` alone, and is
+    dropped when the pages change. Was: Read aloud (UI-1), Reflow (X-11) and Compare (X-13)
+    served deleted pages.
+  - **AUDIT-2026-10-01 pattern 2** — "never larger than the input" is enforced once, by
+    `chooseSmaller(original, result)` (`src/core/size-guard.ts`) in the commit path of every
+    size-reducing tool, not tool by tool. Was: Image to size guarded only upright JPEGs
+    (IMG-1), Grayscale only warned (UI-OPS19), Compress + Protect skipped the guard (IMG-5).
+  - **AUDIT-2026-10-01 pattern 3** — every success message ("Reached", "Opened X", "Repaired")
+    is computed from the bytes actually saved and the return value actually received, never
+    from intent flags. Was: IMG-5, RT-2, Image to size "Reached" on a re-encode that grew.
+  - **AUDIT-2026-10-01 pattern 4** — verify the output, not the plan: verification also
+    covers fallback paths (rasterised pages, salvage), and risky recovery runs only on
+    evidence of damage. Was: PDF-2, PDF-1 (trailer-only encryption check), PDF-3.
+  - **AUDIT-2026-10-01 pattern 5** — one input has one parser: page ranges go through the
+    exported `parsePageRange` (`src/core/page-range.ts`) in preview and worker alike, and a
+    non-empty range that selects zero pages is a visible warning. Was: X-7, X-8.
+  - **AUDIT-2026-10-01 pattern 6** — byte sizes are decimal (1 KB = 1000 B) everywhere, shown
+    by one formatter and read by one parser (`src/core/bytes.ts`); a size that missed its
+    target is rounded up (`formatBytesUp`). Was: IMG-3, IMG-4, IMG-11, X-10.
+  - **AUDIT-2026-10-01 pattern 7** — no whole-document-in-memory loops: page work runs in
+    bounded batches and each document is loaded once per operation. Was: PDF-5, X-4, X-5.
+  - **AUDIT-2026-10-01 pattern 8** — every async UI effect has an error state: no promise
+    without a `.catch`/try, no speech or media object without `onerror`. Enforce with
+    `@typescript-eslint/no-floating-promises` (not yet enabled). Was: UI-2, X-11, X-12.
+  - **AUDIT-2026-10-01 pattern 9** — no user-visible English outside `t()`/`translate()`,
+    including progress stage labels and `detail` strings; the i18n coverage scan must see
+    string literals passed to `stage()`/`progress()`/`detail` (today only for
+    `operations.ts`). Was: X-14, UI-12.
+  - **Keep sound (checked 2026-10-01):** `permissions: []` on every build (`omnibox` is a
+    key, not a permission); the manifest CSP equals `STAPLER_CSP`; no `chrome.*` outside
+    the allowed layers; deep-link values are rejected or clamped and reach only signals;
+    the worker client rejects pending calls on crash, balances `pin()`/`release()` and
+    never reuses a transferred `ArrayBuffer`; the document cap holds on every external open
+    path; undo stays within the active document; object URLs are revoked; no `setInterval`;
+    commit and CTA have a double-run guard.
+- **AC:** A new instance of any pattern fails a gate or a named test, not only review.
+  Met for patterns 1–7 by the tests in HRD-61..HRD-67; unmet for pattern 8 (no lint rule)
+  and pattern 9 outside `operations.ts`.
+
+### HRD-61 · PDF internals: grayscale and repair integrity — `M` `P1`
+
+**Status: Done (2026-10-02)** — all nine findings fixed. Known limit: pdf-lib cannot save
+incrementally, so the output document still grows to the output size during PDF-5's
+batches.
+
+Grayscale (OPS-19) and Repair (DOC-13) each made a guarantee their own checks did not
+prove.
+
+- **Requirements:**
+  - **AUDIT-2026-10-01 PDF-1** — Repair refuses an encrypted file even when its trailer is
+    lost: it refuses on a security-handler dict (`/Filter` + `/O` + `/U`) or a raw
+    `/Encrypt` name **outside stream data**. Was: an encrypted file cut before its final
+    `xref` was "rebuilt", reported as a success, and saved as ciphertext with no
+    `/Encrypt` (`src/core/pdf/repair.ts`). Tests: `tests/unit/repair.test.ts` (PDF-1 cases).
+  - **AUDIT-2026-10-01 PDF-2** — grayscale verification counts raster reasons as colour
+    left; a rasterised page is rendered with its annotations and the drawn annotations are
+    hidden. Was: the fallback render used `annotationMode: DISABLE`, the colour annotation
+    stayed on top, and max chroma was 255 before and after. Tests:
+    `tests/unit/grayscale-audit.test.ts`.
+  - **AUDIT-2026-10-01 PDF-3** — salvage runs only on evidence of damage (bad xref, missing
+    `%%EOF`) and skips matches inside parsed stream ranges; an intact file round-trips as
+    already valid. Was: `salvageDroppedObjects` regex-scanned stream bytes for `N G obj`,
+    reported intact files as damaged and could inject or replace objects. Tests:
+    `tests/unit/repair.test.ts`, `tests/unit/repair-intact.test.ts`,
+    `tests/e2e/repair-intact.spec.ts`.
+  - **AUDIT-2026-10-01 PDF-4** — a Type 0 function with m > 1 inputs uses multilinear
+    interpolation (up to 8 inputs) and returns null (rasterise) above that. Was:
+    nearest-neighbour lookup gave wrong DeviceN greys with hard jumps
+    (`src/core/pdf/functions.ts`). Tests: `tests/unit/functions.test.ts`.
+  - **AUDIT-2026-10-01 PDF-5** — grayscale plans, decodes and applies in batches of 8 pages
+    through a process-worker session (`grayscaleBegin` / `grayscaleApplyBatch` /
+    `grayscaleFinish`); converter memos persist across batches so shared objects are
+    written once and the output is byte-identical to a single batch. Was: every page's
+    decoded images and rasters were held at once (~2.5 GB for 300 pages at 300 dpi).
+    Tests: `tests/unit/grayscale-audit.test.ts`, `tests/unit/grayscale-batching.test.ts`.
+  - **AUDIT-2026-10-01 PDF-6** — a resource-less shared Form XObject is converted once
+    (memoised by object plus inherited resources). Was: one form became N copies. Tests:
+    `tests/unit/grayscale-audit.test.ts`.
+  - **AUDIT-2026-10-01 PDF-7** — a PostScript-function stack underflow throws, and the
+    tint returns null (rasterise), never zeros. Was: a malformed tint mapped to the wrong
+    grey. Tests: `tests/unit/functions.test.ts`, `tests/unit/grayscale-audit.test.ts`.
+  - **AUDIT-2026-10-01 PDF-8** — a content-parse failure is reported for what it is. Was:
+    every parse error said "contains an inline image" (`grayscale.ts`). Tests:
+    `tests/unit/grayscale-parse-errors.test.ts`.
+  - **AUDIT-2026-10-01 PDF-9** — `renderPageGray` takes the job handle and is cancellable;
+    repair scans the bytes directly. Was: no cancellation, and repair built two
+    whole-file latin1 strings. Tests: `tests/unit/grayscale-audit.test.ts`.
+- **AC:** Each test above fails before the fix and passes after; an encrypted file with a
+  lost trailer is refused; eleven intact fixtures round-trip as already valid with
+  unchanged text; a page rasterised for an annotation has R = G = B on every sampled
+  pixel.
+
+### HRD-62 · Runtime, history and local-data integrity — `M` `P1`
+
+**Status: Done (2026-10-02)** — all ten findings fixed. Known limits: the web-twin precache
+survives Clear-all (app code, not user data); granted persistence cannot be revoked by a
+page.
+
+Undo, Repair's open path, session restore and Clear-all (DOC-14, DOC-15, DS-12) could lose
+work or claim a deletion that did not happen.
+
+- **Requirements:**
+  - **AUDIT-2026-10-01 RT-1** — undo and redo never restore `dirty` or `baseline` from a
+    snapshot: `rebaseHistory()` re-anchors every snapshot on save, `dirty` is recomputed
+    against the live baseline, and `sourceHandle` stays live. Was: rotate → Save over
+    original → Ctrl+Z left the page unrotated but marked clean, so closing gave no prompt
+    (`src/core/history.ts`). Tests: `tests/unit/runtime-audit-2026-10-01.test.ts`.
+  - **AUDIT-2026-10-01 RT-2** — "Open repaired" checks `workspaceOpenCapacity(1)` first,
+    releases the source on refusal, has an in-flight guard, and reports success only when
+    `addDocument()` returned true. Was: a success toast with no tab at the 20-document cap,
+    an orphaned OPFS source, and two copies on double-click (`RepairPanel.tsx`,
+    `repair/state.ts`). Tests: `tests/unit/runtime-audit-2026-10-01.test.ts`.
+  - **AUDIT-2026-10-01 RT-3** — Clear-all counts OPFS `removeEntry` failures and shows the
+    partial-clear warning (`isPartialClear`). Was: a locked pre-redaction original survived
+    while the user was told everything was deleted (`opfs.ts`, `local-data.ts`). Tests:
+    `tests/unit/runtime-audit-2026-10-01.test.ts`.
+  - **AUDIT-2026-10-01 RT-4** — the other-tab check (`otherStaplerTabsOpen()`) runs again
+    after the confirm dialog. Was: a tab opened while the dialog was up had its sources
+    deleted from under it (`src/ui/clearLocalData.ts`). Tests:
+    `tests/unit/local-data.test.ts` ("RT-4 — refuses when another tab opens…").
+  - **AUDIT-2026-10-01 RT-5** — the tesseract-cache IndexedDB open is raced against
+    `DB_OPEN_TIMEOUT_MS`, and a connection arriving after the timeout is closed. Was: no
+    timeout or `onblocked`, so Clear-all could hang with autosave suspended. Tests:
+    `tests/unit/runtime-audit-2026-10-01.test.ts`.
+  - **AUDIT-2026-10-01 RT-6** — session restore trims to `MAX_OPEN_DOCUMENTS` in
+    `checkRecovery`, keeps the active document, and reports cap drops separately from lost
+    data. Was: a 30-document record restored all 30. Tests:
+    `tests/unit/runtime-audit-2026-10-01.test.ts`.
+  - **AUDIT-2026-10-01 RT-7** — restored history obeys the per-document depth and
+    `MAX_TOTAL_SNAPSHOTS` (sparing the active document). Was: restored redo stacks were
+    uncapped. Tests: `tests/unit/runtime-audit-2026-10-01.test.ts`.
+  - **AUDIT-2026-10-01 RT-8** — Clear-all deletes the `stapler-meta` IndexedDB database, with
+    a bounded wait that resolves false when blocked. Was: it survived. Tests:
+    `tests/unit/runtime-audit-2026-10-01.test.ts`.
+  - **AUDIT-2026-10-01 RT-9** — `persist()` is asked at most once per session even when the
+    outcome cannot be stored, and no toast shows when the outcome was not recorded. Was:
+    "ask once" depended on an IndexedDB write, so a failed write re-asked and re-toasted
+    every session (`storage-persistence.ts`). Tests: `tests/unit/local-data.test.ts`
+    ("RT-9: asks at most once per session…").
+  - **AUDIT-2026-10-01 RT-10** — no `*.orig` (or other merge-backup) file is tracked;
+    `*.orig` is in `.gitignore`. Was: eight tracked `.orig` files from 634eb74 made grep
+    return duplicate definitions.
+- **AC:** The named tests pass; after Clear-all with a locked file the UI says the clear was
+  partial; `git ls-files '*.orig'` is empty.
+
+### HRD-63 · Web twin service worker, share target and release pipeline — `M` `P1`
+
+**Status: Done (2026-10-02) in code and CI; four checks not verifiable here** — a real Android
+share, Lighthouse installability, an OS "Open with" launch, and a release workflow run on a
+real tag. RELEASE_CHECKLIST.md carries the manual Android share step.
+
+The web twin (DIST-06) could run new HTML with old JS, lose its tool code in a second tab,
+and accept a cross-site share; the release (DIST-07) did not ship what it tested.
+
+- **Requirements:**
+  - **AUDIT-2026-10-01 PLT-1** — a page and its scripts always come from one build: entry
+    files are hashed on the web build, pages are served cache-first from the controlling
+    worker's own cache, and installs are SHA-256-checked. The host must serve build output
+    byte for byte (RELEASE_CHECKLIST.md website deploy step). Was: network-first pages with
+    unhashed cache-first `[name].js` ran v2 HTML on v1 `editor.js` and broke the next
+    offline launch (`src/platform/pwa/service-worker.ts`, `vite.config.ts`). Tests:
+    `tests/unit/pwa-sw-routing.test.ts`, `tests/unit/pwa-build.test.ts`.
+  - **AUDIT-2026-10-01 PLT-2** — every worker imports `src/core/workers/network-guard.ts`
+    first, so worker `fetch`/XHR/WebSocket refuse remote URLs on the website too; cases the
+    guard cannot cover are listed in `scripts/csp.mjs`. Was: the web CSP is a `<meta>`,
+    which does not apply to workers, and GitHub Pages sends no CSP header. Tests:
+    `tests/unit/network-guard-worker.test.ts`.
+  - **AUDIT-2026-10-01 PLT-3** — a share-target POST is classified as reject, verified or
+    unverified; a cross-site one is rejected, and an unverified one (no Origin, referrer or
+    client: every real OS share) is held in the inbox and imported only after "Open N
+    shared files?" is confirmed. Was: any site could auto-submit a form to `/share-target`
+    and open an attacker-chosen PDF (`sw-routing.ts`, `src/ui/pwa.ts`). Tests:
+    `tests/unit/share-consent.test.ts`, `tests/unit/pwa-sw-routing.test.ts`,
+    `tests/e2e/pwa-share-consent.spec.ts`.
+  - **AUDIT-2026-10-01 PLT-4** — an update applied in one tab never strands another: the old
+    cache is kept until its clients are gone; a cold-started worker holds same-origin GETs
+    until it has read the kept-cache record and then serves the kept file or forwards the
+    original `Request` unchanged (`src/platform/pwa/passthrough.ts`: same-origin GET only,
+    query, headers and real status intact); a hard-reloaded tab detects an update applied
+    elsewhere. Was: tab A's update deleted the old cache and tab B's tool code 404ed.
+    Tests: `tests/unit/pwa-sw-routing.test.ts`, `tests/unit/pwa-launch.test.ts`.
+  - **AUDIT-2026-10-01 PLT-5** — Clear-all deletes the `stapler-share-inbox` cache; inbox
+    batches older than 10 minutes, malformed or future-dated are swept on every normal start
+    and before each new share, never on a share-target launch. Was: shared files could stay
+    indefinitely. Tests: `tests/unit/share-inbox-expiry.test.ts`,
+    `tests/unit/runtime-audit-2026-10-01.test.ts`.
+  - **AUDIT-2026-10-01 PLT-6** — the network fallback for a page has a ~3 s timeout behind
+    cache-first serving. Was: no timeout, so offline launch stalled on a flaky connection.
+    Tests: `tests/unit/pwa-sw-routing.test.ts`.
+  - **AUDIT-2026-10-01 PLT-7** — the release builds once, then tests and publishes those same
+    zips as a draft release with a web zip and a `.sha256` per file; `perf` is in `needs`;
+    the `e2e-web-shipped` job unzips the shipped web zip, checks it holds no test hooks, and
+    runs the zero-network, offline and share specs against those bytes. Was: the release
+    job rebuilt instead of shipping the tested artifacts (`.github/workflows/release.yml`).
+    Tests: `tests/e2e/pwa-shipped.config.ts`, `tests/e2e/pwa-shipped-network.spec.ts`.
+- **AC:** The named tests and the zero-network e2e pass; `dist/ext` still has no service
+  worker registration or web manifest. Manual, before a release: a real Android share,
+  Lighthouse installability, OS "Open with", and one run of the workflow on a real tag.
+
+### HRD-64 · Image tools and size honesty — `M` `P1`
+
+**Status: Done (2026-10-02)** — all twelve findings and UI-OPS19 fixed. Design decision kept:
+Grayscale warns about growth and does not block (see UI-OPS19).
+
+Size-reducing and resizing tools (CNV-14, DIST-08, DOC-07, OPS-15) must never save a
+bigger file than they were given, never report a target they missed, and never quietly run
+a value other than the one typed.
+
+- **Requirements:**
+  - **AUDIT-2026-10-01 IMG-1** — for every format, the original is kept whenever it already
+    satisfies the request and the result is not smaller (`chooseSmaller()`,
+    `src/core/size-guard.ts`). Was: only upright JPEGs had the fallback; a PNG grew
+    1,379 → 2,077 B and was reported "Reached" (`commit.ts`, `image-target.ts`). Tests:
+    `tests/unit/size-honesty-commit.test.ts`, `tests/unit/bytes-and-size-guard.test.ts`,
+    `tests/unit/image-size-audit.test.ts`.
+  - **AUDIT-2026-10-01 IMG-2** — an out-of-range amount shows an inline error and the run
+    refuses rather than using a previous value; a unit change converts the amount and is
+    bounds-checked. The same rule (`targetKbInRange`, via `validateSizeParam`) applies to
+    PDF to Images "Size per image". Was: "4 KB" silently ran 50 KB; 0.5 MB → KB became
+    500 B (`ImageSizePanel.tsx`). Tests: `tests/unit/size-honesty-commit.test.ts`,
+    `tests/unit/image-size-audit.test.ts`.
+  - **AUDIT-2026-10-01 IMG-3** — a size that missed its target is rounded up
+    (`formatBytesUp`), and display switches to MB at 999,500 B. Was: "Could not reach
+    200 KB. The smallest Stapler could make is 200 KB." Tests:
+    `tests/unit/bytes-and-size-guard.test.ts`, `tests/unit/size-honesty-commit.test.ts`.
+  - **AUDIT-2026-10-01 IMG-4** — split-by-size uses `targetSizeKb * 1000`. Was: `* 1024`,
+    so "5000 KB" allowed 5.12 MB parts that fail a 5 MB portal limit (`commit.ts`; X-9
+    merged here).
+  - **AUDIT-2026-10-01 IMG-5** — the Compress "Reached" toast is gated on the final written
+    size (`finalSize <= targetBytes`), Protect overhead included. Was: it ignored
+    encryption overhead. Tests: `tests/unit/size-honesty-commit.test.ts`.
+  - **AUDIT-2026-10-01 IMG-6** — "longest side at most N" never yields N+1 px (canvas sized
+    with `fitWithin` / floored with an epsilon). Was: a 595 pt page gave 401/801/1601 px
+    (`render.worker.ts`). Tests: `tests/unit/operations-sized-image.test.ts`,
+    `tests/unit/cnv14-pdf-to-img.test.ts`.
+  - **AUDIT-2026-10-01 IMG-7** — the PDF to Images size estimate uses the first page's
+    rotated viewport and caps the longest side. Was: a hard-coded 595 pt width capped on
+    width (`PdfToImagePanel.tsx`).
+  - **AUDIT-2026-10-01 IMG-8** — the pixel limit is checked from each format's header before
+    decoding (JPEG via `readJpegInfo`'s SOF; post-decode check when there is no usable
+    SOF), and throws `unsupported` naming the dimensions. The same limit guards Images to
+    PDF's main-thread decode (`imageFileToPdfImages`: header in the first 1 MB, else the
+    decoded bitmap). Was: a 20000×20000 PNG gave a cryptic canvas/OOM error
+    (`image.worker.ts`). Tests: `tests/unit/image-limits-gif-audit.test.ts`,
+    `tests/unit/image-size-audit.test.ts`, `tests/unit/images-to-pdf-pixel-limit.test.ts`.
+  - **AUDIT-2026-10-01 IMG-9** — TIFF Orientation (tag 274) is applied, and Image to size and
+    Images to PDF name each animated GIF whose first frame alone was used (frames counted by
+    the streaming `GifFrameCounter`). Was: orientation ignored, later frames dropped
+    silently (`raster-decode.ts`). Tests: `tests/unit/image-limits-gif-audit.test.ts`,
+    `tests/unit/image-size-audit.test.ts`.
+  - **AUDIT-2026-10-01 IMG-10** — `isBrowserRenderableImage` is false when `rasterKindOf()`
+    is non-null or the size is 0, and `<img>` has an `onError` fallback. Was: MIME OR
+    extension, so a HEIC named `.jpg` or a 0-byte `.png` showed a broken image
+    (`src/core/image.ts`). Tests: `tests/unit/image-size-audit.test.ts`.
+  - **AUDIT-2026-10-01 IMG-11** — the "200 MB" limit is 200,000,000 B, and KiB/MiB are scaled
+    correctly or rejected. Was: 200 MiB, and KiB/MiB parsed as decimal (`image.ts`,
+    `deep-link.ts`). Tests: `tests/unit/image-size-audit.test.ts`.
+  - **AUDIT-2026-10-01 IMG-12** — the Compress target field validates against
+    `PDF_TARGET_BOUNDS`, with 10 KB as the minimum, matching the deep link. Was: 50 B
+    accepted (`CompressPanel.tsx`). Tests: `tests/unit/size-honesty-commit.test.ts`,
+    `tests/unit/image-size-audit.test.ts`.
+  - **AUDIT-2026-10-01 UI-OPS19** — Grayscale never writes a larger file silently: growth
+    is warned with both sizes (never shown as equal), including growth caused by password
+    protection or re-applied restrictions alone, and the export review shows both sizes
+    before anything is written. It warns rather than blocks, because the original cannot
+    satisfy "make it grey" and a blocking confirm interrupted ordinary vector-only
+    conversions that grow by a few bytes. Was: saved with only a warning, no sizes. Tests:
+    `tests/unit/size-honesty-commit.test.ts` ("OPS-19 — Grayscale never writes a larger
+    file silently").
+- **AC:** The audit's probe cases (PNG 1,379 B, WebP 488 B, 5 MB target) keep the original;
+  no "Reached" appears unless the written bytes meet the target; the named tests pass.
+
+### HRD-65 · UI: read aloud, single-page view, repair, duplex and tooltips — `M` `P1`
+
+**Status: Done (2026-10-02)** — all twelve findings and the ACC-04 voice-fallback notice fixed.
+
+The read-aloud panel (ACC-04), the single-page view (DS-10), the Repair and Duplex panels
+(DOC-13, OPS-20) and the rail tooltip (DS-11) had stale state, stuck states and silent
+fallbacks.
+
+- **Requirements:**
+  - **AUDIT-2026-10-01 UI-1** — Read aloud keys its cached bytes and text on the page list
+    and stops speech when it changes. Was: delete page 2, press Play on page 2, and it read
+    the deleted page (`ReadAloudPanel.tsx`). Tests: `tests/e2e/audit-2026-10-01-ui.spec.ts`.
+  - **AUDIT-2026-10-01 UI-2** — a synthesis error (`utterance.onerror`) or a failed page
+    extraction resets the panel to idle with a note. Was: stuck on "Reading page N" with an
+    unhandled rejection. Tests: `tests/e2e/audit-2026-10-01-ui.spec.ts`.
+  - **AUDIT-2026-10-01 UI-3** — Repair repairs what the panel names: an untouched document
+    from its raw file, an edited one composed from its own pages, rotations, crops and
+    annotations; it falls back to the raw file only when the edits cannot be written, and
+    says so. Was: a single-source document was repaired from its original file, dropping
+    rotations, deletions and annotations under copy saying "the open document"
+    (`src/ui/tools/commit.ts`). Tests: `tests/unit/size-honesty-commit.test.ts`
+    ("UI-3 — Repair repairs the open document, edits included").
+  - **AUDIT-2026-10-01 UI-4** — sentence splitting does not break after titles, initials and
+    mid-sentence abbreviations, and caps each utterance at about 250 characters (breaking at
+    whitespace or a comma, never inside a surrogate pair; CJK and RTL work). Was:
+    `Intl.Segmenter` split after "Dr." and a table page became one utterance Chrome cut off
+    (`sentences.ts`). Tests: `tests/unit/ui-audit-2026-10-01.test.ts`.
+  - **AUDIT-2026-10-01 UI-5** — fit-to-view observes the stage through a callback ref, so it
+    works when the stage mounts late (session restore). Was: a `[]`-deps ResizeObserver
+    effect left zoom at 100% (`SinglePageView.tsx`).
+  - **AUDIT-2026-10-01 UI-6** — a manual zoom is kept across page changes and reset only on a
+    document, displayed-size or rotation change. Was: reset on every page change, against
+    the file's own header comment. Tests: `tests/unit/ui-audit-2026-10-01.test.ts`.
+  - **AUDIT-2026-10-01 UI-7** — resize ticks are coalesced and the zoom floored to a whole
+    percent, so a drag yields few renders. Was: every tick started a full worker render
+    (`usePageRender.ts`). Tests: `tests/unit/ui-audit-2026-10-01.test.ts`.
+  - **AUDIT-2026-10-01 UI-8** — the Duplex interleave button is disabled until the page order
+    changes. Was: a second press scrambled the order (`DuplexSection.tsx`). Tests:
+    `tests/unit/ui-audit-2026-10-01.test.ts`.
+  - **AUDIT-2026-10-01 UI-9** — the chosen repair file can be cleared ("Use the open
+    document", `clearRepairCandidate`). Was: `repairCandidate` was never cleared, so later
+    repairs targeted a stale file (`repair/state.ts`). Tests:
+    `tests/unit/runtime-audit-2026-10-01.test.ts`.
+  - **AUDIT-2026-10-01 UI-10** — reading to the end resets to page 1, sentence 1, and the
+    "skipped page" note stays visible for at least one sentence. Was: Play at the end read
+    only the last sentence and the note was cleared unseen. Tests:
+    `tests/e2e/audit-2026-10-01-ui.spec.ts`.
+  - **AUDIT-2026-10-01 UI-11** — tooltips meet WCAG 1.4.13: the bubble is hoverable with a
+    hide delay; each rail item has its own static hidden summary for `aria-describedby`;
+    the trust chip drops a describedby that only repeated its name; the Escape listener
+    attaches in a layout effect. Was: unhoverable bubble, describedby one render late, and
+    an Escape race that made `mobile.spec.ts` flaky (`FloatingTooltip.tsx`).
+  - **AUDIT-2026-10-01 UI-12** — `HomeView`'s `detail` goes through `translate()` and is in
+    every locale. Was: hard-coded English (`src/ui/home/HomeView.tsx`).
+  - **AUDIT-2026-10-01 ACC-04** — a remembered voice that is no longer installed (or is now a
+    network voice) falls back to the default local voice with a notice; voice and rate
+    survive a reload. Was: silent fallback (`voices.ts`), no reload e2e. Tests:
+    `tests/unit/ui-audit-2026-10-01.test.ts`, `tests/e2e/read-aloud-preferences.spec.ts`.
+- **AC:** The named tests pass in light and dark; the tooltip can be hovered and dismissed
+  with Escape; `mobile.spec.ts` is stable under load.
+
+### HRD-66 · Compare exports: correct, cancellable, bounded — `M` `P1`
+
+**Status: Done (2026-10-02)** — all seven findings fixed.
+
+The visual-diff (ANN-05) and redline (ANN-06) exports produced wrong output under cancel,
+non-Letter pages and mixed sizes, and held whole documents on the main thread.
+
+- **Requirements:**
+  - **AUDIT-2026-10-01 X-1** — a cancelled export throws `cancelled()` and saves nothing.
+    Was: `break` then save, so cancel at page 3 of 40 offered a 2-page "diff"
+    (`src/core/visual-diff-export.ts`). Tests:
+    `tests/unit/compare-export-audit-2026-10-01.test.ts`.
+  - **AUDIT-2026-10-01 X-2** — each output page uses the real CropBox size and rotation.
+    Was: every page forced to 612×792, distorting A4 and landscape. Tests:
+    `tests/unit/compare-export-audit-2026-10-01.test.ts`,
+    `tests/e2e/audit-2026-10-01-ui.spec.ts`.
+  - **AUDIT-2026-10-01 X-3** — pages of different sizes are compared by resampling one image
+    to the other's size, as the live view does. Was: `pixelDiff` threw on a size mismatch,
+    so A4 vs Letter or a rotated page could not be exported (`pixel-diff.ts`). Tests:
+    `tests/unit/compare-export-audit-2026-10-01.test.ts`, `tests/unit/compare.test.ts`,
+    `tests/e2e/audit-2026-10-01-ui.spec.ts`.
+  - **AUDIT-2026-10-01 X-4** — each document is loaded once per export
+    (`src/core/compare-documents.ts`). Was: both reloaded on every page (400 pdf.js loads
+    for two 200-page files). Tests: `tests/unit/compare-export-audit-2026-10-01.test.ts`.
+  - **AUDIT-2026-10-01 X-5** — redline export works page by page. Was: both documents
+    rasterised at once (~1.7 GB for a 200-page pair) (`redline-export.ts`). Tests:
+    `tests/unit/compare-export-audit-2026-10-01.test.ts`.
+  - **AUDIT-2026-10-01 X-6** — per-page `getImageData`, diff and PNG encode run in the cv
+    worker (`src/core/compare-raster.ts`), with per-page determinate progress. Was: >50 ms
+    per page on the main thread, no progress. Tests:
+    `tests/unit/compare-export-audit-2026-10-01.test.ts`,
+    `tests/e2e/audit-2026-10-01-ui.spec.ts`.
+  - **AUDIT-2026-10-01 X-13** — moving the sensitivity slider recomputes only the diff from
+    the kept rendered `ImageData`. Was: each tick reloaded and re-rendered both documents
+    (`CompareView.tsx`).
+- **AC:** A4 against Letter exports at real sizes; cancel writes nothing; peak memory is per
+  page, not per document; the named tests pass.
+
+### HRD-67 · Cross-cutting: ranges, units, async errors, strings and types — `S` `P1`
+
+**Status: Done (2026-10-02)** — all seven findings fixed.
+
+Repo-wide instances of patterns 5, 6, 8 and 9 and of the strict-TypeScript convention.
+
+- **Requirements:**
+  - **AUDIT-2026-10-01 X-7** — preview and export share `parsePageRange`; a whitespace-only
+    range means every page, an en dash and `;` are accepted, and a non-empty range that
+    selects nothing is flagged. Was: `" "` selected all pages in the watermark preview and
+    none in the export, and `–`, `;`, `0`, `-` silently selected nothing
+    (`watermark/state.ts` vs `process.worker.ts`). Tests:
+    `tests/unit/ui-audit-2026-10-01.test.ts`.
+  - **AUDIT-2026-10-01 X-8** — custom split points accept plain integers only. Was:
+    `parseInt` accepted `"1-3"` and `"2.5"` (`operations.ts`). Tests:
+    `tests/unit/split-points.test.ts`.
+  - **AUDIT-2026-10-01 X-10** — storage, import, open-document, OCR, zip-guard and PPTX
+    size messages use the one decimal formatter. Was: 1024-based units in each. Tests:
+    `tests/unit/bytes-and-size-guard.test.ts`.
+  - **AUDIT-2026-10-01 X-11** — Reflow, `HomeView` and `LocalDataSection` promise chains have
+    an error state, and Reflow's text is keyed on the page version. Was: no `.catch`, and
+    stale Reflow text after page edits.
+  - **AUDIT-2026-10-01 X-12** — a corrupt Flate stream rejects once, through `decodeStream`,
+    with the writer's `write()` and `close()` rejections caught. Was: two unhandled
+    rejections (`src/core/pdf/interpreter.ts`). Tests:
+    `tests/unit/interpreter-decode.test.ts`.
+  - **AUDIT-2026-10-01 X-14** — every progress label and user-facing note in `operations.ts`
+    goes through `translate()` with `{page}` parameters. Was: about 15 bare English
+    labels. Tests: `tests/unit/operations-i18n-labels.test.ts`.
+  - **AUDIT-2026-10-01 X-15** — no `any` without a justifying comment. Stored
+    `Recipe.settings` is `unknown`, validated by `parseRecipe`
+    (`src/ui/tools/batch/recipe-settings.ts`) before a batch runs or a recipe is imported;
+    a malformed recipe stops with the bad fields named; stored shape and DB version
+    unchanged. Was: unjustified `any` in `BatchPanel.tsx`, `AcroFormOverlay.tsx`,
+    `ImageOptionsDialog.tsx` and `db.ts`. Tests: `tests/unit/recipe-settings.test.ts`.
+- **AC:** The named tests pass; the four files X-15 named contain no `any`, and every
+  remaining `any` in `src/` sits under an `eslint-disable` with a justifying comment.
+
+### HRD-68 · Regressions found by the first post-fix review — `S` `P1`
+
+**Status: Done (2026-10-02)** — every item fixed with a test that fails before and passes
+after, except two recorded verdicts: one not reproduced, one documented.
+
+A review of the fix branch against `master` for bugs the fixes introduced.
+
+- **Requirements:**
+  - **AUDIT-2026-10-01 UI-3 follow-up** — Repair never stamps Watermark, Header/Footer or
+    N-up panel settings into a repaired file, and an untouched document is repaired from
+    its raw bytes (`hasDocumentEdits`). Was: the UI-3 fix composed every document, so panel
+    settings leaked in and salvageable damaged files were rebuilt instead. Tests:
+    `tests/unit/size-honesty-commit.test.ts`.
+  - **AUDIT-2026-10-01 IMG-1 follow-up** — Image to size caps JPEG quality at the source size
+    only when `imageOriginalSatisfies` holds (now in `raster-decode.ts`, shared with the
+    worker). Was: the cap also applied to files it must convert anyway (HEIC, TIFF,
+    sideways JPEG). Tests: `tests/unit/image-source-cap.test.ts`.
+  - **AUDIT-2026-10-01 PDF-2 follow-up** — not reproduced: an annotation hidden by PDF-2
+    flattening was suspected to still count as colour left. Two reproductions failed, the
+    speculative change was reverted, and the mesh-gradient case is kept as a guard test in
+    `tests/unit/grayscale-audit.test.ts`.
+  - **AUDIT-2026-10-01 PDF-1 follow-up** — `/Encrypt` counts only outside stream data. Was:
+    unencrypted files with `/Encrypt` inside a stream were refused. Tests:
+    `tests/unit/repair.test.ts`.
+  - **AUDIT-2026-10-01 RT-1 follow-up** — `refreshBaseline` receives the annotations actually
+    written and clears `dirty` only when pages and annotations both match. Was: an
+    annotation added while a save was in flight became the baseline. Tests:
+    `tests/unit/runtime-audit-2026-10-01.test.ts`.
+  - **AUDIT-2026-10-01 PLT-4 follow-up** — an active worker at registration time marks the
+    first `controllerchange` as an update, not a first install. Was: a hard-reloaded
+    (uncontrolled) tab missed a takeover by another tab's update. Tests:
+    `tests/unit/pwa-launch.test.ts`.
+  - **AUDIT-2026-10-01 PLT-1 follow-up** — documented, not changed: a host that rewrites
+    responses makes every service-worker install fail its integrity check. The check stays;
+    RELEASE_CHECKLIST.md's website deploy step states the byte-for-byte hosting requirement
+    and how to verify the install.
+  - **AUDIT-2026-10-01 post-fix cleanups** — the size target is checked before composing;
+    `targetKbInRange` uses `validateSizeParam`; the cap message, compare open/close and grey
+    encoder each live once (`open-document.ts`, `compare-documents.ts`, `gray-encode.ts`);
+    GIF frames are counted once by a streaming `GifFrameCounter`, identical to the old
+    counter on every truncation, the fixtures and 300 corrupted files. Tests:
+    `tests/unit/image-limits-gif-audit.test.ts`.
+  - **AUDIT-2026-10-01 test stability** — e2e specs never exhaust a low-memory runner: the
+    19-page CSP test opens a fresh browser context per page; the compress preview reports
+    `ready` only after document analysis chose the real page (a check records every page
+    that ever reported ready, 10/10 runs). Tests: `tests/e2e/zero-network.spec.ts`,
+    `tests/e2e/compress-preview.spec.ts`.
+- **AC:** Each fixed item has its regression test; the two verdicts stay recorded here.
+
+### HRD-69 · Regressions found by the second post-fix review — `S` `P1`
+
+**Status: Done (2026-10-02)** — every item fixed with a test. Not verifiable here: a real
+Android share, Lighthouse installability, an OS "Open with" launch, and a release workflow
+run on a real tag (tracked on HRD-63).
+
+A second review covered the round that implemented the acceptance-criteria gaps (Compress
+Colour option for OPS-19, exact width × height for CNV-14, DS-10 layout, PLT-4 cold start).
+
+- **Requirements:**
+  - **AUDIT-2026-10-02 compress-grey skipped pages** — Compress with grey names every page it
+    could not convert (JBIG2/JPX, failed pages) and never claims full conversion. Tests:
+    `tests/unit/ops19-compress-gray.test.ts`.
+  - **AUDIT-2026-10-02 compress-grey colour kept** — when grey does not help or cannot be
+    verified, a verified colour compression is still saved; the original is kept only when
+    that is not smaller either. Was: the colour result was discarded. Tests:
+    `tests/unit/ops19-compress-gray.test.ts`.
+  - **AUDIT-2026-10-02 cold-start passthrough** — requests held by a cold-started worker are
+    forwarded unchanged: query string and headers kept, a 404 stays a 404, no shared scratch
+    cache entry. Tests: `tests/unit/pwa-sw-routing.test.ts`.
+  - **AUDIT-2026-10-02 exact-size limits** — Image to size and PDF to Images share one area
+    limit and one per-side limit (`src/core/render-limits.ts`), checked before any canvas is
+    allocated. Was: Image to size had a looser pixel cap and no per-side check. Tests:
+    `tests/unit/cnv14-exact-limit.test.ts`.
+  - **AUDIT-2026-10-02 exact-size relock** — an edit made while the aspect lock is off
+    survives re-locking. Tests: `tests/unit/cnv14-exact-size.test.ts`.
+  - **AUDIT-2026-10-02 header dimensions** — the Image to size panel reads image dimensions
+    from the file header, never by fully decoding the image.
+  - **AUDIT-2026-10-02 cleanups** — one `progressBand`, one copy of the cap, no dead
+    `applyGrayscale` / `isShareRequestAllowed`; the confirm-dialog list has unique keys; the
+    Welcome dialog never stacks over a confirm.
+  - **AUDIT-2026-10-02 corpus sweep stability** — the DOC-02 corpus sweep
+    (`tests/e2e/import.spec.ts`) opens a fresh tab per fixture in one context instead of
+    reloading one tab ~40 times. Was: intermittent `net::ERR_INSUFFICIENT_RESOURCES`. Passed
+    3 runs in a row.
+- **AC:** The named tests pass; `import.spec.ts` passes repeatedly on a low-memory runner.
 
 ---
 

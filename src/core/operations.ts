@@ -138,7 +138,7 @@ function toWatermarkData(settings: WatermarkSettings): WatermarkData {
  *    same array.
  *
  * So the gate stays, unused, as a guard rather than an optimisation. See
- * `docs/AUDIT-FINDINGS.md` §4 for what would have to change to open it.
+ * AUDIT-FINDINGS §4 (EPIC-19, `docs/TICKETS.md`) for what would have to change to open it.
  *
  * Use this only on bytes that came out of a worker one line earlier and die at
  * this call.

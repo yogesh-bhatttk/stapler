@@ -1,5 +1,5 @@
 /**
- * §1.9 (AUDIT-EDGE-CASES-2026-09-15.md) — `writeSourceBytes` used to let a
+ * §1.9 (AUDIT-EDGE-CASES-2026-09-15, EPIC-19 in docs/TICKETS.md) — `writeSourceBytes` used to let a
  * `QuotaExceededError` from OPFS's `write()` escape uncaught, surfacing as a
  * generic "Something went wrong" instead of the specific, actionable message
  * `core/db.ts`'s IndexedDB guard already gives for the identical failure.

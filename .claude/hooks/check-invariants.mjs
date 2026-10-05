@@ -19,7 +19,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 
-// §4 (docs/AUDIT-EDGE-CASES-2026-09-15.md), tightened by audit 2026-09-25
+// AUDIT-EDGE-CASES-2026-09-15 §4 (EPIC-19 in docs/TICKETS.md), tightened by audit 2026-09-25
 // PLT-3: the manifest CSP is checked directive by directive against an
 // allowlist. Every directive may only carry the sources listed here; the only
 // remote source anywhere is the exact, path-scoped pinned OCR model

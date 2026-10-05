@@ -232,7 +232,7 @@ async function runBatchBody(
         // Batch had no equivalent of importPdf()'s validation gate: a non-PDF file
         // fell straight into pdf-lib's tolerant parser and surfaced a raw internal
         // TypeError, and a truncated file could silently lose trailing pages with
-        // no error at all (see AUDIT-EDGE-CASES-2026-09-15.md §1.8). Mirror the
+        // no error at all (AUDIT-EDGE-CASES-2026-09-15 §1.8 in docs/TICKETS.md EPIC-19). Mirror the
         // single-file import path's checks — magic-byte sniff, then the pdf.js
         // parse importPdf() also uses as the real corruption gate — so a bad file
         // in a batch folder fails the same clear, classified way an equally bad

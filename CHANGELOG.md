@@ -23,8 +23,8 @@ onward, not the full development history before it.
   crashed the app instead of falling back to memory, undo/redo history could
   be corrupted by overlapping operations, and several tools (compression,
   redaction, scan cleanup, OCR, batch processing) mishandled degenerate or
-  adversarial inputs. Full details in `docs/AUDIT-FINDINGS.md` and
-  `docs/AUDIT-EDGE-CASES-2026-09-15.md`.
+  adversarial inputs. The findings (AUDIT-FINDINGS, AUDIT-EDGE-CASES-2026-09-15)
+  are recorded as requirements in EPIC-19 of `docs/TICKETS.md`.
 - Document and page-selection state updates are now batched, session
   auto-save no longer re-enters itself under rapid changes, and worker job
   proxies and render canvases now release their memory immediately instead

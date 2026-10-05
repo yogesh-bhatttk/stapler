@@ -268,7 +268,7 @@ describe('§2.1: a second concurrent runBatch() call is a no-op', () => {
 });
 
 /**
- * §1.8 (AUDIT-EDGE-CASES-2026-09-15.md) — batch had no equivalent of
+ * §1.8 (AUDIT-EDGE-CASES-2026-09-15, EPIC-19 in docs/TICKETS.md) — batch had no equivalent of
  * importPdf()'s validation gate, so a non-PDF or corrupt file in a batch
  * folder either threw a raw internal error or silently produced wrong output.
  * It must fail the same clear, classified way "Add PDF" would.

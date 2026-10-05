@@ -85,7 +85,7 @@ export function __resetOpfsProbeForTests(): void {
  * Writes one file into the OPFS root, turning quota exhaustion into the same
  * clear, actionable message `core/db.ts`'s IndexedDB guard already gives for the
  * identical failure, instead of an uncaught `QuotaExceededError` that surfaces as
- * a generic "Something went wrong" (see AUDIT-EDGE-CASES-2026-09-15.md §1.9). OPFS
+ * a generic "Something went wrong" (AUDIT-EDGE-CASES-2026-09-15 §1.9 in docs/TICKETS.md EPIC-19). OPFS
  * holds the actual document bytes — often the largest thing this app ever writes
  * to disk — so it is the storage path most likely to hit quota.
  */
