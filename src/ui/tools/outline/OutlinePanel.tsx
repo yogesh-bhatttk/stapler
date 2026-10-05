@@ -31,6 +31,7 @@ import {
   deleteEntry,
   editTree,
   entriesFromHeadingCandidates,
+  type EntryMoves,
   flattenEntries,
   indentEntry,
   moveEntry,
@@ -40,7 +41,8 @@ import {
   outlineTree,
   outlineUnresolved,
   renameEntry,
-  setEntryPage
+  setEntryPage,
+  type OutlineEntry
 } from './state';
 
 export function OutlinePanel() {
@@ -128,7 +130,7 @@ export function OutlinePanel() {
       )}
 
       <ul className={styles.tree} aria-label={t('Bookmarks')}>
-        {rows.map(({ entry, depth }) => {
+        {rows.map(({ entry, depth, moves }) => {
           const pageNumber = pageNumberOf(entry.pageKey);
           return (
             <li
@@ -160,38 +162,7 @@ export function OutlinePanel() {
                 >
                   {t('Use page {n}', { n: currentIndex + 1 })}
                 </Button>
-                <IconButton
-                  icon={ChevronUp}
-                  size="compact"
-                  aria-label={t('Move up: {title}', { title: entry.title })}
-                  onClick={() => {
-                    editTree(current => moveEntry(current, entry.id, 'up'));
-                  }}
-                />
-                <IconButton
-                  icon={ChevronDown}
-                  size="compact"
-                  aria-label={t('Move down: {title}', { title: entry.title })}
-                  onClick={() => {
-                    editTree(current => moveEntry(current, entry.id, 'down'));
-                  }}
-                />
-                <IconButton
-                  icon={ListIndentIncrease}
-                  size="compact"
-                  aria-label={t('Indent: {title}', { title: entry.title })}
-                  onClick={() => {
-                    editTree(current => indentEntry(current, entry.id));
-                  }}
-                />
-                <IconButton
-                  icon={ListIndentDecrease}
-                  size="compact"
-                  aria-label={t('Outdent: {title}', { title: entry.title })}
-                  onClick={() => {
-                    editTree(current => outdentEntry(current, entry.id));
-                  }}
-                />
+                <OutlineMoveButtons entry={entry} moves={moves} t={t} />
                 <IconButton
                   icon={Trash2}
                   size="compact"
@@ -214,5 +185,81 @@ export function OutlinePanel() {
         </p>
       )}
     </div>
+  );
+}
+
+type Translate = ReturnType<typeof useTranslation>;
+
+/**
+ * HRD-24 §12.10 — the move/indent/outdent buttons of one row. A button whose
+ * edit would do nothing at this edge of the tree (first or last among its
+ * siblings, nothing above to nest under, already top level) is
+ * `aria-disabled` with the reason as its description, and its click does
+ * nothing. Not the native `disabled`: that drops the button out of the tab
+ * order, so moving a bookmark up to the top with the keyboard would throw
+ * focus back to the page the moment the button it is on turns off.
+ *
+ * Hook-free, so a test can call it and read the props it renders.
+ */
+export function OutlineMoveButtons({
+  entry,
+  moves,
+  t
+}: {
+  entry: OutlineEntry;
+  moves: EntryMoves;
+  t: Translate;
+}) {
+  const buttons = [
+    {
+      key: 'up',
+      icon: ChevronUp,
+      enabled: moves.up,
+      label: t('Move up: {title}', { title: entry.title }),
+      reason: t('Already the first bookmark at this level.'),
+      edit: (tree: OutlineEntry[]) => moveEntry(tree, entry.id, 'up')
+    },
+    {
+      key: 'down',
+      icon: ChevronDown,
+      enabled: moves.down,
+      label: t('Move down: {title}', { title: entry.title }),
+      reason: t('Already the last bookmark at this level.'),
+      edit: (tree: OutlineEntry[]) => moveEntry(tree, entry.id, 'down')
+    },
+    {
+      key: 'indent',
+      icon: ListIndentIncrease,
+      enabled: moves.indent,
+      label: t('Indent: {title}', { title: entry.title }),
+      reason: t('Indenting needs a bookmark above it at the same level.'),
+      edit: (tree: OutlineEntry[]) => indentEntry(tree, entry.id)
+    },
+    {
+      key: 'outdent',
+      icon: ListIndentDecrease,
+      enabled: moves.outdent,
+      label: t('Outdent: {title}', { title: entry.title }),
+      reason: t('Already at the top level.'),
+      edit: (tree: OutlineEntry[]) => outdentEntry(tree, entry.id)
+    }
+  ];
+  return (
+    <>
+      {buttons.map(button => (
+        <IconButton
+          key={button.key}
+          icon={button.icon}
+          size="compact"
+          className={button.enabled ? undefined : styles.unavailable}
+          aria-label={button.label}
+          aria-disabled={button.enabled ? undefined : 'true'}
+          title={button.enabled ? undefined : button.reason}
+          onClick={() => {
+            if (button.enabled) editTree(button.edit);
+          }}
+        />
+      ))}
+    </>
   );
 }

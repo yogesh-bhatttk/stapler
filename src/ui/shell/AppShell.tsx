@@ -76,6 +76,7 @@ import {
   customShortcuts
 } from '../../core/shortcuts';
 import { useUnsavedGuard } from '../useUnsavedGuard';
+import { FloatingLayer } from '../components/FloatingTooltip';
 import styles from './AppShell.module.css';
 
 const WELCOME_KEY = 'welcomed';
@@ -322,7 +323,13 @@ export function AppShell({ children }: { children: ComponentChildren }) {
         return;
       }
 
-      void importFilesAsDocuments(files, { requestImageOptions: requestOptions });
+      // Land in Organize, like every other open path (the Home drop zone,
+      // Recents, paste) — the new tab used to open behind the Home screen.
+      void importFilesAsDocuments(files, { requestImageOptions: requestOptions }).then(
+        ({ imported }) => {
+          if (imported > 0) setLocation(toolRoute('organize'));
+        }
+      );
     };
 
     window.addEventListener('dragover', onDragOver);
@@ -343,6 +350,7 @@ export function AppShell({ children }: { children: ComponentChildren }) {
           <Suspense fallback={null}>
             <ActionBar />
           </Suspense>
+          <FloatingLayer />
         </main>
         <Suspense fallback={null}>
           <OptionsPanel />

@@ -111,6 +111,16 @@
   margin: 0;
 }
 
+/* HRD-23 — the export-wide options under the review (fast web view). */
+.exportOptions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+  margin-top: var(--space-md);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--hairline);
+}
+
 .summary {
   display: flex;
   flex-wrap: wrap;

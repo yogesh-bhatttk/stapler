@@ -151,13 +151,33 @@ function imageIsSafe(image: ImageFacts): ImageSafety {
   // ASCII85. Testing only the first entry reported that as `ASCII85Decode`,
   // which matches nothing here, and the image went down the surgical path this
   // list exists to keep it out of.
+  //
+  // Surgical-only (HRD-39). The surgical route would have to decode this
+  // stream and write it back as a JPEG, which it will not do for JPEG 2000 or
+  // JBIG2. The raster route never reads the stream: pdf.js renders the page,
+  // and the bundled pdf.js decodes both (its `openjpeg` and `jbig2` WASM
+  // decoders, `pdfjs-setup.ts`'s `wasmUrl`) — the same reasoning as the
+  // sub-byte case below. A textless page carrying one is therefore a raster
+  // candidate like any other scan; CMP-04's never-larger check in
+  // `rebuildCompressed` still discards the result if the JPEG page comes out
+  // bigger, which for a well-compressed JBIG2 scan it often will.
+  //
+  // Surgical-only means *only* the surgical route: this is recorded, not
+  // returned, so the raster-blocking checks further down (named inks, stencil
+  // masks, colour-key masks, /Matte) still run. Returning early here used to
+  // hand a JBIG2 image in /Separation, or a JBIG2 /ImageMask stencil, a
+  // `raster: true` verdict — and the textless page carrying it was flattened
+  // to an RGB JPEG, destroying the spot ink the checks below exist to keep.
+  let surgicalOnly: ImageSafety | undefined;
   const undecodable = (image.filters ?? [image.filter]).find(name => UNDECODABLE_FILTERS.has(name));
   if (undecodable) {
-    return blocked(
-      translate('{filter} image (decoder output cannot be re-encoded safely)', {
+    surgicalOnly = {
+      surgical: false,
+      raster: true,
+      reason: translate('{filter} image (decoder output cannot be re-encoded safely)', {
         filter: undecodable
       })
-    );
+    };
   }
   // The same test, applied to the image's *mask*. An `/SMask` (or a stencil
   // `/Mask`) is a separate stream with its own `/Filter` chain, and nothing
@@ -165,17 +185,23 @@ function imageIsSafe(image: ImageFacts): ImageSafety {
   // passed every check here and was routed to `surgical`, where pdf.js has no
   // decoder for the mask it is asked to resample and `rebuildCompressed` would
   // re-attach a mask built from data nothing ever read. A mask that cannot be
-  // decoded disqualifies the image it masks exactly as an undecodable base
-  // image does.
+  // decoded disqualifies the image it masks from the surgical route exactly as
+  // an undecodable base image does — and, like one, leaves the raster route
+  // open, because pdf.js renders the masked image, mask and all.
   const undecodableMask = (image.maskFilters ?? []).find(name => UNDECODABLE_FILTERS.has(name));
-  if (undecodableMask) {
-    return blocked(
-      translate(
+  if (undecodableMask && !surgicalOnly) {
+    surgicalOnly = {
+      surgical: false,
+      raster: true,
+      reason: translate(
         "{filter} soft mask (the mask's own stream cannot be decoded, so the image it masks cannot be re-encoded)",
         { filter: undecodableMask }
       )
-    );
+    };
   }
+  // Everything from here to the bit-depth test blocks *both* routes, and wins
+  // over a surgical-only verdict above: its reason is the one a refused page
+  // has to print.
   if (UNSAFE_COLOR_SPACES.has(image.colorSpace)) {
     return blocked(
       translate('{colorSpace} image (re-encoding would flatten a named ink to RGB)', {
@@ -196,6 +222,8 @@ function imageIsSafe(image: ImageFacts): ImageSafety {
       translate('Pre-blended soft mask (/Matte), where colour and mask cannot be separated')
     );
   }
+
+  if (surgicalOnly) return surgicalOnly;
 
   if (image.bitsPerComponent < 8) {
     // Surgical-only. Re-encoding a sub-byte image in place means decoding its

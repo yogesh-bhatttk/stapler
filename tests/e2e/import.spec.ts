@@ -10,6 +10,7 @@
  */
 import { expect, test } from '@playwright/test';
 import { PDFDocument } from 'pdf-lib';
+import { readFileSync } from 'node:fs';
 import { corruptPdf, ensureFixture, FIXTURES_DIR, textPdf } from './fixtures';
 import { confirmExportReviewIfShown, openApp } from './helpers';
 
@@ -325,34 +326,89 @@ test.describe('DOC-02 import and validation', () => {
   });
 });
 
-test('CNV-07: Paste image as page from clipboard', async ({ page, context }) => {
-  await openApp(page);
-  // Need to bypass clipboard permissions in Playwright
-  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+/**
+ * CNV-07 / HRD-23 (AUDIT-FINDINGS §11.10) — paste through the real clipboard.
+ *
+ * No test hook: Playwright grants the clipboard permissions, the page writes a
+ * real image `ClipboardItem` with the async Clipboard API, and the paste is the
+ * real Ctrl/Cmd+V, so the browser itself builds the `ClipboardEvent`.
+ */
+test.describe('CNV-07 paste image as page', () => {
+  const PASTED = { width: 240, height: 160 };
 
-  // Write a small image to the clipboard using JS evaluation
-  page.on('console', msg => console.log(msg.text()));
-  await page.evaluate(async () => {
-    // 1x1 red PNG
-    const base64 =
-      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
-    const res = await fetch(`data:image/png;base64,${base64}`);
-    const blob = await res.blob();
+  /** Puts a real PNG of the given size on the system clipboard. */
+  async function writeClipboardImage(page: import('@playwright/test').Page) {
+    await page.evaluate(async ({ width, height }) => {
+      const canvas = new OffscreenCanvas(width, height);
+      const ctx = canvas.getContext('2d')!;
+      ctx.fillStyle = 'red';
+      ctx.fillRect(0, 0, width, height);
+      const blob = await canvas.convertToBlob({ type: 'image/png' });
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    }, PASTED);
+  }
 
-    // Set the mock file
-    (window as any).__mockClipboardImage = new File([blob], 'Pasted Image.png', {
-      type: 'image/png'
-    });
+  async function confirmImageOptions(page: import('@playwright/test').Page) {
+    const dialog = page.getByRole('dialog', { name: /Import 1 image/ });
+    await expect(dialog).toBeVisible({ timeout: 15_000 });
+    await dialog.getByRole('button', { name: 'Import', exact: true }).click();
+    await expect(dialog).toBeHidden();
+  }
 
-    // Dispatch the paste event to trigger the AppShell listener
-    window.dispatchEvent(new Event('paste', { bubbles: true, cancelable: true }));
+  test.beforeEach(async ({ context }) => {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   });
 
-  // The importImages dialog should appear
-  const dialog = page.getByRole('dialog', { name: /Import 1 image/ });
-  await dialog.getByRole('button', { name: 'Import' }).click();
+  test('with nothing open, a pasted image becomes a one-page document', async ({ page }) => {
+    await openApp(page);
+    await writeClipboardImage(page);
+    await page.locator('body').click({ position: { x: 5, y: 200 } });
+    await page.keyboard.press('ControlOrMeta+V');
 
-  // A new page should appear
-  const grid = page.getByRole('listbox', { name: /Pages of/ });
-  await expect(grid.getByRole('option')).toHaveCount(1);
+    await confirmImageOptions(page);
+    const grid = page.getByRole('listbox', { name: /Pages of/ });
+    await expect(grid.getByRole('option')).toHaveCount(1, { timeout: 30_000 });
+  });
+
+  test('into an open 3-page document, the image lands after the selected page 2, at its own size', async ({
+    page
+  }) => {
+    const file = await ensureFixture('text-3.pdf', () => textPdf(3));
+    await openApp(page);
+    await page.locator('input[type="file"]').setInputFiles(file);
+    const grid = page.getByRole('listbox', { name: /Pages of/ });
+    await expect(grid.getByRole('option')).toHaveCount(3, { timeout: 30_000 });
+    const original = await PDFDocument.load(readFileSync(file));
+    const textSize = original.getPage(0).getSize();
+
+    // Select page 2: the insertion point is just after the selection.
+    await grid.getByRole('option', { name: /^Page 2 of/ }).click();
+    await writeClipboardImage(page);
+    await page.keyboard.press('ControlOrMeta+V');
+    await confirmImageOptions(page);
+    await expect(grid.getByRole('option')).toHaveCount(4, { timeout: 30_000 });
+
+    const download = page.waitForEvent('download', { timeout: 60_000 });
+    await page.getByRole('button', { name: 'View changes' }).click();
+    await confirmExportReviewIfShown(page, download);
+    const bytes = new Uint8Array(readFileSync((await (await download).path())!));
+    const output = await PDFDocument.load(bytes);
+    expect(output.getPageCount()).toBe(4);
+    const sizes = output.getPages().map(p => {
+      const { width, height } = p.getSize();
+      return [Math.round(width), Math.round(height)];
+    });
+    const text = [Math.round(textSize.width), Math.round(textSize.height)];
+    // Index 2 (0-based) is the pasted image at 1 px = 1 pt; the rest keep their order.
+    expect(sizes).toEqual([text, text, [PASTED.width, PASTED.height], text]);
+  });
+
+  test('a clipboard with no image is refused with a clear message', async ({ page }) => {
+    await openApp(page);
+    await page.evaluate(() => navigator.clipboard.writeText('just some words'));
+    await page.locator('body').click({ position: { x: 5, y: 200 } });
+    await page.keyboard.press('ControlOrMeta+V');
+    await expect(page.getByText('No image found on the clipboard.')).toBeVisible();
+    await expect(page.getByRole('dialog', { name: /Import \d+ image/ })).toHaveCount(0);
+  });
 });

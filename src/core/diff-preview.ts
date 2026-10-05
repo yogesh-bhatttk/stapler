@@ -5,29 +5,52 @@
  * on-screen display instead of baking a diff into a new PDF, and keeps each
  * document loaded for the length of the review (see `PreviewSession` below).
  */
-import { renderWorker } from './workers';
-import { pixelDiff } from './pixel-diff';
+import * as Comlink from 'comlink';
+import { cvWorker, renderWorker } from './workers';
 
 const SCALE = 1.25;
 const SENSITIVITY = 60;
 
-async function toImageData(bitmap: ImageBitmap): Promise<ImageData | null> {
-  const canvas = document.createElement('canvas');
-  canvas.width = bitmap.width;
-  canvas.height = bitmap.height;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  ctx?.drawImage(bitmap, 0, 0);
-  bitmap.close();
-  const imageData = ctx ? ctx.getImageData(0, 0, canvas.width, canvas.height) : null;
-  // This canvas is never attached to the DOM, so nothing keeps it visible —
-  // but its GPU-backed 2D backing store is not guaranteed to be freed the
-  // moment it becomes unreachable; some engines only reclaim it on the next
-  // GC pass, which for repeated page-by-page review comparisons can mean many
-  // full-size backing stores alive at once. Zeroing the dimensions forces an
-  // immediate release instead of waiting on that.
-  canvas.width = 0;
-  canvas.height = 0;
-  return imageData;
+/**
+ * Reading the rendered bitmaps back into pixels and diffing them happens in the
+ * cv worker (`compare-pages.ts` › `reviewPage`): on the main thread that was
+ * ~50 ms per page view — getImageData on both pages plus a per-pixel loop — and
+ * broke the 50 ms budget on the 10 × 5 MB merge's review (NFR-02). The bitmaps
+ * move there without a copy, and the pixels come back the same way.
+ */
+async function toImages(before: ImageBitmap | null, after: ImageBitmap | null): Promise<PageDiff> {
+  const transfers = [before, after].filter((b): b is ImageBitmap => b !== null);
+  try {
+    return await cvWorker.lease(api =>
+      api.reviewPage(Comlink.transfer({ a: before, b: after }, transfers), SENSITIVITY)
+    );
+  } finally {
+    // Already transferred (and so closed here) on success; on a failed post
+    // this is what frees them.
+    for (const bitmap of transfers) bitmap.close();
+  }
+}
+
+/** Bytes above which a document is copied in slices rather than cloned in one task. */
+const POST_SLICE = 4 * 1024 * 1024;
+
+/**
+ * A copy of `bytes` the worker can take ownership of, made a few megabytes per
+ * task.
+ *
+ * Posting the bytes themselves structured-clones them inside `postMessage`, one
+ * uninterruptible copy: ~50 ms for a 10 × 5 MB merge's output (NFR-02). The
+ * caller still needs its own bytes (they are what gets saved), so they cannot
+ * be transferred — but a copy made in slices, yielding between them, can be,
+ * and the transfer itself costs nothing.
+ */
+async function transferableCopy(bytes: Uint8Array): Promise<Uint8Array> {
+  const copy = new Uint8Array(bytes.byteLength);
+  for (let at = 0; at < bytes.byteLength; at += POST_SLICE) {
+    copy.set(bytes.subarray(at, Math.min(bytes.byteLength, at + POST_SLICE)), at);
+    await nextTask();
+  }
+  return Comlink.transfer(copy, [copy.buffer]);
 }
 
 /**
@@ -95,7 +118,10 @@ function load(session: Session, bytes: Uint8Array): LoadedPreview {
   }
   if (!entry) {
     const client = renderWorker.pin();
-    const info = client.lease(api => api.loadDocument(bytes));
+    const info =
+      bytes.byteLength > POST_SLICE
+        ? transferableCopy(bytes).then(copy => client.lease(api => api.loadDocument(copy)))
+        : client.lease(api => api.loadDocument(bytes));
     const created: LoadedPreview = { client, info };
     entry = created;
     session.loaded.set(bytes, created);
@@ -144,15 +170,12 @@ async function renderFrom(
   index: number,
   rotationOverride?: number,
   retried = false
-): Promise<ImageData | null> {
+): Promise<ImageBitmap | null> {
   const entry = load(session, bytes);
   try {
     const { handle, pageCount } = await entry.info;
     if (index < 0 || index >= pageCount) return null;
-    const bitmap = await entry.client.lease(api =>
-      api.renderPage(handle, index, SCALE, rotationOverride)
-    );
-    return await toImageData(bitmap);
+    return await entry.client.lease(api => api.renderPage(handle, index, SCALE, rotationOverride));
   } catch (error) {
     // The instance died under this render: reload once on a live one.
     if (!retried && entry.client.dead && !session.released) {
@@ -214,14 +237,7 @@ export async function diffPage(
     renderFrom(own, afterBytes, afterIndex)
   ]);
 
-  if (!before || !after) return { before, after, diff: null, comparable: false };
-  const comparable = before.width === after.width && before.height === after.height;
-  return {
-    before,
-    after,
-    diff: comparable ? pixelDiff(before, after, SENSITIVITY) : null,
-    comparable
-  };
+  return toImages(before, after);
 }
 
 /** Renders a single page (no comparison) — used for zip members' after-only preview. */
@@ -230,5 +246,6 @@ export async function renderPage(
   bytes: Uint8Array,
   pageIndex: number
 ): Promise<ImageData | null> {
-  return renderFrom(sessionOf(session), bytes, pageIndex);
+  const bitmap = await renderFrom(sessionOf(session), bytes, pageIndex);
+  return bitmap ? (await toImages(null, bitmap)).after : null;
 }

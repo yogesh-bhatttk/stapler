@@ -72,6 +72,14 @@ the application. `.gitignore` allow-lists exactly these files inside `tests/fixt
 - `sample.png` / `sample.webp` / `sample.tiff` — one 240×160 gradient in three encodings,
   so `DOC-02`'s "accept PNG, JPEG, WebP, TIFF, HEIC" is exercised through the real import
   pipeline (`tests/e2e/import.spec.ts`) rather than asserted. Built with ImageMagick.
+- `multipage.tiff` — three IFDs, for `HRD-05`'s "a multi-page TIFF imports every page":
+  300×200 green, 160×240 blue, and 200×100 yellow stored with Orientation 6 (RightTop),
+  which must import as a portrait 100×200 page. Each page has a 20×20 red marker in its
+  stored top-left corner, so orientation is checked on pixels, not only on the size.
+  Written byte by byte (`writeMultipageTiff` in `scripts/generate-static-fixtures.mjs`,
+  Deflate strips) because ImageMagick sets `-orient` on every frame at once; read back
+  by libtiff (PIL) and ImageMagick with the same sizes and tags.
+  `tests/unit/tiff-multipage.test.ts`.
 
 Regenerate any of these (after deleting the file) with `npm run fixtures:static`. The raw
 hand-built ones (`jbig2`, `jpx`, `xfa`, `cjk`, `rtl`) always regenerate offline; the other

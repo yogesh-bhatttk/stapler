@@ -13,14 +13,15 @@
  *
  * Two further caveats, both real:
  *
- *  • Some save sites pass `useObjectStreams: true`. pdf-lib's `PDFStreamWriter` then
- *    diverts every non-stream object — page dictionaries, the page tree, the catalog —
- *    into compressed object streams that it appends *after* the content streams,
- *    regardless of the order handed to it. On that path the reordering below buys
- *    nothing beyond ordering the page content streams themselves. It is left applied
- *    because it is free and because it does help the save sites that write plain
- *    indirect objects; `tests/unit/linearize.test.ts` asserts both halves of that
- *    sentence rather than letting the claim rot.
+ *  • The worker's ordinary saves pass `useObjectStreams: true` (DOC-05). pdf-lib's
+ *    `PDFStreamWriter` then diverts non-stream objects into compressed object streams
+ *    that it appends *after* the content streams, regardless of the order handed to
+ *    it. On that path the reordering below buys nothing beyond ordering the page
+ *    content streams themselves; `tests/unit/linearize.test.ts` asserts both halves
+ *    of that sentence rather than letting the claim rot. The user-facing "Fast web
+ *    view" export option (HRD-23) is what actually puts page 1 first in the written
+ *    bytes: it saves with a plain xref and renumbers objects into this order
+ *    (`fast-web-view.ts`), so a later plain-xref re-save (encryption) keeps it too.
  *  • The reordering is a pure permutation. No object is added, removed or rewritten, so
  *    output always re-parses to the same pages in the same order.
  *
@@ -89,7 +90,12 @@ function getRefs(obj: PDFObject, refs: PDFRef[] = []): PDFRef[] {
   return refs;
 }
 
-function sortForFastWebView(doc: PDFDocument, allObjects: [PDFRef, PDFObject][]) {
+/**
+ * `allObjects` reordered so everything reachable from the catalog without passing
+ * through a later page comes first, in its original relative order. Exported for
+ * `fast-web-view.ts`, which renumbers objects into this order.
+ */
+export function sortForFastWebView(doc: PDFDocument, allObjects: [PDFRef, PDFObject][]) {
   const context = doc.context;
 
   const pageCount = doc.getPageCount();

@@ -11,6 +11,8 @@
  * the scrollbar still reflects the full document.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { memo } from 'preact/compat';
+import type { RefObject } from 'preact';
 import {
   deletePages,
   documents,
@@ -40,7 +42,7 @@ import { eventMatchesShortcut, getEffectiveBinding, customShortcuts } from '../.
 import { WatermarkOverlay } from '../tools/watermark/WatermarkOverlay';
 import { watermarkSettings, hasWatermarkContent } from '../tools/watermark/state';
 import { CropBoxPreview } from '../tools/crop/CropBoxPreview';
-import { cropBoxes } from '../tools/crop/state';
+import { cropBoxes, type CropBox } from '../tools/crop/state';
 import { withSlots } from '../i18nSlots';
 import styles from './PageGrid.module.css';
 
@@ -49,6 +51,24 @@ const MIN_TILE = 160;
 const GAP = 24;
 /** Rows kept mounted above and below the viewport, to hide scroll latency. */
 const OVERSCAN_ROWS = 2;
+
+/**
+ * The rows to mount for a scroll position: those intersecting the viewport, plus
+ * `OVERSCAN_ROWS` either side. `scrolled` is relative to the top of the grid.
+ */
+export function windowRows(
+  scrolled: number,
+  rowHeight: number,
+  viewportHeight: number,
+  rowCount: number
+): { first: number; last: number } {
+  const first = Math.max(0, Math.floor(scrolled / rowHeight) - OVERSCAN_ROWS);
+  const last = Math.min(
+    rowCount,
+    Math.max(0, Math.ceil((scrolled + viewportHeight) / rowHeight) + OVERSCAN_ROWS)
+  );
+  return { first, last };
+}
 
 export interface PageGridProps {
   doc: StaplerDoc;
@@ -62,7 +82,16 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const [metrics, setMetrics] = useState({ columns: 1, width: MIN_TILE, height: 0, offsetTop: 0 });
-  const [scrollTop, setScrollTop] = useState(0);
+  /**
+   * The scroll position, kept in a ref rather than state (DOC-04 scroll jank).
+   * Setting state on every `scroll` event re-rendered the whole window — every
+   * mounted cell and thumbnail — once per frame, and the resulting repaint and
+   * re-layerisation cost ~8 ms of main thread per frame. `onScroll` now records
+   * the position here and re-renders (via `bumpWindow`) only when the set of
+   * mounted rows actually changes.
+   */
+  const scrollTopRef = useRef(0);
+  const [, bumpWindow] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(0);
   const [dragKey, setDragKey] = useState<string | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
@@ -123,12 +152,29 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
 
   const rowHeight = metrics.height + GAP;
   const rowCount = Math.ceil(doc.pages.length / metrics.columns);
-  const scrolled = scrollTop - metrics.offsetTop;
-  const firstRow = Math.max(0, Math.floor(scrolled / rowHeight) - OVERSCAN_ROWS);
-  const lastRow = Math.min(
-    rowCount,
-    Math.max(0, Math.ceil((scrolled + viewportHeight) / rowHeight) + OVERSCAN_ROWS)
+  const { first: firstRow, last: lastRow } = windowRows(
+    scrollTopRef.current - metrics.offsetTop,
+    rowHeight,
+    viewportHeight,
+    rowCount
   );
+  /** What `onScroll` needs to tell whether a new position mounts different rows. */
+  const windowRef = useRef({
+    firstRow,
+    lastRow,
+    rowHeight,
+    viewportHeight,
+    rowCount,
+    offsetTop: 0
+  });
+  windowRef.current = {
+    firstRow,
+    lastRow,
+    rowHeight,
+    viewportHeight,
+    rowCount,
+    offsetTop: metrics.offsetTop
+  };
   const firstIndex = firstRow * metrics.columns;
   const visible = doc.pages.slice(firstIndex, lastRow * metrics.columns);
 
@@ -138,7 +184,11 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
   const showWatermarkPreview = hasWatermarkContent(watermarkSettings.value);
 
   const onScroll = useCallback(() => {
-    setScrollTop(scrollerRef.current?.scrollTop ?? 0);
+    const top = scrollerRef.current?.scrollTop ?? 0;
+    scrollTopRef.current = top;
+    const w = windowRef.current;
+    const next = windowRows(top - w.offsetTop, w.rowHeight, w.viewportHeight, w.rowCount);
+    if (next.first !== w.firstRow || next.last !== w.lastRow) bumpWindow(n => n + 1);
   }, []);
 
   const clickPage = (index: number, page: PageRef, event: MouseEvent) => {
@@ -177,7 +227,8 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
       else if (bottom > viewBottom) next = bottom - scroller.clientHeight;
       if (next !== viewTop) {
         scroller.scrollTop = Math.max(0, next);
-        setScrollTop(scroller.scrollTop);
+        scrollTopRef.current = scroller.scrollTop;
+        bumpWindow(n => n + 1);
       }
     },
     [metrics.columns, metrics.offsetTop, metrics.height, rowHeight]
@@ -314,6 +365,55 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
     }
   });
 
+  /**
+   * The cell event handlers, behind one stable ref so `PageCell`'s props stay
+   * shallow-equal between renders: a cell whose page, selection, focus and drag
+   * state are unchanged is not re-rendered when the window moves.
+   */
+  const actionsRef = useRef<CellActions>(null as unknown as CellActions);
+  actionsRef.current = {
+    click: clickPage,
+    keyDown: onKeyDown,
+    focus: setFocusIndex,
+    dragStart: (event, page) => {
+      if (activeJob.value !== null) {
+        event.preventDefault();
+        refuseEditWhileBusy();
+        return;
+      }
+      setDragKey(page.key);
+      event.dataTransfer?.setData('text/plain', page.key);
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+    },
+    dragOver: (event, index) => {
+      if (!dragKey) return;
+      event.preventDefault();
+      const tile = event.currentTarget as HTMLElement;
+      // Insert before or after depending on which half is hovered —
+      // mirrored under RTL, where the page before is to the right.
+      setDropIndex(
+        dropGapIndex(event.clientX, tile.getBoundingClientRect(), index, isRightToLeft(tile))
+      );
+    },
+    dragEnd: () => {
+      setDragKey(null);
+      setDropIndex(null);
+    },
+    drop: event => {
+      // Only an internal reorder is this tile's to handle. A file
+      // from the OS must reach AppShell's window handler, which
+      // skips any drop that is already defaultPrevented.
+      if (!dragKey) return;
+      event.preventDefault();
+      if (dropIndex !== null) {
+        const keys = selection.has(dragKey) ? [...selection] : [dragKey];
+        movePages(doc.id, keys, dropIndex);
+      }
+      setDragKey(null);
+      setDropIndex(null);
+    }
+  };
+
   return (
     <div
       className={styles.scroller}
@@ -347,107 +447,26 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
         >
           {visible.map((page, offset) => {
             const index = firstIndex + offset;
-            const isSelected = selection.has(page.key);
-            const dropBefore = dropIndex === index;
-            const dropAfter = dropIndex === index + 1 && index === doc.pages.length - 1;
-            const cropBox = cropBoxes.value[page.key];
-
             return (
-              <div
+              <PageCell
                 key={page.key}
-                data-index={index}
-                className={[
-                  styles.cell,
-                  dragKey === page.key ? styles.dragging : '',
-                  dropBefore ? styles.dropBefore : '',
-                  dropAfter ? styles.dropAfter : ''
-                ]
-                  .filter(Boolean)
-                  .join(' ')}
-                role="option"
-                aria-selected={isSelected}
-                aria-label={t(
-                  isSelected ? 'Page {n} of {total}, selected' : 'Page {n} of {total}',
-                  {
-                    n: index + 1,
-                    total: doc.pages.length
-                  }
-                )}
-                // Roving tabindex: one tab stop for the whole grid, arrows within.
-                tabIndex={index === focusIndex ? 0 : -1}
-                draggable
-                onClick={event => clickPage(index, page, event)}
-                onKeyDown={event => onKeyDown(event, index, page)}
-                onFocus={() => setFocusIndex(index)}
-                onDragStart={event => {
-                  if (activeJob.value !== null) {
-                    event.preventDefault();
-                    refuseEditWhileBusy();
-                    return;
-                  }
-                  setDragKey(page.key);
-                  event.dataTransfer?.setData('text/plain', page.key);
-                  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
-                }}
-                onDragOver={event => {
-                  if (!dragKey) return;
-                  event.preventDefault();
-                  const tile = event.currentTarget as HTMLElement;
-                  // Insert before or after depending on which half is hovered —
-                  // mirrored under RTL, where the page before is to the right.
-                  setDropIndex(
-                    dropGapIndex(
-                      event.clientX,
-                      tile.getBoundingClientRect(),
-                      index,
-                      isRightToLeft(tile)
-                    )
-                  );
-                }}
-                onDragEnd={() => {
-                  setDragKey(null);
-                  setDropIndex(null);
-                }}
-                onDrop={event => {
-                  // Only an internal reorder is this tile's to handle. A file
-                  // from the OS must reach AppShell's window handler, which
-                  // skips any drop that is already defaultPrevented.
-                  if (!dragKey) return;
-                  event.preventDefault();
-                  if (dropIndex !== null) {
-                    const keys = selection.has(dragKey) ? [...selection] : [dragKey];
-                    movePages(doc.id, keys, dropIndex);
-                  }
-                  setDragKey(null);
-                  setDropIndex(null);
-                }}
-              >
-                <Thumbnail
-                  page={page}
-                  docId={doc.id}
-                  width={metrics.width}
-                  aspect={gridAspect}
-                  isSelected={isSelected}
-                  selectable={selectable}
-                  overlay={
-                    (showWatermarkPreview || cropBox) && (
-                      <>
-                        {showWatermarkPreview && (
-                          <WatermarkOverlay
-                            pageIndex={index}
-                            width={metrics.width}
-                            height={metrics.height}
-                          />
-                        )}
-                        {cropBox && <CropBoxPreview box={cropBox} />}
-                      </>
-                    )
-                  }
-                />
-                <span className={isSelected ? styles.pageNumberSelected : styles.pageNumber}>
-                  {index + 1}
-                </span>
-              </div>
+                page={page}
+                index={index}
+                total={doc.pages.length}
+                docId={doc.id}
+                isSelected={selection.has(page.key)}
+                focusable={index === focusIndex}
+                dragging={dragKey === page.key}
+                dropBefore={dropIndex === index}
+                dropAfter={dropIndex === index + 1 && index === doc.pages.length - 1}
+                width={metrics.width}
+                height={metrics.height}
+                aspect={gridAspect}
+                selectable={selectable}
+                showWatermarkPreview={showWatermarkPreview}
+                cropBox={cropBoxes.value[page.key]}
+                actions={actionsRef}
+              />
             );
           })}
         </div>
@@ -462,6 +481,113 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
     </div>
   );
 }
+
+interface CellActions {
+  click: (index: number, page: PageRef, event: MouseEvent) => void;
+  keyDown: (event: KeyboardEvent, index: number, page: PageRef) => void;
+  focus: (index: number) => void;
+  dragStart: (event: DragEvent, page: PageRef) => void;
+  dragOver: (event: DragEvent, index: number) => void;
+  dragEnd: () => void;
+  drop: (event: DragEvent) => void;
+}
+
+interface PageCellProps {
+  page: PageRef;
+  index: number;
+  total: number;
+  docId: string;
+  isSelected: boolean;
+  /** Holds the grid's single roving tab stop. */
+  focusable: boolean;
+  dragging: boolean;
+  dropBefore: boolean;
+  dropAfter: boolean;
+  width: number;
+  height: number;
+  aspect: number;
+  selectable: boolean;
+  showWatermarkPreview: boolean;
+  cropBox: CropBox | undefined;
+  actions: RefObject<CellActions>;
+}
+
+/**
+ * One tile of the grid. Memoised: when the window moves by a row, only the cells
+ * entering it render; the rest keep their DOM untouched.
+ */
+const PageCell = memo(function PageCell({
+  page,
+  index,
+  total,
+  docId,
+  isSelected,
+  focusable,
+  dragging,
+  dropBefore,
+  dropAfter,
+  width,
+  height,
+  aspect,
+  selectable,
+  showWatermarkPreview,
+  cropBox,
+  actions
+}: PageCellProps) {
+  const t = useTranslation();
+  const act = () => actions.current as CellActions;
+  return (
+    <div
+      data-index={index}
+      className={[
+        styles.cell,
+        dragging ? styles.dragging : '',
+        dropBefore ? styles.dropBefore : '',
+        dropAfter ? styles.dropAfter : ''
+      ]
+        .filter(Boolean)
+        .join(' ')}
+      role="option"
+      aria-selected={isSelected}
+      aria-label={t(isSelected ? 'Page {n} of {total}, selected' : 'Page {n} of {total}', {
+        n: index + 1,
+        total
+      })}
+      // Roving tabindex: one tab stop for the whole grid, arrows within.
+      tabIndex={focusable ? 0 : -1}
+      draggable
+      onClick={event => act().click(index, page, event)}
+      onKeyDown={event => act().keyDown(event, index, page)}
+      onFocus={() => act().focus(index)}
+      onDragStart={event => act().dragStart(event, page)}
+      onDragOver={event => act().dragOver(event, index)}
+      onDragEnd={() => act().dragEnd()}
+      onDrop={event => act().drop(event)}
+    >
+      <Thumbnail
+        page={page}
+        docId={docId}
+        width={width}
+        aspect={aspect}
+        isSelected={isSelected}
+        selectable={selectable}
+        overlay={
+          (showWatermarkPreview || cropBox) && (
+            <>
+              {showWatermarkPreview && (
+                <WatermarkOverlay pageIndex={index} width={width} height={height} />
+              )}
+              {cropBox && <CropBoxPreview box={cropBox} />}
+            </>
+          )
+        }
+      />
+      <span className={isSelected ? styles.pageNumberSelected : styles.pageNumber}>
+        {index + 1}
+      </span>
+    </div>
+  );
+});
 
 /** Exported so the transaction helper is used where a drag spans many mutations. */
 export function withReorderTransaction<T>(fn: () => T): T {

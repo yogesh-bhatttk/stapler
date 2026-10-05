@@ -1456,9 +1456,9 @@ const api: RenderJob = {
       done++;
       const page = await doc.getPage(pageIndex + 1);
       try {
-        const wanted = new Map(pageRequests.map(r => [r.objectNumber, r.rects]));
+        const wanted = rectsByObject(pageRequests);
         const seen = new Set<number>();
-        for (const placement of imagePlacements(await page.getOperatorList())) {
+        for (const placement of imagePlacements(await page.getOperatorList(), { patterns: true })) {
           if (seen.size === wanted.size) break;
           const decoded = await decodeImage(page, placement.objId);
           if (!decoded) continue;
@@ -2102,11 +2102,11 @@ const api: RenderJob = {
     if (requests.length === 0) return [];
     const page = await entry(handle).doc.getPage(pageIndex + 1);
     try {
-      const wanted = new Map(requests.map(r => [r.objectNumber, r.rects]));
+      const wanted = rectsByObject(requests);
       const results: RedactedImageResult[] = [];
       const seen = new Set<number>();
 
-      for (const placement of imagePlacements(await page.getOperatorList())) {
+      for (const placement of imagePlacements(await page.getOperatorList(), { patterns: true })) {
         if (seen.size === wanted.size) break;
         const decoded = await decodeImage(page, placement.objId);
         // A null decode is pdf.js saying it could not read the image — JBIG2 and
@@ -2162,7 +2162,7 @@ const api: RenderJob = {
   async extractImageRegion(handle, pageIndex, objectNumber, rect) {
     const page = await entry(handle).doc.getPage(pageIndex + 1);
     try {
-      for (const placement of imagePlacements(await page.getOperatorList())) {
+      for (const placement of imagePlacements(await page.getOperatorList(), { patterns: true })) {
         const decoded = await decodeImage(page, placement.objId);
         if (!decoded || decoded.objectNumber !== objectNumber) continue;
         const crop = cropUnitRect(decoded, rect);
@@ -2184,7 +2184,7 @@ const api: RenderJob = {
       const seen = new Set<number>();
       let done = 0;
 
-      for (const placement of imagePlacements(await page.getOperatorList())) {
+      for (const placement of imagePlacements(await page.getOperatorList(), { patterns: true })) {
         if (seen.size === wanted.size) break;
         const decoded = await decodeImage(page, placement.objId);
         // A null decode is pdf.js saying it could not read the image. There is
@@ -2344,6 +2344,23 @@ type Matrix = [number, number, number, number, number, number];
 const IDENTITY: Matrix = [1, 0, 0, 1, 0, 0];
 
 /** `m` applied first, then `ctm` — pdf.js's `Util.transform(ctm, m)`. */
+/**
+ * Object number → every rect asked for it. One image can be requested more than
+ * once on a page — drawn by the page and again from a pattern's cell (HRD-41),
+ * or named twice — and a plain `Map` of the requests kept only the last one's
+ * rects, so the area the first mark covered was neither blacked out nor
+ * checked. The union over-covers each placement, never under-covers one.
+ */
+function rectsByObject<R>(requests: { objectNumber: number; rects: R[] }[]): Map<number, R[]> {
+  const wanted = new Map<number, R[]>();
+  for (const request of requests) {
+    const existing = wanted.get(request.objectNumber);
+    if (existing) existing.push(...request.rects);
+    else wanted.set(request.objectNumber, [...request.rects]);
+  }
+  return wanted;
+}
+
 function concat(ctm: Matrix, m: Matrix): Matrix {
   return [
     ctm[0] * m[0] + ctm[2] * m[1],
@@ -2411,62 +2428,98 @@ export function largerPlacement(candidate: ImagePlacement, incumbent: ImagePlace
  * canvas transform in ways that are not visible from the operator list, so any
  * image drawn inside one is marked unmeasured and re-encoded at source size.
  */
-function imagePlacements(ops: { fnArray: number[]; argsArray: unknown[] }): ImagePlacement[] {
+function imagePlacements(
+  ops: { fnArray: number[]; argsArray: unknown[] },
+  options: { patterns?: boolean } = {}
+): ImagePlacement[] {
   const OPS = pdfjsLib.OPS;
   const found = new Map<string, ImagePlacement>();
-  const stack: Matrix[] = [];
-  let ctm: Matrix = IDENTITY;
 
-  const record = (objId: unknown, scaleX: number, scaleY: number) => {
-    if (typeof objId !== 'string') return;
-    const widthPt = Math.abs(scaleX) * Math.hypot(ctm[0], ctm[1]);
-    const heightPt = Math.abs(scaleY) * Math.hypot(ctm[2], ctm[3]);
-    const previous = found.get(objId);
-    if (!previous) {
-      found.set(objId, { objId, widthPt, heightPt, measured: true });
-      return;
+  const walk = (
+    list: { fnArray: number[]; argsArray: unknown[] },
+    depth: number,
+    inPattern: boolean
+  ) => {
+    const stack: Matrix[] = [];
+    let ctm: Matrix = IDENTITY;
+
+    const record = (objId: unknown, scaleX: number, scaleY: number) => {
+      if (typeof objId !== 'string') return;
+      const widthPt = Math.abs(scaleX) * Math.hypot(ctm[0], ctm[1]);
+      const heightPt = Math.abs(scaleY) * Math.hypot(ctm[2], ctm[3]);
+      const previous = found.get(objId);
+      if (!previous) {
+        // An image in a pattern cell is drawn in pattern space, once per tile,
+        // under a matrix the page's operator list does not carry: its size on
+        // the page is unknown, so it is never reported as measured.
+        found.set(objId, { objId, widthPt, heightPt, measured: !inPattern });
+        return;
+      }
+      // An image drawn twice has to survive at the size of its largest use.
+      previous.widthPt = Math.max(previous.widthPt, widthPt);
+      previous.heightPt = Math.max(previous.heightPt, heightPt);
+      if (inPattern) previous.measured = false;
+    };
+
+    for (let i = 0; i < list.fnArray.length; i++) {
+      const args = list.argsArray[i];
+      switch (list.fnArray[i]) {
+        case OPS.save:
+          stack.push(ctm);
+          break;
+        case OPS.restore:
+          ctm = stack.pop() ?? IDENTITY;
+          break;
+        case OPS.transform:
+          if (isMatrix(args)) ctm = concat(ctm, args);
+          break;
+        case OPS.paintFormXObjectBegin: {
+          stack.push(ctm);
+          const matrix = Array.isArray(args) ? args[0] : null;
+          if (isMatrix(matrix)) ctm = concat(ctm, matrix);
+          break;
+        }
+        case OPS.paintFormXObjectEnd:
+          ctm = stack.pop() ?? IDENTITY;
+          break;
+        case OPS.paintImageXObject:
+          if (Array.isArray(args)) record(args[0], 1, 1);
+          break;
+        case OPS.paintImageXObjectRepeat:
+          // pdf.js collapses three or more identical draws into one op carrying
+          // the per-instance scale.
+          if (Array.isArray(args)) record(args[0], Number(args[1]) || 1, Number(args[2]) || 1);
+          break;
+        case OPS.setFillColorN:
+        case OPS.setStrokeColorN: {
+          // HRD-41 — a tiling pattern's cell is its own operator list, carried
+          // inside the colour operator as `['TilingPattern', color, ir, …]`. Its
+          // images decode into the page's object store like any other, so a
+          // caller that has to reach them (redaction, face blur) can.
+          if (!options.patterns || depth >= MAX_PATTERN_DEPTH || !Array.isArray(args)) break;
+          const ir = args[2] as { fnArray?: unknown; argsArray?: unknown } | undefined;
+          if (
+            args[0] === 'TilingPattern' &&
+            ir &&
+            Array.isArray(ir.fnArray) &&
+            Array.isArray(ir.argsArray)
+          ) {
+            walk(ir as { fnArray: number[]; argsArray: unknown[] }, depth + 1, true);
+          }
+          break;
+        }
+        default:
+          break;
+      }
     }
-    // An image drawn twice has to survive at the size of its largest use.
-    previous.widthPt = Math.max(previous.widthPt, widthPt);
-    previous.heightPt = Math.max(previous.heightPt, heightPt);
   };
 
-  for (let i = 0; i < ops.fnArray.length; i++) {
-    const args = ops.argsArray[i];
-    switch (ops.fnArray[i]) {
-      case OPS.save:
-        stack.push(ctm);
-        break;
-      case OPS.restore:
-        ctm = stack.pop() ?? IDENTITY;
-        break;
-      case OPS.transform:
-        if (isMatrix(args)) ctm = concat(ctm, args);
-        break;
-      case OPS.paintFormXObjectBegin: {
-        stack.push(ctm);
-        const matrix = Array.isArray(args) ? args[0] : null;
-        if (isMatrix(matrix)) ctm = concat(ctm, matrix);
-        break;
-      }
-      case OPS.paintFormXObjectEnd:
-        ctm = stack.pop() ?? IDENTITY;
-        break;
-      case OPS.paintImageXObject:
-        if (Array.isArray(args)) record(args[0], 1, 1);
-        break;
-      case OPS.paintImageXObjectRepeat:
-        // pdf.js collapses three or more identical draws into one op carrying
-        // the per-instance scale.
-        if (Array.isArray(args)) record(args[0], Number(args[1]) || 1, Number(args[2]) || 1);
-        break;
-      default:
-        break;
-    }
-  }
-
+  walk(ops, 0, false);
   return [...found.values()];
 }
+
+/** How deep patterns drawing patterns are followed by {@link imagePlacements}. */
+const MAX_PATTERN_DEPTH = 4;
 
 interface DecodedImage {
   objectNumber: number;

@@ -14,6 +14,7 @@ import {
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { unzipSync, unzlibSync } from 'fflate';
+import { drawnText } from './pdf-bytes';
 import {
   acroformPdf,
   ANNOTATION_TEXT,
@@ -227,58 +228,6 @@ async function highlightStrokes(bytes: Uint8Array): Promise<HighlightStroke[]> {
   });
 
   return strokes;
-}
-
-/**
- * Every string a document draws on page 0, including inside the form XObjects the
- * page invokes — which is where a flattened form field's value ends up.
- *
- * Show-text operands may be literal `(text)` or hex `<hex>`, and the hex code width
- * depends on the font, so all readings are concatenated and the caller asserts a
- * substring. The point is to check the value is *drawn*, not merely stored in /V.
- */
-async function drawnText(bytes: Uint8Array): Promise<string> {
-  const { inflateSync } = await import('node:zlib');
-  const doc = await PDFDocument.load(bytes);
-  const page = doc.getPage(0);
-
-  const decode = (stream: unknown): string => {
-    if (!(stream instanceof PDFStream)) return '';
-    const raw = Buffer.from((stream as PDFRawStream).contents ?? []);
-    const isFlate = String(stream.dict.get(PDFName.of('Filter'))) === '/FlateDecode';
-    let text: string;
-    try {
-      text = (isFlate ? inflateSync(raw) : raw).toString('latin1');
-    } catch (err) {
-      const message = `Failed to decode a content stream while reading page text: ${
-        err instanceof Error ? err.message : String(err)
-      }`;
-      throw new Error(message, { cause: err });
-    }
-    // Append both decodings of every hex literal alongside the raw operators.
-    let decoded = text;
-    for (const match of text.matchAll(/<([0-9A-Fa-f\s]+)>/g)) {
-      const hex = match[1].replace(/\s+/g, '');
-      for (const width of [2, 4]) {
-        if (hex.length % width !== 0) continue;
-        let out = '';
-        for (let i = 0; i < hex.length; i += width) {
-          out += String.fromCharCode(parseInt(hex.slice(i, i + width), 16));
-        }
-        decoded += `\n${out}`;
-      }
-    }
-    return decoded;
-  };
-
-  let all = '';
-  const contents = page.node.Contents();
-  const streams = contents instanceof PDFArray ? contents.asArray() : contents ? [contents] : [];
-  for (const stream of streams) all += decode(doc.context.lookup(stream));
-
-  const xobjects = page.node.Resources()?.lookupMaybe(PDFName.of('XObject'), PDFDict);
-  for (const [, ref] of xobjects?.entries() ?? []) all += decode(doc.context.lookup(ref));
-  return all;
 }
 
 /**

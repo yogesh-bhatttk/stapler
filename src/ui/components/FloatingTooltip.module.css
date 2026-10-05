@@ -1,3 +1,9 @@
+/* The portal host inside <main>: no box of its own, so it takes no part in
+   main's flex layout and gives the fixed bubble no containing block. */
+.layer {
+  display: contents;
+}
+
 .bubble {
   position: fixed;
   /* Above the shell (rail/top bar/sheet are 100–101), below dialogs (1000+). */

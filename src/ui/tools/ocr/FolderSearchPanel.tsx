@@ -3,10 +3,14 @@
  *
  * Allows folder selection, displays indexing progress bar, search input field,
  * and search result list with snippet matching, page number attribution, and jump-to-page.
+ *
+ * "Also OCR scanned pages" is off by default. Turning it on goes through OCR-01's
+ * consent dialog when the language model is not stored yet (`prepareOcrModel`);
+ * declining leaves it off and nothing is fetched.
  */
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { Button } from '../../components/Button';
-import { Field, TextInput } from '../../components/Field';
+import { Checkbox, Field, TextInput } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
 import { tPlural, useTranslation } from '../../../core/i18n';
 import { showDirectoryPicker } from '../../../platform/fsa';
@@ -19,7 +23,10 @@ import {
 import { activePageIndex, documents, switchDocument } from '../../../core/store';
 import { importFilesAsDocuments } from '../../../core/open-document';
 import { notifyError } from '../../../core/notify';
+import { isCancellation } from '../../../core/errors';
+import { prepareOcrModel } from '../../../core/ocr/runOcr';
 import type { FsaDirectoryHandle } from '../../../platform/fsa';
+import { ocrSettings } from './state';
 
 /** Folder-relative path → the document it was opened as, so a second result doesn't open it twice. */
 const openedFromFolder = new Map<string, string>();
@@ -34,6 +41,14 @@ export function FolderSearchPanel() {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResultItem[]>([]);
   const [searching, setSearching] = useState(false);
+  // OCR-02 — opt-in, off by default. `preparingModel` covers the consent
+  // dialog and the model download that turning it on may start.
+  const [ocrScans, setOcrScans] = useState(false);
+  const [preparingModel, setPreparingModel] = useState(false);
+  /** Whether the stats shown were produced with OCR on — the note's wording depends on it. */
+  const [statsUsedOcr, setStatsUsedOcr] = useState(false);
+  /** Why the option is off after the user tried to turn it on (declined or cancelled). */
+  const [ocrMessage, setOcrMessage] = useState('');
   // Each keystroke starts a new lookup with no cancellation and no guarantee
   // it resolves in order — a fast type-then-backspace can let an earlier
   // (longer) query's results land after a shorter one's, overwriting what's
@@ -62,6 +77,56 @@ export function FolderSearchPanel() {
   const indexController = useRef<AbortController | null>(null);
   useEffect(() => () => indexController.current?.abort(), []);
 
+  /**
+   * Makes the OCR model available, through OCR-01's consent and download flow
+   * when it is not stored. True when it is ready; false when the user declined
+   * or cancelled (nothing was fetched in either case).
+   */
+  const ensureOcrModel = async (controller: AbortController): Promise<boolean> => {
+    const outcome = await prepareOcrModel(ocrSettings.value.lang, {
+      signal: controller.signal,
+      onProgress: (p, label) => {
+        if (p !== null) setProgress(Math.round(p * 100));
+        setStatusText(label);
+      }
+    });
+    if (outcome === 'declined') {
+      setOcrMessage(
+        t('Scanned pages will not be read: the OCR language model was not downloaded.')
+      );
+      return false;
+    }
+    return true;
+  };
+
+  const handleToggleOcr = async (checked: boolean) => {
+    if (!checked) {
+      setOcrScans(false);
+      return;
+    }
+    if (indexController.current) return;
+    const controller = new AbortController();
+    indexController.current = controller;
+    setPreparingModel(true);
+    setOcrMessage('');
+    setProgress(0);
+    setStatusText(t('Checking the OCR language model...'));
+    try {
+      if (await ensureOcrModel(controller)) setOcrScans(true);
+    } catch (err) {
+      if (controller.signal.aborted || isCancellation(err)) {
+        setOcrMessage(
+          t('Scanned pages will not be read: the OCR language model was not downloaded.')
+        );
+      } else {
+        notifyError('ocr.folder-search', err);
+      }
+    } finally {
+      indexController.current = null;
+      setPreparingModel(false);
+    }
+  };
+
   const handleStartIndexing = async () => {
     if (!dirHandle || indexController.current) return;
     const controller = new AbortController();
@@ -70,14 +135,24 @@ export function FolderSearchPanel() {
     setProgress(0);
     setStatusText(t('Starting index...'));
     try {
+      // The model can have been removed (or evicted) since the option was
+      // turned on, or the OCR language changed: asked again, never fetched
+      // without the dialog.
+      let useOcr = ocrScans;
+      if (useOcr && !(await ensureOcrModel(controller))) {
+        useOcr = false;
+        setOcrScans(false);
+      }
       const resStats = await indexDirectory(dirHandle, {
         signal: controller.signal,
+        ...(useOcr ? { ocr: { lang: ocrSettings.value.lang } } : {}),
         onProgress: (p, label) => {
           setProgress(Math.round(p * 100));
           setStatusText(label);
         }
       });
       setStats(resStats);
+      setStatsUsedOcr(useOcr);
       if (query.trim()) {
         await handleSearch(query);
       }
@@ -150,6 +225,34 @@ export function FolderSearchPanel() {
     }
   };
 
+  const busy = indexing || preparingModel;
+
+  const ocrNotes: string[] = [];
+  if (stats) {
+    if (stats.ocrPagesRecognized > 0) {
+      ocrNotes.push(tPlural('{count} scanned pages were read with OCR.', stats.ocrPagesRecognized));
+    }
+    if (stats.ocrPagesFailed > 0) {
+      ocrNotes.push(
+        tPlural('{count} scanned pages could not be read by OCR.', stats.ocrPagesFailed)
+      );
+    }
+    if (stats.scannedPagesSkipped > 0) {
+      ocrNotes.push(
+        stats.ocrUnavailableReason
+          ? tPlural('{count} scanned pages were skipped: {reason}', stats.scannedPagesSkipped, {
+              reason: stats.ocrUnavailableReason
+            })
+          : statsUsedOcr
+            ? tPlural('{count} scanned pages were skipped.', stats.scannedPagesSkipped)
+            : tPlural(
+                '{count} scanned pages have no text layer and were skipped. Turn on "Also OCR scanned pages" to search them.',
+                stats.scannedPagesSkipped
+              )
+      );
+    }
+  }
+
   return (
     <div className={panelStyles.section}>
       <h2 className={panelStyles.title}>{t('Folder Search & Index')}</h2>
@@ -158,7 +261,7 @@ export function FolderSearchPanel() {
         <button
           type="button"
           onClick={handleSelectFolder}
-          disabled={indexing}
+          disabled={busy}
           style={{
             height: 'var(--control-h)',
             padding: '0 var(--space-md)',
@@ -177,7 +280,7 @@ export function FolderSearchPanel() {
           <button
             type="button"
             onClick={handleStartIndexing}
-            disabled={indexing}
+            disabled={busy}
             style={{
               height: 'var(--control-h)',
               padding: '0 var(--space-md)',
@@ -192,7 +295,7 @@ export function FolderSearchPanel() {
             {indexing ? t('Indexing...') : t('Index PDFs')}
           </button>
         )}
-        {indexing && (
+        {busy && (
           <Button
             variant="secondary"
             size="compact"
@@ -203,9 +306,27 @@ export function FolderSearchPanel() {
         )}
       </div>
 
-      {indexing && (
+      <Checkbox
+        label={t('Also OCR scanned pages')}
+        checked={ocrScans}
+        disabled={busy}
+        onChange={checked => void handleToggleOcr(checked)}
+      />
+      <p className={panelStyles.description}>
+        {t(
+          'Pages with no text layer are read with OCR while indexing, so scans become searchable. ' +
+            'Slower; uses the OCR language chosen above. Files are not changed.'
+        )}
+      </p>
+
+      {busy && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
           <div
+            role="progressbar"
+            aria-label={t('Indexing progress')}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={progress}
             style={{
               height: '6px',
               width: '100%',
@@ -229,14 +350,23 @@ export function FolderSearchPanel() {
         </div>
       )}
 
-      {stats && !indexing && (
-        <p className={panelStyles.note + ' ' + panelStyles.noteInfo}>
-          {t('Indexed {files} ({pages}, {tokens}) in {ms}ms.', {
-            files: tPlural('{count} PDFs', stats.filesIndexed),
-            pages: tPlural('{count} pages', stats.pagesIndexed),
-            tokens: tPlural('{count} tokens', stats.totalTokens),
-            ms: stats.durationMs
-          })}
+      {!busy && ocrMessage && (
+        <p className={panelStyles.note + ' ' + panelStyles.noteInfo} role="status">
+          {ocrMessage}
+        </p>
+      )}
+
+      {stats && !busy && (
+        <p className={panelStyles.note + ' ' + panelStyles.noteInfo} role="status">
+          {[
+            t('Indexed {files} ({pages}, {tokens}) in {ms}ms.', {
+              files: tPlural('{count} PDFs', stats.filesIndexed),
+              pages: tPlural('{count} pages', stats.pagesIndexed),
+              tokens: tPlural('{count} tokens', stats.totalTokens),
+              ms: stats.durationMs
+            }),
+            ...ocrNotes
+          ].join(' ')}
         </p>
       )}
 
@@ -267,44 +397,73 @@ export function FolderSearchPanel() {
               <li
                 key={res.fileId + '-' + res.pageIndex + '-' + i}
                 className={panelStyles.listRow}
-                style={{
-                  flexDirection: 'column',
-                  alignItems: 'flex-start',
-                  padding: '8px',
-                  cursor: 'pointer',
-                  borderRadius: 'var(--radius-sm)'
-                }}
-                onClick={() => handleJumpToPage(res)}
+                style={{ padding: 0, borderRadius: 'var(--radius-sm)' }}
               >
-                <div
+                <button
+                  type="button"
+                  onClick={() => void handleJumpToPage(res)}
                   style={{
                     display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'flex-start',
                     width: '100%',
-                    justifyContent: 'space-between',
-                    fontWeight: 600
+                    padding: '8px',
+                    background: 'none',
+                    border: 'none',
+                    borderRadius: 'var(--radius-sm)',
+                    color: 'inherit',
+                    font: 'inherit',
+                    textAlign: 'start',
+                    cursor: 'pointer'
                   }}
                 >
-                  <span className={panelStyles.listRowText}>{res.fileName}</span>
-                  <span
+                  <div
                     style={{
-                      font: 'var(--text-micro)',
-                      color: 'var(--primary)',
-                      whiteSpace: 'nowrap'
+                      display: 'flex',
+                      width: '100%',
+                      justifyContent: 'space-between',
+                      fontWeight: 600
                     }}
                   >
-                    {t('Page {page}', { page: res.pageNumber })}
-                  </span>
-                </div>
-                <div
-                  style={{
-                    font: 'var(--text-micro)',
-                    color: 'var(--ink-subtle)',
-                    marginTop: '2px',
-                    wordBreak: 'break-word'
-                  }}
-                >
-                  {res.textSnippet}
-                </div>
+                    <span className={panelStyles.listRowText}>{res.fileName}</span>
+                    <span
+                      style={{
+                        font: 'var(--text-micro)',
+                        color: 'var(--primary)',
+                        whiteSpace: 'nowrap'
+                      }}
+                    >
+                      {t('Page {page}', { page: res.pageNumber })}
+                    </span>
+                  </div>
+                  {res.fromOcr && (
+                    <span
+                      title={t(
+                        'This match is in text recognized by OCR, which can contain errors.'
+                      )}
+                      style={{
+                        marginTop: '2px',
+                        padding: '0 6px',
+                        font: 'var(--text-micro)',
+                        color: 'var(--ink-muted)',
+                        border: '1px solid var(--hairline)',
+                        borderRadius: 'var(--radius-pill)'
+                      }}
+                    >
+                      {t('Recognized text')}
+                    </span>
+                  )}
+                  <div
+                    style={{
+                      font: 'var(--text-micro)',
+                      color: 'var(--ink-subtle)',
+                      marginTop: '2px',
+                      wordBreak: 'break-word'
+                    }}
+                  >
+                    {res.textSnippet}
+                  </div>
+                </button>
               </li>
             ))}
           </ul>

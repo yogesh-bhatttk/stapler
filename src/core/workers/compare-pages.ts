@@ -6,6 +6,7 @@
  * pure functions in `compare-raster.ts`.
  */
 import * as Comlink from 'comlink';
+import { pixelDiff } from '../pixel-diff';
 import {
   deflateRaster,
   redlinePageRaster,
@@ -29,6 +30,20 @@ export interface ComparePagesJob {
     sensitivity: number,
     unchangedPages: 'skip' | 'mark'
   ): RedlinePageRaster;
+  /**
+   * UX-02 — one page of the pre-export review (`diff-preview.ts`): each side's
+   * pixels and, when both sides are the same size, the changed-pixel mask.
+   * Reading the bitmaps back and diffing them took ~50 ms of main thread per
+   * page view on the 10 × 5 MB merge's review (NFR-02).
+   */
+  reviewPage(pair: ComparePagePair, sensitivity: number): ReviewPageImages;
+}
+
+export interface ReviewPageImages {
+  before: ImageData | null;
+  after: ImageData | null;
+  diff: ImageData | null;
+  comparable: boolean;
 }
 
 function readBitmap(bitmap: ImageBitmap | null): ImageData | undefined {
@@ -48,6 +63,18 @@ function readBitmap(bitmap: ImageBitmap | null): ImageData | undefined {
 }
 
 export const comparePagesApi: ComparePagesJob = {
+  reviewPage(pair, sensitivity) {
+    const before = readBitmap(pair.a) ?? null;
+    const after = readBitmap(pair.b) ?? null;
+    const comparable =
+      !!before && !!after && before.width === after.width && before.height === after.height;
+    const diff = comparable && before && after ? pixelDiff(before, after, sensitivity) : null;
+    const out: ReviewPageImages = { before, after, diff, comparable };
+    const buffers = [before, after, diff].flatMap(image =>
+      image ? [image.data.buffer as ArrayBuffer] : []
+    );
+    return Comlink.transfer(out, buffers);
+  },
   visualDiffPage(pair, sensitivity) {
     const raster = visualDiffRaster(readBitmap(pair.a), readBitmap(pair.b), sensitivity);
     const out = { ...deflateRaster(raster), changed: raster.changed };

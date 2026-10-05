@@ -509,91 +509,73 @@ export async function gifFrameCountOf(file: File): Promise<number> {
 }
 
 /**
+ * A copy of `source` to hand to a worker, so the caller's own bitmap or canvas
+ * is never detached or closed by the transfer (they keep using and closing it,
+ * as before HRD-27 H3).
+ */
+async function bitmapCopyFor(source: ImageBitmap | OffscreenCanvas): Promise<ImageBitmap> {
+  return createImageBitmap(source as unknown as ImageBitmapSource);
+}
+
+/**
  * Trims fully transparent margins and returns a PNG with its alpha intact.
  *
  * Used for signatures (SGN-01): the acceptance criterion is that a drawn signature
  * exports with genuine alpha and no white box over coloured page content, so this
  * must never composite a background.
+ *
+ * HRD-27 H3: the per-pixel scan runs in the cv worker
+ * (`workers/signature-pixels.ts`); a copy of `source` is transferred to it, so
+ * `source` stays the caller's.
  */
 export async function trimTransparentToPng(
   source: ImageBitmap | OffscreenCanvas,
   padding = 8
 ): Promise<{ png: Uint8Array; width: number; height: number } | null> {
-  const width = source.width;
-  const height = source.height;
-  const canvas = new OffscreenCanvas(width, height);
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  if (!ctx) return null;
-  ctx.drawImage(source as unknown as CanvasImageSource, 0, 0);
-
-  const { data } = ctx.getImageData(0, 0, width, height);
-  let top = height;
-  let left = width;
-  let right = -1;
-  let bottom = -1;
-
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (data[(y * width + x) * 4 + 3] === 0) continue;
-      if (x < left) left = x;
-      if (x > right) right = x;
-      if (y < top) top = y;
-      if (y > bottom) bottom = y;
-    }
+  const [{ cvWorker }, Comlink] = await Promise.all([import('./workers'), import('comlink')]);
+  const bitmap = await bitmapCopyFor(source);
+  try {
+    return await cvWorker.lease(api =>
+      api.trimSignature(Comlink.transfer(bitmap, [bitmap]), padding)
+    );
+  } finally {
+    // A no-op once transferred; frees the copy if the lease failed first.
+    bitmap.close();
   }
-
-  if (right < left || bottom < top) return null; // nothing drawn
-
-  const cropWidth = right - left + 1;
-  const cropHeight = bottom - top + 1;
-  const out = new OffscreenCanvas(cropWidth + padding * 2, cropHeight + padding * 2);
-  const outCtx = out.getContext('2d');
-  if (!outCtx) return null;
-  outCtx.drawImage(
-    canvas,
-    left,
-    top,
-    cropWidth,
-    cropHeight,
-    padding,
-    padding,
-    cropWidth,
-    cropHeight
-  );
-
-  const blob = await out.convertToBlob({ type: 'image/png' });
-  return {
-    png: new Uint8Array(await blob.arrayBuffer()),
-    width: out.width,
-    height: out.height
-  };
 }
 
 /**
  * Turns a near-white background into real transparency, for an imported signature
  * photographed or scanned on paper (SGN-01). Pixels above `cutoff` luminance with
  * low saturation become transparent; ink is left alone.
+ *
+ * HRD-27 H3: the per-pixel pass runs in the cv worker
+ * (`workers/signature-pixels.ts`) on a transferred copy of `bitmap`; the
+ * result comes back as a bitmap and is drawn (one blit, no pixel loop) into
+ * the canvas this has always returned.
  */
 export async function removeWhiteBackground(
   bitmap: ImageBitmap,
   cutoff = 235
 ): Promise<OffscreenCanvas | null> {
-  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  if (!ctx) return null;
-  ctx.drawImage(bitmap, 0, 0);
-
-  const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const data = image.data;
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    // Only neutral light pixels are paper. A coloured highlight stays.
-    if (min >= cutoff && max - min < 24) data[i + 3] = 0;
+  const [{ cvWorker }, Comlink] = await Promise.all([import('./workers'), import('comlink')]);
+  const copy = await bitmapCopyFor(bitmap);
+  let cleared: ImageBitmap | null;
+  try {
+    cleared = await cvWorker.lease(api =>
+      api.removeSignatureBackground(Comlink.transfer(copy, [copy]), cutoff)
+    );
+  } finally {
+    copy.close();
   }
-  ctx.putImageData(image, 0, 0);
-  return canvas;
+  if (!cleared) return null;
+  try {
+    const canvas = new OffscreenCanvas(cleared.width, cleared.height);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(cleared, 0, 0);
+    return canvas;
+  } finally {
+    cleared.close();
+  }
 }

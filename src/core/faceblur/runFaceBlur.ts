@@ -109,6 +109,22 @@ export async function runFaceBlur(
     });
   }
 
+  // HRD-41 (PDF-14): images in annotation appearances are blurred when the
+  // appearance is the one a viewer shows, and images in tiling pattern cells
+  // like any form's. Those only a hidden annotation or an alternate look draws
+  // cannot be decoded here — said per page, so "no faces found" never covers
+  // them.
+  for (const pageIndex of plan.hiddenAppearancePages ?? []) {
+    skipped.push({
+      pageIndex,
+      reason: translate(
+        'An image on this page is drawn only by a hidden comment or field, or by its ' +
+          'pressed or hover look, so it was not checked for faces or logos, and was left ' +
+          'untouched.'
+      )
+    });
+  }
+
   if (plan.images.length === 0) {
     return {
       bytes,
@@ -139,16 +155,26 @@ export async function runFaceBlur(
       let logoTemplate: { rgba: Uint8ClampedArray; width: number; height: number } | undefined;
       const forced = new Map<number, UnitRect[]>();
       if (options.logoRegion) {
-        const marked = await processWorker.lease(api =>
-          api.planImageRedactions(bytes, [options.logoRegion as RedactionRegion])
+        // Blur's own planner, not redaction's: a pattern fill the redaction
+        // planner would refuse to vouch for is no reason to refuse a blur. It
+        // is skipped instead, and the skip is reported like any other.
+        const plan = await processWorker.lease(api =>
+          api.planLogoMark(bytes, options.logoRegion as RedactionRegion)
         );
+        skipped.push(...plan.skipped);
+        const marked = plan.requests;
         if (marked.length === 0) {
           throw internal(
-            translate(
-              'The marked logo does not sit on top of an embedded image, so there are no pixels ' +
-                'to match. Mark the logo where it is drawn as a picture, or use a redaction mark ' +
-                'to remove it outright.'
-            )
+            plan.skipped.length > 0
+              ? translate(
+                  'The marked logo sits on a pattern fill Stapler could not look inside, so there ' +
+                    'are no pixels to match. Mark a copy of the logo that is drawn as a picture.'
+                )
+              : translate(
+                  'The marked logo does not sit on top of an embedded image, so there are no pixels ' +
+                    'to match. Mark the logo where it is drawn as a picture, or use a redaction mark ' +
+                    'to remove it outright.'
+                )
           );
         }
         const source = marked[0];

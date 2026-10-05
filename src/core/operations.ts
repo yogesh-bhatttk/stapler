@@ -1047,11 +1047,16 @@ export async function applyRedactions(
   // region and page by page, so a long pass is not a frozen "Verifying" tick —
   // and `signal` reaches every loop inside it, so it can be cancelled like any
   // other stage.
-  const verdicts = await verifyRedaction(output, regions, {
-    signal: options.signal,
-    onProgress: (fraction, label) =>
-      options.onProgress?.(0.85 + 0.15 * Math.min(1, Math.max(0, fraction ?? 0)), label)
-  });
+  const verdicts = await verifyRedaction(
+    output,
+    regions,
+    {
+      signal: options.signal,
+      onProgress: (fraction, label) =>
+        options.onProgress?.(0.85 + 0.15 * Math.min(1, Math.max(0, fraction ?? 0)), label)
+    },
+    bytes
+  );
 
   // No `rasterizedPages`: this pipeline is operator-level throughout — content
   // streams are edited and partly-covered images have their pixels replaced.
@@ -1315,7 +1320,14 @@ export function imageResidueFailure(inspection: RedactedImageInspection): string
 async function verifyRedaction(
   output: Uint8Array,
   regions: RedactionRegion[],
-  options: JobOptions = {}
+  options: JobOptions = {},
+  /**
+   * The document as it was before redaction. The tiling-pattern check reads
+   * which part of each cell the *source* page's paints showed under a mark —
+   * a paint the redaction removed (a covered stencil mask or form) no longer
+   * says so in the output, and its cell could otherwise keep what it showed.
+   */
+  source?: Uint8Array
 ): Promise<RegionVerdict[]> {
   /**
    * A worker-side handle whose 0..1 progress lands in `[from, to]` of this pass.
@@ -1356,6 +1368,18 @@ async function verifyRedaction(
     api.scanResidualText(output, searchTerms, markedPages)
   );
   const residualFound = new Set(residual.found.map(t => t.toLowerCase()));
+  // HRD-41 — content inside a tiling pattern's cell under a mark. pdf.js page
+  // text never reads a pattern cell, so a hand-drawn mark (no search string)
+  // over text in one was invisible to every other text check.
+  let patternResidue: { pageIndex: number; reason?: string }[];
+  try {
+    patternResidue = await processWorker.lease(api => api.patternResidue(output, regions, source));
+  } catch (error) {
+    if (isCancellation(error)) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    patternResidue = markedPages.map(pageIndex => ({ pageIndex, reason: message }));
+  }
+  const patternResidueByPage = new Map(patternResidue.map(r => [r.pageIndex, r]));
   // N-4: a page whose own content could not be decoded cannot be proven clean.
   // Only pages that carry a mark are held to this — an undecodable stream
   // elsewhere cannot hold what a mark on another page removed, and failing on
@@ -1467,6 +1491,23 @@ async function verifyRedaction(
                 message: residual.undecodableFilters?.[region.pageIndex] || '?'
               })
             })
+          };
+        }
+
+        const inPattern = patternResidueByPage.get(region.pageIndex);
+        if (inPattern) {
+          return {
+            region,
+            pass: false,
+            detail: inPattern.reason
+              ? translate(
+                  'The redaction on page {page} is not proven: the patterns under its marks could not be checked ({message}).',
+                  { page: region.pageIndex + 1, message: inPattern.reason }
+                )
+              : translate(
+                  'A tiling pattern on page {page} still draws content under a redaction mark, so that content is still inside the file.',
+                  { page: region.pageIndex + 1 }
+                )
           };
         }
 

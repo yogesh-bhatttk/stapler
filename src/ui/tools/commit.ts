@@ -158,6 +158,7 @@ import {
 import { runOcr } from '../../core/ocr/runOcr';
 import { renderWorker } from '../../core/workers';
 import { altTextMap } from './acc/state';
+import { fastWebViewExport, loadExportSettings } from './export-settings';
 
 /**
  * IMG-2 / IMG-12 — a target-size field holds something outside its range (the
@@ -406,10 +407,95 @@ async function applyProtection(
 export interface GrowthGuard {
   /** The original, pre-compression byte length — never the pre-restriction one. */
   maxBytes: number;
+  /**
+   * False keeps `maxBytes` as a ceiling for the fast-web-view rewrite only, and
+   * lets the file itself exceed it — for Protect, whose growth is the user's own
+   * explicit choice. Fast web view is dropped rather than allowed to push a
+   * compressed file past the original either way. Default true.
+   */
+  enforce?: boolean;
   /** English key, marked with `tKey` at construction; translated when shown. */
   title: string;
   /** English key, marked with `tKey` at construction; translated when shown. */
   detail: string;
+}
+
+/** What `save` tells a caller about the bytes it is about to write. */
+export interface FinalBytesInfo {
+  /** True when the written file was rewritten for fast web view (HRD-23). */
+  fastWebView: boolean;
+}
+
+type OnFinalBytes = (bytes: Uint8Array, info: FinalBytesInfo) => void;
+
+/**
+ * `applied`: rewritten for fast web view. `off`: the option is off, or this is
+ * not a PDF. `failed`: the rewrite threw, so the ordinary bytes are written.
+ * `dropped`: the rewrite would have made a compressed file larger than the
+ * original, so the ordinary bytes are written.
+ */
+type FastWebViewOutcome = 'applied' | 'off' | 'failed' | 'dropped';
+
+/**
+ * HRD-23 / DOC-08 — the opt-in fast-web-view rewrite of one finished PDF export.
+ *
+ * Done here, on the last unencrypted bytes, rather than in each worker save an
+ * export happens to run: an export is often several saves in a row (compose,
+ * then alt text, flatten, protection), and only the last decides the layout of
+ * the written file. Never fatal: if the rewrite fails, the ordinary bytes are
+ * written and the success message says fast web view was not applied.
+ */
+async function forFastWebView(
+  bytes: Uint8Array,
+  name: string,
+  job?: JobOptions
+): Promise<{ bytes: Uint8Array; outcome: FastWebViewOutcome }> {
+  if (!name.toLowerCase().endsWith('.pdf')) return { bytes, outcome: 'off' };
+  await loadExportSettings();
+  if (!fastWebViewExport.value) return { bytes, outcome: 'off' };
+  try {
+    const out = await processWorker.lease(api =>
+      api.saveForFastWebView(bytes, createJobHandle(job ?? {}))
+    );
+    return { bytes: out, outcome: 'applied' };
+  } catch (err) {
+    if (isCancellation(err)) throw err;
+    return { bytes, outcome: 'failed' };
+  }
+}
+
+/** The size part of a "Saved" detail line, plus a word when fast web view was not applied. */
+function fastWebViewNote(size: string, outcome: FastWebViewOutcome): string {
+  if (outcome === 'dropped') {
+    return translate(
+      '{size} · saved without fast web view, which would have made it larger than the original',
+      { size }
+    );
+  }
+  if (outcome === 'failed') {
+    return translate('{size} · fast web view could not be applied, so it was saved without it', {
+      size
+    });
+  }
+  return size;
+}
+
+/**
+ * The fast-web-view rewrite for the exports that write with
+ * `platform.saveFileAs` directly instead of `save` (images-to-pdf, md-to-pdf,
+ * repair, the Office-to-PDF conversions). Saves, and says so when fast web
+ * view had to be left out. Resolves `platform.saveFileAs`'s answer.
+ */
+async function saveDirectPdf(bytes: Uint8Array, name: string, job?: JobOptions): Promise<boolean> {
+  const fast = await forFastWebView(bytes, name, job);
+  const saved = await platform.saveFileAs(fast.bytes, name);
+  if (saved && fast.outcome === 'failed') {
+    notify(
+      'info',
+      translate('Fast web view could not be applied, so the file was saved without it.')
+    );
+  }
+  return saved;
 }
 
 /**
@@ -427,7 +513,7 @@ async function save(
   bytes: Uint8Array,
   name: string,
   job?: JobOptions,
-  onFinalBytes?: (bytes: Uint8Array) => void,
+  onFinalBytes?: OnFinalBytes,
   growthGuard?: GrowthGuard,
   // False for any export whose bytes are not a faithful rendering of
   // `doc.pages` as the document itself — a page subset (split), a derived
@@ -442,25 +528,58 @@ async function save(
   // pass through on their way to disk, rather than threaded through each
   // handler: a tool that forgot to pass it would quietly export an
   // unrestricted copy, which is the failure this whole path exists to prevent.
-  const result = await applyProtection(bytes, name, job, documentRestrictions(doc));
+  const restrictions = documentRestrictions(doc);
+  // HRD-23: fast web view is a layout rewrite of the unencrypted bytes, so it
+  // runs before protection — whose plain-xref, object-number-order re-save
+  // keeps the first-page-first numbering it produces.
+  const fast = await forFastWebView(bytes, name, job);
+  let fastWebView = fast.outcome;
+  let toProtect = fast.bytes;
+  // The fast-web-view ceiling is checked on the *unprotected* bytes, before
+  // anything is encrypted: what fast web view is answerable for is its own
+  // share of the growth (no object streams), not the AES pass that follows.
+  // Checking after encryption used to blame fast web view for Protect's
+  // bytes, and then ran a second full encryption pass over the plain bytes to
+  // find out — even with `enforce: false`, where the result was never going
+  // to be refused anyway.
+  if (
+    fastWebView === 'applied' &&
+    growthGuard &&
+    fast.bytes.byteLength > growthGuard.maxBytes &&
+    fast.bytes.byteLength > bytes.byteLength
+  ) {
+    toProtect = bytes;
+    fastWebView = 'dropped';
+  }
+  // Encrypted once. No second pass over the plain bytes if this comes out
+  // over the ceiling: the encryption re-save (`protectDocument` /
+  // `restrictDocument`) writes a plain xref without object streams whatever
+  // it is given, so the plain bytes encrypt to the same size give or take a
+  // few bytes — the growth past this point is the encryption's own, and it is
+  // either the user's choice (Protect, `enforce: false`) or refused below.
+  const result = await applyProtection(toProtect, name, job, restrictions);
   if (!result) return false;
-  bytes = result.bytes;
-  if (growthGuard && bytes.byteLength > growthGuard.maxBytes) {
+  const protectedResult = result;
+  bytes = protectedResult.bytes;
+  if (growthGuard && growthGuard.enforce !== false && bytes.byteLength > growthGuard.maxBytes) {
     notify('warning', translate(growthGuard.title), {
       detail: translate(growthGuard.detail),
       timeout: 0
     });
     return false;
   }
-  onFinalBytes?.(bytes);
-  const note = (size: string) => {
-    if (result.passwordApplied) return translate('{size} · password required to open', { size });
+  onFinalBytes?.(bytes, { fastWebView: fastWebView === 'applied' });
+  const note = (bytesLabel: string) => {
+    const size = fastWebViewNote(bytesLabel, fastWebView);
+    if (protectedResult.passwordApplied) {
+      return translate('{size} · password required to open', { size });
+    }
     // No password either before or after, but the restrictions this document
     // arrived with were carried through by re-encrypting under this handler's
     // one fixed algorithm (AES-256/R6) — worth a word, since a reader that
     // opened the input under an older/weaker handler is not guaranteed to
     // open this output.
-    if (result.restrictionsPreserved) {
+    if (protectedResult.restrictionsPreserved) {
       return translate(
         "{size} · this document's restrictions were preserved (now AES-256-encrypted; needs a reader from the last decade or so)",
         { size }
@@ -538,7 +657,7 @@ async function reviewAndSave(
   bytes: Uint8Array,
   name: string,
   job?: JobOptions,
-  onFinalBytes?: (bytes: Uint8Array) => void,
+  onFinalBytes?: OnFinalBytes,
   alignment?: PageAlignment,
   // See `save()` — false when `bytes` is a page subset or a different layout
   // entirely (split's single-file branch, the contact sheet), so it must not
@@ -886,7 +1005,13 @@ async function commitConvertedPreview<P extends { bytes: Uint8Array }>(input: {
 
   const name = input.name(preview);
   let bytes = preview.bytes;
+  let fastWebView: FastWebViewOutcome = 'off';
   if (input.protectAsPdf) {
+    // HRD-23: a layout-only rewrite (numbering and xref), not a re-conversion,
+    // so the saved pages are still exactly the ones the preview showed.
+    const fast = await forFastWebView(bytes, name, input.protectAsPdf);
+    bytes = fast.bytes;
+    fastWebView = fast.outcome;
     // No `restrictions` argument: these three convert *into* PDF from a Word,
     // Excel or PowerPoint file, so there is no imported `/Encrypt` to carry —
     // and the other three write `.docx`/`.xlsx`/`.pptx`, which take no PDF
@@ -899,6 +1024,12 @@ async function commitConvertedPreview<P extends { bytes: Uint8Array }>(input: {
   const saved = await platform.saveFileAs(bytes, name);
   if (!saved) return;
   notify('success', translate('Saved {name}', { name }), { detail: input.detail(preview, bytes) });
+  if (fastWebView === 'failed') {
+    notify(
+      'info',
+      translate('Fast web view could not be applied, so the file was saved without it.')
+    );
+  }
 }
 
 /**
@@ -1486,7 +1617,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // UX-04: no "before" PDF exists yet — this builds one from scratch — so
     // it's an after-only review, purely to confirm the layout came out right.
     if (!(await reviewOnly(bytes, name, job))) return;
-    const saved = await platform.saveFileAs(bytes, name);
+    const saved = await saveDirectPdf(bytes, name, job);
     if (!saved) return;
 
     for (const warning of warnings) {
@@ -1654,13 +1785,15 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       // not `outcome.achievedBytes`, which is measured before that pass and can
       // undercount it by the handful of bytes the AES pass adds.
       let finalSize = outcome.achievedBytes;
+      let savedFastWebView = false;
       const savedTarget = await save(
         doc,
         outcome.bytes,
         `${stem(doc.name)}-compressed.pdf`,
         undefined,
-        finalBytes => {
+        (finalBytes, info) => {
           finalSize = finalBytes.byteLength;
+          savedFastWebView = info.fastWebView;
           if (lastCompressionResult.value?.documentId === doc.id) {
             lastCompressionResult.value = {
               ...lastCompressionResult.value,
@@ -1668,20 +1801,21 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
             };
           }
         },
-        // Not applied when the user turned Protect on: they asked for encryption
+        // Not enforced when the user turned Protect on: they asked for encryption
         // on top of compression, which adds bytes by design, and blocking their
         // own explicit choice under the never-grow guarantee would be a worse
         // surprise than the size it exists to prevent. This guard is for the
-        // *silent* case — a restriction the document merely arrived with.
-        protectionActive()
-          ? undefined
-          : {
-              maxBytes: outcome.originalBytes,
-              title: tKey('Kept the original file.'),
-              detail: tKey(
-                'Re-applying this document’s restrictions after compression would have produced a file no smaller than the original, so nothing was written. This document is already as small as it usefully gets.'
-              )
-            }
+        // *silent* case — a restriction the document merely arrived with. The
+        // ceiling still applies to fast web view (HRD-23), which is dropped
+        // rather than allowed to make a compressed file larger than the original.
+        {
+          maxBytes: outcome.originalBytes,
+          enforce: !protectionActive(),
+          title: tKey('Kept the original file.'),
+          detail: tKey(
+            'Re-applying this document’s restrictions after compression would have produced a file no smaller than the original, so nothing was written. This document is already as small as it usefully gets.'
+          )
+        }
       );
       // IMG-5: "Reached" is said about the file actually written — after
       // Protect or re-applied restrictions, which add bytes — not about the
@@ -1696,7 +1830,9 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
           }),
           {
             detail: translate(
-              'Compression reached {reached}, but encrypting the file for Protect (or re-applying its restrictions) added {extra}. Turn Protect off, or aim a little lower, to get under the target.',
+              savedFastWebView
+                ? 'Compression reached {reached}, but saving for fast web view (and Protect or this document’s restrictions, if any) added {extra}. Turn fast web view off in the export review, or aim a little lower, to get under the target.'
+                : 'Compression reached {reached}, but encrypting the file for Protect (or re-applying its restrictions) added {extra}. Turn Protect off, or aim a little lower, to get under the target.',
               {
                 reached: formatBytes(outcome.achievedBytes),
                 extra: formatBytesUp(finalSize - outcome.achievedBytes)
@@ -1892,18 +2028,17 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
           };
         }
       },
-      // See the target-size branch above: not applied when Protect is on, since
+      // See the target-size branch above: not enforced when Protect is on, since
       // that growth is the user's own explicit choice, not the silent kind this
-      // guard exists to catch.
-      protectionActive()
-        ? undefined
-        : {
-            maxBytes: result.originalBytes,
-            title: tKey('Kept the original file.'),
-            detail: tKey(
-              'Re-applying this document’s restrictions after compression would have produced a file no smaller than the original, so nothing was written. This document is already as small as it usefully gets.'
-            )
-          }
+      // guard exists to catch — but still the ceiling for fast web view.
+      {
+        maxBytes: result.originalBytes,
+        enforce: !protectionActive(),
+        title: tKey('Kept the original file.'),
+        detail: tKey(
+          'Re-applying this document’s restrictions after compression would have produced a file no smaller than the original, so nothing was written. This document is already as small as it usefully gets.'
+        )
+      }
     );
     if (saved) {
       const percent = Math.round((1 - finalSize / result.originalBytes) * 100);
@@ -2402,21 +2537,25 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // after the check above: when that alone pushes the written file past the
     // original, say so — measured on the bytes actually written (pattern 3).
     let finalSize = result.bytes.byteLength;
+    let savedFastWebView = false;
     const saved = await reviewAndSave(
       doc,
       current,
       result.bytes,
       `${stem(doc.name)}-${settings.mode === 'bw' ? 'bw' : 'grayscale'}.pdf`,
       job,
-      finalBytes => {
+      (finalBytes, info) => {
         finalSize = finalBytes.byteLength;
+        savedFastWebView = info.fastWebView;
       }
     );
     if (saved && sizeChoice !== 'larger' && finalSize > result.originalBytes) {
       const sizes = formatTargetMiss(result.originalBytes, finalSize);
       notify('warning', translate('The converted file is larger than the original.'), {
         detail: translate(
-          '{before} → {after}. Converting to grey made it smaller, but encrypting it for password protection (or re-applying its restrictions) added {extra}.',
+          savedFastWebView
+            ? '{before} → {after}. Converting to grey made it smaller, but saving for fast web view (and password protection or re-applied restrictions, if any) added {extra}.'
+            : '{before} → {after}. Converting to grey made it smaller, but encrypting it for password protection (or re-applying its restrictions) added {extra}.',
           {
             before: sizes.target,
             after: sizes.achieved,
@@ -2486,7 +2625,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       return;
     }
     if (!(await reviewOnly(result.bytes, outName, job))) return;
-    const saved = await platform.saveFileAs(result.bytes, outName);
+    const saved = await saveDirectPdf(result.bytes, outName, job);
     if (saved) {
       notify('success', translate('Saved {name}', { name: outName }), {
         detail: tPlural('{count} pages recovered and verified.', result.pageCount)
@@ -2512,7 +2651,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     );
     // UX-04: built from scratch, no "before" PDF to compare against.
     if (!(await reviewOnly(bytes, 'document.pdf', job))) return;
-    const saved = await platform.saveFileAs(bytes, 'document.pdf');
+    const saved = await saveDirectPdf(bytes, 'document.pdf', job);
     if (!saved) return;
     if (hadUnsupportedCharacters) {
       notify('warning', translate('PDF saved, but some characters could not be represented.'), {

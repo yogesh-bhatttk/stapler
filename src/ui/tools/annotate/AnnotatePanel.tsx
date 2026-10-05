@@ -6,7 +6,7 @@ import { pageAnnotations } from './state';
 import { tKey, translate, useTranslation } from '../../../core/i18n';
 import { ANNOTATION_COLORS } from '../../../core/doc-colors';
 import { notify } from '../../../core/notify';
-import { activeDoc } from '../../../core/store';
+import { activeDoc, type StaplerDoc } from '../../../core/store';
 import { Button } from '../../components/Button';
 import { Checkbox, Field, RadioGroup, Slider, TextInput } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
@@ -37,6 +37,33 @@ export function AnnotatePanel() {
   const doc = activeDoc.value;
 
   /**
+   * ANN-04 — a printable summary of every note in the active document.
+   * HRD-24 §12.11: through `useJob`, like every other export, so it shows
+   * determinate progress and can be cancelled; errors go through
+   * `notifyError` with this scope.
+   */
+  const handleExportSummary = () => {
+    const current = activeDoc.value;
+    if (!current) return;
+    const combined = summaryAnnotationsFor(current);
+    if (combined.length === 0) {
+      notify('warning', translate('No annotations to export.'));
+      return;
+    }
+    return run(
+      { label: translate('Exporting annotation summary'), scope: 'annotate.summary' },
+      async job => {
+        const summaryBytes = await exportAnnotationSummary(current, combined, job);
+        const fileStem = current.name.replace(/\.[^.]+$/, '') || 'document';
+        const saved = await platform.saveFileAs(summaryBytes, `${fileStem}-annotation-summary.pdf`);
+        if (saved) {
+          notify('success', translate('Exported annotation summary PDF.'));
+        }
+      }
+    );
+  };
+
+  /**
    * ANN-03 — every match becomes a highlight on ANN-01's layer.
    *
    * The search itself is `findTextRegions`, the same worker call RED's
@@ -44,49 +71,6 @@ export function AnnotatePanel() {
    * keeps the search one undo step and drops stale results if the active
    * document changes before the worker returns.
    */
-  const handleExportSummary = async () => {
-    const current = activeDoc.value;
-    if (!current) return;
-    const currentPageKeys = new Set(current.pages.map(page => page.key));
-
-    const allLayerAnns: SummaryAnnotation[] = [];
-    for (const [pageKey, anns] of Object.entries(pageAnnotations.value)) {
-      if (!currentPageKeys.has(pageKey)) continue;
-      for (const ann of anns) {
-        allLayerAnns.push({ ...ann, pageKey });
-      }
-    }
-
-    const docAnns: SummaryAnnotation[] = (current.annotations || []).map(a => ({
-      id: a.id,
-      type: a.type,
-      x: a.x,
-      y: a.y,
-      rect: { x: a.x, y: a.y, width: a.width, height: a.height },
-      text: a.data,
-      pageKey: a.pageKey
-    }));
-
-    const combined = [...allLayerAnns, ...docAnns];
-    if (combined.length === 0) {
-      notify('warning', translate('No annotations to export.'));
-      return;
-    }
-
-    try {
-      const summaryBytes = await exportAnnotationSummary(current, combined);
-      const fileStem = current.name.replace(/\.[^.]+$/, '') || 'document';
-      const saved = await platform.saveFileAs(summaryBytes, `${fileStem}-annotation-summary.pdf`);
-      if (saved) {
-        notify('success', translate('Exported annotation summary PDF.'));
-      }
-    } catch (err) {
-      notify('danger', translate('Could not export annotation summary.'), {
-        detail: err instanceof Error ? err.message : String(err)
-      });
-    }
-  };
-
   const highlightMatches = () =>
     run(
       {
@@ -196,4 +180,28 @@ export function AnnotatePanel() {
       <FlattenOption mode="annotate" />
     </>
   );
+}
+
+/**
+ * Every annotation the summary lists for `current`: the drawing layer's notes
+ * on its pages (another document's stale keys are skipped, HRD-24 §12.3) and
+ * the document's own annotations.
+ */
+export function summaryAnnotationsFor(current: StaplerDoc): SummaryAnnotation[] {
+  const currentPageKeys = new Set(current.pages.map(page => page.key));
+  const layer: SummaryAnnotation[] = [];
+  for (const [pageKey, anns] of Object.entries(pageAnnotations.value)) {
+    if (!currentPageKeys.has(pageKey)) continue;
+    for (const ann of anns) layer.push({ ...ann, pageKey });
+  }
+  const own: SummaryAnnotation[] = (current.annotations || []).map(a => ({
+    id: a.id,
+    type: a.type,
+    x: a.x,
+    y: a.y,
+    rect: { x: a.x, y: a.y, width: a.width, height: a.height },
+    text: a.data,
+    pageKey: a.pageKey
+  }));
+  return [...layer, ...own];
 }

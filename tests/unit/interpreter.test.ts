@@ -584,3 +584,72 @@ describe('rotated image placements under a mark (PDF-4)', () => {
     expect(result.partialImageCoverage).toEqual([]);
   });
 });
+
+describe('stroke extent includes the line width (HRD-41 review)', () => {
+  const region: Rect[] = [{ x: 90, y: 90, width: 60, height: 60 }];
+  const filterWithPattern = (source: string) => {
+    const statements = parseContentStream(tokenizeContentStream(enc(source)));
+    return filterContentStream(statements, region, undefined, undefined, undefined, {
+      allocateFormName: () => 'X',
+      resolvePattern: name =>
+        name === 'P0' ? { tiling: true, bbox: [0, 0, 200, 200], xStep: 200, yStep: 200 } : undefined
+    });
+  };
+
+  it('removes a thick stroke whose centre line misses the mark but whose ink does not', () => {
+    // Centre line at y 160, 30pt wide: the ink reaches down to y 145, inside the mark.
+    const { text } = filterText('0 0 1 RG 30 w 0 160 m 300 160 l S\n', region);
+    expect(text).not.toContain(' l\n');
+  });
+
+  it('keeps a hairline stroke the same distance away', () => {
+    const { text } = filterText('0 0 1 RG 1 w 0 160 m 300 160 l S\n', region);
+    expect(text).toContain(' l\n');
+  });
+
+  it("clips a pattern stroke's cell footprint to its ink, not its points", () => {
+    // Points y 125..132, 20pt wide: ink y 115..142 — the footprint must cover it.
+    const result = filterWithPattern(
+      '/Pattern CS /P0 SCN 20 w 0 125 m 200 125 l 0 132 m 200 132 l S\n'
+    );
+    const [footprint] = result.patternFootprints;
+    expect(footprint.name).toBe('P0');
+    const top = Math.max(...footprint.rects.map(r => r.y + r.height));
+    const bottom = Math.min(...footprint.rects.map(r => r.y));
+    expect(top).toBeGreaterThanOrEqual(142);
+    expect(bottom).toBeLessThanOrEqual(115);
+  });
+
+  it('reaches as far as the mitre limit allows at a sharp mitred join', () => {
+    // A mitred join at (100, 80). The extent is bounded by the mitre limit's
+    // worst case — 10 × half of 4pt = 20pt past the points, into the mark at
+    // y 90 — rather than by this join's own angle: over-reach, never under.
+    const { text } = filterText('0 0 1 RG 4 w 10 M 0 j 60 0 m 100 80 l 140 0 l S\n', region);
+    expect(text).not.toContain(' l\n');
+    // A round join's ink stays within the full line width of its points.
+    const round = filterText('0 0 1 RG 4 w 1 j 60 0 m 100 80 l 140 0 l S\n', region);
+    expect(round.text).toContain(' l\n');
+  });
+
+  it('records the cell under a stencil mask filled with a pattern', () => {
+    const statements = parseContentStream(
+      tokenizeContentStream(enc('/Pattern cs /P0 scn q 20 0 0 20 100 100 cm /Mk Do Q\n'))
+    );
+    const result = filterContentStream(
+      statements,
+      region,
+      undefined,
+      name => (name === 'Mk' ? { subtype: 'Image', imageMask: true } : undefined),
+      undefined,
+      {
+        allocateFormName: () => 'X',
+        resolvePattern: name =>
+          name === 'P0'
+            ? { tiling: true, bbox: [0, 0, 200, 200], xStep: 200, yStep: 200 }
+            : undefined
+      }
+    );
+    expect(result.strippedXObjectNames).toEqual(['Mk']);
+    expect(result.patternFootprints.map(f => f.name)).toEqual(['P0']);
+  });
+});

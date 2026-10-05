@@ -31,7 +31,13 @@ import { Button } from './Button';
 import { IconButton } from './IconButton';
 import { CompareSlider } from './CompareSlider';
 import { formatBytes } from './Feedback';
+import { Checkbox } from './Field';
 import { useTranslation } from '../../core/i18n';
+import {
+  fastWebViewExport,
+  loadExportSettings,
+  setFastWebViewExport
+} from '../tools/export-settings';
 import styles from './ExportReviewModal.module.css';
 
 const IMAGE_EXT = /\.(png|jpe?g|webp|gif|tiff?|heic|bmp)$/i;
@@ -511,6 +517,35 @@ function ZipReview({ session, resultBytes }: { session: PreviewSession; resultBy
   );
 }
 
+/**
+ * HRD-23 / DOC-08 — the "Fast web view" export option, shown on every single-PDF
+ * review. It is a persisted, export-wide setting (`tools/export-settings.ts`),
+ * not a per-review choice, so exports that skip this dialog honour it too; it is
+ * offered here because this is the one step those exports reliably pass through.
+ * A plain checkbox: reachable by Tab, toggled with Space, labelled.
+ */
+function FastWebViewOption() {
+  const t = useTranslation();
+  useEffect(() => {
+    void loadExportSettings();
+  }, []);
+  const on = fastWebViewExport.value;
+  return (
+    <div className={styles.exportOptions}>
+      <Checkbox label={t('Fast web view')} checked={on} onChange={setFastWebViewExport} />
+      <p className={styles.note}>
+        {on
+          ? t(
+              'Page 1 is saved first, so a browser can show it before the rest of the file has loaded. The file is usually a little larger. Applies to every PDF you save.'
+            )
+          : t(
+              'Saves the smallest file. Turn on to put page 1 first, so a browser can show it before the rest of the file has loaded.'
+            )}
+      </p>
+    </div>
+  );
+}
+
 export const ExportReviewModal = forwardRef<HTMLDivElement, Record<string, never>>(
   function ExportReviewModal(_props, ref) {
     const t = useTranslation();
@@ -554,6 +589,7 @@ export const ExportReviewModal = forwardRef<HTMLDivElement, Record<string, never
             alignment={request.alignment}
           />
         )}
+        {request.kind === 'single' && /\.pdf$/i.test(request.fileName) && <FastWebViewOption />}
       </Modal>
     );
   }

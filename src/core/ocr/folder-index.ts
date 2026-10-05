@@ -5,6 +5,12 @@ import { tPlural, translate } from '../i18n';
  * Indexes a directory of PDFs (text layer, OCR scans on demand); inverted index
  * stored in IndexedDB (`searchIndex` store); fast queries (<500ms) with snippets,
  * page numbers, and jump-to-page capability. Incremental re-index on change.
+ *
+ * "OCR scans on demand" is opt-in (`FolderIndexOptions.ocr`): pages with no text
+ * layer are recognised through `recognizeText` — the same render → cleanup →
+ * tesseract worker pipeline as OCR-01 — using the model already stored in this
+ * browser. Nothing here asks for or downloads a model; the panel does that through
+ * OCR-01's consent dialog when the user turns the option on (`prepareOcrModel`).
  */
 import {
   clearSearchIndexStore,
@@ -16,9 +22,10 @@ import {
   type SearchIndexRecord
 } from '../db';
 import { renderWorker } from '../workers';
-import { cancelled, fromUnknown, logEvent } from '../errors';
+import { cancelled, fromUnknown, isCancellation, logEvent } from '../errors';
 import { notify } from '../notify';
 import { createJobHandle } from '../workers/protocol';
+import { isOcrModelReady, recognizeText } from './runOcr';
 import type { FsaDirectoryHandle, FsaFileHandle } from '../../platform/fsa';
 
 export type { IndexOccurrence };
@@ -31,6 +38,8 @@ export interface SearchResultItem {
   textSnippet: string;
   handle?: FsaFileHandle;
   score?: number;
+  /** True when the matched page's text was recognised by OCR rather than read from a text layer. */
+  fromOcr?: boolean;
 }
 
 export interface SkippedFile {
@@ -47,12 +56,40 @@ export interface FolderIndexStats {
   durationMs: number;
   /** Files deliberately not indexed — encrypted, corrupt, or otherwise unreadable. */
   skipped: SkippedFile[];
+  /**
+   * Pages across the folder that have no text layer and were left unsearchable
+   * because OCR was off (or its model unavailable) — including pages of files
+   * this run did not need to re-read, so the number describes the folder, not
+   * just this run's work.
+   */
+  scannedPagesSkipped: number;
+  /** Pages this run made searchable by OCR. */
+  ocrPagesRecognized: number;
+  /** Pages OCR was attempted on but could not read (see `runOcr`'s per-page skip). */
+  ocrPagesFailed: number;
+  /** Set when OCR was asked for but could not run at all; says why. */
+  ocrUnavailableReason?: string;
 }
 
 export interface FolderIndexOptions {
   onProgress?: (progress: number, label: string) => void;
   signal?: AbortSignal;
   forceReindex?: boolean;
+  /**
+   * OCR-02 — also OCR pages with no text layer, in `lang`. Off when absent. Uses
+   * the stored model only: when it is not stored, nothing is recognised and
+   * `ocrUnavailableReason` says so. Never prompts, never fetches.
+   */
+  ocr?: { lang: string };
+}
+
+/** Indices of the pages that carry no searchable text at all. */
+export function pagesWithoutText(pages: string[]): number[] {
+  const indices: number[] = [];
+  for (let i = 0; i < pages.length; i++) {
+    if (tokenizeText(pages[i]).length === 0) indices.push(i);
+  }
+  return indices;
 }
 
 /** Tokenizes text into unique lowercase words/tokens. */
@@ -235,6 +272,8 @@ export async function readPdfTextPages(
       const job = options ? createJobHandle(options) : undefined;
       return { pages: await client.lease(api => api.documentText(info.handle, job)) };
     } catch (err) {
+      // A cancel is the user stopping the run, not a verdict on this file.
+      if (isCancellation(err) || options?.signal?.aborted) throw cancelled();
       return { pages: [], skipReason: fromUnknown(err).message };
     } finally {
       await client.lease(api => api.closeDocument(info.handle)).catch(() => {});
@@ -273,6 +312,22 @@ export async function indexDirectory(
 
   const pdfFiles = await collectPdfFilesFromDir(dirHandle);
 
+  // Checked once, before any file: whether OCR can run this time with no
+  // download. When it cannot, the run continues as if the option were off and
+  // says why, rather than asking (or fetching) halfway through a folder.
+  const ocrLang = options?.ocr?.lang;
+  let ocrUnavailableReason: string | undefined;
+  let ocrActive = false;
+  if (ocrLang) {
+    ocrActive = await isOcrModelReady(ocrLang);
+    if (!ocrActive) {
+      ocrUnavailableReason = translate('The OCR language model is not stored in this browser.');
+    }
+  }
+  let scannedPagesSkipped = 0;
+  let ocrPagesRecognized = 0;
+  let ocrPagesFailed = 0;
+
   let filesIndexed = 0;
   let pagesIndexed = 0;
   let totalTokensCount = 0;
@@ -290,147 +345,244 @@ export async function indexDirectory(
   const tokenMap = new Map<string, Map<string, IndexOccurrence>>();
   const recordsToStore: SearchIndexRecord[] = [];
 
-  for (let i = 0; i < pdfFiles.length; i++) {
-    if (options?.signal?.aborted) {
-      throw cancelled();
-    }
-
-    const { fileId, fileName, handle, file } = pdfFiles[i];
-    const progressFrac = (i + 1) / (pdfFiles.length || 1);
-    options?.onProgress?.(
-      progressFrac,
-      translate('Indexing {name} ({n}/{total})', {
-        name: fileName,
-        n: i + 1,
-        total: pdfFiles.length
-      })
-    );
-
-    // Incremental check
-    const docKey = `doc:${fileId}`;
-    const existingMeta = await getSearchIndexRecord(docKey);
-    if (
-      !options?.forceReindex &&
-      existingMeta &&
-      existingMeta.lastModified === file.lastModified &&
-      existingMeta.size === file.size
-    ) {
-      // Skipped unchanged file
-      continue;
-    }
-
-    // Clear old tokens for this file before re-indexing
-    await deleteSearchIndexRecordsByFileId(fileId);
-    rewrittenFileIds.add(fileId);
-
-    const fileBaseFrac = i / (pdfFiles.length || 1);
-    const fileWeight = 1 / (pdfFiles.length || 1);
-
-    const { pages: pagesText, skipReason } = await readPdfTextPages(file, {
-      signal: options?.signal,
-      onProgress: (localFrac, localLabel) => {
-        options?.onProgress?.(
-          fileBaseFrac + fileWeight * (localFrac ?? 0),
-          localLabel
-            ? translate('Indexing {name} ({n}/{total}) — {detail}', {
-                name: fileName,
-                n: i + 1,
-                total: pdfFiles.length,
-                detail: localLabel
-              })
-            : translate('Indexing {name} ({n}/{total})', {
-                name: fileName,
-                n: i + 1,
-                total: pdfFiles.length
-              })
-        );
-      }
-    });
-
-    if (skipReason) {
-      // Explicitly not indexed. Its stale occurrences are still stripped below —
-      // a file that has become unreadable must not keep answering searches — but
-      // nothing is written in their place, and the user is told.
-      skipped.push({ fileId, fileName, reason: skipReason });
-      continue;
-    }
-
-    filesIndexed++;
-    pagesIndexed += pagesText.length;
-
-    for (let pageIndex = 0; pageIndex < pagesText.length; pageIndex++) {
-      const pageText = pagesText[pageIndex];
-      const tokens = tokenizeText(pageText);
-
-      for (const token of tokens) {
-        if (!token) continue;
-        const snippet = extractSnippet(pageText, token);
-        let occMap = tokenMap.get(token);
-        if (!occMap) {
-          occMap = new Map();
-          tokenMap.set(token, occMap);
-        }
-        const occKey = `${fileId}:${pageIndex}`;
-        if (!occMap.has(occKey)) {
-          occMap.set(occKey, {
-            fileId,
-            fileName,
-            pageIndex,
-            textSnippet: snippet
-          });
+  /**
+   * Writes everything this run has finished. Also run on cancel, so the files
+   * completed before it — and the OCR already done on them — are kept: the file
+   * that was in progress has had its doc record removed, so the next run redoes
+   * exactly that one and the ones after it.
+   */
+  const commit = async () => {
+    // Tokens that only appear in files this run rewrote still need their stale
+    // occurrences cleared, even when the file contributed no new occurrence for that
+    // token (its text changed, or it became unreadable). So every stored token record
+    // touching a rewritten file is visited, not just the ones in `tokenMap`.
+    const touchedTokenKeys = new Set(tokenMap.keys());
+    if (rewrittenFileIds.size > 0) {
+      for (const record of await getSearchIndexRecordsByType('token')) {
+        if (!record.token || touchedTokenKeys.has(record.token)) continue;
+        if (record.occurrences?.some(o => rewrittenFileIds.has(o.fileId))) {
+          touchedTokenKeys.add(record.token);
         }
       }
     }
 
-    recordsToStore.push({
-      id: docKey,
-      type: 'doc',
-      fileId,
-      fileName,
-      lastModified: file.lastModified,
-      size: file.size,
-      handle,
-      indexedAt: Date.now()
-    });
-  }
+    for (const token of touchedTokenKeys) {
+      const tokenKey = `t:${token}`;
+      const newOccurrences = Array.from(tokenMap.get(token)?.values() ?? []);
+      totalTokensCount += newOccurrences.length;
 
-  // Tokens that only appear in files this run rewrote still need their stale
-  // occurrences cleared, even when the file contributed no new occurrence for that
-  // token (its text changed, or it became unreadable). So every stored token record
-  // touching a rewritten file is visited, not just the ones in `tokenMap`.
-  const touchedTokenKeys = new Set(tokenMap.keys());
-  if (rewrittenFileIds.size > 0) {
-    for (const record of await getSearchIndexRecordsByType('token')) {
-      if (!record.token || touchedTokenKeys.has(record.token)) continue;
-      if (record.occurrences?.some(o => rewrittenFileIds.has(o.fileId))) {
-        touchedTokenKeys.add(record.token);
-      }
+      const existing = await getSearchIndexRecord(tokenKey);
+      const existingOccs = existing?.occurrences ?? [];
+      // Only this run's files lose their old entries. Everything else stays exactly
+      // as it was indexed.
+      const updatedOccs = existingOccs.filter(o => !rewrittenFileIds.has(o.fileId));
+      updatedOccs.push(...newOccurrences);
+
+      recordsToStore.push({
+        id: tokenKey,
+        type: 'token',
+        token,
+        occurrences: updatedOccs
+      });
     }
+
+    if (recordsToStore.length > 0) {
+      await putSearchIndexRecordsBatch(recordsToStore);
+    }
+  };
+
+  try {
+    for (let i = 0; i < pdfFiles.length; i++) {
+      if (options?.signal?.aborted) {
+        throw cancelled();
+      }
+
+      const { fileId, fileName, handle, file } = pdfFiles[i];
+      // The start of this file's slice: the bar must not run ahead of the work.
+      const progressFrac = i / (pdfFiles.length || 1);
+      options?.onProgress?.(
+        progressFrac,
+        translate('Indexing {name} ({n}/{total})', {
+          name: fileName,
+          n: i + 1,
+          total: pdfFiles.length
+        })
+      );
+
+      // Incremental check
+      const docKey = `doc:${fileId}`;
+      const existingMeta = await getSearchIndexRecord(docKey);
+      if (
+        !options?.forceReindex &&
+        existingMeta &&
+        existingMeta.lastModified === file.lastModified &&
+        existingMeta.size === file.size &&
+        // Unchanged, but indexed while OCR was off (or by a build that did not
+        // record it): with OCR now on, its scanned pages still need reading.
+        // Pages OCR already read — or already tried and failed on — are not
+        // redone until the file itself changes, *unless* that was in another
+        // language: text recognised with the wrong model is not text, so after
+        // the user switches language every text-less page is read again, the
+        // ones that failed included. (`ocrLang` is the language OCR last ran
+        // in on this file; a record without one never had OCR run on it.)
+        !(
+          ocrActive &&
+          ((existingMeta.pagesAwaitingOcr ?? 1) > 0 ||
+            (existingMeta.ocrLang !== undefined && existingMeta.ocrLang !== ocrLang))
+        )
+      ) {
+        // Skipped unchanged file
+        scannedPagesSkipped += existingMeta.pagesAwaitingOcr ?? 0;
+        continue;
+      }
+
+      // Clear old tokens for this file before re-indexing
+      await deleteSearchIndexRecordsByFileId(fileId);
+      rewrittenFileIds.add(fileId);
+
+      const fileBaseFrac = i / (pdfFiles.length || 1);
+      const fileWeight = 1 / (pdfFiles.length || 1);
+      // With OCR on, the text-layer read is the first quarter of this file's
+      // slice of the bar and recognition the rest; otherwise the read is all of it.
+      const readWeight = ocrActive ? fileWeight * 0.25 : fileWeight;
+      const fileLabel = (localLabel: string) =>
+        localLabel
+          ? translate('Indexing {name} ({n}/{total}) — {detail}', {
+              name: fileName,
+              n: i + 1,
+              total: pdfFiles.length,
+              detail: localLabel
+            })
+          : translate('Indexing {name} ({n}/{total})', {
+              name: fileName,
+              n: i + 1,
+              total: pdfFiles.length
+            });
+
+      const { pages: pagesText, skipReason } = await readPdfTextPages(file, {
+        signal: options?.signal,
+        onProgress: (localFrac, localLabel) => {
+          options?.onProgress?.(
+            fileBaseFrac + readWeight * (localFrac ?? 0),
+            fileLabel(localLabel)
+          );
+        }
+      });
+
+      if (skipReason) {
+        // Explicitly not indexed. Its stale occurrences are still stripped below —
+        // a file that has become unreadable must not keep answering searches — but
+        // nothing is written in their place, and the user is told.
+        skipped.push({ fileId, fileName, reason: skipReason });
+        continue;
+      }
+
+      // Pages with no text layer: a scan, or a page that is only an image.
+      const textless = pagesWithoutText(pagesText);
+      const ocrPageSet = new Set<number>();
+      let pagesAwaitingOcr = 0;
+      /** The language OCR ran in on this file, whatever each page's outcome. */
+      let ocrRanIn: string | undefined;
+      if (textless.length > 0 && ocrActive && ocrLang) {
+        try {
+          const recognized = await recognizeText(
+            new Uint8Array(await file.arrayBuffer()),
+            pagesText.length,
+            {
+              lang: ocrLang,
+              pageIndices: textless,
+              signal: options?.signal,
+              onProgress: (localFrac, localLabel) =>
+                options?.onProgress?.(
+                  fileBaseFrac + readWeight + (fileWeight - readWeight) * (localFrac ?? 0),
+                  fileLabel(localLabel)
+                )
+            }
+          );
+          for (const page of recognized.pages) {
+            if (tokenizeText(page.text).length === 0) continue; // a genuinely blank page
+            pagesText[page.pageIndex] = page.text;
+            ocrPageSet.add(page.pageIndex);
+          }
+          // Recognised but blank pages count as read; pages the engine could
+          // not run on are reported, and not retried until the file (or the
+          // OCR language) changes.
+          ocrRanIn = ocrLang;
+          ocrPagesRecognized += ocrPageSet.size;
+          ocrPagesFailed += recognized.skippedPages.length;
+          for (const page of recognized.skippedPages) {
+            logEvent(
+              'warn',
+              'folder-index',
+              `${fileId} page ${page.pageIndex + 1}: ${page.reason}`
+            );
+          }
+        } catch (err) {
+          if (isCancellation(err) || options?.signal?.aborted) throw cancelled();
+          // The engine itself could not run (a model that will not load). Every
+          // later file would fail the same way, so OCR stops for the rest of this
+          // run; these pages stay awaiting OCR so a later run tries again.
+          ocrActive = false;
+          ocrUnavailableReason = fromUnknown(err).message;
+          logEvent('warn', 'folder-index', `${fileId}: OCR unavailable: ${ocrUnavailableReason}`);
+          pagesAwaitingOcr = textless.length;
+          scannedPagesSkipped += textless.length;
+        }
+      } else if (textless.length > 0) {
+        pagesAwaitingOcr = textless.length;
+        scannedPagesSkipped += textless.length;
+      }
+
+      filesIndexed++;
+      pagesIndexed += pagesText.length;
+
+      for (let pageIndex = 0; pageIndex < pagesText.length; pageIndex++) {
+        const pageText = pagesText[pageIndex];
+        const tokens = tokenizeText(pageText);
+        const fromOcr = ocrPageSet.has(pageIndex);
+
+        for (const token of tokens) {
+          if (!token) continue;
+          const snippet = extractSnippet(pageText, token);
+          let occMap = tokenMap.get(token);
+          if (!occMap) {
+            occMap = new Map();
+            tokenMap.set(token, occMap);
+          }
+          const occKey = `${fileId}:${pageIndex}`;
+          if (!occMap.has(occKey)) {
+            occMap.set(occKey, {
+              fileId,
+              fileName,
+              pageIndex,
+              textSnippet: snippet,
+              ...(fromOcr ? { source: 'ocr' as const } : {})
+            });
+          }
+        }
+      }
+
+      recordsToStore.push({
+        id: docKey,
+        type: 'doc',
+        fileId,
+        fileName,
+        lastModified: file.lastModified,
+        size: file.size,
+        handle,
+        indexedAt: Date.now(),
+        pagesAwaitingOcr,
+        ocrPages: ocrPageSet.size,
+        // Recorded whenever OCR ran — not only when it found text — so a page
+        // that failed or came back blank is retried after a language change.
+        ...(ocrRanIn ? { ocrLang: ocrRanIn } : {})
+      });
+    }
+  } catch (err) {
+    if (isCancellation(err)) await commit();
+    throw err;
   }
-
-  for (const token of touchedTokenKeys) {
-    const tokenKey = `t:${token}`;
-    const newOccurrences = Array.from(tokenMap.get(token)?.values() ?? []);
-    totalTokensCount += newOccurrences.length;
-
-    const existing = await getSearchIndexRecord(tokenKey);
-    const existingOccs = existing?.occurrences ?? [];
-    // Only this run's files lose their old entries. Everything else stays exactly
-    // as it was indexed.
-    const updatedOccs = existingOccs.filter(o => !rewrittenFileIds.has(o.fileId));
-    updatedOccs.push(...newOccurrences);
-
-    recordsToStore.push({
-      id: tokenKey,
-      type: 'token',
-      token,
-      occurrences: updatedOccs
-    });
-  }
-
-  if (recordsToStore.length > 0) {
-    await putSearchIndexRecordsBatch(recordsToStore);
-  }
+  await commit();
 
   const durationMs = Math.round(performance.now() - startTime);
   options?.onProgress?.(
@@ -463,7 +615,11 @@ export async function indexDirectory(
     pagesIndexed,
     totalTokens: totalTokensCount,
     durationMs,
-    skipped
+    skipped,
+    scannedPagesSkipped,
+    ocrPagesRecognized,
+    ocrPagesFailed,
+    ...(ocrUnavailableReason ? { ocrUnavailableReason } : {})
   };
 }
 
@@ -515,7 +671,8 @@ export async function searchFolderIndex(query: string): Promise<SearchResultItem
     pageNumber: occ.pageIndex + 1,
     textSnippet: occ.textSnippet,
     handle: handleMap.get(occ.fileId),
-    score
+    score,
+    ...(occ.source === 'ocr' ? { fromOcr: true } : {})
   }));
 
   results.sort(

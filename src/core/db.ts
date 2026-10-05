@@ -23,6 +23,8 @@ export interface IndexOccurrence {
   fileName: string;
   pageIndex: number;
   textSnippet: string;
+  /** OCR-02 — set when this page's text was recognised by OCR, not read from a text layer. */
+  source?: 'ocr';
 }
 
 export interface SearchIndexRecord {
@@ -36,6 +38,16 @@ export interface SearchIndexRecord {
   size?: number;
   handle?: FsaFileHandle;
   indexedAt?: number;
+  /** OCR-02 — pages of this file with no text layer that were not OCR'd (option off, or OCR failed). */
+  pagesAwaitingOcr?: number;
+  /** OCR-02 — pages whose indexed text came from OCR. */
+  ocrPages?: number;
+  /**
+   * OCR-02 — the language OCR last ran in on this file's text-less pages (set
+   * whenever it ran, even if every page failed or was blank). A different
+   * language on a later run re-OCRs them.
+   */
+  ocrLang?: string;
 }
 
 /**

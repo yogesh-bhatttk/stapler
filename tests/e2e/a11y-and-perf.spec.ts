@@ -61,31 +61,80 @@ test.describe('first run', () => {
 });
 
 test.describe('accessibility', () => {
-  test('every route has one main landmark, a title, and no positive tabindex', async ({ page }) => {
-    // 1. Scan Home Route (DS-05)
-    await page.goto('/');
-    let accessibilityScanResults = await new AxeBuilder({ page }).analyze();
-    expect(accessibilityScanResults.violations).toEqual([]);
+  // NFR-01's AC is "zero violations on every route in both themes". This used
+  // to run in the default (light) theme only; dark mode was axe-scanned at
+  // phone width on four screens (`mobile.spec.ts`). Now the whole desktop
+  // sweep — Home with and without the welcome dialog, the trust panel, the
+  // privacy policy page, and every registered tool with a document open —
+  // runs once per theme. Violations are collected across every screen and
+  // asserted once, so a failure lists all of them by rule and selector rather
+  // than stopping at the first.
+  for (const theme of ['light', 'dark'] as const) {
+    test(`every route has one main landmark, a title, and no positive tabindex (${theme})`, async ({
+      page
+    }) => {
+      test.setTimeout(180_000);
+      // The app resolves its theme from `prefers-color-scheme` when no choice
+      // is stored, which a fresh context never has.
+      await page.emulateMedia({ colorScheme: theme });
+      const found: string[] = [];
+      const scan = async (screen: string) => {
+        await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+        const { violations } = await new AxeBuilder({ page }).analyze();
+        for (const v of violations) {
+          for (const node of v.nodes) {
+            found.push(`${screen} · ${v.id} (${v.impact}) · ${node.target.join(' ')}`);
+          }
+        }
+      };
 
-    // 2. Open a document to unlock document-gated panels
-    const file = await ensureFixture('text-6.pdf', () => textPdf(6));
-    await openApp(page);
-    await page.locator('input[type="file"]').setInputFiles(file);
-    await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
+      // 1. Home, first run (the welcome dialog is up), then Home itself (DS-05).
+      await page.goto('/');
+      await expect(page.getByRole('dialog', { name: 'Welcome to Stapler' })).toBeVisible({
+        timeout: 10_000
+      });
+      await scan('home + welcome');
+      await openApp(page);
+      await scan('home');
 
-    // 3. Scan all tools
-    for (const tool of TOOLS) {
-      await gotoTool(page, tool);
-      await expect(page.locator('header')).toBeVisible();
-      // A positive tabindex breaks the natural order for everyone downstream of it.
-      expect(
-        await page.locator('[tabindex]:not([tabindex="0"]):not([tabindex="-1"])').count()
-      ).toBe(0);
+      // 2. The trust panel, and the privacy policy page it links to.
+      await page.getByRole('button', { name: /Offline, zero network/ }).click();
+      const trust = page.getByRole('dialog', { name: /Zero network/ });
+      await expect(trust).toBeVisible();
+      await scan('trust panel');
+      await page.keyboard.press('Escape');
+      await expect(trust).toBeHidden();
 
-      accessibilityScanResults = await new AxeBuilder({ page }).analyze();
-      expect(accessibilityScanResults.violations).toEqual([]);
-    }
-  });
+      // 3. Open a document to unlock document-gated panels, then every tool.
+      const file = await ensureFixture('text-6.pdf', () => textPdf(6));
+      await page.locator('input[type="file"]').setInputFiles(file);
+      await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({
+        timeout: 30_000
+      });
+      for (const tool of TOOLS) {
+        await gotoTool(page, tool);
+        await expect(page.locator('header')).toBeVisible();
+        // A positive tabindex breaks the natural order for everyone downstream of it.
+        expect(
+          await page.locator('[tabindex]:not([tabindex="0"]):not([tabindex="-1"])').count(),
+          `positive tabindex on ${tool}`
+        ).toBe(0);
+        await scan(`tool/${tool}`);
+      }
+
+      // 4. The privacy policy, a static page of its own. It has no theme
+      // switcher of its own, so only the scheme is checked there.
+      await page.goto('/privacy.html');
+      const { violations } = await new AxeBuilder({ page }).analyze();
+      for (const v of violations) {
+        for (const node of v.nodes) {
+          found.push(`privacy.html · ${v.id} (${v.impact}) · ${node.target.join(' ')}`);
+        }
+      }
+
+      expect(found, `axe violations in the ${theme} theme`).toEqual([]);
+    });
+  }
 
   test('every icon-only control has an accessible name', async ({ page }) => {
     await openApp(page);

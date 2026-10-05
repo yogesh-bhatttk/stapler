@@ -579,35 +579,45 @@ describe('the restriction pass itself', () => {
 
 describe('an unrestricted document is unaffected', () => {
   it('exports with no security handler at all', async () => {
-    const plain = await PDFDocument.create();
-    plain.addPage([200, 200]);
-    const doc = await openDocument('plain', await plain.save());
-    expect(documentRestrictions(doc)).toBeNull();
+    // Both saves stamp CreationDate/ModDate from the clock, and those land in a
+    // compressed object stream (HRD-40), so a second boundary between the two
+    // saves can change the deflated length by a byte. Freeze the clock so the
+    // comparison below measures only what the restriction path could add.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-05T12:00:00Z'));
+    try {
+      const plain = await PDFDocument.create();
+      plain.addPage([200, 200]);
+      const doc = await openDocument('plain', await plain.save());
+      expect(documentRestrictions(doc)).toBeNull();
 
-    await commitTool('organize', {});
-    expect(saved).toHaveLength(1);
+      await commitTool('organize', {});
+      expect(saved).toHaveLength(1);
 
-    // pdf.js returns null for a document with no security handler — nothing was
-    // added where nothing was before.
-    const pdf = await openWithNoPassword(saved[0].bytes);
-    expect(await pdf.getPermissions()).toBeNull();
-    expect(new TextDecoder('latin1').decode(saved[0].bytes)).not.toContain('/Encrypt');
+      // pdf.js returns null for a document with no security handler — nothing was
+      // added where nothing was before.
+      const pdf = await openWithNoPassword(saved[0].bytes);
+      expect(await pdf.getPermissions()).toBeNull();
+      expect(new TextDecoder('latin1').decode(saved[0].bytes)).not.toContain('/Encrypt');
 
-    // And the export is byte-identical to the same export with this whole path
-    // removed, which is what "the common case does not regress" means: the only
-    // thing that could have changed it is an `/Encrypt` that was never added.
-    const doc2 = documents.value.find(d => d.id === doc.id)!;
-    const again = await processWorkerImpl.compose(
-      doc2.pages,
-      { plain: __memoryFallback.get('plain')! },
-      [],
-      undefined,
-      undefined,
-      null,
-      null,
-      undefined
-    );
-    expect(saved[0].bytes.byteLength).toBe(again.byteLength);
+      // And the export is byte-identical to the same export with this whole path
+      // removed, which is what "the common case does not regress" means: the only
+      // thing that could have changed it is an `/Encrypt` that was never added.
+      const doc2 = documents.value.find(d => d.id === doc.id)!;
+      const again = await processWorkerImpl.compose(
+        doc2.pages,
+        { plain: __memoryFallback.get('plain')! },
+        [],
+        undefined,
+        undefined,
+        null,
+        null,
+        undefined
+      );
+      expect(saved[0].bytes.byteLength).toBe(again.byteLength);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('exports a /P -4 owner-password file without adding a handler either', async () => {

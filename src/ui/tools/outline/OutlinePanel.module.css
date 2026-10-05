@@ -60,3 +60,17 @@
   color: var(--ink-subtle);
   font: var(--text-small);
 }
+
+/* HRD-24 §12.10 — an edit that would do nothing at this edge of the tree.
+   Styled like IconButton's own :disabled, but still focusable (aria-disabled). */
+.controls .unavailable,
+.controls .unavailable:hover {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background-color: transparent;
+  color: var(--ink-muted);
+}
+
+.controls .unavailable:active {
+  transform: none;
+}

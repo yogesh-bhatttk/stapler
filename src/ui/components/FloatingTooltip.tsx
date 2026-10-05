@@ -1,5 +1,6 @@
 /**
- * A hover/focus tooltip rendered into `document.body` at a fixed position.
+ * A hover/focus tooltip rendered into the app's floating layer at a fixed
+ * position.
  *
  * `Tooltip` positions its bubble inside the trigger's own box, which a
  * scrolling container clips — the tool rail is one (`overflow-y: auto`, plus a
@@ -19,6 +20,15 @@
  * after a short delay, and the bubble accepts the pointer and keeps itself
  * open while hovered. The bubble learns which trigger hook owns it through
  * {@link hoverKeepers}, so callers wire nothing extra.
+ *
+ * NFR-01 — the bubble is portalled into {@link FloatingLayer}, an empty host
+ * `AppShell` renders inside `<main>`, not into `document.body`: a body-level
+ * bubble sat outside every landmark, and axe flagged it (`region`) on every
+ * route in both themes. Being `position: fixed` with no transformed, filtered
+ * or contained ancestor between it and the viewport (the host is
+ * `display: contents` inside `<main>`, which creates no stacking context), it
+ * still escapes the rail's and top bar's clipping exactly as before, and its
+ * z-index still competes in the root stacking context.
  */
 import type { ComponentChildren } from 'preact';
 import { createPortal } from 'preact/compat';
@@ -121,6 +131,17 @@ export function useTooltipTrigger(): TooltipTrigger {
   };
 }
 
+/** The id of the element {@link FloatingTooltip} portals into. */
+export const FLOATING_LAYER_ID = 'floating-layer';
+
+/**
+ * The host for floating bubbles. Rendered once, inside a landmark (`<main>`),
+ * so a tooltip is in the landmark structure wherever its trigger is.
+ */
+export function FloatingLayer() {
+  return <div id={FLOATING_LAYER_ID} className={styles.layer} />;
+}
+
 export interface FloatingTooltipProps {
   anchor: HTMLElement | null;
   id: string;
@@ -161,6 +182,7 @@ export function FloatingTooltip({ anchor, id, side, children }: FloatingTooltipP
     >
       {children}
     </div>,
-    document.body
+    // Body only where no shell is mounted (an isolated component render).
+    document.getElementById(FLOATING_LAYER_ID) ?? document.body
   );
 }

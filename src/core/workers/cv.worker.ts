@@ -27,6 +27,7 @@ import { checkpoint, releaseJobHandlesAfterCall, type JobHandle } from './protoc
 import { internal } from '../errors';
 import { diffText, type DiffChunk } from '../diff';
 import { comparePagesApi, type ComparePagesJob } from './compare-pages';
+import { signaturePixelsApi, type SignaturePixelsJob } from './signature-pixels';
 
 export interface ScanSettings {
   preset: Preset;
@@ -41,7 +42,8 @@ export interface ScanSettings {
 }
 
 // X-6 — the Compare exports' per-page diff and compression (see compare-pages.ts).
-export interface CVJob extends LocaleAware, ComparePagesJob {
+// HRD-27 H3 — signature trimming and paper-white removal (see signature-pixels.ts).
+export interface CVJob extends LocaleAware, ComparePagesJob, SignaturePixelsJob {
   detectCorners(imageData: ImageData): CornerDetection;
   processScan(imageData: ImageData, settings: ScanSettings, job?: JobHandle): Promise<ImageData>;
   trimBox(imageData: ImageData): { x: number; y: number; width: number; height: number } | null;
@@ -71,6 +73,7 @@ function bitmapToImageData(bitmap: ImageBitmap): ImageData {
 const api: CVJob = {
   setLocale: loadLocale,
   ...comparePagesApi,
+  ...signaturePixelsApi,
   diffText(oldText, newText) {
     return diffText(oldText, newText);
   },

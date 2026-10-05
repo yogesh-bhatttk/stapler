@@ -1,11 +1,23 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { PDFDocument } from 'pdf-lib';
-import {
-  exportAnnotationSummary,
-  exportAnnotationSummaryText,
-  type SummaryAnnotation
-} from '../../src/core/annotation-summary';
+import type { SummaryAnnotation } from '../../src/core/annotation-summary';
 import type { StaplerDoc } from '../../src/core/store';
+
+// The PDF is built in the process worker; run its real implementation in-process.
+vi.mock('comlink', () => ({
+  expose: vi.fn(),
+  transfer: vi.fn(value => value),
+  proxy: vi.fn(value => value)
+}));
+vi.mock('../../src/core/workers', async () => {
+  const { processWorkerImpl } = await import('../../src/core/workers/process.worker');
+  // `any`: stands in for the pool's `Comlink.Remote<T>` wrapper.
+  const run = (fn: (api: any) => unknown) => fn(processWorkerImpl);
+  return { processWorker: { lease: run, pin: () => ({ lease: run, release: () => {} }) } };
+});
+
+const { exportAnnotationSummary, exportAnnotationSummaryText } =
+  await import('../../src/core/annotation-summary');
 
 describe('ANN-04: Export annotation summary', () => {
   const dummyPages = [
