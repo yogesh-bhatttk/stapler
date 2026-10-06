@@ -530,7 +530,7 @@ real output, and dedicated CJK (`cjk.pdf`, CID-keyed "中文") and RTL (`rtl.pdf
 
 ### SGN-01 · Signature capture and library — `M` `P0`
 
-**Status: Done, one DoD gap** — Draw/type/import, PNG with real alpha, white-paper removal. Initials supported. Open: `trimTransparentToPng` and `removeWhiteBackground` (`src/core/image.ts`) loop over every pixel on the main thread from `SignatureModal.tsx`, so a large imported photo (4000×3000) blocks it for seconds. That breaks the definition of done's 50 ms rule. Fix: move them to a worker (AUDIT-FINDINGS §14 H3, HRD-27).
+**Status: Done (2026-10-05)** — Draw/type/import, PNG with real alpha, white-paper removal. Initials supported. The former DoD gap (AUDIT-FINDINGS §14 H3) is closed: `trimTransparentToPng` and `removeWhiteBackground` keep their API but run their pixel loops in the cv worker (`src/core/workers/signature-pixels.ts`), with byte-identical output (`tests/unit/signature-pixels-worker.test.ts`). The browser performance trace on a 4000×3000 import is still unrun (HRD-27).
 
 - **Requirements:** Three creation modes — draw on canvas (pointer + stylus pressure where
   available), type with a script-style face, or import a transparent PNG. Auto-trim
