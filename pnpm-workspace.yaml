@@ -1,4 +1,9 @@
 packages:
   - '.'
+# tesseract.js's postinstall only prints an Open Collective banner; it is not
+# needed to build or run Stapler. pnpm 11 refuses to install until each
+# dependency build script is explicitly allowed or denied.
+allowBuilds:
+  tesseract.js: false
 minimumReleaseAgeExclude:
   - '@cantoo/pdf-lib@2.9.1'
