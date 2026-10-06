@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Stapler — Offline PDF Tools",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "minimum_chrome_version": "147",
   "description": "Merge, split, compress, convert, sign, and redact PDFs — entirely offline. Zero uploads, zero limits.",
   "icons": {

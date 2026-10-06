@@ -10,6 +10,16 @@ Pre-1.0. See `docs/TICKETS.md` for the ticket-by-ticket state of every feature �
 this file starts tracking user-facing changes from the first tagged release
 onward, not the full development history before it.
 
+## [0.3.1] — 2026-10-06
+
+### Fixed
+
+- The Firefox package now passes Mozilla's add-on validator with no warnings
+  (25 in 0.3.0's first build). Library code that could evaluate strings or
+  write raw HTML is removed at build time, Preact is no longer bundled into
+  the workers, and pdf.js loads its worker code statically instead of through
+  `import()`. The packages are about 275 KB smaller. No user-visible change.
+
 ## [0.3.0] — 2026-10-06
 
 ### Added

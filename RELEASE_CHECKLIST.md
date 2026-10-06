@@ -270,6 +270,11 @@ so it gets its own explicit step below rather than being buried inside "run veri
       until you do.
 
 ## 5. Chrome Web Store Publishing
+- [ ] **Upload the CI-built zips, never a local build.** Download the zips from the
+      GitHub release the tag created (they are the bytes the release workflow tested)
+      and upload those to every store, and submit the source at that tag when AMO asks
+      for it. A local `pnpm package` of the same source is not byte-identical to the CI
+      build, so a reviewer rebuilding from source would not match a locally built upload.
 - [ ] **Upload Package:** Go to the [Chrome Developer Dashboard](https://chrome.google.com/webstore/devconsole).
 - [ ] **Create/Update Item:** Upload `dist/release/stapler-<version>-chrome.zip`.
 - [ ] **Update Listing:** Ensure all Store Listing details (description, screenshots, promotional images) are up-to-date (refer to `docs/STORE_LISTING.md`).
