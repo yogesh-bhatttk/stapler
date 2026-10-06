@@ -1,8 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
 import { statSync } from 'node:fs';
 import { unzipSync } from 'fflate';
-import { PDFDocument, StandardFonts } from 'pdf-lib';
-import { ensureFixture, heavyPdf, textPdf } from './fixtures';
+import { PDFDocument } from 'pdf-lib';
+import { ensureFixture, heavyPdf, letterPdf, textPdf } from './fixtures';
 import {
   commitAndRead,
   confirmExportReviewIfShown,
@@ -75,25 +75,6 @@ function expectMemoryWithinCeilings(label: string, peak: HeapPeak) {
 function percentile(values: number[], p: number): number {
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)];
-}
-
-/** `pages` US Letter pages of text: 612 × 792 pt is exactly 8.5 × 11 in. */
-async function letterPdf(pages: number): Promise<Uint8Array> {
-  const doc = await PDFDocument.create();
-  const font = await doc.embedFont(StandardFonts.Helvetica);
-  for (let i = 0; i < pages; i++) {
-    const page = doc.addPage([612, 792]);
-    page.drawText(`Stapler letter fixture page ${i + 1}`, { x: 72, y: 720, size: 18, font });
-    for (let line = 0; line < 30; line++) {
-      page.drawText(`Line ${line + 1} of body text on page ${i + 1}.`, {
-        x: 72,
-        y: 680 - line * 20,
-        size: 11,
-        font
-      });
-    }
-  }
-  return doc.save();
 }
 
 /** Width and height from a PNG's IHDR. */
@@ -549,6 +530,12 @@ test.describe('performance budgets (PLAN §5.1)', () => {
     // into it. The click is made in the page and timed there until the job
     // has unwound (the action bar drops its Cancel button only when the job's
     // promise settles), so Playwright's round trips are not in the number.
+    //
+    // The points are progress, not wall-clock: Cancel is clicked, from inside
+    // the page, on the first determinate progress at or past 1%, 35% and 70%.
+    // Fixed delays made the test a race against the runner — a fast CI machine
+    // finished the whole export before a 1.1 s click — and would have measured
+    // a different point of the job on every machine anyway.
     test.setTimeout(180_000);
     const file = await ensureFixture('letter-20.pdf', () => letterPdf(20));
     await openApp(page);
@@ -561,41 +548,74 @@ test.describe('performance budgets (PLAN §5.1)', () => {
     const cancel = page.getByRole('main').getByRole('button', { name: 'Cancel', exact: true });
     const review = page.getByRole('dialog', { name: 'Review before saving' });
     const latencies: number[] = [];
-    for (const delay of [300, 700, 1_100]) {
+    const cancelledAt: number[] = [];
+    for (const threshold of [1, 35, 70]) {
       let downloaded = false;
       const onDownload = () => (downloaded = true);
       page.on('download', onDownload);
       await page.getByRole('button', { name: 'Export images' }).click();
       await expect(cancel).toBeVisible();
-      // Deliberately mid-job: cancel at a fixed point into the work.
-      await page.waitForTimeout(delay);
-      // Still rendering, not already waiting on the save review.
-      await expect(review, `the export finished within ${delay} ms`).toBeHidden();
-      const ms = await cancel.evaluate(
-        button =>
-          new Promise<number>(resolve => {
-            const t0 = performance.now();
-            const observer = new MutationObserver(() => {
+      const outcome = await cancel.evaluate(
+        (button, threshold) =>
+          new Promise<{ ms: number; percent: number } | null>(resolve => {
+            const main = button.closest('main') ?? document.body;
+            const percentNow = () => {
+              const bar = main.querySelector('[role="progressbar"][aria-valuenow]');
+              return bar ? Number(bar.getAttribute('aria-valuenow')) : null;
+            };
+            let fired = false;
+            const check = () => {
+              if (fired) return;
+              // The job settled on its own before reaching the threshold.
               if (!button.isConnected) {
-                observer.disconnect();
-                resolve(performance.now() - t0);
+                watch.disconnect();
+                resolve(null);
+                return;
               }
+              const percent = percentNow();
+              if (percent === null || percent < threshold) return;
+              fired = true;
+              watch.disconnect();
+              const t0 = performance.now();
+              const settled = new MutationObserver(() => {
+                if (!button.isConnected) {
+                  settled.disconnect();
+                  resolve({ ms: performance.now() - t0, percent });
+                }
+              });
+              settled.observe(document.body, { childList: true, subtree: true });
+              (button as HTMLButtonElement).click();
+            };
+            const watch = new MutationObserver(check);
+            watch.observe(document.body, {
+              childList: true,
+              subtree: true,
+              attributes: true,
+              attributeFilter: ['aria-valuenow']
             });
-            observer.observe(document.body, { childList: true, subtree: true });
-            (button as HTMLButtonElement).click();
-          })
+            check();
+          }),
+        threshold
       );
+      expect(outcome, `the export finished before reaching ${threshold}% progress`).not.toBeNull();
+      const { ms, percent } = outcome as { ms: number; percent: number };
+      // Mid-job, not already waiting on the save review.
+      expect(percent, `cancelled at ${percent}%`).toBeLessThan(100);
+      await expect(review, `the export reached the save review at ${percent}%`).toBeHidden();
       latencies.push(ms);
+      cancelledAt.push(percent);
       // Cancelled means nothing is saved and nothing is left running: no
       // download arrives late, and the next export is accepted at once.
       await page.waitForTimeout(1_000);
       page.off('download', onDownload);
-      expect(downloaded, `cancel at ${delay} ms still saved a file`).toBe(false);
+      expect(downloaded, `cancel at ${percent}% still saved a file`).toBe(false);
       await expect(page.getByRole('button', { name: 'Export images' })).toBeEnabled();
     }
     test.info().annotations.push({
       type: 'perf',
-      description: `cancel latency at 300/700/1100 ms: ${latencies.map(Math.round).join(', ')} ms`
+      description:
+        `cancel latency at ${cancelledAt.map(p => `${p}%`).join('/')} progress: ` +
+        `${latencies.map(Math.round).join(', ')} ms`
     });
     expectWithinBudget('Cancel to job settled', Math.max(...latencies), 200);
   });

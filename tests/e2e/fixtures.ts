@@ -5,6 +5,7 @@ import {
   PDFName,
   PDFHexString,
   PDFRef,
+  PDFStream,
   StandardFonts,
   concatTransformationMatrix,
   degrees,
@@ -590,11 +591,158 @@ export async function annotatedPdf(): Promise<Uint8Array> {
   return doc.save();
 }
 
-/** A truncated PDF to test error taxonomy and recovery */
+/**
+ * `textPdf(pages)`, serialised with every page's content stream first and the
+ * document's structure — fonts, page objects, page tree, catalog, info — after
+ * all of it, then a classic xref table and trailer. That is the layout writers
+ * that pack their dictionaries into a trailing object stream produce, and it is
+ * what makes a truncated copy damaged in a known way: any cut before
+ * `structureStart` loses every page object and the catalog, while the content
+ * before the cut survives for repair (GAP-6) to rebuild pages from.
+ *
+ * Written by hand rather than by `doc.save()`, because a writer's object order
+ * is its own business: `@cantoo/pdf-lib` puts the catalog and page tree *first*,
+ * so cutting the tail off one of its files leaves a document every tolerant
+ * parser still opens — and the truncation fixtures would silently stop being
+ * the file the import refuses.
+ */
+async function structureLastTextPdf(
+  pages: number
+): Promise<{ bytes: Uint8Array; structureStart: number }> {
+  const doc = await PDFDocument.load(await textPdf(pages));
+  const objects = doc.context
+    .enumerateIndirectObjects()
+    .filter(([, object]) => !isObjectStreamOrXref(object))
+    .sort(([a], [b]) => a.objectNumber - b.objectNumber);
+  const content = objects.filter(([, object]) => object instanceof PDFStream);
+  const structure = objects.filter(([, object]) => !(object instanceof PDFStream));
+
+  const latin1 = (text: string) => Uint8Array.from(text, c => c.charCodeAt(0));
+  const chunks: Uint8Array[] = [latin1('%PDF-1.7\n%\xe2\xe3\xcf\xd3\n')];
+  let offset = chunks[0].length;
+  const offsets = new Map<number, number>();
+  let structureStart = -1;
+  for (const [ref, object] of [...content, ...structure]) {
+    if (structureStart < 0 && !(object instanceof PDFStream)) structureStart = offset;
+    offsets.set(ref.objectNumber, offset);
+    const body = new Uint8Array(object.sizeInBytes());
+    object.copyBytesInto(body, 0);
+    for (const part of [latin1(`${ref.objectNumber} 0 obj\n`), body, latin1('\nendobj\n')]) {
+      chunks.push(part);
+      offset += part.length;
+    }
+  }
+  const size = Math.max(...offsets.keys()) + 1;
+  let xref = `xref\n0 ${size}\n0000000000 65535 f \n`;
+  for (let n = 1; n < size; n++) {
+    const at = offsets.get(n);
+    xref +=
+      at === undefined ? '0000000000 65535 f \n' : `${String(at).padStart(10, '0')} 00000 n \n`;
+  }
+  const { Root, Info } = doc.context.trailerInfo;
+  const info = Info ? ` /Info ${Info.toString()}` : '';
+  xref += `trailer\n<< /Size ${size} /Root ${String(Root)}${info} >>\nstartxref\n${offset}\n%%EOF\n`;
+  chunks.push(latin1(xref));
+
+  const bytes = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.length;
+  }
+  return { bytes, structureStart };
+}
+
+function isObjectStreamOrXref(object: unknown): boolean {
+  if (!(object instanceof PDFStream)) return false;
+  const type = object.dict.get(PDFName.of('Type'));
+  return type === PDFName.of('ObjStm') || type === PDFName.of('XRef');
+}
+
+/**
+ * Cuts `bytes` at `at`, refusing a cut that would leave any of the document's
+ * structure behind: the truncation fixtures' premise is that the import (pdf.js
+ * and pdf-lib alike) refuses them, and only repair can get anything back.
+ */
+function cutBeforeStructure(
+  name: string,
+  { bytes, structureStart }: { bytes: Uint8Array; structureStart: number },
+  at: number
+): Uint8Array {
+  if (structureStart < 0 || at > structureStart) {
+    throw new Error(`${name}: cut at ${at} keeps structure that starts at ${structureStart}`);
+  }
+  return bytes.slice(0, at);
+}
+
+/**
+ * `truncated.pdf`: a one-page file cut off where its structure begins — the page's
+ * content is whole, but its page object, the page tree, the catalog and the
+ * xref are all gone. Tests error taxonomy (import) and recovery (repair).
+ */
 export async function corruptPdf(): Promise<Uint8Array> {
-  const valid = await textPdf(1);
-  // Truncate the last 500 bytes (which removes the xref table and trailer)
-  return valid.slice(0, valid.length - 500);
+  const file = await structureLastTextPdf(1);
+  return cutBeforeStructure('truncated.pdf', file, file.structureStart);
+}
+
+/**
+ * Two more shapes of damage, which fail in different places inside pdf.js: a
+ * six-page file cut halfway through its page content (`mid-body`) loses the later
+ * pages' content as well as all of the structure, and a 200-byte prefix (`header-only`) keeps only the start of the
+ * first page's content stream.
+ */
+export async function truncatedTextPdf(kind: 'mid-body' | 'header-only'): Promise<Uint8Array> {
+  const file = await structureLastTextPdf(6);
+  const at = kind === 'mid-body' ? Math.floor(file.structureStart / 2) : 200;
+  return cutBeforeStructure(`truncated-${kind}.pdf`, file, at);
+}
+
+/** A `.pdf` that is plain text: no `%PDF-` header at all. */
+export async function notAPdf(): Promise<Uint8Array> {
+  return new TextEncoder().encode('This is definitely not a PDF.');
+}
+
+/**
+ * A4 pages each carrying a "Page N" heading and five grey bars — text plus
+ * vector content, one shared font, nothing else. `100-page.pdf` and
+ * `merge-source-1.pdf` (50 pages) are this shape.
+ */
+export async function barsPdf(pages: number): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  for (let i = 0; i < pages; i++) {
+    const page = doc.addPage([595.28, 841.89]);
+    page.drawText(`Page ${i + 1}`, { x: 50, y: 800, size: 24, font, color: rgb(0, 0, 0) });
+    for (let bar = 1; bar <= 5; bar++) {
+      page.drawRectangle({
+        x: 50,
+        y: bar * 100,
+        width: 400,
+        height: 50,
+        color: rgb(0.8, 0.8, 0.8)
+      });
+    }
+  }
+  return doc.save();
+}
+
+/** `pages` US Letter pages of text: 612 × 792 pt is exactly 8.5 × 11 in. */
+export async function letterPdf(pages: number): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  for (let i = 0; i < pages; i++) {
+    const page = doc.addPage([612, 792]);
+    page.drawText(`Stapler letter fixture page ${i + 1}`, { x: 72, y: 720, size: 18, font });
+    for (let line = 0; line < 30; line++) {
+      page.drawText(`Line ${line + 1} of body text on page ${i + 1}.`, {
+        x: 72,
+        y: 680 - line * 20,
+        size: 11,
+        font
+      });
+    }
+  }
+  return doc.save();
 }
 
 /**

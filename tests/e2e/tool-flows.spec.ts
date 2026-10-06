@@ -28,6 +28,7 @@ import {
   METADATA_LEAK,
   metadataLeakPdf,
   mixedTextImagePdf,
+  notAPdf,
   OVERSIZED_MASK_FIXTURE,
   oversizedMaskPdf,
   sharedImagePdf,
@@ -354,6 +355,21 @@ async function makePhotoJpeg(
   return new Uint8Array(Buffer.from(base64, 'base64'));
 }
 
+/**
+ * `mixed-text-image.pdf` (or a same-content copy under `name`): the mixed page with
+ * an already-compressed 1600 × 1200 photo, the realistic shape CMP-03's 30–70%
+ * band is stated against. Every spec that uses the name builds it the same way,
+ * so which one runs first cannot change the bytes the others are handed.
+ */
+async function mixedJpegFixture(
+  page: import('@playwright/test').Page,
+  name: 'mixed-text-image.pdf' | 'mixed-text-image-tabs.pdf' = 'mixed-text-image.pdf'
+): Promise<string> {
+  return ensureFixture(name, async () =>
+    mixedTextImagePdf(await makePhotoJpeg(page, 1600, 1200, 0.85))
+  );
+}
+
 /** Top-level bookmark titles of a produced file, in `/First`→`/Next` order. */
 async function outlineTitles(bytes: Uint8Array): Promise<string[]> {
   const doc = await PDFDocument.load(bytes);
@@ -651,8 +667,7 @@ test.describe('tool flows', () => {
     // An already-JPEG photo, which is the shape of document PLAN §4.1 projects
     // 30–70% for. A Flate-stored image would reduce by far more than that and
     // so would prove nothing about the band.
-    const jpeg = await makePhotoJpeg(page, 1600, 1200, 0.85);
-    const file = await ensureFixture('mixed-text-image.pdf', () => mixedTextImagePdf(jpeg));
+    const file = await mixedJpegFixture(page);
     const original = new Uint8Array(readFileSync(file));
 
     await page.locator('input[type="file"]').setInputFiles(file);
@@ -700,10 +715,7 @@ test.describe('tool flows', () => {
     // Real, multi-second work, same as the CMP-03 tests below — the window
     // this race needs actually has to be open long enough to click into.
     test.setTimeout(180_000);
-    const jpeg = await makePhotoJpeg(page, 1600, 1200, 0.85);
-    const heavyFile = await ensureFixture('mixed-text-image-tabs.pdf', () =>
-      mixedTextImagePdf(jpeg)
-    );
+    const heavyFile = await mixedJpegFixture(page, 'mixed-text-image-tabs.pdf');
     const otherFile = await ensureFixture('text-2.pdf', () => textPdf(2));
 
     await importFixture(page, heavyFile);
@@ -1305,7 +1317,7 @@ test.describe('tool flows', () => {
     // The bug this covers: a redaction rectangle that overlaps an image without
     // covering it whole used to leave the image untouched and paint a black box
     // on top. The page looked redacted; `pdfimages` handed back the original.
-    const file = await ensureFixture('mixed-text-image.pdf', () => mixedTextImagePdf());
+    const file = await ensureFixture('mixed-text-image-flate.pdf', () => mixedTextImagePdf());
     const sourceImages = await imageEntries(new Uint8Array(readFileSync(file)));
     expect(sourceImages).toHaveLength(1);
     const sourceStream = await imageStreamBytes(new Uint8Array(readFileSync(file)));
@@ -1488,8 +1500,7 @@ test.describe('tool flows', () => {
   });
 
   test('cleanup: applying b&w preset alters the page', async ({ page }) => {
-    const jpeg = await makePhotoJpeg(page, 800, 600, 0.85);
-    const file = await ensureFixture('mixed-text-image.pdf', () => mixedTextImagePdf(jpeg));
+    const file = await mixedJpegFixture(page);
     await importFixture(page, file);
     await gotoTool(page, 'cleanup');
 
@@ -1639,9 +1650,7 @@ test.describe('tool flows', () => {
   });
 
   test('a corrupt file is refused with a reason and does not break the tab', async ({ page }) => {
-    const file = await ensureFixture('not-a-pdf.pdf', async () =>
-      new TextEncoder().encode('This is definitely not a PDF.')
-    );
+    const file = await ensureFixture('not-a-pdf.pdf', notAPdf);
     await openApp(page);
     await page.locator('input[type="file"]').setInputFiles(file);
 

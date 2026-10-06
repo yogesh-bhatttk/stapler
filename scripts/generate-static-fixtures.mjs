@@ -404,6 +404,35 @@ function writeMultipageTiff() {
   return Buffer.concat(chunks);
 }
 
+/**
+ * The generated half of the corpus: every git-ignored fixture Node can build, from the
+ * one table in `tests/e2e/fixture-corpus.ts` that the Playwright specs share. Run here,
+ * before any runner, so `pnpm test` on a clean checkout never depends on an e2e run
+ * having left files behind. The module is TypeScript (and some generators import from
+ * `src/`), so it is loaded through a Vite module runner — with no config file, as a
+ * plain Node module graph rather than the app — kept open until every generator,
+ * including their lazy imports, has finished.
+ */
+async function generateCorpus() {
+  const { createServer, createServerModuleRunner } = await import('vite');
+  const server = await createServer({
+    configFile: false,
+    logLevel: 'error',
+    appType: 'custom',
+    server: { middlewareMode: true, hmr: false, ws: false, watch: null }
+  });
+  try {
+    const runner = createServerModuleRunner(server.environments.ssr, { hmr: false });
+    const corpus = await runner.import(path.resolve('tests/e2e/fixture-corpus.ts'));
+    const written = await corpus.generateFixtureCorpus(FIXTURES_DIR);
+    if (written.length) console.log(`Generated ${written.length} fixtures: ${written.join(', ')}`);
+    await runner.close();
+  } finally {
+    await server.close();
+  }
+}
+
 generateRawStubs();
 generateEncodedFixtures();
+await generateCorpus();
 console.log('Static fixtures present in tests/fixtures/ (generated any that were missing).');

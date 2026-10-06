@@ -50,7 +50,7 @@ test.describe('GAP-4 — compress PDF to a size', () => {
     // over the person's own edit.
     await expect.poll(() => page.evaluate(() => window.location.hash)).toBe('#/tool/compress');
 
-    await importPdfIntoCompress(page, 'tests/fixtures/mixed-text-image.pdf');
+    await importPdfIntoCompress(page, 'tests/fixtures/mixed-text-image-flate.pdf');
     await expect(page.getByRole('radio', { name: /Aim for a size/ })).toBeChecked();
     await expect(page.locator('[data-target-amount]')).toHaveValue('100');
     await expect(page.getByRole('combobox', { name: 'Target size unit' })).toHaveValue('KB');

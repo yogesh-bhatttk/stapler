@@ -11,7 +11,14 @@
 import { expect, test } from '@playwright/test';
 import { PDFDocument } from 'pdf-lib';
 import { readFileSync } from 'node:fs';
-import { corruptPdf, ensureFixture, FIXTURES_DIR, textPdf } from './fixtures';
+import {
+  corruptPdf,
+  ensureFixture,
+  FIXTURES_DIR,
+  notAPdf,
+  textPdf,
+  truncatedTextPdf
+} from './fixtures';
 import { confirmExportReviewIfShown, openApp } from './helpers';
 
 /** Imports through the real file input; images pause on the options dialog first. */
@@ -61,14 +68,9 @@ test.describe('DOC-02 import and validation', () => {
    * places inside pdf.js: half a file loses object bodies, a 200-byte prefix loses
    * the page tree entirely. All three must produce the same accurate sentence.
    */
-  for (const { name, slice } of [
-    { name: 'mid-body', slice: (v: Uint8Array) => v.slice(0, Math.floor(v.length * 0.5)) },
-    { name: 'header-only', slice: (v: Uint8Array) => v.slice(0, 200) }
-  ]) {
+  for (const name of ['mid-body', 'header-only'] as const) {
     test(`a PDF truncated ${name} is refused with the same accurate reason`, async ({ page }) => {
-      const file = await ensureFixture(`truncated-${name}.pdf`, async () =>
-        slice(await textPdf(6))
-      );
+      const file = await ensureFixture(`truncated-${name}.pdf`, () => truncatedTextPdf(name));
       const crashes: string[] = [];
       page.on('pageerror', err => crashes.push(String(err)));
 
@@ -242,9 +244,7 @@ test.describe('DOC-02 import and validation', () => {
     // whatever order the suites happened to execute in.
     await ensureFixture('text-4.pdf', () => textPdf(4));
     await ensureFixture('truncated.pdf', corruptPdf);
-    await ensureFixture('not-a-pdf.pdf', async () =>
-      new TextEncoder().encode('This is definitely not a PDF.')
-    );
+    await ensureFixture('not-a-pdf.pdf', notAPdf);
 
     const specific = [
       /invalid or truncated/i,

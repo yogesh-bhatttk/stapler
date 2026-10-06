@@ -2,12 +2,15 @@
 
 This directory contains the fixture corpus required for the test suites (`QA-01`).
 To keep the repository size reasonable, large or easily constructed files are generated
-dynamically at test-time by `tests/e2e/fixtures.ts`, while small static files that need a
+at test time from the generators in `tests/e2e/fixtures.ts`, while small static files that need a
 specific encoding (which requires an external encoder like ImageMagick or Ghostscript, or
 a hand-built byte structure no encoder produces) are committed here.
 
-`npm test` and `npm run test:e2e` regenerate any missing static fixture automatically via
-their `pretest`/`pretest:e2e` hooks (`npm run fixtures:static`). Regeneration only runs
+`pnpm test`, `pnpm test:e2e`, `pnpm test:e2e:web`, `pnpm test:e2e:ext` and `pnpm test:perf`
+all regenerate any missing fixture — committed or generated — through their `pre*` hooks
+(`pnpm fixtures:static`, i.e. `scripts/generate-static-fixtures.mjs`), before any test
+runner starts. So a clean checkout has the whole corpus without one suite having to run
+before another. Regeneration only runs
 `convert`/`gs` for `scanned_skewed.pdf`, `cmyk.pdf`, `encrypted.pdf`,
 `permission-restricted.pdf` and `permission-no-print.pdf` if those files are absent — on a normal checkout they are
 already committed, so no external tool is required.
@@ -87,10 +90,30 @@ three need `convert` (ImageMagick) and `gs` (Ghostscript) on `PATH`.
 
 ## Dynamic Fixtures (Generated)
 
-These files are generated on demand into this directory by `tests/e2e/fixtures.ts` and are
-git-ignored — deterministic, so re-running tests reproduces them identically:
+These files are git-ignored and generated into this directory by
+`scripts/generate-static-fixtures.mjs`, from the table in `tests/e2e/fixture-corpus.ts`
+(`GENERATED_FIXTURES`: one generator per file name, all from `tests/e2e/fixtures.ts`).
+That table is the only place a name is bound to its bytes; a spec that also calls
+`ensureFixture(name, …)` for one of them passes the same generator. Not in the table: the
+`phone-photo-NN.jpg` set and `mixed-text-image.pdf` / `mixed-text-image-tabs.pdf`, whose
+JPEGs only a browser can encode here, and a few single-spec fixtures built inline — the
+specs that need those `ensureFixture` them, and nothing else reads them.
 
-- `text-6.pdf`, `text-10.pdf`, `text-100.pdf`, `text-300.pdf` — text documents with a
+- `truncated.pdf`, `truncated-mid-body.pdf`, `truncated-header-only.pdf` — a text PDF
+  serialised with its page content first and all of its structure (fonts, page objects,
+  page tree, catalog) after it, then cut: where the structure begins, halfway through the
+  page content, and after 200 bytes (`corruptPdf`, `truncatedTextPdf`). **Must not
+  regress:** the import refuses all three (pdf.js and pdf-lib alike), and repair rebuilds
+  pages from the content that survived. The writer's own object order cannot be used:
+  `@cantoo/pdf-lib` writes the catalog first, and a file cut off after its catalog still
+  opens, so the fixture would stop being a file the import refuses — the generator throws
+  rather than produce such a cut.
+- `100-page.pdf` (100 pages) and `merge-source-1.pdf` (50 pages) — A4 pages of a
+  "Page N" heading over five grey bars (`barsPdf`).
+- `letter-20.pdf` — twenty US Letter text pages, for the 300 DPI export budgets
+  (`letterPdf`).
+
+- `text-2.pdf` … `text-300.pdf` — text documents with a
   predictable page count and per-page marker text (`textPdf(n)`).
 - `mixed-sizes.pdf` — A4, Letter, and Legal pages in one document, for merge and normalise
   assertions (`mixedSizePdf`).
@@ -167,7 +190,5 @@ git-ignored — deterministic, so re-running tests reproduces them identically:
   reproducible by `fixtures:static`'s ImageMagick/Ghostscript path since neither writes
   real HEIC).
 
-`tests/e2e/fixtures.ts` also exports `largePdf` (300 pages), `rotatedPdf` (90/180/270°
-pages), `acroformPdf` (fillable text field + checkbox), and `corruptPdf` (truncated PDF) —
-each written under the fixture name passed to `ensureFixture` by the test that needs it,
-not under the export's own name.
+`tests/e2e/fixtures.ts` also exports builders that tests call in memory without writing a
+file, such as `largePdf` (300 pages) and `rotatedPdf` (90/180/270° pages).

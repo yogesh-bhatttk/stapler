@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { ensureFixture, textPdf } from './fixtures';
 import { gotoTool, openApp } from './helpers';
 import AxeBuilder from '@axe-core/playwright';
@@ -23,6 +23,32 @@ import { TOOLS as TOOL_REGISTRY } from '../../src/core/tools';
 const TOOLS = TOOL_REGISTRY.map(t => t.id);
 const TOOL_TITLES = TOOL_REGISTRY.map(t => t.title);
 
+/** What the app has stored under `key`, read straight from its IndexedDB settings store. */
+async function storedSetting(page: Page, key: string): Promise<unknown> {
+  return page.evaluate(
+    key =>
+      new Promise((resolve, reject) => {
+        const open = indexedDB.open('stapler');
+        open.onerror = () => reject(open.error);
+        open.onsuccess = () => {
+          const db = open.result;
+          if (!db.objectStoreNames.contains('settings')) {
+            db.close();
+            resolve(undefined);
+            return;
+          }
+          const get = db.transaction('settings').objectStore('settings').get(key);
+          get.onsuccess = () => {
+            db.close();
+            resolve(get.result);
+          };
+          get.onerror = () => reject(get.error);
+        };
+      }),
+    key
+  );
+}
+
 test.describe('first run', () => {
   test('the welcome screen appears once and never again', async ({ page }) => {
     await page.goto('/');
@@ -31,7 +57,12 @@ test.describe('first run', () => {
     await page.getByRole('button', { name: 'Get started' }).click();
     await expect(dialog).toBeHidden();
 
-    // Same context, so the stored flag persists across the reload.
+    // Same context, so the stored flag persists across the reload — once it is
+    // stored. The flag is an IndexedDB write the click starts and does not wait
+    // for; reloading the instant the dialog closes aborts that transaction if it
+    // has not committed yet, which on a cold runner (the first test of the run,
+    // the database just created) it often has not. Wait for the write itself.
+    await expect.poll(() => storedSetting(page, 'welcomed')).toBe(true);
     await page.reload();
     await expect(page.locator('header')).toBeVisible();
     await expect(dialog).toBeHidden();
