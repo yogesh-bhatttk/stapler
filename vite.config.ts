@@ -9,12 +9,14 @@ import {
   rmSync,
   writeFileSync
 } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { transformManifestForFirefox } from './scripts/firefox-manifest.mjs';
 import { STAPLER_CSP } from './scripts/csp.mjs';
 import { webPwa } from './scripts/pwa.mjs';
 import { PDF_AND_IMAGES } from './src/platform/index.ts';
+import { LANDING_PAGES, type LandingPage } from './src/landing/pages.ts';
+import { renderLandingPage, renderSitemap } from './src/landing/template.ts';
 import {
   collectThirdPartyLicenses,
   packageOfModuleId,
@@ -254,8 +256,9 @@ function thirdPartyLicenses(): Plugin {
 
 /**
  * Audit 2026-09-25 PLT-14 — `public/` is shared, but not everything in it
- * belongs in every build: `robots.txt`/`sitemap.xml` are for the crawled
- * website only, and the website has no use for the extension's
+ * belongs in every build: `robots.txt` is for the crawled website only
+ * (`sitemap.xml` is not in `public/` at all: `landingPages` emits it into the
+ * web build from the page list), and the website has no use for the extension's
  * `manifest.json` (nothing links or fetches it; it only advertised the
  * extension CSP and a `background.js` that does not exist there). Vite copies
  * `public/` before `writeBundle`, so the extras are removed here.
@@ -263,7 +266,6 @@ function thirdPartyLicenses(): Plugin {
 export const PUBLIC_ONLY_FOR: Record<string, 'ext' | 'web'> = {
   'manifest.json': 'ext',
   'robots.txt': 'web',
-  'sitemap.xml': 'web',
   // GAP-2: the web app manifest's install icons.
   'icons/icon-192.png': 'web',
   'icons/icon-512.png': 'web'
@@ -301,32 +303,61 @@ function emitWebIndex(): Plugin {
 }
 
 /**
- * DIST-03 — the per-tool landing pages (`/merge-pdf`, `/compress-pdf`, `/sign-pdf`,
- * `/scan-cleanup`, `/redact-pdf`, plus the six CNV-08..13 converters). Web-only:
- * they are static marketing entry points for the deployed site, not something the
- * extension ever opens, so they are excluded from `BUILD_TARGET=ext` the same way
- * `emitWebIndex` is.
+ * DIST-03 / DIST-08 — the per-tool landing pages (`/merge-pdf`, `/compress-pdf`,
+ * `/compress-pdf-to-100kb` …, `/sign-pdf`, `/scan-cleanup`, `/redact-pdf`, plus
+ * the six CNV-08..13 converters). There are no landing `.html` files in the repo:
+ * each page's text lives once in `src/landing/pages.ts`, and this plugin renders
+ * it through `src/landing/template.ts` as a virtual `<root>/<slug>.html` module.
+ * Listed in `rollupOptions.input` like a real file, each goes through Vite's own
+ * HTML pipeline (entry script, modulepreload, `stapler:web-csp`) and lands at
+ * `dist/web/<slug>.html`, the URL it has always had. The dev server serves the
+ * same render at `/<slug>.html`. It also emits `sitemap.xml` from the same list.
+ *
+ * Web-only: they are static marketing entry points for the deployed site, not
+ * something the extension ever opens, so `BUILD_TARGET=ext` neither lists them
+ * as inputs nor loads this plugin, the same way it skips `emitWebIndex`.
  */
-const LANDING_PAGES: Record<string, string> = {
-  'merge-pdf': 'merge-pdf.html',
-  'compress-pdf': 'compress-pdf.html',
-  'sign-pdf': 'sign-pdf.html',
-  'scan-cleanup': 'scan-cleanup.html',
-  'redact-pdf': 'redact-pdf.html',
-  'pdf-to-word': 'pdf-to-word.html',
-  'word-to-pdf': 'word-to-pdf.html',
-  'pdf-to-excel': 'pdf-to-excel.html',
-  'excel-to-pdf': 'excel-to-pdf.html',
-  'pdf-to-ppt': 'pdf-to-ppt.html',
-  'ppt-to-pdf': 'ppt-to-pdf.html',
-  // GAP-4 — "compress PDF to X KB" entry pages, all one entry script that opens
-  // Compress in "Aim for a size" mode with the page's target pre-filled.
-  'compress-pdf-to-100kb': 'compress-pdf-to-100kb.html',
-  'compress-pdf-to-200kb': 'compress-pdf-to-200kb.html',
-  'compress-pdf-to-500kb': 'compress-pdf-to-500kb.html',
-  'compress-pdf-to-1mb': 'compress-pdf-to-1mb.html',
-  'compress-pdf-to-size': 'compress-pdf-to-size.html'
-};
+const LANDING_BY_SLUG = new Map(LANDING_PAGES.map(page => [page.slug, page]));
+
+const landingHtmlPath = (slug: string): string => resolve(root, `${slug}.html`);
+
+function landingPageFor(id: string): LandingPage | undefined {
+  const path = id.split('?')[0];
+  if (!path.endsWith('.html') || dirname(path) !== root) return undefined;
+  return LANDING_BY_SLUG.get(basename(path, '.html'));
+}
+
+export function landingPages(): Plugin {
+  return {
+    name: 'stapler:landing-pages',
+    enforce: 'pre',
+    resolveId(id) {
+      return landingPageFor(id) ? id : undefined;
+    },
+    load(id) {
+      const page = landingPageFor(id);
+      return page ? renderLandingPage(page) : undefined;
+    },
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const path = (req.url ?? '').split(/[?#]/)[0];
+        const page = /^\/[a-z0-9-]+\.html$/.test(path)
+          ? LANDING_BY_SLUG.get(path.slice(1, -'.html'.length))
+          : undefined;
+        if (!page) return next();
+        server
+          .transformIndexHtml(req.url ?? path, renderLandingPage(page), req.originalUrl)
+          .then(html => {
+            res.setHeader('Content-Type', 'text/html');
+            res.end(html);
+          }, next);
+      });
+    },
+    generateBundle() {
+      this.emitFile({ type: 'asset', fileName: 'sitemap.xml', source: renderSitemap() });
+    }
+  };
+}
 
 export default defineConfig(() => {
   const target = process.env.BUILD_TARGET;
@@ -341,9 +372,7 @@ export default defineConfig(() => {
   if (isAnyExt) {
     input.background = resolve(root, 'src/background/service-worker.ts');
   } else {
-    for (const [name, file] of Object.entries(LANDING_PAGES)) {
-      input[name] = resolve(root, file);
-    }
+    for (const { slug } of LANDING_PAGES) input[slug] = landingHtmlPath(slug);
   }
 
   return {
@@ -357,7 +386,7 @@ export default defineConfig(() => {
       thirdPartyLicenses(),
       filterPublicDir(isAnyExt ? 'ext' : 'web'),
       ...(isFirefox ? [firefoxManifest()] : []),
-      ...(isAnyExt ? [] : [emitWebIndex(), webCspMeta()]),
+      ...(isAnyExt ? [] : [landingPages(), emitWebIndex(), webCspMeta()]),
       // GAP-2: manifest.webmanifest + precaching sw.js — never in an extension build.
       ...(isAnyExt ? [] : [webPwa({ root, fileAccept: PDF_AND_IMAGES })])
     ],

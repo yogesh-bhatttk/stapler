@@ -3,6 +3,8 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { cspFindings } from './csp.mjs';
 import { analyzeNetwork } from './network-guard.mjs';
+import { LANDING_PAGES } from '../src/landing/pages.ts';
+import { renderLandingPage } from '../src/landing/template.ts';
 
 // Kept in sync with .claude/hooks/check-invariants.mjs — this is the same guard
 // run as a one-shot, whole-repo scan (see AUDIT-FINDINGS §9 (EPIC-19 in docs/TICKETS.md): the
@@ -72,13 +74,19 @@ const root = process.cwd();
 // the same as no check at all.
 const manifestPath = path.join(root, 'public/manifest.json');
 // Audit 2026-09-25 PLT-6: the root entry pages (editor.html and every
-// landing page) ship in the web build, so they are scanned like source.
+// landing page) ship in the web build, so they are scanned like source. The
+// landing pages are generated (DIST-03: `src/landing/`), so they are scanned
+// as rendered, under the root path the web build gives them.
 const rootHtml = readdirSync(root)
   .filter(name => name.endsWith('.html'))
   .map(name => path.join(root, name));
+const renderedHtml = new Map(
+  LANDING_PAGES.map(page => [path.join(root, `${page.slug}.html`), renderLandingPage(page)])
+);
 const files = [
   ...getAllFiles(path.join(root, 'src')),
   ...rootHtml,
+  ...renderedHtml.keys(),
   path.join(root, 'public/privacy.html'),
   manifestPath
 ];
@@ -92,7 +100,7 @@ for (const file of files) {
 
   let text;
   try {
-    text = readFileSync(file, 'utf8');
+    text = renderedHtml.get(file) ?? readFileSync(file, 'utf8');
   } catch {
     continue;
   }

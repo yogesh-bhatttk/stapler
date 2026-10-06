@@ -4,6 +4,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import * as guard from '../../scripts/network-guard.mjs';
+import { LANDING_PAGES } from '../../src/landing/pages';
+import { renderLandingPage } from '../../src/landing/template';
 
 /**
  * Audit 2026-09-25 PLT-6 — the zero-network analyzer shared by the
@@ -336,7 +338,6 @@ describe('network guard — this repository', () => {
   it('the shipped entry pages and the network-API files are clean', () => {
     for (const rel of [
       'editor.html',
-      'merge-pdf.html',
       'public/privacy.html',
       'src/core/ocr/devanagariFont.ts',
       'src/core/workers/index.ts',
@@ -344,6 +345,11 @@ describe('network guard — this repository', () => {
       'src/core/convert/xlsx-writer.ts'
     ]) {
       expect(analyzeNetwork(readFileSync(path.join(ROOT, rel), 'utf8'), rel), rel).toEqual([]);
+    }
+    // The landing pages are generated (DIST-03), so their rendered HTML is what ships.
+    for (const page of LANDING_PAGES) {
+      const rel = `${page.slug}.html`;
+      expect(analyzeNetwork(renderLandingPage(page), rel), rel).toEqual([]);
     }
   });
 

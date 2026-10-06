@@ -5,8 +5,9 @@
  * `/excel-to-pdf`, `/pdf-to-ppt`, `/ppt-to-pdf`).
  *
  * Each landing page is a real static HTML file (see the `*.entry.ts` files in
- * `src/ui/landing/` and the matching `.html` files at the repo root, wired into
- * `vite.config.ts`'s web-only `rollupOptions.input`) with real hero/feature/CTA
+ * `src/ui/landing/`, and `src/landing/`, whose page list and template the
+ * `stapler:landing-pages` plugin in `vite.config.ts` renders into the web-only
+ * `rollupOptions.input` at build time) with real hero/feature/CTA
  * markup that renders before any script runs — that is what makes the route
  * "server-rendered static" rather than a client-routed SPA path that 404s on a
  * direct hit. Below that static hero, this mounts the *same* `App` tree the

@@ -10,6 +10,7 @@ import {
   wordToPdfDocx
 } from './fixtures';
 import { gotoTool, importFile, openApp } from './helpers';
+import { LANDING_PAGES } from '../../src/landing/pages';
 
 /**
  * QA-03 — the test that protects the entire product claim.
@@ -563,22 +564,7 @@ test.describe('zero network', () => {
     const pages = [
       '/',
       '/editor.html',
-      '/merge-pdf.html',
-      '/compress-pdf.html',
-      '/compress-pdf-to-100kb.html',
-      '/compress-pdf-to-200kb.html',
-      '/compress-pdf-to-500kb.html',
-      '/compress-pdf-to-1mb.html',
-      '/compress-pdf-to-size.html',
-      '/sign-pdf.html',
-      '/scan-cleanup.html',
-      '/redact-pdf.html',
-      '/pdf-to-word.html',
-      '/word-to-pdf.html',
-      '/pdf-to-excel.html',
-      '/excel-to-pdf.html',
-      '/pdf-to-ppt.html',
-      '/ppt-to-pdf.html',
+      ...LANDING_PAGES.map(({ slug }) => `/${slug}.html`),
       '/privacy.html'
     ];
     // A fresh context per page, closed before the next one opens. Nineteen full

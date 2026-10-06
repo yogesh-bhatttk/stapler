@@ -1208,6 +1208,20 @@ local 2026-08-16 run below (90–92 performance, index SEO 91), which is **below
 clickjacking protection on the web twin depends on the host. The offline/installable
 twin is DIST-06; compress-to-size landing pages are DIST-08.
 
+**2026-10-06 — generated, not committed.** The sixteen landing `.html` files (these
+eleven plus DIST-08's five) no longer sit at the repo root. Each page's text lives once in
+`src/landing/pages.ts` (typed data: slug, name, description, og text, h1, intro, feature
+points, FAQ, entry script, body attributes) and one template, `src/landing/template.ts`,
+renders the full document. The `stapler:landing-pages` plugin in `vite.config.ts` serves
+each as a virtual `<root>/<slug>.html` module (`resolveId`/`load`), so Vite's HTML
+pipeline and `stapler:web-csp` treat it exactly like a file and emit `dist/web/<slug>.html`
+at the same URL; `pnpm dev` serves the same render at `/<slug>.html`. `sitemap.xml` is
+emitted from the same list (it is no longer in `public/`). Verified on output bytes: every
+file of `dist/web` (all HTML, `sitemap.xml`, every hashed asset and `sw.js`) was
+byte-identical before and after the move. `scripts/check-invariants.mjs` scans the
+rendered pages, and the CSP e2e case iterates the page list. The implementation notes
+below that mention "the static `.html` file" now mean the rendered page.
+
 Original entry: `pnpm build:web` now emits eleven real static HTML entry points,
 and all twelve landing pages (index + 11 tool pages) serve HTTP 200 from `vite preview`.
 Lighthouse scores measured locally against `http://localhost:4173` (2026-08-16), for the
@@ -5727,6 +5741,11 @@ DOC-07 already compresses to a target size.
   and a sitemap entry, and opening it with a PDF selected lands in Compress with that
   target set; an unreachable target reports the smallest size achieved and never emits a
   file larger than the input (CMP-04).
+- **2026-10-06:** the five pages are generated from one copy, not five files:
+  `COMPRESS_TARGET_SIZES` in `src/landing/pages.ts` lists the fixed sizes, and every
+  size-specific string (title, description, FAQ, hero, "Other target sizes" links,
+  `data-compress-target`) is written once with the size substituted; the pick-your-own
+  page is a separate entry sharing the common cards and FAQ. See DIST-03's 2026-10-06 note.
 
 ### CNV-14 · Image target size and resize output — `M` `P2` · GAP-5
 
