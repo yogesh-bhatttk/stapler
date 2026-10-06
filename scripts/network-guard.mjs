@@ -1258,11 +1258,22 @@ export function analyzeScript(text, fileName = 'file.ts', options = {}) {
     if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) checkJsxAttributes(node);
 
     if (ts.isStringLiteralLike(node) || ts.isTemplateExpression(node)) checkStringContent(node);
-
-    ts.forEachChild(node, visit);
   };
 
-  visit(sf);
+  // Walked with an explicit stack, not by recursing: minified bundles hold
+  // binary-expression chains thousands deep (pdf.js's worker, bundled into the
+  // render worker), which overflow the call stack. Children are pushed in
+  // reverse, so nodes are still visited in source order.
+  const stack = [sf];
+  while (stack.length) {
+    const node = stack.pop();
+    visit(node);
+    const children = [];
+    ts.forEachChild(node, child => {
+      children.push(child);
+    });
+    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+  }
   return findings;
 }
 

@@ -72,10 +72,11 @@ libraries and none in Stapler's own source:
   in each of six workers.
 - 2 were pdf.js `import()` calls.
 
-`scripts/amo-lint-patches.mjs` now removes 17 of them at build time: all 16
-`Function`/`eval` uses and the editor's Preact `innerHTML` write. The six worker
-copies of Preact are no longer bundled at all (explained below the table). The two
-pdf.js warnings remain (see the next section).
+`scripts/amo-lint-patches.mjs` now removes 19 of them at build time: all 16
+`Function`/`eval` uses, the editor's Preact `innerHTML` write, and both pdf.js
+`import()` calls. The six worker copies of Preact are no longer bundled at all
+(explained below the table). `addons-linter` now reports 0 errors, 0 notices and
+0 warnings (see [Reproducing the lint](#reproducing-the-lint)).
 
 How the patches are kept safe:
 
@@ -87,6 +88,9 @@ How the patches are kept safe:
   checks the same against the installed `node_modules`.
 - A patch only removes code that cannot run in a supported browser, or code that
   nothing in Stapler calls. Browser behaviour is unchanged, and so is the CSP.
+  The one deliberate behaviour change is in the pdf.js row for WebAssembly: a
+  case no supported browser reaches now fails with a clear error instead of
+  loading a slower pure-JS decoder.
 
 | Library (version) | Where it ships | Removed code | Why the removal is safe |
 | --- | --- | --- | --- |
@@ -100,6 +104,9 @@ How the patches are kept safe:
 | `docx` 9.7.1, bundled `function-bind` | same | The `Function("binder", …)` that builds the fallback `bind` | The fallback is used only if `Function.prototype.bind` is missing (`module.exports = Function.prototype.bind \|\| implementation`). |
 | `docx` 9.7.1, bundled `get-intrinsic` | same | The table entry `"%eval%": eval` | Nothing asks `GetIntrinsic` for `%eval%`. |
 | `docx` 9.7.1, bundled `is-generator-function` | same | `Function("return function*() {}")()`, replaced by the literal `function* () {}` | Both give the same `GeneratorFunction` prototype, without evaluating a string. |
+| `pdfjs-dist` 6.2.108 `build/pdf.mjs` | `assets/render.worker-*.js` | The fake-worker fallback in `PDFWorker._setupFakeWorkerGlobal`, `await import(this.workerSrc)`. It now throws an error saying the worker module must be pre-registered | pdf.js runs in-process in the render worker (its "fake worker"; a nested worker would only double the threads). This path was live: it loaded `assets/pdf.worker-*.mjs` on the first document. `src/core/workers/pdfjs-setup.ts` now imports `pdfjs-dist/build/pdf.worker.mjs` statically and sets `globalThis.pdfjsWorker = { WorkerMessageHandler }` before any document is opened. pdf.js checks that global first (`#mainThreadWorkerMessageHandler`), so the `import()` is unreachable. No `workerSrc` is set, and the separate `assets/pdf.worker-*.mjs` file is no longer shipped. Its code is bundled (minified) into the render worker, once. |
+| `pdfjs-dist` 6.2.108 `build/pdf.worker.mjs` | `assets/render.worker-*.js` | The `WorkerMessageHandler` static block that calls `initializeFromPort(self)` whenever the module is evaluated in a worker global | Not a linter finding. It is needed by the row above: Stapler never runs this module as its own `Worker`. Left in, it would add a second message listener to the render worker and post a stray `ready` message to the page. |
+| `pdfjs-dist` 6.2.108 `build/pdf.worker.mjs` | `assets/render.worker-*.js` | `WasmImage.#getJsModule`'s ``await import(`${wasmUrl}${noWasmFilename}`)``, which loads the pure-JS JPEG 2000 / JBIG2 decoder (`*_nowasm_fallback.js`) when WebAssembly cannot be instantiated. It now throws inside the existing `try` | Every supported browser (the floors in `scripts/browser-floors.mjs`, currently Chrome 147 and Firefox 144) runs WebAssembly, and the CSP allows it (`'wasm-unsafe-eval'`, unchanged). If WebAssembly did fail, pdf.js's `catch` logs the error and the decoder throws `OpenJPEG failed to initialize` / `JBig2 failed to initialize`. pdf.js then records the image as undecodable (`Unable to decode image`), and Stapler's existing paths report it: redaction refuses and names the image, and compression/grayscale leave it untouched and say so. The two `*_nowasm_fallback.js` files (~597 KB) are no longer copied into `pdfjs/wasm/`, because nothing else references them. |
 | `preact` 10.29.8 | `assets/releases-*.js` (editor page) | The single `innerHTML` assignment, which serves `dangerouslySetInnerHTML`. It now throws instead | Stapler never uses `dangerouslySetInnerHTML`, and `eslint.config.js` now forbids it, along with `innerHTML`/`outerHTML` assignment, `insertAdjacentHTML`, and `document.write`, anywhere in `src/`. |
 
 Six of the original warnings were not patched. They went away because the code
@@ -115,19 +122,11 @@ up `%AsyncFunction%` and similar intrinsics. It sits inside a `try`/`catch`. Und
 the extension CSP the call throws and the intrinsic is reported as unavailable,
 which is how it has always behaved in the extension.
 
-## Remaining `addons-linter` warnings
+## Reproducing the lint
 
-On `stapler-<version>-firefox.zip`, `addons-linter` reports 0 errors, 0 notices,
-and these 2 warnings. Both are deliberate, same-origin `import()` calls in
-Mozilla's own pdf.js (`pdfjs-dist` 6.2.108). We leave them in place because each
-one is a working fallback, and removing it would change behaviour.
-
-| File | Warning | Origin | Why it is safe |
-| --- | --- | --- | --- |
-| `assets/render.worker-*.js` | `UNSAFE_VAR_ASSIGNMENT`: Unsafe call to import for argument 0 | pdf.js `PDFWorker._setupFakeWorkerGlobal`: `await import(this.workerSrc)` | This is pdf.js's "fake worker" fallback for when a nested `Worker` cannot be started. `workerSrc` is always the bundled `assets/pdf.worker-*.mjs`, set in `src/core/workers/pdfjs-setup.ts`. CSP `script-src 'self'` allows only files inside the package. |
-| `assets/pdf.worker-*.mjs` | `UNSAFE_VAR_ASSIGNMENT`: Unsafe call to import for argument 0 | pdf.js `WasmImage.#getJsModule`: ``await import(`${wasmUrl}${noWasmFilename}`)`` | This loads the pure-JS JPEG 2000 / JBIG2 decoder when WebAssembly cannot be instantiated. `wasmUrl` is the bundled `pdfjs/wasm/` folder (`pdfjs-setup.ts`), which contains `openjpeg_nowasm_fallback.js` and `jbig2_nowasm_fallback.js`. CSP `script-src 'self'` allows only files inside the package. `pdf.worker.mjs` is copied verbatim from `pdfjs-dist`. |
-
-To reproduce the lint, run:
+On `stapler-<version>-firefox.zip`, `addons-linter` reports 0 errors, 0 notices
+and 0 warnings. The last two warnings, both pdf.js `import()` calls, are now
+patched (the three `pdfjs-dist` rows in the table above). To reproduce the lint, run:
 
 ```bash
 pnpm package

@@ -67,6 +67,63 @@ describe('LIBRARY_PATCHES', () => {
   });
 });
 
+describe('pdf.js patches', () => {
+  const patched = (file: string) => {
+    const [copy] = installedCopies(file);
+    return {
+      before: readFileSync(copy, 'utf8'),
+      after: applyExactPatches(readFileSync(copy, 'utf8'), patchesFor(copy), copy)
+    };
+  };
+  /** Dynamic `import(` calls, ignoring the one inside a string literal. */
+  const dynamicImports = (code: string) =>
+    code.split('\n').filter(line => /\bimport\(/.test(line) && !/`await import\("/.test(line));
+
+  test('pdf.mjs: the fake-worker import(workerSrc) is the only dynamic import, and it is gone', () => {
+    const { before, after } = patched('/node_modules/pdfjs-dist/build/pdf.mjs');
+    expect(dynamicImports(before)).toHaveLength(1);
+    expect(dynamicImports(after)).toEqual([]);
+    // The pre-registered handler is still consulted first; only the fallback throws.
+    expect(after).toContain('if (this.#mainThreadWorkerMessageHandler) {');
+    expect(after).toContain('Register globalThis.pdfjsWorker');
+  });
+
+  test('pdf.worker.mjs: no dynamic import and no standalone auto-start remain', () => {
+    const { before, after } = patched('/node_modules/pdfjs-dist/build/pdf.worker.mjs');
+    expect(dynamicImports(before)).toHaveLength(1);
+    expect(dynamicImports(after)).toEqual([]);
+    expect(before).toContain('this.initializeFromPort(self);');
+    expect(after).not.toContain('this.initializeFromPort(self);');
+    // It still registers itself for pdf.js to find, and still exports the handler.
+    expect(after).toContain('globalThis.pdfjsWorker = {');
+    expect(after).toContain('export { WorkerMessageHandler };');
+  });
+
+  test('pdf.worker.mjs: a missing WebAssembly decoder still reaches the failure callback', () => {
+    const { after } = patched('/node_modules/pdfjs-dist/build/pdf.worker.mjs');
+    const start = after.indexOf('async #getJsModule(fallbackCallback) {');
+    const body = after.slice(start, after.indexOf('async #instantiateWasm(', start));
+    // The throw is inside the try, so the catch warns and calls back with
+    // `null`, and the decoder then throws "failed to initialize" — which pdf.js
+    // turns into an undecodable image, never a silently blank one.
+    expect(body).toMatch(/try \{\s*throw new Error\(`Stapler: WebAssembly could not start/);
+    expect(body).toContain('fallbackCallback(instance);');
+    expect(after).toContain('throw new JpxError("OpenJPEG failed to initialize");');
+    expect(after).toContain('throw new Jbig2Error("JBig2 failed to initialize");');
+  });
+
+  test('pdfjs-setup.ts registers the worker module and sets no workerSrc', () => {
+    const setup = readFileSync(
+      path.resolve(process.cwd(), 'src/core/workers/pdfjs-setup.ts'),
+      'utf8'
+    );
+    expect(setup).toContain("from 'pdfjs-dist/build/pdf.worker.mjs';");
+    expect(setup).toMatch(/\.pdfjsWorker = \{\s*WorkerMessageHandler\s*\}/);
+    expect(setup).not.toMatch(/GlobalWorkerOptions\.workerSrc\s*=/);
+    expect(setup).not.toContain('?url');
+  });
+});
+
 describe('patchTesseractWorker', () => {
   test('removes both Function() fallbacks from the installed worker.min.js', () => {
     const source = readFileSync(

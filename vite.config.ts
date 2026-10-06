@@ -48,9 +48,13 @@ function copyPdfJsAssets(): Plugin {
       // The wasm folder also carries quickjs, which only PDF JavaScript execution
       // needs. We keep `enableScripting: false` and deliberately ship no
       // interpreter for script embedded in an untrusted document.
+      // It also carries `*_nowasm_fallback.js`, pure-JS decoders pdf.js would
+      // `import()` only if WebAssembly could not start. Every supported browser
+      // runs WebAssembly under our CSP, and `scripts/amo-lint-patches.mjs`
+      // removes that import, so nothing could load them.
       mkdirSync(resolve(out, 'wasm'), { recursive: true });
       for (const file of readdirSync(resolve(from, 'wasm'))) {
-        if (file.startsWith('quickjs')) continue;
+        if (file.startsWith('quickjs') || file.endsWith('_nowasm_fallback.js')) continue;
         cpSync(resolve(from, 'wasm', file), resolve(out, 'wasm', file));
       }
     }

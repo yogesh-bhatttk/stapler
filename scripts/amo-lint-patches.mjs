@@ -14,9 +14,11 @@
  *    so one whose file stopped being bundled is noticed and removed.
  *  - A patch only removes a path that cannot run in a supported browser (a
  *    polyfill fallback for a missing `globalThis`/`Function.prototype.bind`,
- *    code generation gated off whenever `navigator` exists), or one nothing in
+ *    code generation gated off whenever `navigator` exists, pdf.js's pure-JS
+ *    decoder import for when WebAssembly cannot start), or one nothing in
  *    this codebase uses (`_.template`, `dangerouslySetInnerHTML` — the latter
- *    banned by an ESLint rule). The extension CSP has no `'unsafe-eval'`, so
+ *    banned by an ESLint rule — and pdf.js's `import(workerSrc)`, superseded by
+ *    the worker module `pdfjs-setup.ts` registers). The extension CSP has no `'unsafe-eval'`, so
  *    every removed `Function(...)` call would throw `EvalError` there anyway.
  *
  * Behaviour in the browser is unchanged; the CSP is unchanged.
@@ -147,6 +149,61 @@ export const LIBRARY_PATCHES = [
     file: '/node_modules/docx/dist/index.mjs',
     find: 'return Function("return function*() {}")();',
     replace: 'return function* () {};'
+  },
+
+  // ── pdfjs-dist 6.2.108 (render.worker) ──────────────────────────────────
+  // pdf.js runs in-process in the render worker (its "fake worker").
+  // `src/core/workers/pdfjs-setup.ts` statically imports `pdf.worker.mjs` and
+  // registers `globalThis.pdfjsWorker` before any document is opened, and
+  // pdf.js checks that global before falling back to `import(workerSrc)`. The
+  // import is dead; if the registration is ever removed, this throws instead.
+  {
+    name: 'pdf.js: fake-worker import(workerSrc)',
+    file: '/node_modules/pdfjs-dist/build/pdf.mjs',
+    find:
+      '      const worker = await import(\n' +
+      '      /*webpackIgnore: true*/\n' +
+      '      /*@vite-ignore*/\n' +
+      '      this.workerSrc);\n' +
+      '      return worker.WorkerMessageHandler;',
+    replace:
+      '      throw new Error("Stapler: pdf.js must run in-process. Register globalThis.pdfjsWorker ' +
+      '(src/core/workers/pdfjs-setup.ts) before opening a document; loading workerSrc ' +
+      'by dynamic import is disabled.");'
+  },
+  // `pdf.worker.mjs` starts itself as a standalone worker when evaluated in
+  // any worker global. Stapler never runs it as its own Worker: it is bundled
+  // into the render worker and driven in-process (above). Left in, it would
+  // attach a second message listener to the render worker and post a stray
+  // "ready" message to the page.
+  {
+    name: 'pdf.worker: standalone-worker auto-start',
+    file: '/node_modules/pdfjs-dist/build/pdf.worker.mjs',
+    find:
+      '    if (typeof window === "undefined" && !isNodeJS && typeof self !== "undefined" && ' +
+      'typeof self.postMessage === "function" && "onmessage" in self) {\n' +
+      '      this.initializeFromPort(self);\n' +
+      '    }',
+    replace: '    /* stapler: never a standalone worker; run in-process by pdfjs-setup.ts */'
+  },
+  // The JPEG 2000 / JBIG2 decoders are WebAssembly. If WebAssembly cannot
+  // start, pdf.js would `import()` a pure-JS build of the decoder. Every
+  // supported browser has WebAssembly and the CSP allows it
+  // (`'wasm-unsafe-eval'`), so the fallback is not shipped. Reaching it now
+  // throws; pdf.js catches that, the decoder reports it failed to initialize,
+  // and the image is reported as undecodable, as for a broken stream.
+  {
+    name: 'pdf.worker: no-WebAssembly decoder import()',
+    file: '/node_modules/pdfjs-dist/build/pdf.worker.mjs',
+    find:
+      '      const mod = await import(\n' +
+      '      /*webpackIgnore: true*/\n' +
+      '      /*@vite-ignore*/\n' +
+      '      `${WasmImage.#wasmUrl}${this._noWasmFilename}`);\n' +
+      '      instance = mod.default();',
+    replace:
+      '      throw new Error(`Stapler: WebAssembly could not start, and the pure-JS ${this._noWasmFilename} ' +
+      'fallback is not shipped.`);'
   },
 
   // ── preact 10.29.8 — dangerouslySetInnerHTML ────────────────────────────

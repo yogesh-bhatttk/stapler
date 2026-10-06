@@ -21,7 +21,7 @@
  *    it. RED-04 exists to strip embedded script, not to run it.
  */
 import * as pdfjsLib from 'pdfjs-dist';
-import pdfjsWorkerSrc from 'pdfjs-dist/build/pdf.worker.mjs?url';
+import { WorkerMessageHandler } from 'pdfjs-dist/build/pdf.worker.mjs';
 
 /*
  * pdf.js resolves its data-file URLs through an internal `fetchData` helper that reads
@@ -42,7 +42,27 @@ if (typeof workerGlobal.document === 'undefined') {
   workerGlobal.document = { baseURI: self.location.href };
 }
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerSrc;
+/*
+ * pdf.js runs in-process here, in this worker: its "fake worker", which is
+ * pdf.js's own worker-side code on this thread behind a loopback port. (Before
+ * this registration existed it got there anyway: `PDFWorker#initialize` reads
+ * `window.location` to start a nested worker, and there is no `window` here.)
+ *
+ * pdf.js gets that code from `globalThis.pdfjsWorker.WorkerMessageHandler` when
+ * it is set, and only otherwise from `await import(workerSrc)`. So the worker
+ * module is imported statically, bundled into this worker, and registered
+ * before any document is opened. That makes the dynamic import dead code, and
+ * `scripts/amo-lint-patches.mjs` removes it (it now throws, should this
+ * registration ever be dropped). No `workerSrc` is set, and no separate
+ * `pdf.worker.mjs` asset is shipped.
+ *
+ * `pdf.worker.mjs` also assigns `globalThis.pdfjsWorker` itself when it is
+ * evaluated. The assignment is repeated here so the dependency is explicit and
+ * survives even if a pdf.js upgrade drops that side effect.
+ */
+(globalThis as { pdfjsWorker?: { WorkerMessageHandler: unknown } }).pdfjsWorker = {
+  WorkerMessageHandler
+};
 
 /**
  * Base URL of the bundled pdf.js data files.
@@ -156,14 +176,13 @@ export function openDocument({ data, password }: OpenOptions) {
     // Rendering happens on an OffscreenCanvas; there is no document to install
     // @font-face rules into, so glyphs are drawn as paths.
     disableFontFace: true,
-    // `PDFWorker#initialize` reads `window.location` to decide whether it can
-    // spin up its own nested worker; `window` does not exist here, so that
-    // always throws, is swallowed, and pdf.js logs "Setting up fake worker."
-    // once and quietly reuses this thread instead (a real nested worker would
-    // just double the thread/memory cost for no benefit — this thread is
-    // already off the main thread). The warning is cosmetic, not a signal
-    // this ever fails to open a document, so it is the one thing silenced;
-    // actual failures still throw and are unaffected by verbosity.
+    // With `globalThis.pdfjsWorker` registered (above), `PDFWorker#initialize`
+    // goes straight to its in-process "fake worker" and logs "Setting up fake
+    // worker." once (a real nested worker would just double the thread/memory
+    // cost for no benefit — this thread is already off the main thread). The
+    // warning is cosmetic, not a signal this ever fails to open a document, so
+    // it is the one thing silenced; actual failures still throw and are
+    // unaffected by verbosity.
     verbosity: pdfjsLib.VerbosityLevel.ERRORS
   });
 }
