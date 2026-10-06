@@ -392,19 +392,38 @@ describe('PDF-14: substitution inside forms — the file-level guarantees', () =
   });
 
   it('keeps an original form another object still names, instead of leaving it dangling', async () => {
-    const { bytes, imageNumber, formNumber } = await build({ pages: 1, annotationAp: true });
+    // The annotation naming the form sits on page 1, which is not selected.
+    const { bytes, imageNumber, formNumber } = await build({ pages: 2, annotationAp: true });
     const written = await processWorkerImpl.replacePageImages(bytes, {}, silentJob, {
-      0: { [imageNumber]: REPLACEMENT }
+      1: { [imageNumber]: REPLACEMENT }
     });
     const out = await PDFDocument.load(written);
-    // The page draws the blurred clone…
-    expect(imageDrawnBy(out, 0).samples.every(v => v === 128)).toBe(true);
-    // …and the annotation appearance still resolves to a real stream.
+    // The selected page draws the blurred clone…
+    expect(imageDrawnBy(out, 1).samples.every(v => v === 128)).toBe(true);
+    // …and the unselected page's annotation appearance still resolves to the
+    // original, real stream.
     const annots = out.getPage(0).node.Annots()!;
     const annot = out.context.lookup(annots.get(0), PDFDict);
     const ap = annot.lookup(PDFName.of('AP'), PDFDict).get(PDFName.of('N')) as PDFRef;
     expect(ap.objectNumber).toBe(formNumber);
     expect(out.context.lookup(ap)).toBeInstanceOf(PDFStream);
+  });
+
+  it('HRD-41: an annotation appearance on a selected page draws the blurred clone too', async () => {
+    // Before HRD-41 the appearance kept the unblurred original on the very page
+    // the user asked to be blurred.
+    const { bytes, imageNumber, formNumber } = await build({ pages: 1, annotationAp: true });
+    const written = await processWorkerImpl.replacePageImages(bytes, {}, silentJob, {
+      0: { [imageNumber]: REPLACEMENT }
+    });
+    const out = await PDFDocument.load(written);
+    const page = imageDrawnBy(out, 0);
+    const annots = out.getPage(0).node.Annots()!;
+    const annot = out.context.lookup(annots.get(0), PDFDict);
+    const ap = annot.lookup(PDFName.of('AP'), PDFDict).get(PDFName.of('N')) as PDFRef;
+    expect(ap).toBe(page.formRef);
+    expect(imagesMatchingOriginal(out)).toBe(0);
+    expect(out.context.lookup(PDFRef.of(formNumber))).toBeUndefined();
   });
 
   it('refuses a form replacement that lands on no form, rather than reporting it done', async () => {

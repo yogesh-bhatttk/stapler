@@ -13,6 +13,7 @@
  * (`image.ts`); the pool spawns a fresh one for the next import. Between TIFF
  * pages the ordinary {@link checkpoint} applies, with determinate progress.
  */
+import './network-guard'; // PLT-2: first, so it wraps the network APIs before any library runs
 import * as Comlink from 'comlink';
 import { loadLocale, translate } from '../i18n';
 import type { LocaleAware } from './client';
@@ -20,8 +21,14 @@ import { checkpoint, releaseJobHandlesAfterCall, type JobHandle } from './protoc
 import {
   createLibheif,
   decodeHeicToRgba,
+  assertDrawableSize,
+  declaredImageSize,
   decodeTiffPages,
   flattenOnWhite,
+  gifFrameCount,
+  imageOriginalSatisfies,
+  orientedHeaderSize,
+  sniffWebImageFormat,
   type LibHeif,
   type RasterKind,
   type RgbaFrame
@@ -34,6 +41,8 @@ import {
   type SizedImageRequest,
   type SizedImageResult
 } from '../image-resize';
+import { exactOutputSize, matchesExactSize } from '../image-target';
+import { assertExactSizeWithinLimit } from '../render-limits';
 
 /** Which decoder a single-image resize needs: the worker's own, or the browser's. */
 export type ResizeSourceKind = RasterKind | 'bitmap';
@@ -42,6 +51,8 @@ export type ResizeSourceKind = RasterKind | 'bitmap';
 export interface ResizedImage extends SizedImageResult {
   /** Pages in the source; only the first is used (a multi-page TIFF). */
   sourcePages: number;
+  /** Frames in the source; only the first is used (an animated GIF). */
+  sourceFrames: number;
 }
 
 export interface ImageJob extends LocaleAware {
@@ -122,11 +133,17 @@ async function decodeForResize(
     return { source: first, pages };
   }
   await checkpoint(job, 0.05, translate('Decoding {name}', { name }));
+  // IMG-8: refuse an image too large to draw from its header (a JPEG's from
+  // its SOF marker), before `createImageBitmap` allocates it, and again from
+  // the bitmap itself for a header that could not be read. Either way the
+  // message names the size.
+  const declared = declaredImageSize(bytes);
+  if (declared) assertDrawableSize(declared.width, declared.height, name);
+  let bitmap: ImageBitmap;
   try {
-    const bitmap = await createImageBitmap(new Blob([bytes as BlobPart]), {
+    bitmap = await createImageBitmap(new Blob([bytes as BlobPart]), {
       imageOrientation: 'from-image'
     });
-    return { source: bitmap, pages: 1 };
   } catch (err) {
     throw corrupt(
       translate('{name} could not be decoded as an image: {message}', {
@@ -135,6 +152,13 @@ async function decodeForResize(
       })
     );
   }
+  try {
+    assertDrawableSize(bitmap.width, bitmap.height, name);
+  } catch (err) {
+    bitmap.close();
+    throw err;
+  }
+  return { source: bitmap, pages: 1 };
 }
 
 let libheif: Promise<LibHeif> | undefined;
@@ -242,18 +266,52 @@ const api: ImageJob = {
   },
 
   async resizeImage(kind, bytes, request, name, job) {
+    // IMG-9: an animated GIF decodes to its first frame only; count the rest
+    // so the result can say so rather than drop them silently.
+    const frames =
+      kind === 'bitmap' && sniffWebImageFormat(bytes) === 'gif' ? gifFrameCount(bytes) : 1;
+    // CNV-14: an exact size past what a canvas can hold is refused from the
+    // header, before the source is decoded at all; `resizeToTarget` checks
+    // again from the decoded size (a HEIC/TIFF, or a header that said nothing).
+    const header = kind === 'bitmap' ? orientedHeaderSize(bytes) : null;
+    const early = header ? exactOutputSize(header, request) : null;
+    if (early) assertExactSizeWithinLimit(early);
     const { source, pages } = await decodeForResize(kind, bytes, name, job);
     try {
-      const result = await resizeToTarget(source, request, {
-        onTrial: (index, max) =>
-          checkpoint(
-            job,
-            0.1 + (0.85 * index) / max,
-            translate('Trying size {attempt} of up to {max}', { attempt: index + 1, max })
-          )
-      });
+      // The source's own size steers the quality search away from a "fit"
+      // that is bigger than the file it came from (IMG-1) — but only when
+      // keeping that file is possible. A HEIC, a TIFF or a sideways JPEG must
+      // be converted whatever its size, so capping its JPEG at the source's
+      // byte length would only cost quality for nothing.
+      // An exact size the source does not already have (CNV-14) rules the
+      // original out too.
+      const keepable =
+        kind === 'bitmap' &&
+        matchesExactSize({ width: source.width, height: source.height }, request) &&
+        imageOriginalSatisfies(
+          bytes,
+          { sourceWidth: source.width, sourceHeight: source.height },
+          request
+        );
+      const sourceBytes = keepable ? bytes.byteLength : undefined;
+      const result = await resizeToTarget(
+        source,
+        { ...request, sourceBytes },
+        {
+          onTrial: (index, max) =>
+            checkpoint(
+              job,
+              0.1 + (0.85 * index) / max,
+              translate('Trying size {attempt} of up to {max}', { attempt: index + 1, max })
+            )
+        }
+      );
       await checkpoint(job, 1, translate('Done'));
-      const out: ResizedImage = { ...result, sourcePages: pages };
+      const out: ResizedImage = {
+        ...result,
+        sourcePages: pages,
+        sourceFrames: Math.max(1, frames)
+      };
       return Comlink.transfer(out, [out.bytes.buffer as ArrayBuffer]);
     } finally {
       if ('close' in source) source.close();

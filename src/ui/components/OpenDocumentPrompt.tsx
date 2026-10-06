@@ -32,7 +32,7 @@ export function OpenDocumentPrompt() {
       <p className={`${panelStyles.note} ${panelStyles.noteInfo}`}>
         {t('Open a document or image to use this tool.')}
       </p>
-      <Button variant="primary" icon={UploadCloud} onClick={open} disabled={busy}>
+      <Button variant="primary" icon={UploadCloud} onClick={() => void open()} disabled={busy}>
         {t('Open a document or image…')}
       </Button>
       {node}

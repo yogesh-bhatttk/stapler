@@ -22,7 +22,8 @@ export const readAloudProgress = signal<ReadAloudProgress>({
 
 /** GAP-10 — the text of the page being read, split into sentences for highlighting. */
 export interface ReadAloudPageText {
-  docId: string;
+  /** UI-1 — `pageListKey(doc)` of the page list this text was extracted from. */
+  docKey: string;
   pageIndex: number;
   text: string;
   sentences: TextRange[];

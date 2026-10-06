@@ -1,12 +1,33 @@
 name: Release
 
-# Audit 2026-09-25 GAP-8 — pushing a `v*` tag builds, verifies and publishes a
-# GitHub Release. The zips are made by `pnpm package` (scripts/package.mjs):
-# all three targets built, zero-permission and version invariants re-checked
-# on the built manifests, no sourcemaps, reproducible timestamps, and a
-# SHA256SUMS file. Nothing here needs a secret beyond the job's own
-# GITHUB_TOKEN, and nothing is uploaded anywhere but this repository's
-# Releases page — store submission stays a manual step (RELEASE_CHECKLIST.md).
+# Audit 2026-09-25 GAP-8, tightened by audit 2026-10-01 PLT-7 / DIST-07 —
+# pushing a `v*` tag builds once, tests what was built, and drafts a GitHub
+# Release from exactly those bytes.
+#
+#   build    `pnpm package` (scripts/package.mjs): all three targets, the
+#            zero-permission and version invariants re-checked on the built
+#            manifests, no sourcemaps, reproducible timestamps; uploads
+#            dist/release (chrome, firefox and web zips, one `.sha256` per zip,
+#            SHA256SUMS) as the `release` artifact. Nothing later rebuilds it.
+#   check    lint, types, tokens, invariants, unit tests (source-level).
+#   bundle-network, e2e-extension, e2e-web-shipped
+#            unpack the artifact's zips and test *those*: the bundle scan runs
+#            on all three, the packaged-extension e2e loads the shipped Chrome
+#            zip, and the zero-network, offline (PWA), share-target and
+#            worker-network suites run against the unzipped web zip as it is,
+#            with no test hooks (`tests/e2e/pwa-shipped.config.ts`).
+#   e2e-web, perf
+#            every other web suite needs the e2e test hooks
+#            (`VITE_E2E_TEST_HOOKS`), which the shipped site deliberately does
+#            not contain, so these build their own instrumented copy of the
+#            same commit. They gate the release too.
+#   release  needs every job above, re-verifies the artifact's checksums and
+#            creates a *draft* release with the artifact's files. A human
+#            reviews and publishes the draft (RELEASE_CHECKLIST.md).
+#
+# Nothing here needs a secret beyond the job's own GITHUB_TOKEN, and nothing
+# is uploaded anywhere but this repository's Actions artifacts and Releases
+# page — store submission stays a manual step.
 #
 #   git tag v0.3.0 && git push origin v0.3.0
 
@@ -22,8 +43,8 @@ permissions:
   contents: read
 
 jobs:
-  check:
-    name: Lint, types, tokens, invariants, unit tests
+  build:
+    name: Build and package (once)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,11 +64,21 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME does not match package.json ($expected)"
             exit 1
           fi
-      - run: pnpm check
-      - run: pnpm test
+      - run: pnpm package
+      - name: Verify checksums
+        working-directory: dist/release
+        run: |
+          sha256sum --check SHA256SUMS
+          for sum in *.zip.sha256; do sha256sum --check "$sum"; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 30
 
-  bundle-network:
-    name: Bundle zero-network scan
+  check:
+    name: Lint, types, tokens, invariants, unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -59,11 +90,109 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - run: pnpm check:bundle-network
+      - run: pnpm check
+      - run: pnpm test
 
-  e2e:
-    name: E2E (web preview and packaged extension)
+  bundle-network:
+    name: Bundle zero-network scan (shipped zips)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+      - name: Unpack the shipped zips
+        run: |
+          for target in chrome firefox web; do
+            unzip -q release/stapler-*-"$target".zip -d "shipped/$target"
+          done
+      - run: node scripts/check-bundle-network.mjs shipped/chrome shipped/firefox shipped/web
+
+  e2e-extension:
+    name: E2E (the shipped Chrome zip)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+      # The extension suite loads `dist/ext`; put the shipped zip's contents there.
+      - run: unzip -q release/stapler-*-chrome.zip -d dist/ext
+      - run: pnpm test:e2e:ext
+        env:
+          STAPLER_EXT_PREBUILT: '1'
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-release-extension
+          path: playwright-report/
+          retention-days: 14
+
+  e2e-web-shipped:
+    # Audit 2026-10-01 PLT-7 — the shipped web bytes themselves, no rebuild and
+    # no test hooks: zero-network, offline after one visit, share target,
+    # and the service worker's own requests.
+    name: E2E (the shipped web zip)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+      - name: Unpack the shipped web zip
+        run: unzip -q release/stapler-*-web.zip -d shipped/web
+      - name: Confirm it is the shipped build (no test hooks)
+        run: |
+          # The e2e build's service-worker opt-in key (src/ui/pwa.ts) is
+          # compiled out of a build without VITE_E2E_TEST_HOOKS.
+          if grep -rlq --exclude='*.map' 'stapler:e2e-service-worker' shipped/web; then
+            echo "::error::The shipped web zip contains the e2e opt-in hook"
+            exit 1
+          fi
+      - run: pnpm exec playwright test -c tests/e2e/pwa-shipped.config.ts
+        env:
+          STAPLER_SHIPPED_WEB: shipped/web
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-release-web-shipped
+          path: playwright-report/
+          retention-days: 14
+
+  e2e-web:
+    name: E2E (web preview, instrumented build)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -77,24 +206,17 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:e2e:web
-      - run: pnpm build:ext
-      - run: pnpm test:e2e:ext
-        env:
-          STAPLER_EXT_PREBUILT: '1'
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: playwright-report-release
+          name: playwright-report-release-web
           path: playwright-report/
           retention-days: 14
 
-  release:
-    name: Package and publish
-    needs: [check, bundle-network, e2e]
+  perf:
+    # PLAN §5.1 budgets, never retried (audit PLT-18) — a release gate too.
+    name: Performance budgets
     runs-on: ubuntu-latest
-    permissions:
-      # Creating a release and uploading its assets.
-      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -105,19 +227,46 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm package
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:perf
+        env:
+          STAPLER_PERF_SLACK: '1.5'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report-release-perf
+          path: playwright-report/
+          retention-days: 14
+
+  release:
+    name: Draft the GitHub Release
+    needs: [build, check, bundle-network, e2e-extension, e2e-web-shipped, e2e-web, perf]
+    runs-on: ubuntu-latest
+    permissions:
+      # Creating a release and uploading its assets.
+      contents: write
+    steps:
+      # Checked out only so `gh` knows the repository; nothing is built here.
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
       - name: Verify checksums
-        working-directory: dist/release
-        run: sha256sum --check SHA256SUMS
-      - name: Create GitHub Release
+        working-directory: release
+        run: |
+          sha256sum --check SHA256SUMS
+          for sum in *.zip.sha256; do sha256sum --check "$sum"; done
+      - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           flags=()
-          # v1.2.3-beta.1 and the like are published as pre-releases.
+          # v1.2.3-beta.1 and the like are marked as pre-releases.
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then flags+=(--prerelease); fi
           gh release create "$GITHUB_REF_NAME" \
-            dist/release/*.zip dist/release/SHA256SUMS \
+            release/*.zip release/*.zip.sha256 release/SHA256SUMS \
+            --draft \
             --verify-tag \
             --title "Stapler ${GITHUB_REF_NAME#v}" \
             --generate-notes \

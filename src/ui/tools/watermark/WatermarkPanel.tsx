@@ -14,6 +14,9 @@ import { Field, SegmentedControl } from '../../components/Field';
 import { Button } from '../../components/Button';
 import { notifyError } from '../../../core/notify';
 import styles from './WatermarkPanel.module.css';
+import { panelStyles } from '../../shell/panelStyles';
+import { activeDoc } from '../../../core/store';
+import { rangeSelectsNothing } from '../../../core/page-range';
 import { tKey, useTranslation } from '../../../core/i18n';
 
 const POSITIONS: { value: WatermarkPosition; label: string }[] = [
@@ -40,6 +43,9 @@ export function WatermarkPanel() {
   const headerFooter = headerFooterSettings.value;
   const bates = batesSettings.value;
   const barcodeStamp = barcodeStampSettings.value;
+  // X-7 — a range that selects no page would export the document untouched.
+  const pageCount = activeDoc.value?.pages.length ?? 0;
+  const noRangeNote = t('This list selects no page of this document, so nothing is stamped.');
 
   const updateBates = (updates: Partial<typeof bates>) => {
     batesSettings.value = { ...bates, ...updates };
@@ -182,6 +188,11 @@ export function WatermarkPanel() {
           />
         )}
       </Field>
+      {pageCount > 0 && rangeSelectsNothing(settings.pageRange, pageCount) && (
+        <p className={panelStyles.note} role="status">
+          {noRangeNote}
+        </p>
+      )}
 
       {settings.kind === 'text' && (
         <Field label={t('Start page number')}>
@@ -492,6 +503,13 @@ export function WatermarkPanel() {
           )}
         </Field>
       )}
+      {(headerFooter.headerText || headerFooter.footerText) &&
+        pageCount > 0 &&
+        rangeSelectsNothing(headerFooter.pageRange, pageCount) && (
+          <p className={panelStyles.note} role="status">
+            {noRangeNote}
+          </p>
+        )}
     </div>
   );
 }

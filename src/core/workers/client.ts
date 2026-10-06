@@ -256,9 +256,10 @@ export function createWorkerClient<T>(
       }
       worker.terminate();
       notify('danger', translate('A background worker stopped unexpectedly.'), {
-        detail:
+        detail: translate(
           'Retry the operation. If it fails again, reload the page — your open ' +
-          'documents are held in this tab and nothing has been written to disk.',
+            'documents are held in this tab and nothing has been written to disk.'
+        ),
         diagnostic: `[${name}] worker error: ${event.message ?? 'unknown'}`
       });
     });

@@ -14,10 +14,12 @@ import {
   outputFormat,
   outputZipHandle,
   scrubMetadataInBatch,
-  Recipe,
+  type Recipe,
+  isStoredRecipe,
   loadRecipes,
   addRecipe
 } from './state';
+import { parseRecipe } from './recipe-settings';
 import { compressSettings } from '../compress/state';
 import type { CompressSettings } from '../compress/state';
 import { watermarkSettings, headerFooterSettings } from '../watermark/state';
@@ -39,6 +41,7 @@ import {
   showSaveFilePicker
 } from '../../../platform/fsa';
 import { notify } from '../../../core/notify';
+import { withErrorToast } from '../../asyncHandler';
 
 /** The only tools a recipe can chain, in the order they'd normally run. */
 const RECIPE_TOOL_CHOICES: { id: Recipe['tools'][number]; label: string }[] = [
@@ -131,8 +134,7 @@ export function BatchPanel() {
         types: [{ description: translate('ZIP Archive'), accept: { 'application/zip': ['.zip'] } }]
       });
       outputFormat.value = 'zip';
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      outputZipHandle.value = handle as any;
+      outputZipHandle.value = handle;
     } catch (e) {
       reportPickerFailure(translate('Output ZIP selection failed'), e);
     }
@@ -218,13 +220,25 @@ export function BatchPanel() {
       if (!file) return;
       try {
         const text = await file.text();
-        const recipes = JSON.parse(text) as Recipe[];
-        for (const r of recipes) {
-          if (r.id && r.name && Array.isArray(r.tools) && typeof r.settings === 'object') {
-            await addRecipe(r);
-          }
+        const parsed: unknown = JSON.parse(text);
+        const records: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
+        // An imported file is the least trusted source a recipe has: keep only
+        // records the runner could actually replay, and say how many were not.
+        let skipped = 0;
+        for (const r of records) {
+          if (isStoredRecipe(r) && parseRecipe(r).ok) await addRecipe(r);
+          else skipped++;
         }
-        notify('success', translate('Recipes imported successfully'));
+        if (skipped > 0) {
+          notify('warning', translate('Some recipes were not imported'), {
+            detail: tPlural(
+              '{count} recipe in the file has missing or invalid settings and was skipped.',
+              skipped
+            )
+          });
+        } else {
+          notify('success', translate('Recipes imported successfully'));
+        }
       } catch (err) {
         notify('danger', translate('Failed to import recipes'), { detail: String(err) });
       }
@@ -232,24 +246,24 @@ export function BatchPanel() {
     input.click();
   };
 
-  const handleRun = () => startBatch();
+  const handleRun = withErrorToast('batch.run', startBatch);
   const handleCancel = () => cancelBatch();
 
   return (
     <>
       <div className={panelStyles.section}>
-        <Button onClick={handleSelectInput} variant="secondary">
+        <Button onClick={() => void handleSelectInput()} variant="secondary">
           {inputDirHandle.value
             ? t('Input: {name}', { name: inputDirHandle.value.name })
             : t('Select Input Folder')}
         </Button>
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-          <Button onClick={handleSelectOutput} variant="secondary">
+          <Button onClick={() => void handleSelectOutput()} variant="secondary">
             {outputFormat.value === 'directory' && outputDirHandle.value
               ? t('Output: {name}/', { name: outputDirHandle.value.name })
               : t('Select Output Folder')}
           </Button>
-          <Button onClick={handleSelectZipOutput} variant="secondary">
+          <Button onClick={() => void handleSelectZipOutput()} variant="secondary">
             {outputFormat.value === 'zip' && outputZipHandle.value
               ? t('Output: {name}', { name: outputZipHandle.value.name })
               : t('Select Output ZIP')}
@@ -338,7 +352,7 @@ export function BatchPanel() {
 
             <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
               <Button
-                onClick={handleSaveRecipe}
+                onClick={withErrorToast('batch.save-recipe', handleSaveRecipe)}
                 disabled={!draftName.trim() || draftTools.length === 0}
               >
                 {t('Save recipe')}

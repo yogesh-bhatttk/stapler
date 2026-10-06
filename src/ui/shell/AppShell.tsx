@@ -1,4 +1,5 @@
 import { tPlural, translate } from '../../core/i18n';
+import { MAX_OPEN_DOCUMENTS } from '../../core/workspace-limits';
 /**
  * The application shell: top bar, rail, canvas, options panel, action bar, plus the
  * global overlays (palette, toasts, confirmations, first-run, shortcuts).
@@ -66,7 +67,8 @@ import {
   runImportJob
 } from '../../core/open-document';
 import { platform } from '../../platform/current';
-import { notify, confirmAction } from '../../core/notify';
+import { notify, confirmAction, confirmRequest } from '../../core/notify';
+import { withErrorToast } from '../asyncHandler';
 import { readSetting, writeSetting } from '../../core/db';
 import {
   eventMatchesRedoShortcut,
@@ -75,6 +77,7 @@ import {
   customShortcuts
 } from '../../core/shortcuts';
 import { useUnsavedGuard } from '../useUnsavedGuard';
+import { FloatingLayer } from '../components/FloatingTooltip';
 import styles from './AppShell.module.css';
 
 const WELCOME_KEY = 'welcomed';
@@ -123,19 +126,31 @@ export function AppShell({ children }: { children: ComponentChildren }) {
     // RT-23/RT-4/RT-14 — see `runStartupRecovery`: always ends with
     // `sessionRecoveryChecked` true, sweeps orphaned OPFS sources once the
     // decision is made, and flags the prompt so imports refuse under it.
-    void runStartupRecovery(({ record, droppedDocuments }) => {
+    void runStartupRecovery(({ record, droppedDocuments, droppedOverLimit }) => {
       const count = record.documents.length;
       const found = tPlural(
         'Stapler found {count} documents open from before this tab closed. Restore them exactly as they were, undo history included, or start with a clean workspace.',
         count
       );
-      const body =
-        droppedDocuments > 0
-          ? `${found} ${tPlural(
+      // RT-6: documents left out for the open-document ceiling still exist on
+      // disk; only the rest have truly lost their saved data.
+      const missing = droppedDocuments - droppedOverLimit;
+      const notes = [
+        missing > 0
+          ? tPlural(
               '{count} other documents from that session could not be recovered — its saved data no longer exists.',
-              droppedDocuments
-            )}`
-          : found;
+              missing
+            )
+          : null,
+        droppedOverLimit > 0
+          ? tPlural(
+              '{count} more documents were left out because Stapler opens at most {max} at once. Open them again from disk.',
+              droppedOverLimit,
+              { max: MAX_OPEN_DOCUMENTS }
+            )
+          : null
+      ].filter(Boolean);
+      const body = notes.length > 0 ? `${found} ${notes.join(' ')}` : found;
       return confirmAction({
         title: translate('Restore your previous session?'),
         body,
@@ -203,7 +218,7 @@ export function AppShell({ children }: { children: ComponentChildren }) {
   }, []);
 
   useEffect(() => {
-    const onPaste = async (event: ClipboardEvent) => {
+    const pasteImage = async (event: ClipboardEvent) => {
       if (isTypingTarget(event.target)) return;
 
       const doc = activeDoc.value;
@@ -271,6 +286,7 @@ export function AppShell({ children }: { children: ComponentChildren }) {
       }
     };
 
+    const onPaste = withErrorToast('paste', pasteImage);
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
   }, []);
@@ -282,7 +298,7 @@ export function AppShell({ children }: { children: ComponentChildren }) {
     // canvas space — never had its default handled, so the browser's default
     // action (navigating the tab to the dropped file) could fire and silently
     // destroy the whole open workspace with no confirmation
-    // (AUDIT-EDGE-CASES-2026-09-15.md §1.1). Block that globally.
+    // (AUDIT-EDGE-CASES-2026-09-15 §1.1). Block that globally.
     const isFileDrag = (transfer: DataTransfer | null) =>
       Array.from(transfer?.types ?? []).includes('Files');
 
@@ -309,7 +325,13 @@ export function AppShell({ children }: { children: ComponentChildren }) {
         return;
       }
 
-      void importFilesAsDocuments(files, { requestImageOptions: requestOptions });
+      // Land in Organize, like every other open path (the Home drop zone,
+      // Recents, paste) — the new tab used to open behind the Home screen.
+      void importFilesAsDocuments(files, { requestImageOptions: requestOptions }).then(
+        ({ imported }) => {
+          if (imported > 0) setLocation(toolRoute('organize'));
+        }
+      );
     };
 
     window.addEventListener('dragover', onDragOver);
@@ -330,6 +352,7 @@ export function AppShell({ children }: { children: ComponentChildren }) {
           <Suspense fallback={null}>
             <ActionBar />
           </Suspense>
+          <FloatingLayer />
         </main>
         <Suspense fallback={null}>
           <OptionsPanel />
@@ -345,7 +368,9 @@ export function AppShell({ children }: { children: ComponentChildren }) {
       {isShortcutSheetOpen.value && (
         <ShortcutModal onClose={() => (isShortcutSheetOpen.value = false)} />
       )}
-      {showWelcome && (
+      {/* Waits for any open confirm (a share or session-restore prompt) so the
+          two never stack; it shows once that is answered. */}
+      {showWelcome && !confirmRequest.value && (
         <WelcomeModal
           onClose={() => {
             setShowWelcome(false);

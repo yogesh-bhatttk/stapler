@@ -17,7 +17,7 @@ import {
   type RegistrationLike,
   type WorkerLike
 } from '../../src/platform/pwa/register';
-import { SKIP_WAITING_MESSAGE } from '../../src/platform/pwa/sw-routing';
+import { CLIENT_READY_MESSAGE, SKIP_WAITING_MESSAGE } from '../../src/platform/pwa/sw-routing';
 import {
   pendingExternalOpens,
   queueExternalOpen,
@@ -103,7 +103,8 @@ function fakeCacheStorage() {
     return {
       put: async (request, response) => void entries.set(request.url, response),
       match: async request => entries.get(request.url)?.clone(),
-      keys: async () => [...entries.keys()].reverse().map(url => new Request(url))
+      keys: async () => [...entries.keys()].reverse().map(url => new Request(url)),
+      delete: async request => entries.delete(request.url)
     };
   };
   const storage: CacheStorageLike = {
@@ -165,21 +166,32 @@ class FakeWorker implements WorkerLike {
   }
 }
 
-function fakeContainer(options: { controller: boolean; waiting?: FakeWorker }) {
+function fakeActiveWorker(): FakeWorker {
+  return {
+    state: 'activated',
+    postMessage: vi.fn(),
+    addEventListener: vi.fn()
+  } as unknown as FakeWorker;
+}
+
+function fakeContainer(options: { controller: boolean; waiting?: FakeWorker; active?: boolean }) {
   const updateListeners: (() => void)[] = [];
   const controllerListeners: (() => void)[] = [];
   const registration: RegistrationLike & { installing: FakeWorker | null } = {
+    active: options.active ? fakeActiveWorker() : null,
     waiting: options.waiting ?? null,
     installing: null,
     addEventListener: (_type, listener) => void updateListeners.push(listener)
   };
-  const container: ContainerLike & { controller: unknown } = {
-    controller: options.controller ? {} : null,
+  const controller = options.controller ? { postMessage: vi.fn() } : null;
+  const container: ContainerLike = {
+    controller,
     register: vi.fn(async () => registration),
     addEventListener: (_type, listener) => void controllerListeners.push(listener)
   };
   return {
     container,
+    controller,
     registration,
     startUpdate(worker: FakeWorker) {
       registration.installing = worker;
@@ -238,16 +250,93 @@ describe('registerServiceWorker', () => {
     expect(onUpdateReady).toHaveBeenCalledTimes(1);
     expect(worker.messages).toEqual([]);
 
-    // A controller change the user did not ask for (another tab applied it) does not reload this one.
-    fake.controllerChange();
-    expect(reload).not.toHaveBeenCalled();
-
     const apply = onUpdateReady.mock.calls[0][0] as () => void;
     apply();
     expect(worker.messages).toEqual([{ type: SKIP_WAITING_MESSAGE }]);
     fake.controllerChange();
     fake.controllerChange();
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('tells a tab that did not apply the update that another tab did (PLT-4)', async () => {
+    const fake = fakeContainer({ controller: true });
+    const onUpdateReady = vi.fn();
+    const reload = vi.fn();
+    const onReplacedElsewhere = vi.fn();
+    await registerServiceWorker({
+      container: fake.container,
+      url: '/sw.js',
+      onUpdateReady,
+      reload,
+      onReplacedElsewhere
+    });
+    const worker = new FakeWorker();
+    fake.startUpdate(worker);
+    worker.setState('installed');
+    // Another tab applied it: this one's controller changes without being asked.
+    fake.controllerChange();
+    fake.controllerChange();
+    expect(onReplacedElsewhere).toHaveBeenCalledTimes(1);
+    expect(reload).not.toHaveBeenCalled();
+    expect(worker.messages).toEqual([]);
+  });
+
+  it('reloads a tab replaced from elsewhere when no handler is given', async () => {
+    const fake = fakeContainer({ controller: true });
+    const reload = vi.fn();
+    await registerServiceWorker({
+      container: fake.container,
+      url: '/sw.js',
+      onUpdateReady: () => undefined,
+      reload
+    });
+    fake.controllerChange();
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('a page first controlled by a fresh install is told of a later update', async () => {
+    const fake = fakeContainer({ controller: false });
+    const reload = vi.fn();
+    const onReplacedElsewhere = vi.fn();
+    await registerServiceWorker({
+      container: fake.container,
+      url: '/sw.js',
+      onUpdateReady: () => undefined,
+      reload,
+      onReplacedElsewhere
+    });
+    fake.controllerChange(); // first install claims the page
+    expect(onReplacedElsewhere).not.toHaveBeenCalled();
+    fake.controllerChange(); // a later update applied in another tab
+    expect(onReplacedElsewhere).toHaveBeenCalledTimes(1);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('a hard-reloaded tab (uncontrolled, worker active) treats a takeover as an update elsewhere', async () => {
+    const fake = fakeContainer({ controller: false, active: true });
+    const reload = vi.fn();
+    const onReplacedElsewhere = vi.fn();
+    await registerServiceWorker({
+      container: fake.container,
+      url: '/sw.js',
+      onUpdateReady: () => undefined,
+      reload,
+      onReplacedElsewhere
+    });
+    fake.controllerChange(); // a newer version, applied in another tab, claims this one
+    expect(onReplacedElsewhere).toHaveBeenCalledTimes(1);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('tells the controlling worker the page has loaded, so it can drop a kept cache', async () => {
+    const fake = fakeContainer({ controller: true });
+    await registerServiceWorker({
+      container: fake.container,
+      url: '/sw.js',
+      onUpdateReady: () => undefined,
+      reload: () => undefined
+    });
+    expect(fake.controller?.postMessage).toHaveBeenCalledWith({ type: CLIENT_READY_MESSAGE });
   });
 
   it('offers a worker that was already waiting when the page loaded', async () => {

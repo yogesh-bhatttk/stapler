@@ -4,6 +4,7 @@ import type { CompressionReport } from '../../../core/operations';
 import type { CompressionPlan } from '../../../core/compress-plan';
 import type { ImageResultStat } from '../../../core/compress-report';
 import { refineEstimate, type PreviewMeasurement } from '../../../core/compress-plan';
+import type { CompressColour } from '../../../core/compress-gray';
 
 export interface CompressSettings {
   /** Render resolution for the raster path. 150 is the CMP-02 default. */
@@ -26,6 +27,16 @@ export const compressSettings = signal<CompressSettings>({ dpi: 150, quality: 0.
 export type CompressMode = 'quality' | 'target';
 
 export const compressMode = signal<CompressMode>('quality');
+
+/**
+ * OPS-19 — convert to grey or black and white as part of compressing (scans).
+ *
+ * Off (`keep`) by default. A separate signal for the same reason as
+ * `compressMode`: `CompressSettings` is CMP-05's measurement cache key, and the
+ * preview does not model this step. Applied in "Choose quality" only — see
+ * `CompressPanel` for why the size search does not use it.
+ */
+export const compressColour = signal<CompressColour>('keep');
 
 export type TargetUnit = 'KB' | 'MB';
 

@@ -4,6 +4,7 @@
  * empty-state prompt on tool panels, Recents, a window-level drop) runs the
  * same flow without duplicating it.
  */
+import { formatBytes } from './bytes';
 import { platform } from '../platform/current';
 import { PDF_AND_IMAGES, type OpenedFile } from '../platform/index';
 import { importFiles, isPdfFile, type ImportOutcome } from './import';
@@ -60,11 +61,8 @@ export function expectedDocumentCount(files: readonly File[]): number {
   return pdfs + (hasImages ? 1 : 0);
 }
 
-function formatGigabytes(bytes: number): string {
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
-}
-
-function notifyDocumentCeiling(openCount: number): void {
+/** The one message for an open refused at the document ceiling. */
+export function notifyDocumentCeiling(openCount: number): void {
   notify('warning', translate('Too many documents are open.'), {
     detail: translate(
       'Stapler can keep up to {max} documents open at once (open now: {open}). Close some tabs, then open your files again.',
@@ -92,7 +90,7 @@ export async function ensureRoomToOpen(files: readonly File[]): Promise<boolean>
       title: translate('Open these files anyway?'),
       body: translate(
         'Open documents would add up to about {size}. Stapler may slow down, and if the browser runs out of memory it can close this tab, losing unsaved changes. Closing tabs you no longer need helps.',
-        { size: formatGigabytes(capacity.projectedBytes) }
+        { size: formatBytes(capacity.projectedBytes) }
       ),
       confirmLabel: translate('Open anyway')
     });

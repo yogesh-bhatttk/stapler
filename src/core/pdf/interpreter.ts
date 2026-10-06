@@ -201,6 +201,13 @@ export interface SavedState {
   wordSpacing: number;
   horizontalScale: number;
   fontName: string;
+  fillPattern: string;
+  strokePattern: string;
+  lineWidth: number;
+  lineCap: number;
+  lineJoin: number;
+  miterLimit: number;
+  textRenderMode: number;
 }
 
 /**
@@ -228,6 +235,31 @@ export class GraphicsState {
   horizontalScale: number = 1;
   /** The resource name from the last `Tf`, so widths can be looked up. */
   fontName: string = '';
+  /**
+   * HRD-41 — the `/Pattern` resource name the non-stroking (fill) colour was
+   * last set to with `scn`, or `''` for any other colour. A name starting with
+   * {@link INHERITED_PATTERN} was selected by an enclosing content stream and
+   * cannot be resolved against this one's resources.
+   */
+  fillPattern: string = '';
+  /** The same for the stroking colour (`SCN`). */
+  strokePattern: string = '';
+  /**
+   * Stroke geometry (`w`, `J`, `j`, `M`), in user space at the paint. A
+   * stroke's ink reaches past its path's points by up to half the line width —
+   * further at a mitred corner or a projecting cap — so the extent a mark is
+   * tested against has to include it.
+   */
+  lineWidth: number = 1;
+  lineCap: number = 0;
+  lineJoin: number = 0;
+  miterLimit: number = 10;
+  /**
+   * `Tr` — text rendering mode. Modes 1, 2, 5 and 6 stroke the glyph outlines,
+   * so their ink reaches past the glyph box by the stroke's reach, exactly as a
+   * stroked path's does. Graphics state, not reset by `BT`/`ET`.
+   */
+  textRenderMode: number = 0;
 
   clone(): GraphicsState {
     const next = new GraphicsState();
@@ -245,7 +277,14 @@ export class GraphicsState {
       charSpacing: this.charSpacing,
       wordSpacing: this.wordSpacing,
       horizontalScale: this.horizontalScale,
-      fontName: this.fontName
+      fontName: this.fontName,
+      fillPattern: this.fillPattern,
+      strokePattern: this.strokePattern,
+      lineWidth: this.lineWidth,
+      lineCap: this.lineCap,
+      lineJoin: this.lineJoin,
+      miterLimit: this.miterLimit,
+      textRenderMode: this.textRenderMode
     };
   }
 
@@ -259,6 +298,13 @@ export class GraphicsState {
     this.wordSpacing = s.wordSpacing;
     this.horizontalScale = s.horizontalScale;
     this.fontName = s.fontName;
+    this.fillPattern = s.fillPattern;
+    this.strokePattern = s.strokePattern;
+    this.lineWidth = s.lineWidth;
+    this.lineCap = s.lineCap;
+    this.lineJoin = s.lineJoin;
+    this.miterLimit = s.miterLimit;
+    this.textRenderMode = s.textRenderMode;
   }
 }
 
@@ -407,6 +453,131 @@ export interface FilterContentStreamResult {
    * retire the original name.
    */
   formRewrites: FormRewrite[];
+  /**
+   * HRD-41 — tiling patterns whose paint a mark reached, with the area of the
+   * pattern's *cell* that the mark covers in any tile. The cell is a content
+   * stream of its own that nothing on the page names directly, so the filter
+   * cannot remove what it draws: the caller must filter the cell against these
+   * areas and substitute the result, or refuse. A paint a mark reaches whose
+   * every colour is such a pattern is *kept* (the pattern is what gets
+   * redacted); any other paint a mark reaches is dropped, exactly as before.
+   */
+  patternFootprints: PatternFootprint[];
+}
+
+/**
+ * HRD-41 — what the redaction filter needs to know about one `/Pattern`
+ * resource. Only a tiling pattern (`/PatternType 1`) has content of its own;
+ * a shading pattern is a gradient, and dropping its paint removes it.
+ */
+export interface PatternInfo {
+  tiling: boolean;
+  /** Pattern space, [llx, lly, urx, ury]. Absent when unreadable. */
+  bbox?: [number, number, number, number];
+  xStep?: number;
+  yStep?: number;
+  /** Pattern space → the default space of the stream that names it. */
+  matrix?: Matrix;
+}
+
+/** The cell-space area of one tiling pattern that a mark covers. */
+export interface PatternFootprint {
+  /** The `/Pattern` resource name, without the slash. */
+  name: string;
+  /** In the cell's own space (pattern space with the tile offset removed). */
+  rects: RedactionArea[];
+}
+
+/** Prefix of a pattern name selected by an enclosing stream (see `fillPattern`). */
+export const INHERITED_PATTERN = '^';
+
+/** Above this many tiles under one mark, the whole cell is treated as covered. */
+const MAX_FOOTPRINT_TILES = 4096;
+/** Above this many cell-space pieces, they are merged into their bounds. */
+const MAX_FOOTPRINT_RECTS = 64;
+
+/**
+ * HRD-41 — the part of a tiling pattern's cell that `area` covers, wherever a
+ * tile lands under it.
+ *
+ * A tiling pattern repeats its cell every `XStep`/`YStep` in pattern space, and
+ * pattern space is fixed to the *default* space of the content stream that
+ * names the pattern (`base`), not to the CTM at the paint — so the mark, clipped
+ * to what the paint covers, is taken into pattern space and folded back onto the
+ * cell tile by tile. A rotated pattern matrix makes the mark a rotated box in
+ * pattern space; its bounds are used, which over-covers the cell rather than
+ * under-covers it. When the mark spans more tiles than is worth enumerating, the
+ * whole cell is returned: every part of it is under the mark somewhere.
+ */
+export function patternCellFootprint(
+  info: PatternInfo,
+  base: Matrix,
+  area: RedactionArea,
+  paintBox: Rect
+): RedactionArea[] {
+  const bbox = info.bbox!;
+  const bx0 = Math.min(bbox[0], bbox[2]);
+  const bx1 = Math.max(bbox[0], bbox[2]);
+  const by0 = Math.min(bbox[1], bbox[3]);
+  const by1 = Math.max(bbox[1], bbox[3]);
+  const whole: RedactionArea[] = [{ x: bx0, y: by0, width: bx1 - bx0, height: by1 - by0 }];
+
+  const cx0 = Math.max(area.x, paintBox.x);
+  const cy0 = Math.max(area.y, paintBox.y);
+  const cx1 = Math.min(area.x + area.width, paintBox.x + paintBox.width);
+  const cy1 = Math.min(area.y + area.height, paintBox.y + paintBox.height);
+  // A degenerate paint box (a hairline) still touched the mark; keep the mark.
+  const clip =
+    cx1 > cx0 && cy1 > cy0
+      ? { x0: cx0, y0: cy0, x1: cx1, y1: cy1 }
+      : { x0: area.x, y0: area.y, x1: area.x + area.width, y1: area.y + area.height };
+
+  const inverse = invertMatrix(multiplyMatrix(info.matrix ?? [1, 0, 0, 1, 0, 0], base));
+  if (!inverse) return whole;
+  const corners = [
+    transformPoint(inverse, clip.x0, clip.y0),
+    transformPoint(inverse, clip.x1, clip.y0),
+    transformPoint(inverse, clip.x1, clip.y1),
+    transformPoint(inverse, clip.x0, clip.y1)
+  ];
+  const px0 = Math.min(...corners.map(c => c.x));
+  const px1 = Math.max(...corners.map(c => c.x));
+  const py0 = Math.min(...corners.map(c => c.y));
+  const py1 = Math.max(...corners.map(c => c.y));
+  if (![px0, px1, py0, py1].every(Number.isFinite)) return whole;
+  const polygon = area.polygon?.map(p => transformPoint(inverse, p.x, p.y));
+
+  const xs = Math.abs(info.xStep ?? 0);
+  const ys = Math.abs(info.yStep ?? 0);
+  if (!(xs > 0) || !(ys > 0)) return whole;
+  const iMin = Math.floor((px0 - bx1) / xs) - 1;
+  const iMax = Math.ceil((px1 - bx0) / xs) + 1;
+  const jMin = Math.floor((py0 - by1) / ys) - 1;
+  const jMax = Math.ceil((py1 - by0) / ys) + 1;
+  if ((iMax - iMin + 1) * (jMax - jMin + 1) > MAX_FOOTPRINT_TILES) return whole;
+
+  const rects: RedactionArea[] = [];
+  for (let i = iMin; i <= iMax; i++) {
+    for (let j = jMin; j <= jMax; j++) {
+      const ox = i * xs;
+      const oy = j * ys;
+      const x0 = Math.max(px0 - ox, bx0);
+      const x1 = Math.min(px1 - ox, bx1);
+      const y0 = Math.max(py0 - oy, by0);
+      const y1 = Math.min(py1 - oy, by1);
+      if (!(x1 > x0) || !(y1 > y0)) continue;
+      const piece: RedactionArea = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+      if (polygon) piece.polygon = polygon.map(p => ({ x: p.x - ox, y: p.y - oy }));
+      // A shaped mark keeps only the tiles its outline actually reaches.
+      if (!piece.polygon || areaTouches(piece, piece)) rects.push(piece);
+    }
+  }
+  if (rects.length <= MAX_FOOTPRINT_RECTS) return rects;
+  const ux0 = Math.min(...rects.map(r => r.x));
+  const uy0 = Math.min(...rects.map(r => r.y));
+  const ux1 = Math.max(...rects.map(r => r.x + r.width));
+  const uy1 = Math.max(...rects.map(r => r.y + r.height));
+  return [{ x: ux0, y: uy0, width: ux1 - ux0, height: uy1 - uy0 }];
 }
 
 /**
@@ -493,6 +664,13 @@ export interface XObjectInfo {
   /** Form's own transform, applied before the page CTM. Unused for images. */
   matrix?: Matrix;
   /**
+   * HRD-41 — an image with `/ImageMask true`: a stencil that paints the
+   * current *fill colour* through its set samples. Filled with a tiling
+   * pattern, it shows that pattern's cell, so the cell under the mark has to be
+   * redacted as well as the stencil.
+   */
+  imageMask?: boolean;
+  /**
    * The Form's own content, so a mark that covers only part of it can be
    * resolved by looking *inside* rather than refused. Absent when the caller
    * could not decode the stream, or would not (a form that nests into itself,
@@ -510,7 +688,40 @@ export interface FormContent {
   statements: Statement[];
   resolveXObject?: (name: string) => XObjectInfo | undefined;
   resolveFont?: (name: string) => FontInfo | undefined;
+  /** HRD-41 — the form's own `/Pattern` resources. */
+  resolvePattern?: (name: string) => PatternInfo | undefined;
+  /** The form's own `/ExtGState` resources (see {@link ExtGStateInfo}). */
+  resolveExtGState?: (name: string) => ExtGStateInfo | undefined;
 }
+
+/**
+ * The stroke parameters one `/ExtGState` resource sets, as read for the
+ * redaction filter. A key the dictionary does not carry is absent and leaves
+ * the graphics state alone; `/D` (dash) is deliberately not represented — a
+ * dash pattern only ever removes ink from a stroke, so the undashed extent is
+ * already an upper bound on it.
+ *
+ * A resolver returns `undefined` for a name it cannot resolve (missing from
+ * the dictionary, not a dictionary, or a stroke key whose value is not a
+ * number). The filter then treats the line width as **unknown** — see
+ * {@link UNKNOWN_STROKE_REACH} — rather than as unchanged, because an
+ * unchanged width under-measures a `/LW 20` it could not read.
+ */
+export interface ExtGStateInfo {
+  lineWidth?: number;
+  lineCap?: number;
+  lineJoin?: number;
+  miterLimit?: number;
+}
+
+/**
+ * How far, in device space, a stroke whose line width is unknown is assumed to
+ * reach: further than any page (14 400 units is the largest a PDF page may
+ * be), so every stroke painted under an unreadable `/ExtGState` is treated as
+ * touching every mark on the page. That over-removes strokes rather than
+ * refusing the redaction; leaving one whose ink entered a mark is not an option.
+ */
+export const UNKNOWN_STROKE_REACH = 1e6;
 
 /**
  * A Form XObject placement whose content had to change, and the replacement
@@ -551,6 +762,18 @@ export interface FormRecursionOptions {
   allocateFormName: () => string;
   /** Current nesting depth; callers leave this at its default. */
   depth?: number;
+  /** HRD-41 — this stream's `/Pattern` resources. */
+  resolvePattern?: (name: string) => PatternInfo | undefined;
+  /**
+   * This stream's `/ExtGState` resources. Absent means none could be read:
+   * every `gs` then makes the line width unknown (fail closed).
+   */
+  resolveExtGState?: (name: string) => ExtGStateInfo | undefined;
+  /**
+   * HRD-41 — the default space of this content stream, which pattern space is
+   * fixed to: identity for a page, the form's matrix at its `Do` for a form.
+   */
+  patternBase?: Matrix;
 }
 
 /**
@@ -882,7 +1105,7 @@ function formBoxOf(formCtm: Matrix, bbox: [number, number, number, number]): Rec
  * object. So this answers "was anything removed, replaced or reordered" without
  * having to serialise and compare bytes.
  */
-function sameStatements(filtered: Statement[], original: Statement[]): boolean {
+export function sameStatements(filtered: Statement[], original: Statement[]): boolean {
   if (filtered.length !== original.length) return false;
   for (let i = 0; i < filtered.length; i++) if (filtered[i] !== original[i]) return false;
   return true;
@@ -903,10 +1126,131 @@ export function filterContentStream(
   const formDepth = formOptions?.depth ?? 0;
   const state = initialState ? initialState.clone() : new GraphicsState();
   const savedStates: SavedState[] = [];
+  const patternFootprints: PatternFootprint[] = [];
+  const patternBase: Matrix = formOptions?.patternBase ?? [1, 0, 0, 1, 0, 0];
+
+  /**
+   * HRD-41 — what a colour set to pattern `name` paints with: nothing to look
+   * into (`none`: not a pattern, or a name no resource defines, which viewers
+   * paint as nothing), a gradient (`shading`), a cell of content (`tiling`), or
+   * a pattern an enclosing stream selected (`inherited`).
+   */
+  const patternKind = (name: string): 'none' | 'shading' | 'tiling' | 'inherited' => {
+    // No pattern resolver means the caller is not tracking patterns at all
+    // (face/logo blur's image planning): every paint is judged on its own, as
+    // it was before HRD-41, and nothing is recorded or refused for a pattern.
+    if (!name || !formOptions?.resolvePattern) return 'none';
+    if (name.startsWith(INHERITED_PATTERN)) return 'inherited';
+    const info = formOptions?.resolvePattern?.(name);
+    if (!info) return 'none';
+    return info.tiling ? 'tiling' : 'shading';
+  };
+
+  /**
+   * Records that `area` reached a paint (whose extent is `box`) in pattern
+   * `name`. Returns whether the paint can be kept: only when the pattern's cell
+   * is what will be redacted instead.
+   */
+  const recordPatternPaint = (name: string, area: RedactionArea, box: Rect): boolean => {
+    const kind = patternKind(name);
+    if (kind === 'none' || kind === 'shading') return false;
+    if (kind === 'inherited') {
+      // Cannot be resolved from here; the enclosing filter refuses.
+      patternFootprints.push({ name, rects: [] });
+      return false;
+    }
+    const info = formOptions!.resolvePattern!(name)!;
+    const bbox = info.bbox;
+    if (!bbox || bbox[0] === bbox[2] || bbox[1] === bbox[3]) {
+      throw unsupported(
+        translate(
+          'A redaction mark falls across an area filled with a tiling pattern that has no ' +
+            'usable /BBox, so what the mark covers inside the pattern cannot be determined. ' +
+            'Nothing was changed — your original document is untouched. Rasterise the page ' +
+            'first.'
+        )
+      );
+    }
+    const rects = patternCellFootprint(info, patternBase, area, box);
+    const existing = patternFootprints.find(f => f.name === name);
+    if (existing) existing.rects.push(...rects);
+    else patternFootprints.push({ name, rects });
+    return true;
+  };
+
+  /**
+   * HRD-41 review — which of the current fill and stroke patterns a form drawn
+   * now (at `formCtm`) paints with, in this stream's names. A form that sets a
+   * colour of its own before every paint uses neither; one whose content cannot
+   * be read, or cannot be walked to the end, is assumed to use both — assuming
+   * otherwise would leave the cell under the mark in the file.
+   */
+  const inheritedPatternsPainted = (info: XObjectInfo, formCtm: Matrix): string[] => {
+    const candidates = [state.fillPattern, state.strokePattern].filter((name, index, all) => {
+      const kind = patternKind(name);
+      return (kind === 'tiling' || kind === 'inherited') && all.indexOf(name) === index;
+    });
+    if (candidates.length === 0) return [];
+    if (!info.content || formDepth >= MAX_FORM_DEPTH) return candidates;
+    const inherited = (name: string) =>
+      name.startsWith(INHERITED_PATTERN) ? name : INHERITED_PATTERN + name;
+    const innerState = state.clone();
+    innerState.ctm = formCtm;
+    if (innerState.fillPattern) innerState.fillPattern = inherited(innerState.fillPattern);
+    if (innerState.strokePattern) innerState.strokePattern = inherited(innerState.strokePattern);
+    try {
+      const inner = filterContentStream(
+        info.content.statements,
+        redactionBoxes,
+        innerState,
+        info.content.resolveXObject,
+        info.content.resolveFont,
+        {
+          // A probe: nothing it rewrites is kept, so its names need not be unique.
+          allocateFormName: () => 'StaplerProbe',
+          depth: formDepth + 1,
+          resolvePattern: info.content.resolvePattern ?? (() => undefined),
+          resolveExtGState: info.content.resolveExtGState,
+          patternBase: formCtm
+        }
+      );
+      const used = new Set(inner.patternFootprints.map(f => f.name));
+      return candidates.filter(name => used.has(inherited(name)));
+    } catch {
+      return candidates;
+    }
+  };
 
   // Track vector path construction and painting
   let currentPathStmts: Statement[] = [];
   let currentPathPoints: { x: number; y: number }[] = [];
+  /** Segments in the current subpath, so a join between two can be detected. */
+  let subpathSegments = 0;
+  /** The path has a join other than `re`'s right angles (see `strokeOutset`). */
+  let pathHasFreeJoin = false;
+
+  /**
+   * How far, in device space, a stroke's ink reaches past its path's points:
+   * `[dx, dy]`. Half the line width at a butt end or a round join; up to
+   * `√2 ×` that at a projecting square cap or a right-angled mitre (`re`); up
+   * to `miterLimit ×` that at a sharper mitred join. The full line width covers
+   * the first two, and the mitre limit the third when the path has a join that
+   * is not `re`'s — so the box is never smaller than the ink. Over-reach only
+   * ever widens what is removed, which is the safe direction.
+   */
+  const strokeOutset = (freeJoin: boolean = pathHasFreeJoin): [number, number] => {
+    const width = Math.abs(state.lineWidth);
+    // Unknown (an `/ExtGState` that could not be read): fail closed.
+    if (width === Number.POSITIVE_INFINITY) return [UNKNOWN_STROKE_REACH, UNKNOWN_STROKE_REACH];
+    if (!Number.isFinite(width) || width === 0) return [0, 0];
+    let reach = width; // = (width / 2) · 2
+    if (freeJoin && state.lineJoin === 0) {
+      const limit = Number.isFinite(state.miterLimit) ? Math.max(1, state.miterLimit) : 10;
+      reach = Math.max(reach, (width / 2) * limit);
+    }
+    const [a, b, c, d] = state.ctm;
+    return [reach * Math.hypot(a, c), reach * Math.hypot(b, d)];
+  };
 
   const flushPath = (paintOpStmt: Statement | null, isPainting: boolean) => {
     if (currentPathStmts.length === 0 && !paintOpStmt) return;
@@ -922,14 +1266,40 @@ export function filterContentStream(
       pathBox = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
     }
 
+    // A stroke paints past its points (HRD-41 review): a 20pt pattern stroke
+    // whose centre line sits just outside a mark still paints under it, and its
+    // cell footprint must reach as far as its ink does.
+    const paintOpName = paintOpStmt ? String.fromCharCode(...paintOpStmt.operator.bytes) : '';
+    if (pathBox && STROKE_PAINT_OPS.has(paintOpName)) {
+      const [dx, dy] = strokeOutset();
+      if (dx > 0 || dy > 0) {
+        pathBox = {
+          x: pathBox.x - dx,
+          y: pathBox.y - dy,
+          width: pathBox.width + 2 * dx,
+          height: pathBox.height + 2 * dy
+        };
+      }
+    }
+
     let overlaps = false;
     if (isPainting && pathBox) {
+      // HRD-41 — the colours this paint uses. A paint filled (or stroked) with
+      // a tiling pattern shows that pattern's cell content; dropping the paint
+      // hides the cell but leaves it in the file, so the cell itself is what
+      // gets redacted and a paint that uses nothing *but* such patterns stays.
+      const colours: string[] = [];
+      if (FILL_PAINT_OPS.has(paintOpName)) colours.push(state.fillPattern);
+      if (STROKE_PAINT_OPS.has(paintOpName)) colours.push(state.strokePattern);
+      let keepable = colours.length > 0;
       for (const r of redactionBoxes) {
-        if (areaTouches(r, pathBox)) {
-          overlaps = true;
-          break;
+        if (!areaTouches(r, pathBox)) continue;
+        overlaps = true;
+        for (const name of colours) {
+          if (!recordPatternPaint(name, r, pathBox)) keepable = false;
         }
       }
+      if (overlaps && keepable) overlaps = false;
     }
 
     if (!overlaps) {
@@ -939,6 +1309,8 @@ export function filterContentStream(
 
     currentPathStmts = [];
     currentPathPoints = [];
+    subpathSegments = 0;
+    pathHasFreeJoin = false;
   };
 
   for (const stmt of statements) {
@@ -947,6 +1319,15 @@ export function filterContentStream(
     // Path construction operators: m l c v y h re
     if (op === 'm' || op === 'l' || op === 'c' || op === 'v' || op === 'y' || op === 're') {
       currentPathStmts.push(stmt);
+      if (op === 'm') {
+        subpathSegments = 0;
+      } else if (op === 're') {
+        // A closed rectangle of right angles, which the full-width reach covers;
+        // anything appended to it joins it at its origin, which may not.
+        subpathSegments = 1;
+      } else if (++subpathSegments >= 2) {
+        pathHasFreeJoin = true;
+      }
       if (op === 're' && stmt.operands.length === 4) {
         const rx = parseFloat(String.fromCharCode(...stmt.operands[0].bytes));
         const ry = parseFloat(String.fromCharCode(...stmt.operands[1].bytes));
@@ -970,6 +1351,8 @@ export function filterContentStream(
       continue;
     } else if (op === 'h') {
       currentPathStmts.push(stmt);
+      // Closing adds a segment back to the start, and a join at each end of it.
+      if (subpathSegments >= 1) pathHasFreeJoin = true;
       continue;
     }
 
@@ -994,6 +1377,53 @@ export function filterContentStream(
     // If there was an unpainted path when encountering another operator, flush it
     if (currentPathStmts.length > 0) {
       flushPath(null, false);
+    }
+
+    if (op === 'scn' || op === 'SCN') {
+      const last = stmt.operands[stmt.operands.length - 1];
+      const name =
+        last?.type === 'name' ? String.fromCharCode(...last.bytes).replace(/^\//, '') : '';
+      if (op === 'scn') state.fillPattern = name;
+      else state.strokePattern = name;
+    } else if (op === 'cs' || op === 'sc' || op === 'g' || op === 'rg' || op === 'k') {
+      state.fillPattern = '';
+    } else if (op === 'CS' || op === 'SC' || op === 'G' || op === 'RG' || op === 'K') {
+      state.strokePattern = '';
+    }
+
+    if (op === 'w' || op === 'J' || op === 'j' || op === 'M') {
+      const value =
+        stmt.operands.length >= 1
+          ? parseFloat(String.fromCharCode(...stmt.operands[0].bytes))
+          : Number.NaN;
+      if (Number.isFinite(value)) {
+        if (op === 'w') state.lineWidth = value;
+        else if (op === 'J') state.lineCap = value;
+        else if (op === 'j') state.lineJoin = value;
+        else state.miterLimit = value;
+      }
+    } else if (op === 'gs') {
+      const last = stmt.operands[stmt.operands.length - 1];
+      const name =
+        last?.type === 'name' ? String.fromCharCode(...last.bytes).replace(/^\//, '') : '';
+      const ext = name ? formOptions?.resolveExtGState?.(name) : undefined;
+      if (!ext) {
+        // Not resolvable from here — a name the resources do not define, a
+        // value that is not a dictionary, an unreadable stroke key, or no
+        // resolver at all. Whatever it set, the width is no longer known.
+        state.lineWidth = Number.POSITIVE_INFINITY;
+      } else {
+        if (ext.lineWidth !== undefined) state.lineWidth = ext.lineWidth;
+        if (ext.lineCap !== undefined) state.lineCap = ext.lineCap;
+        if (ext.lineJoin !== undefined) state.lineJoin = ext.lineJoin;
+        if (ext.miterLimit !== undefined) state.miterLimit = ext.miterLimit;
+      }
+    } else if (op === 'Tr') {
+      const value =
+        stmt.operands.length >= 1
+          ? parseFloat(String.fromCharCode(...stmt.operands[0].bytes))
+          : Number.NaN;
+      if (Number.isFinite(value)) state.textRenderMode = value;
     }
 
     if (op === 'q') {
@@ -1160,6 +1590,14 @@ export function filterContentStream(
       }
 
       const trm = multiplyMatrix(state.textMatrix, state.ctm);
+      // Stroked text (modes 1, 2, 5, 6) paints the glyph outlines with the
+      // current line width, which is in user space — the CTM scales it, the
+      // text matrix does not (PDF 32000 9.3.6; pdf.js divides it back out of
+      // the text matrix too). A glyph outline is all joins, so the mitre reach
+      // applies. Modes 0, 3, 4 and 7 draw no stroke and keep the plain box.
+      const [glyphDx, glyphDy] = STROKED_TEXT_MODES.has(state.textRenderMode)
+        ? strokeOutset(true)
+        : [0, 0];
       // A zero-width span (an empty show, a zero-width glyph) still occupies its
       // cursor position; give it a hairline so a caret-position mark matches.
       const hairline = Math.abs(state.fontSize) * 0.05 || 0.05;
@@ -1177,10 +1615,10 @@ export function filterContentStream(
         const xs = corners.map(c => c.x);
         const ys = corners.map(c => c.y);
         return {
-          x: Math.min(...xs),
-          y: Math.min(...ys),
-          width: Math.max(...xs) - Math.min(...xs),
-          height: Math.max(...ys) - Math.min(...ys)
+          x: Math.min(...xs) - glyphDx,
+          y: Math.min(...ys) - glyphDy,
+          width: Math.max(...xs) - Math.min(...xs) + 2 * glyphDx,
+          height: Math.max(...ys) - Math.min(...ys) + 2 * glyphDy
         };
       };
 
@@ -1202,6 +1640,16 @@ export function filterContentStream(
       if (touching.length === 0) {
         filtered.push(stmt);
         continue;
+      }
+
+      // HRD-41 — glyphs painted with a tiling pattern show the cell through
+      // their outlines; the cell under the mark is redacted as well as the
+      // glyphs. Whatever the text rendering mode, both colours are taken: the
+      // over-removal is confined to the cell area under the mark.
+      for (const r of touching) {
+        for (const name of [state.fillPattern, state.strokePattern]) {
+          recordPatternPaint(name, r, runBox);
+        }
       }
 
       /**
@@ -1343,8 +1791,19 @@ export function filterContentStream(
 
         // Fully covered: the whole form goes, exactly as before. Nothing the
         // user kept is inside it.
-        if (box && redactionBoxes.some(r => areaCovers(r, box))) shouldStrip = true;
-        else if (box && !redactionBoxes.some(r => areaTouches(r, box))) {
+        if (box && redactionBoxes.some(r => areaCovers(r, box))) {
+          shouldStrip = true;
+          // HRD-41 review — a form drawn while the colour is a tiling pattern
+          // can paint with that colour (it inherits the graphics state), and
+          // what it paints is the pattern's cell. Dropping the `Do` hides the
+          // cell there but leaves it in the file, so the cell under the mark
+          // is redacted as for any other paint in that pattern.
+          for (const name of inheritedPatternsPainted(info, formCtm)) {
+            for (const r of redactionBoxes) {
+              if (areaTouches(r, box)) recordPatternPaint(name, r, box);
+            }
+          }
+        } else if (box && !redactionBoxes.some(r => areaTouches(r, box))) {
           // Nowhere near a mark. Byte-untouched.
         } else if (info.content && formOptions && formDepth < MAX_FORM_DEPTH) {
           // A partial overlap, resolved by filtering the form's own content at
@@ -1358,14 +1817,44 @@ export function filterContentStream(
           // the form in an implicit save/restore.
           const innerState = state.clone();
           innerState.ctm = formCtm;
+          // A colour the form inherits names a pattern in *this* stream's
+          // resources, not the form's.
+          if (innerState.fillPattern && !innerState.fillPattern.startsWith(INHERITED_PATTERN)) {
+            innerState.fillPattern = INHERITED_PATTERN + innerState.fillPattern;
+          }
+          if (innerState.strokePattern && !innerState.strokePattern.startsWith(INHERITED_PATTERN)) {
+            innerState.strokePattern = INHERITED_PATTERN + innerState.strokePattern;
+          }
           const inner = filterContentStream(
             info.content.statements,
             redactionBoxes,
             innerState,
             info.content.resolveXObject,
             info.content.resolveFont,
-            { allocateFormName: formOptions.allocateFormName, depth: formDepth + 1 }
+            {
+              allocateFormName: formOptions.allocateFormName,
+              depth: formDepth + 1,
+              resolvePattern: info.content.resolvePattern,
+              resolveExtGState: info.content.resolveExtGState,
+              patternBase: formCtm
+            }
           );
+
+          if (inner.patternFootprints.length > 0) {
+            // HRD-41 — a pattern's cell drawn through a form. The cell would
+            // have to be rewritten through the form's own resources, which this
+            // path does not do; leaving the cell intact would leave what the
+            // mark covers in the file.
+            throw unsupported(
+              translate(
+                'A redaction mark falls across an area that a Form XObject fills with a tiling ' +
+                  'pattern. Stapler can remove content from a pattern drawn by the page itself, ' +
+                  'but not from one drawn through a form, and covering it would leave the ' +
+                  'pattern’s content inside the file. Nothing was changed — your original ' +
+                  'document is untouched. Rasterise the page first.'
+              )
+            );
+          }
 
           if (inner.strippedXObjectNames.length > 0 || inner.partialImageCoverage.length > 0) {
             // An image or a nested form inside this one falls under the mark.
@@ -1446,6 +1935,16 @@ export function filterContentStream(
         }
         shouldStrip = covered;
 
+        // HRD-41 review — a stencil mask paints the fill colour through its
+        // samples, so filled with a tiling pattern it shows the pattern's cell.
+        // Whether the stencil itself is dropped (covered) or blacked out
+        // (partly), the cell under the mark is redacted too.
+        if (info?.imageMask) {
+          for (const r of redactionBoxes) {
+            if (areaTouches(r, box)) recordPatternPaint(state.fillPattern, r, box);
+          }
+        }
+
         if (!covered && xObjectName) {
           const unitRects: RedactionArea[] = [];
           for (const r of redactionBoxes) {
@@ -1483,8 +1982,22 @@ export function filterContentStream(
     flushPath(null, false);
   }
 
-  return { filtered, finalState: state, strippedXObjectNames, partialImageCoverage, formRewrites };
+  return {
+    filtered,
+    finalState: state,
+    strippedXObjectNames,
+    partialImageCoverage,
+    formRewrites,
+    patternFootprints
+  };
 }
+
+/** Painting operators that use the non-stroking colour. */
+const FILL_PAINT_OPS = new Set(['f', 'F', 'f*', 'B', 'B*', 'b', 'b*']);
+/** Painting operators that use the stroking colour. */
+const STROKE_PAINT_OPS = new Set(['S', 's', 'B', 'B*', 'b', 'b*']);
+/** Text rendering modes (`Tr`) that stroke the glyph outlines. */
+const STROKED_TEXT_MODES = new Set([1, 2, 5, 6]);
 
 /** Text-showing and text-state operators — everything legal inside `BT`...`ET`. */
 const TEXT_OPERATORS = new Set([
@@ -1680,8 +2193,12 @@ export async function decodeStream(bytes: Uint8Array): Promise<Uint8Array> {
   async function tryAlgorithm(algorithm: CompressionFormat): Promise<Uint8Array> {
     const ds = new DecompressionStream(algorithm);
     const writer = ds.writable.getWriter();
-    writer.write(bytes);
-    writer.close();
+    // Not awaited — the readable side has to be drained concurrently or the
+    // write never resolves. A corrupt stream rejects these as well as the
+    // read below; the read's rejection is the one reported, so these are
+    // observed here rather than left as unhandled rejections.
+    writer.write(bytes).catch(() => {});
+    writer.close().catch(() => {});
 
     const reader = ds.readable.getReader();
     const chunks: Uint8Array[] = [];

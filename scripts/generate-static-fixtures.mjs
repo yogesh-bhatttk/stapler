@@ -1,4 +1,5 @@
 import { execSync } from 'node:child_process';
+import { deflateSync } from 'node:zlib';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
@@ -220,6 +221,11 @@ function generateEncodedFixtures() {
     }
   }
 
+  // multipage.tiff: three IFDs, so HRD-05's "N IFDs → N pages" is proved on a real file
+  // (sample.tiff has one). See writeMultipageTiff below.
+  const multipageTiff = path.join(FIXTURES_DIR, 'multipage.tiff');
+  if (!existsSync(multipageTiff)) writeFileSync(multipageTiff, writeMultipageTiff());
+
   // face-chip.png: a real photographic face, for RED-08's detector test. Cropped from
   // the MIT-licensed sample that ships inside the installed `@vladmandic/face-api`
   // package — the same library whose detector the test runs — so no new asset enters
@@ -299,6 +305,103 @@ function generateEncodedFixtures() {
     );
     run(`rm ${tempIn}`, 'rm');
   }
+}
+
+/**
+ * multipage.tiff (HRD-05): a baseline TIFF 6.0 file with three IFDs, written byte by byte.
+ *
+ * Each page has its own size and fill, with a 20×20 red marker in its *stored* top-left
+ * corner. Page 3 is stored landscape 200×100 with Orientation 6 (RightTop, "row 0 is the
+ * visual right side"), the tag a scanner writes for a sideways page: it must import as a
+ * portrait 100×200 page with the marker at the top-right. Pages 1 and 2 carry
+ * Orientation 1.
+ *
+ * Written here rather than by ImageMagick, because ImageMagick applies `-orient` to every
+ * frame of a multi-frame TIFF (and rewrites the pixels to match), so it cannot make one
+ * sideways page among upright ones; and not by UTIF, so the decoder under test is not
+ * grading its own encoder. RGB, 8 bits, one Deflate (Compression 8) strip per page —
+ * deterministic, a few KB. `PIL`/libtiff read it back with the same sizes and tags.
+ */
+function writeMultipageTiff() {
+  const pages = [
+    { width: 300, height: 200, fill: [0, 255, 0], orientation: 1 },
+    { width: 160, height: 240, fill: [0, 0, 255], orientation: 1 },
+    { width: 200, height: 100, fill: [255, 255, 0], orientation: 6 }
+  ];
+  const strips = pages.map(({ width, height, fill }) => {
+    const raw = Buffer.alloc(width * height * 3);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const rgb = x < 20 && y < 20 ? [255, 0, 0] : fill;
+        raw.set(rgb, (y * width + x) * 3);
+      }
+    }
+    return deflateSync(raw, { level: 9 });
+  });
+
+  const TAGS = 11;
+  const ifdSize = 2 + TAGS * 12 + 4;
+  const chunks = [];
+  let offset = 8;
+  const layout = pages.map((_, i) => {
+    const stripOffset = offset;
+    offset += strips[i].length + (strips[i].length % 2); // word-align what follows
+    const bitsOffset = offset;
+    offset += 6;
+    const ifdOffset = offset;
+    offset += ifdSize;
+    return { stripOffset, bitsOffset, ifdOffset };
+  });
+
+  const header = Buffer.alloc(8);
+  header.write('II', 0, 'latin1');
+  header.writeUInt16LE(42, 2);
+  header.writeUInt32LE(layout[0].ifdOffset, 4);
+  chunks.push(header);
+
+  pages.forEach((page, i) => {
+    const { stripOffset, bitsOffset, ifdOffset } = layout[i];
+    const strip = strips[i];
+    chunks.push(strip);
+    if (strip.length % 2) chunks.push(Buffer.alloc(1));
+    const bits = Buffer.alloc(6);
+    [8, 8, 8].forEach((b, k) => bits.writeUInt16LE(b, k * 2));
+    chunks.push(bits);
+
+    const SHORT = 3;
+    const LONG = 4;
+    // [tag, type, count, value], ascending by tag as TIFF requires.
+    const entries = [
+      [256, LONG, 1, page.width],
+      [257, LONG, 1, page.height],
+      [258, SHORT, 3, bitsOffset],
+      [259, SHORT, 1, 8], // Deflate
+      [262, SHORT, 1, 2], // RGB
+      [273, LONG, 1, stripOffset],
+      [274, SHORT, 1, page.orientation],
+      [277, SHORT, 1, 3],
+      [278, LONG, 1, page.height],
+      [279, LONG, 1, strip.length],
+      [284, SHORT, 1, 1] // chunky
+    ];
+    if (entries.length !== TAGS) throw new Error('multipage.tiff: tag count mismatch');
+    const ifd = Buffer.alloc(ifdSize);
+    ifd.writeUInt16LE(entries.length, 0);
+    entries.forEach(([tag, type, count, value], k) => {
+      const at = 2 + k * 12;
+      ifd.writeUInt16LE(tag, at);
+      ifd.writeUInt16LE(type, at + 2);
+      ifd.writeUInt32LE(count, at + 4);
+      if (type === SHORT && count === 1) ifd.writeUInt16LE(value, at + 8);
+      else ifd.writeUInt32LE(value, at + 8);
+    });
+    ifd.writeUInt32LE(i + 1 < pages.length ? layout[i + 1].ifdOffset : 0, 2 + TAGS * 12);
+    chunks.push(ifd);
+    if (Buffer.concat(chunks).length !== ifdOffset + ifdSize) {
+      throw new Error('multipage.tiff: layout offsets drifted');
+    }
+  });
+  return Buffer.concat(chunks);
 }
 
 generateRawStubs();

@@ -13,10 +13,11 @@ import {
 import { activeDoc } from '../../../core/store';
 import { currentDocumentBytes, planCompression } from '../../../core/operations';
 import { Button } from '../../components/Button';
-import { Field, NumberInput, RadioGroup, Select, Slider } from '../../components/Field';
-import { SizeDelta, formatBytes } from '../../components/Feedback';
+import { Field, RadioGroup, Select, Slider } from '../../components/Field';
+import { SizeDelta, formatBytes, formatTargetMiss } from '../../components/Feedback';
 import { panelStyles } from '../../shell/panelStyles';
 import {
+  compressColour,
   compressMeasurement,
   compressMode,
   compressReport,
@@ -26,14 +27,17 @@ import {
   lastCompressionResult,
   projectedOutput,
   targetSizeBytes,
-  type CompressMode,
-  type TargetUnit
+  type CompressMode
 } from './state';
+import { TargetSizeInput } from '../image-size/TargetSizeInput';
+import { PDF_TARGET_BOUNDS } from '../../../core/deep-link';
 import { MAX_TARGET_TRIALS } from '../../../core/compress-target';
 import { useEffect } from 'preact/hooks';
 import { useJob } from '../../useJob';
 import { fromUnknown, isCancellation, logEvent } from '../../../core/errors';
 import { tKey, translate, useTranslation } from '../../../core/i18n';
+import type { CompressColour } from '../../../core/compress-gray';
+import { withErrorToast } from '../../asyncHandler';
 
 const DPI_OPTIONS = [
   { value: 72, label: tKey('72 DPI — smallest') },
@@ -56,9 +60,22 @@ const MODE_OPTIONS = [
   }
 ] as const;
 
-const UNIT_OPTIONS = [
-  { value: 'MB' as TargetUnit, label: 'MB' },
-  { value: 'KB' as TargetUnit, label: 'KB' }
+/**
+ * OPS-19 — grey as a compression lever. The two grey hints are the Grayscale
+ * tool's own strings: it is the same conversion, so it is described the same way.
+ */
+const COLOUR_OPTIONS = [
+  { value: 'keep' as CompressColour, label: tKey('Keep colour') },
+  {
+    value: 'gray' as CompressColour,
+    label: tKey('Shades of grey'),
+    hint: tKey('Every colour becomes the grey of the same brightness.')
+  },
+  {
+    value: 'bw' as CompressColour,
+    label: tKey('Black and white'),
+    hint: tKey('For scans: pure black on white, usually the smallest file.')
+  }
 ] as const;
 
 export function CompressPanel() {
@@ -120,6 +137,7 @@ export function CompressPanel() {
   const target = compressTarget.value;
   const outcome = compressTargetOutcome.value;
   const targetBytes = targetSizeBytes(target);
+  const colour = compressColour.value;
 
   const exportReport = async () => {
     if (!report) return;
@@ -179,30 +197,17 @@ export function CompressPanel() {
             )}
           >
             {id => (
-              <div className={panelStyles.actions}>
-                <NumberInput
-                  id={id}
-                  min={0.05}
-                  step={target.unit === 'MB' ? 0.5 : 50}
-                  value={target.amount}
-                  data-target-amount={target.amount}
-                  onInput={event => {
-                    const amount = Number((event.target as HTMLInputElement).value);
-                    if (Number.isFinite(amount) && amount > 0) {
-                      compressTarget.value = { ...target, amount };
-                    }
-                  }}
-                />
-                <Select
-                  value={target.unit}
-                  options={UNIT_OPTIONS}
-                  ariaLabel={t('Target size unit')}
-                  onChange={unit => (compressTarget.value = { ...target, unit })}
-                />
-              </div>
+              <TargetSizeInput
+                id={id}
+                value={target}
+                bounds={PDF_TARGET_BOUNDS}
+                steps={{ KB: 50, MB: 0.5 }}
+                dataAttribute="data-target-amount"
+                onChange={next => (compressTarget.value = next)}
+              />
             )}
           </Field>
-          {report && targetBytes >= report.originalBytes && (
+          {report && Number.isFinite(targetBytes) && targetBytes >= report.originalBytes && (
             <p className={panelStyles.note}>
               {t(
                 'This document is already {size} — smaller than the target, so there is nothing to do.',
@@ -231,10 +236,8 @@ export function CompressPanel() {
                 })
               : t(
                   'Could not reach {target}. The smallest Stapler can produce without destroying this document is {achieved}.',
-                  {
-                    target: formatBytes(outcome.targetBytes),
-                    achieved: formatBytes(outcome.achievedBytes)
-                  }
+                  // Rounded so the miss never reads as the target (IMG-3).
+                  formatTargetMiss(outcome.targetBytes, outcome.achievedBytes)
                 )}
             {outcome.settings
               ? ` ${t('Settings used: {dpi} DPI, {quality}%.', {
@@ -280,20 +283,48 @@ export function CompressPanel() {
               />
             )}
           </Field>
+
+          <RadioGroup
+            legend={t('Colour')}
+            name="compress-colour"
+            value={colour}
+            options={COLOUR_OPTIONS.map(option => ({
+              value: option.value,
+              label: t(option.label),
+              hint: 'hint' in option ? t(option.hint) : undefined
+            }))}
+            onChange={next => (compressColour.value = next)}
+          />
+          {colour !== 'keep' && (
+            <p className={panelStyles.note} data-compress-colour-note>
+              {t(
+                'The projection and the preview show compression only, in colour. The converted file is measured before saving. If it is not smaller than the original, the colour-compressed file is saved instead, and if that is not smaller either, the original is kept.'
+              )}
+            </p>
+          )}
         </>
       ) : (
         // In target mode these two are chosen by the search, not by the user, so
         // showing them as editable controls would misrepresent what the export
         // will do. The preview keeps rendering at whatever the search last used.
-        <p className={panelStyles.note}>
-          {t(
-            'Resolution and quality are chosen by the search. The preview shows {dpi} DPI, {quality}%.',
-            { dpi: settings.dpi, quality: Math.round(settings.quality * 100) }
+        <>
+          <p className={panelStyles.note}>
+            {t(
+              'Resolution and quality are chosen by the search. The preview shows {dpi} DPI, {quality}%.',
+              { dpi: settings.dpi, quality: Math.round(settings.quality * 100) }
+            )}
+          </p>
+          {colour !== 'keep' && (
+            <p className={panelStyles.note} data-compress-colour-note>
+              {t(
+                'Converting to grey is not used when aiming for a size: each attempt is measured in colour, and converting afterwards would make that measurement untrue. Choose quality to convert while compressing.'
+              )}
+            </p>
           )}
-        </p>
+        </>
       )}
 
-      <Button variant="secondary" icon={Gauge} onClick={analyse}>
+      <Button variant="secondary" icon={Gauge} onClick={() => void analyse()}>
         {t('Analyse without changing anything')}
       </Button>
 
@@ -357,7 +388,9 @@ export function CompressPanel() {
             </p>
           )}
 
-          {report.alreadyOptimized && (
+          {/* "Not worth the time" judges re-encoding alone; with grey on (quality
+              mode) a scan can still shrink a lot, and commit does not ask either. */}
+          {report.alreadyOptimized && (colour === 'keep' || mode === 'target') && (
             <p className={panelStyles.note}>
               {t(
                 'This document is already optimized — about {percent}% is all that is available from {size}. Compressing it is not worth the time.',
@@ -369,7 +402,11 @@ export function CompressPanel() {
             </p>
           )}
 
-          <Button variant="secondary" icon={Download} onClick={exportReport}>
+          <Button
+            variant="secondary"
+            icon={Download}
+            onClick={withErrorToast('compress.report', exportReport)}
+          >
             {t('Export Report')}
           </Button>
         </div>

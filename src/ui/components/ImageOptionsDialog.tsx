@@ -16,7 +16,8 @@ export interface ImageOptionsDialogProps {
 export const ImageOptionsDialog = forwardRef<HTMLDivElement, ImageOptionsDialogProps>(
   function ImageOptionsDialog({ count, onConfirm, onCancel }, ref) {
     const t = useTranslation();
-    const [pageSize, setPageSize] = useState<ImagesToPdfOptions['pageSize']>('original');
+    // The dialog offers only the named sizes; per-image sizes come from elsewhere.
+    const [pageSize, setPageSize] = useState<'original' | 'a4' | 'letter'>('original');
     const [orientation, setOrientation] = useState<ImagesToPdfOptions['orientation']>('auto');
     const [margin, setMargin] = useState<number>(0);
     const [quality, setQuality] = useState<number>(0.9);
@@ -45,9 +46,8 @@ export const ImageOptionsDialog = forwardRef<HTMLDivElement, ImageOptionsDialogP
             {id => (
               <Select
                 id={id}
-                value={pageSize as string}
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                onChange={val => setPageSize(val as any)}
+                value={pageSize}
+                onChange={setPageSize}
                 options={[
                   { value: 'original', label: t('Original image size') },
                   { value: 'a4', label: t('A4') },
@@ -62,8 +62,7 @@ export const ImageOptionsDialog = forwardRef<HTMLDivElement, ImageOptionsDialogP
               <Select
                 id={id}
                 value={orientation}
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                onChange={val => setOrientation(val as any)}
+                onChange={setOrientation}
                 disabled={pageSize === 'original'}
                 options={[
                   { value: 'auto', label: t('Auto (match image)') },

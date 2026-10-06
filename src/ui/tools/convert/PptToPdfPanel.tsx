@@ -35,6 +35,7 @@ import {
   setPptToPdfPreview,
   setPptToPdfSource
 } from './ppt-to-pdf-state';
+import { withErrorToast } from '../../asyncHandler';
 
 /** Inches, to one decimal — how PowerPoint itself states a slide's size. */
 function inches(points: number): string {
@@ -73,7 +74,7 @@ export function PptToPdfPanel() {
   const handlePreview = () => {
     const file = pptToPdfSource.value;
     if (!file) return;
-    run({ label: translate('Converting to PDF'), scope: 'convert.ppt-to-pdf' }, async job => {
+    void run({ label: translate('Converting to PDF'), scope: 'convert.ppt-to-pdf' }, async job => {
       // Captured before the bytes are read, so a change made *during* the
       // conversion still invalidates its result.
       const revision = pptToPdfInputRevision.value;
@@ -161,7 +162,11 @@ export function PptToPdfPanel() {
       </div>
 
       <div className={panelStyles.section}>
-        <Button variant="secondary" icon={Upload} onClick={chooseFile}>
+        <Button
+          variant="secondary"
+          icon={Upload}
+          onClick={withErrorToast('convert.choose-file', chooseFile)}
+        >
           {source ? t('Choose a different .pptx') : t('Choose a .pptx file')}
         </Button>
         {source && (

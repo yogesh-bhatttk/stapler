@@ -60,13 +60,19 @@
   gap: 2px;
   padding: 2px;
   background: var(--surface-overlay);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--hairline);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-2);
+  /* Hidden tools are not painted at all, and the backdrop blur exists only while
+     they are shown (DOC-04 scroll jank). An invisible-but-painted blurred overlay
+     on every mounted tile made each one a composited layer, and every
+     thumbnail mounting or painting during a scroll re-layerised them all — about
+     half of each frame's main-thread time. `visibility` waits out the fade. */
   opacity: 0;
-  transition: opacity var(--dur-fast) var(--ease-snappy);
+  visibility: hidden;
+  transition:
+    opacity var(--dur-fast) var(--ease-snappy),
+    visibility 0s linear var(--dur-fast);
 }
 
 /* Shown on hover *and* on keyboard focus — hover-only controls are unreachable
@@ -75,6 +81,12 @@
 .frame:focus-within .tools,
 :global(.cell:focus-visible) .tools {
   opacity: 1;
+  visibility: visible;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  transition:
+    opacity var(--dur-fast) var(--ease-snappy),
+    visibility 0s;
 }
 
 .checkbox {

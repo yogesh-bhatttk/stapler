@@ -280,18 +280,62 @@ describe('§2.4 the skip list inspects the mask’s filter chain, not just the i
     expect(plan.skipped.join(' ')).toContain('mask');
   });
 
-  it('refuses to rasterise a textless page whose image carries an undecodable mask', async () => {
+  it('still rasterises a textless page whose image carries a JPX/JBIG2 mask (HRD-39)', async () => {
     const { bytes } = await docWithImages([
       { filter: 'FlateDecode', mask: { key: 'SMask', filter: 'JPXDecode' } }
     ]);
     const inventory = await processWorkerImpl.imageInventory(bytes, silentJob);
     const plan = classifyPages(inventory, [census(0)], OPTIONS);
 
-    // pdf.js cannot decode the mask to render the page either, so unlike the
-    // 1-bit case below this one really does block both routes.
-    expect(plan.pages[0].route).toBe('already-optimized');
-    expect(plan.pages[0].reason).toContain('cannot be safely rasterized');
+    // The surgical route needs to decode the mask; the raster route does not —
+    // pdf.js renders the page with its bundled OpenJPEG/JBIG2 decoders, the
+    // same reasoning as the 1-bit case below. CMP-04's never-larger check in
+    // `rebuildCompressed` still discards a raster page that comes out bigger.
+    expect(plan.pages[0].route).toBe('raster');
+    expect(plan.pages[0].reencode).toEqual([]);
+    expect(plan.pages[0].reason).not.toMatch(/cannot be safely rasterized/);
   });
+
+  // A JBIG2/JPX stream only blocks the *surgical* route. It must not short-cut
+  // the checks that block the raster route too: before the fix, the early
+  // `raster: true` return skipped them, and a textless page carrying one of
+  // these was flattened to an RGB JPEG — destroying the spot ink or stencil.
+  it.each([
+    [
+      'a JBIG2 image in /Separation',
+      { filter: 'JBIG2Decode', colorSpace: 'Separation', bitsPerComponent: 1 },
+      'Separation'
+    ],
+    ['a JPX image in /DeviceN', { filter: 'JPXDecode', colorSpace: 'DeviceN' }, 'DeviceN'],
+    [
+      'a JBIG2 /ImageMask stencil',
+      { filter: 'JBIG2Decode', bitsPerComponent: 1, extra: { ImageMask: true } },
+      'Stencil mask'
+    ],
+    [
+      'a /Separation image whose /SMask is JPX',
+      {
+        filter: 'FlateDecode',
+        colorSpace: 'Separation',
+        mask: { key: 'SMask' as const, filter: 'JPXDecode' }
+      },
+      'Separation'
+    ]
+  ])(
+    'refuses to rasterise a textless page carrying %s',
+    async (_label, spec: ImageSpec, expected) => {
+      const { bytes } = await docWithImages([{ byteLength: 120_000, ...spec }]);
+      const inventory = await processWorkerImpl.imageInventory(bytes, silentJob);
+      const plan = classifyPages(inventory, [census(0)], OPTIONS);
+
+      expect(plan.pages[0].route).not.toBe('raster');
+      expect(plan.pages[0].route).not.toBe('surgical');
+      expect(plan.pages[0].reencode).toEqual([]);
+      expect(plan.pages[0].reason).toContain('cannot be safely rasterized');
+      // The raster-blocking reason is the one printed, not the surgical-only one.
+      expect(plan.skipped.join(' ')).toContain(expected);
+    }
+  );
 
   it('still re-encodes an image whose mask is an ordinary Flate stream', async () => {
     const { bytes } = await docWithImages([

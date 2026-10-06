@@ -32,7 +32,7 @@ export function CropPanel() {
   if (!doc) return null;
 
   const handleAutoTrim = () => {
-    run({ label: translate('Auto-trimming pages'), scope: 'crop.autotrim' }, async job => {
+    void run({ label: translate('Auto-trimming pages'), scope: 'crop.autotrim' }, async job => {
       await autoTrimDocument(doc, settings.scope, job);
     });
   };

@@ -6,9 +6,14 @@
  *   1. builds all three targets (Chrome/Edge extension, Firefox, website);
  *   2. runs `validate-builds.mjs` and re-checks the zero-permission and
  *      version invariants on the *built* manifests;
- *   3. zips `dist/ext` and `dist/firefox`, leaving out every `*.map`, with
+ *   3. zips `dist/ext`, `dist/firefox` and `dist/web` (the static website,
+ *      ready to unpack onto any static host that serves files unmodified — the
+ *      service worker hash-checks every file, see RELEASE_CHECKLIST.md), leaving
+ *      out every `*.map`, with
  *      fixed timestamps so the same tree always produces the same bytes;
- *   4. writes `dist/release/SHA256SUMS` for the zips.
+ *   4. writes a `<zip>.sha256` next to each zip (audit 2026-10-01 DIST-07 —
+ *      `sha256sum --check <zip>.sha256` verifies one download on its own) and
+ *      `dist/release/SHA256SUMS` covering all of them.
  *
  * Node built-ins plus `fflate` (already a dependency) only.
  *
@@ -122,20 +127,33 @@ if (!existsSync(join(DIST, 'web', 'THIRD_PARTY_LICENSES.txt'))) {
 for (const webOnly of ['sw.js', 'manifest.webmanifest']) {
   if (!existsSync(join(DIST, 'web', webOnly))) fail(`dist/web: ${webOnly} is missing (GAP-2)`);
 }
+// Audit 2026-10-01 PLT-1: the website's entry scripts are content-hashed, so a
+// deploy can never pair new HTML with an old cached `editor.js`.
+for (const file of readdirSync(join(DIST, 'web'))) {
+  if (!file.endsWith('.html')) continue;
+  const stem = file === 'index.html' ? 'editor' : file.slice(0, -'.html'.length);
+  if (existsSync(join(DIST, 'web', `${stem}.js`))) {
+    fail(`dist/web: entry script ${stem}.js is not content-hashed (PLT-1)`);
+  }
+}
 
 console.log('\n▶ zip');
 rmSync(RELEASE, { recursive: true, force: true });
 mkdirSync(RELEASE, { recursive: true });
 const zips = [
   zipDir(join(DIST, 'ext'), `stapler-${version}-chrome.zip`),
-  zipDir(join(DIST, 'firefox'), `stapler-${version}-firefox.zip`)
+  zipDir(join(DIST, 'firefox'), `stapler-${version}-firefox.zip`),
+  zipDir(join(DIST, 'web'), `stapler-${version}-web.zip`)
 ];
 
-const sums = zips
-  .map(
-    file =>
-      `${createHash('sha256').update(readFileSync(file)).digest('hex')}  ${relative(RELEASE, file)}`
-  )
-  .join('\n');
+/** `sha256sum` format: `<hex>  <name>`, so `sha256sum --check` reads it. */
+const sumLine = file =>
+  `${createHash('sha256').update(readFileSync(file)).digest('hex')}  ${relative(RELEASE, file)}`;
+
+const lines = zips.map(sumLine);
+zips.forEach((file, i) => writeFileSync(`${file}.sha256`, `${lines[i]}\n`));
+const sums = lines.join('\n');
 writeFileSync(join(RELEASE, 'SHA256SUMS'), `${sums}\n`);
-console.log(`\n▶ dist/release/SHA256SUMS\n${sums}\n\n✓ packaged Stapler ${version}`);
+console.log(
+  `\n▶ dist/release/SHA256SUMS (+ one .sha256 per zip)\n${sums}\n\n✓ packaged Stapler ${version}`
+);

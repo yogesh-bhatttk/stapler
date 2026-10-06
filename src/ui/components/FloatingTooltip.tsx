@@ -1,5 +1,6 @@
 /**
- * A hover/focus tooltip rendered into `document.body` at a fixed position.
+ * A hover/focus tooltip rendered into the app's floating layer at a fixed
+ * position.
  *
  * `Tooltip` positions its bubble inside the trigger's own box, which a
  * scrolling container clips — the tool rail is one (`overflow-y: auto`, plus a
@@ -12,10 +13,26 @@
  * hover, dismissed by Escape (WCAG 1.4.13), and wired with
  * `aria-describedby` only while visible. On a touch screen a tap focuses the
  * control without `:focus-visible`, so no bubble flashes up before navigation.
+ *
+ * UI-11 — WCAG 1.4.13 also asks that the bubble be *hoverable*: moving the
+ * pointer from the trigger onto the bubble (to read a long summary, or with a
+ * screen magnifier) must not dismiss it. Leaving the trigger now hides it
+ * after a short delay, and the bubble accepts the pointer and keeps itself
+ * open while hovered. The bubble learns which trigger hook owns it through
+ * {@link hoverKeepers}, so callers wire nothing extra.
+ *
+ * NFR-01 — the bubble is portalled into {@link FloatingLayer}, an empty host
+ * `AppShell` renders inside `<main>`, not into `document.body`: a body-level
+ * bubble sat outside every landmark, and axe flagged it (`region`) on every
+ * route in both themes. Being `position: fixed` with no transformed, filtered
+ * or contained ancestor between it and the viewport (the host is
+ * `display: contents` inside `<main>`, which creates no stacking context), it
+ * still escapes the rail's and top bar's clipping exactly as before, and its
+ * z-index still competes in the root stacking context.
  */
 import type { ComponentChildren } from 'preact';
 import { createPortal } from 'preact/compat';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import styles from './FloatingTooltip.module.css';
 
 /** Where the bubble sits relative to its anchor, in logical terms. */
@@ -23,6 +40,17 @@ export type FloatingSide = 'inline-end' | 'block-end';
 
 const GAP = 8;
 const HOVER_DELAY_MS = 300;
+/** UI-11 — long enough to cross the {@link GAP} between trigger and bubble. */
+export const HIDE_DELAY_MS = 200;
+
+/** What a bubble calls while the pointer is over it, per anchor element. */
+interface HoverKeeper {
+  /** The pointer is on the bubble: stay open. */
+  keep: () => void;
+  /** The pointer left the bubble: hide after the delay. */
+  release: () => void;
+}
+const hoverKeepers = new WeakMap<HTMLElement, HoverKeeper>();
 
 export interface TooltipTrigger {
   /** The element the bubble is showing for, or null. */
@@ -46,11 +74,26 @@ export function useTooltipTrigger(): TooltipTrigger {
     clearTimeout(timer.current);
     setAnchor(null);
   };
+  const hideSoon = () => {
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setAnchor(null), HIDE_DELAY_MS);
+  };
 
   useEffect(() => () => clearTimeout(timer.current), []);
 
-  // Escape dismisses it wherever focus is — including a hover-only bubble.
+  // UI-11 — let the bubble for this anchor keep it open while hovered.
   useEffect(() => {
+    if (!anchor) return;
+    hoverKeepers.set(anchor, { keep: () => clearTimeout(timer.current), release: hideSoon });
+    return () => {
+      hoverKeepers.delete(anchor);
+    };
+  }, [anchor]);
+
+  // Escape dismisses it wherever focus is — including a hover-only bubble.
+  // A layout effect, so the listener is attached in the same commit that
+  // shows the bubble: an Escape pressed the moment it appears is never missed.
+  useLayoutEffect(() => {
     if (!anchor) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') hide();
@@ -66,9 +109,16 @@ export function useTooltipTrigger(): TooltipTrigger {
       onMouseEnter: event => {
         const target = event.currentTarget as HTMLElement;
         clearTimeout(timer.current);
+        // Already showing for this trigger (the pointer came back from the
+        // bubble): just stay; otherwise show after the hover delay.
+        if (anchor === target) return;
         timer.current = setTimeout(() => setAnchor(target), HOVER_DELAY_MS);
       },
-      onMouseLeave: hide,
+      // Not at once: the pointer may be on its way to the bubble (UI-11).
+      onMouseLeave: () => {
+        if (anchor) hideSoon();
+        else clearTimeout(timer.current);
+      },
       onFocus: event => {
         const target = event.currentTarget as HTMLElement;
         // A pointer click or a tap focuses too; only keyboard focus shows it.
@@ -79,6 +129,17 @@ export function useTooltipTrigger(): TooltipTrigger {
       onBlur: hide
     }
   };
+}
+
+/** The id of the element {@link FloatingTooltip} portals into. */
+export const FLOATING_LAYER_ID = 'floating-layer';
+
+/**
+ * The host for floating bubbles. Rendered once, inside a landmark (`<main>`),
+ * so a tooltip is in the landmark structure wherever its trigger is.
+ */
+export function FloatingLayer() {
+  return <div id={FLOATING_LAYER_ID} className={styles.layer} />;
 }
 
 export interface FloatingTooltipProps {
@@ -108,10 +169,20 @@ export function FloatingTooltip({ anchor, id, side, children }: FloatingTooltipP
     else style.right = `${Math.max(GAP, viewport - rect.right)}px`;
   }
 
+  // Looked up on each event, not now: the hook registers its keeper in an
+  // effect, after this first render.
   return createPortal(
-    <div role="tooltip" id={id} className={styles.bubble} style={style}>
+    <div
+      role="tooltip"
+      id={id}
+      className={styles.bubble}
+      style={style}
+      onMouseEnter={() => hoverKeepers.get(anchor)?.keep()}
+      onMouseLeave={() => hoverKeepers.get(anchor)?.release()}
+    >
       {children}
     </div>,
-    document.body
+    // Body only where no shell is mounted (an isolated component render).
+    document.getElementById(FLOATING_LAYER_ID) ?? document.body
   );
 }

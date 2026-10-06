@@ -22,19 +22,14 @@ import {
 import type { OpenOptions, OpenedFile, OutputDirectory, RecentEntry } from './index';
 import { deleteHandle, listHandles, readHandle, writeHandle } from '../core/db';
 
+/**
+ * Reads an image off the OS clipboard through the async Clipboard API.
+ *
+ * The paste handler prefers `ClipboardEvent.clipboardData`; this is its
+ * fallback. There is deliberately no test hook here (AUDIT-FINDINGS §11.10):
+ * the e2e writes a real `ClipboardItem` and pastes with the real shortcut.
+ */
 export async function readClipboardImage(): Promise<File | null> {
-  const win = window as unknown as { __mockClipboardImage?: File };
-  // `MODE === 'test'` covers vitest, but Playwright's e2e suite drives a real
-  // production build (`vite build` + `vite preview`, mode 'production') so
-  // clipboard paste can be exercised against zero-network build output — that
-  // build sets `VITE_E2E_TEST_HOOKS` explicitly (see playwright.config.ts) so
-  // this stays absent from the actual store/website builds.
-  if (
-    (import.meta.env.MODE === 'test' || import.meta.env.VITE_E2E_TEST_HOOKS === 'true') &&
-    win.__mockClipboardImage
-  ) {
-    return win.__mockClipboardImage;
-  }
   try {
     const items = await navigator.clipboard.read();
     for (const item of items) {
@@ -324,6 +319,30 @@ export function openFilesViaInput(options?: OpenOptions): Promise<OpenedFile[]> 
   });
 }
 
+/** Bytes a single `Blob` part copies in one task (NFR-02, 50 ms main-thread budget). */
+const BLOB_SLICE = 4 * 1024 * 1024;
+
+/**
+ * `bytes` as a Blob, without one long main-thread copy.
+ *
+ * `new Blob([bytes])` copies synchronously; a 50 MB merge output took ~40 ms in
+ * one task, and the old `bytes.slice()` in front of it (to drop the rest of a
+ * shared buffer — unnecessary, since a view part contributes only the bytes it
+ * covers) another ~50 ms. Large outputs are now copied a few megabytes per task
+ * and stitched together by reference.
+ */
+async function blobInSlices(bytes: Uint8Array, type: string): Promise<Blob> {
+  // Blob takes no SharedArrayBuffer-backed view; copy in that (never expected) case.
+  const own = bytes.buffer instanceof ArrayBuffer ? bytes : bytes.slice();
+  if (own.byteLength <= BLOB_SLICE) return new Blob([own], { type });
+  const parts: Blob[] = [];
+  for (let at = 0; at < own.byteLength; at += BLOB_SLICE) {
+    parts.push(new Blob([own.subarray(at, at + BLOB_SLICE)]));
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+  }
+  return new Blob(parts, { type });
+}
+
 /**
  * Fallback: anchor download, for saving without the picker.
  *
@@ -335,11 +354,9 @@ export function openFilesViaInput(options?: OpenOptions): Promise<OpenedFile[]> 
  * "the file was saved" — callers should not treat `true` as a completion
  * guarantee the way `saveViaPicker`'s real success/failure result is.
  */
-export function saveViaDownload(bytes: Uint8Array, suggestedName: string): boolean {
+export async function saveViaDownload(bytes: Uint8Array, suggestedName: string): Promise<boolean> {
   try {
-    // Copy into a fresh buffer: a transferred Uint8Array may be a view on a larger
-    // ArrayBuffer, and Blob would then write the whole thing.
-    const blob = new Blob([bytes.slice()], { type: mimeForName(suggestedName) });
+    const blob = await blobInSlices(bytes, mimeForName(suggestedName));
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;

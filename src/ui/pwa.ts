@@ -4,19 +4,27 @@
  * extension, which is offline by construction and ships no service worker.
  *
  *  - registers `sw.js` (built by `scripts/pwa.mjs` for the web target only)
- *    and offers a reload, as a toast, when a new version has installed;
+ *    and offers a reload, as a toast, when a new version has installed —
+ *    and follows an update applied in another tab (PLT-4);
  *  - queues files the OS opens with the installed app (`launchQueue`) and
  *    files shared to it (`share_target`, stored by the worker) for
- *    `useExternalOpen` to import.
+ *    `useExternalOpen` to import — asking first when the worker could not
+ *    trace the share to this app (PLT-3).
  */
 import { platform } from '../platform/current';
 import { consumeLaunchQueue, type LaunchQueueLike } from '../platform/pwa/launch-queue';
 import { registerServiceWorker } from '../platform/pwa/register';
-import { takeSharedFiles } from '../platform/pwa/share-inbox';
+import {
+  sweepStaleSharedFiles,
+  takeSharedBatch,
+  type CacheStorageLike,
+  type SharedBatch
+} from '../platform/pwa/share-inbox';
 import { SHARE_TARGET_PARAM } from '../platform/pwa/sw-routing';
 import { queueExternalOpen } from '../core/external-open';
-import { notify } from '../core/notify';
-import { translate } from '../core/i18n';
+import { documents } from '../core/store';
+import { confirmAction, notify } from '../core/notify';
+import { tPlural, translate } from '../core/i18n';
 
 /**
  * The e2e build (`VITE_E2E_TEST_HOOKS`) registers the worker only when a test
@@ -35,20 +43,83 @@ function shouldRegister(): boolean {
   }
 }
 
+/** Cache Storage, or `undefined` where the page has none (old browsers, some private modes). */
+function cacheStorage(): CacheStorageLike | undefined {
+  return typeof caches === 'undefined' ? undefined : caches;
+}
+
+/**
+ * Audit 2026-10-01 PLT-5 — on a start that is not a share-target launch,
+ * deletes shared files a failed hand-off left behind. A share-target launch
+ * never sweeps: it takes the whole inbox instead, so the batch it was
+ * redirected for cannot be deleted under it. Returns whether a sweep ran.
+ */
+export async function sweepShareInboxOnStart(
+  href: string,
+  storage: CacheStorageLike | undefined = cacheStorage(),
+  now = Date.now()
+): Promise<boolean> {
+  if (!storage || new URL(href).searchParams.has(SHARE_TARGET_PARAM)) return false;
+  try {
+    await sweepStaleSharedFiles(storage, now);
+  } catch {
+    // Best effort: the next start, the next share or Clear-all tries again.
+  }
+  return true;
+}
+
+/** How many file names the "Open shared files?" dialog lists before "…and N more". */
+const LISTED_NAMES = 10;
+
+/**
+ * Audit 2026-10-01 PLT-3 — whether to import a batch from the share inbox.
+ * A share the worker positively traced to this origin opens at once. One it
+ * could not — no `Origin`, no referrer, no client it can see: what the OS
+ * share sheet sends, and also what a foreign page sends by opening the POST
+ * in a new no-referrer window — is only opened when the user says so. The
+ * batch has already left the inbox, so "Discard" (or Escape) leaves nothing
+ * behind. `confirm` is a seam for the unit tests.
+ */
+export async function shouldOpenSharedBatch(
+  batch: SharedBatch,
+  confirm: typeof confirmAction = confirmAction
+): Promise<boolean> {
+  if (batch.files.length === 0) return false;
+  if (batch.verified) return true;
+  const names = batch.files.map(file => file.name);
+  const details = names.slice(0, LISTED_NAMES);
+  if (names.length > LISTED_NAMES) {
+    details.push(tPlural('…and {count} more', names.length - LISTED_NAMES));
+  }
+  return confirm({
+    title: tPlural('Open {count} shared files?', names.length),
+    body: translate(
+      'Stapler can’t tell whether these came from your device’s share menu or from a website. Open them only if you just shared them.'
+    ),
+    details,
+    confirmLabel: translate('Open'),
+    cancelLabel: translate('Discard')
+  });
+}
+
 async function receiveSharedFiles(): Promise<void> {
   const url = new URL(window.location.href);
-  if (!url.searchParams.has(SHARE_TARGET_PARAM)) return;
+  if (!url.searchParams.has(SHARE_TARGET_PARAM)) {
+    await sweepShareInboxOnStart(url.href);
+    return;
+  }
   url.searchParams.delete(SHARE_TARGET_PARAM);
   // A reload must not look for the same files again.
   history.replaceState(history.state, '', url.href);
-  let files: File[];
+  let batch: SharedBatch;
   try {
-    files = typeof caches === 'undefined' ? [] : await takeSharedFiles(caches);
+    const storage = cacheStorage();
+    batch = storage ? await takeSharedBatch(storage) : { files: [], verified: true };
   } catch {
-    files = [];
+    batch = { files: [], verified: true };
   }
-  if (files.length > 0) {
-    queueExternalOpen({ files });
+  if (batch.files.length > 0) {
+    if (await shouldOpenSharedBatch(batch)) queueExternalOpen({ files: batch.files });
     return;
   }
   notify('warning', translate('The shared files could not be received.'), {
@@ -63,6 +134,27 @@ async function receiveSharedFiles(): Promise<void> {
  */
 declare const __STAPLER_WEB_BUILD__: boolean | undefined;
 const WEB_BUILD = typeof __STAPLER_WEB_BUILD__ !== 'undefined' && __STAPLER_WEB_BUILD__;
+
+/**
+ * Audit 2026-10-01 PLT-4 — the user applied an update in another tab, and
+ * this tab is now controlled by the new version's worker while still running
+ * the old code. With nothing unsaved it simply reloads into the new version.
+ * With unsaved changes it never reloads on its own: it says so and offers
+ * the reload, which then goes through the same unsaved-changes confirmation
+ * as any other (`useUnsavedGuard`). Until then the worker keeps serving this
+ * tab's old files (`service-worker.ts`), so exporting first still works.
+ */
+function onReplacedElsewhere(): void {
+  if (!documents.value.some(doc => doc.dirty)) {
+    window.location.reload();
+    return;
+  }
+  notify('warning', translate('Stapler was updated in another tab.'), {
+    detail: translate('Export your changes, then reload to finish updating.'),
+    timeout: 0,
+    action: { label: translate('Reload'), run: () => window.location.reload() }
+  });
+}
 
 export function startWebApp(): void {
   if (!WEB_BUILD || platform.kind !== 'web') return;
@@ -79,6 +171,7 @@ export function startWebApp(): void {
     url: `${base}sw.js`,
     scope: base,
     reload: () => window.location.reload(),
+    onReplacedElsewhere,
     onUpdateReady: apply =>
       notify('info', translate('A new version of Stapler is ready.'), {
         detail: translate('Reload to start using it.'),

@@ -16,7 +16,17 @@ import {
 } from './errors';
 import { DOC_PAGE_WHITE } from './doc-colors';
 import { translate } from './i18n';
+import { formatBytes } from './bytes';
 import type { RasterKind } from './raster-decode';
+
+export { imageOriginalSatisfies };
+import {
+  assertDrawableSize,
+  declaredImageSize,
+  imageOriginalSatisfies,
+  GifFrameCounter,
+  sniffWebImageFormat
+} from './raster-decode';
 import { jpegPassthrough, readJpegInfo, type JpegInfo } from './jpeg-info';
 import { encodeCanvasAtMaximum, webpTraits } from './max-quality';
 import type { PdfImageSource } from './image-embed';
@@ -58,6 +68,11 @@ const BROWSER_RENDERABLE_EXTENSIONS = /\.(png|jpe?g|webp|gif)$/i;
  * filename-only placeholder wherever the browser can actually do it.
  */
 export function isBrowserRenderableImage(file: File): boolean {
+  // IMG-10: a HEIC named `.jpg` (or typed as HEIC but named `.png`) and an
+  // empty file both show a broken `<img>`; neither is renderable, whatever the
+  // other half of the name/type pair says. Previews still keep an `onError`
+  // fallback for the cases only the decoder can find.
+  if (file.size === 0 || rasterKindOf(file) !== null) return false;
   return BROWSER_RENDERABLE.has(file.type) || BROWSER_RENDERABLE_EXTENSIONS.test(file.name);
 }
 
@@ -314,8 +329,11 @@ async function onOwnedImageWorker<T>(
   }
 }
 
-/** GAP-5 — the most a single-image resize will read into memory, in bytes. */
-export const MAX_RESIZE_INPUT_BYTES = 200 * 1024 * 1024;
+/**
+ * GAP-5 — the most a single-image resize will read into memory, in bytes.
+ * Decimal, because the message calls it "200 MB" (IMG-11).
+ */
+export const MAX_RESIZE_INPUT_BYTES = 200_000_000;
 
 /**
  * GAP-5 — one image file as a JPEG at or under `request.targetBytes` and/or
@@ -346,7 +364,7 @@ export async function resizeImageFile(
     throw unsupported(
       translate('{name} is larger than {size}, which is more than this tool will open.', {
         name: file.name,
-        size: '200 MB'
+        size: formatBytes(MAX_RESIZE_INPUT_BYTES)
       })
     );
   }
@@ -406,6 +424,13 @@ export async function resizeImageFile(
  *    when that is smaller than the PNG (`max-quality.ts`).
  * Below 1 the image is re-encoded as JPEG at that quality, as before.
  */
+/**
+ * How much of an image file is read to find its declared size. JPEG frame
+ * headers sit after the APPn segments (EXIF, ICC, XMP — each at most 64 KB),
+ * so 1 MB covers any real file without reading a large one whole.
+ */
+const HEADER_PROBE_BYTES = 1_000_000;
+
 export async function imageFileToPdfImages(
   file: File,
   quality = 0.9,
@@ -433,6 +458,14 @@ export async function imageFileToPdfImages(
     photographic =
       readJpegInfo(original) !== null || (webp !== null && !webp.lossless && !webp.alpha);
   }
+  // The same limit the image worker applies (IMG-8): refuse a too-large image
+  // from its header, before the browser commits memory to decoding it. Only
+  // the head of the file is read; a header past it falls back to the check on
+  // the decoded bitmap below.
+  const head = new Uint8Array(await file.slice(0, HEADER_PROBE_BYTES).arrayBuffer());
+  const declared = declaredImageSize(head);
+  if (declared) assertDrawableSize(declared.width, declared.height, file.name);
+  if (signal?.aborted) throw cancelled();
   let bitmap: ImageBitmap;
   try {
     bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
@@ -445,6 +478,7 @@ export async function imageFileToPdfImages(
     );
   }
   try {
+    assertDrawableSize(bitmap.width, bitmap.height, file.name);
     return [
       lossless ? await bitmapToMaximum(bitmap, photographic) : await bitmapToJpeg(bitmap, quality)
     ];
@@ -454,91 +488,94 @@ export async function imageFileToPdfImages(
 }
 
 /**
+ * IMG-9 — how many frames a file holds when it really is a GIF (by signature,
+ * never by name), else 0. A still-image import decodes only the first frame
+ * (`createImageBitmap`), so a count above 1 means the rest were dropped and the
+ * caller should say so. Reads four bytes first, so a non-GIF costs nothing.
+ */
+export async function gifFrameCountOf(file: File): Promise<number> {
+  const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+  if (sniffWebImageFormat(head) !== 'gif') return 0;
+  // Streamed: an animated GIF can run to tens of MB, and the count needs no
+  // more of it in memory than one chunk at a time.
+  const counter = new GifFrameCounter();
+  const reader = file.stream().getReader();
+  try {
+    for (let r = await reader.read(); !r.done; r = await reader.read()) counter.push(r.value);
+  } finally {
+    reader.releaseLock();
+  }
+  return counter.finish();
+}
+
+/**
+ * A copy of `source` to hand to a worker, so the caller's own bitmap or canvas
+ * is never detached or closed by the transfer (they keep using and closing it,
+ * as before HRD-27 H3).
+ */
+async function bitmapCopyFor(source: ImageBitmap | OffscreenCanvas): Promise<ImageBitmap> {
+  return createImageBitmap(source as unknown as ImageBitmapSource);
+}
+
+/**
  * Trims fully transparent margins and returns a PNG with its alpha intact.
  *
  * Used for signatures (SGN-01): the acceptance criterion is that a drawn signature
  * exports with genuine alpha and no white box over coloured page content, so this
  * must never composite a background.
+ *
+ * HRD-27 H3: the per-pixel scan runs in the cv worker
+ * (`workers/signature-pixels.ts`); a copy of `source` is transferred to it, so
+ * `source` stays the caller's.
  */
 export async function trimTransparentToPng(
   source: ImageBitmap | OffscreenCanvas,
   padding = 8
 ): Promise<{ png: Uint8Array; width: number; height: number } | null> {
-  const width = source.width;
-  const height = source.height;
-  const canvas = new OffscreenCanvas(width, height);
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  if (!ctx) return null;
-  ctx.drawImage(source as unknown as CanvasImageSource, 0, 0);
-
-  const { data } = ctx.getImageData(0, 0, width, height);
-  let top = height;
-  let left = width;
-  let right = -1;
-  let bottom = -1;
-
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (data[(y * width + x) * 4 + 3] === 0) continue;
-      if (x < left) left = x;
-      if (x > right) right = x;
-      if (y < top) top = y;
-      if (y > bottom) bottom = y;
-    }
+  const [{ cvWorker }, Comlink] = await Promise.all([import('./workers'), import('comlink')]);
+  const bitmap = await bitmapCopyFor(source);
+  try {
+    return await cvWorker.lease(api =>
+      api.trimSignature(Comlink.transfer(bitmap, [bitmap]), padding)
+    );
+  } finally {
+    // A no-op once transferred; frees the copy if the lease failed first.
+    bitmap.close();
   }
-
-  if (right < left || bottom < top) return null; // nothing drawn
-
-  const cropWidth = right - left + 1;
-  const cropHeight = bottom - top + 1;
-  const out = new OffscreenCanvas(cropWidth + padding * 2, cropHeight + padding * 2);
-  const outCtx = out.getContext('2d');
-  if (!outCtx) return null;
-  outCtx.drawImage(
-    canvas,
-    left,
-    top,
-    cropWidth,
-    cropHeight,
-    padding,
-    padding,
-    cropWidth,
-    cropHeight
-  );
-
-  const blob = await out.convertToBlob({ type: 'image/png' });
-  return {
-    png: new Uint8Array(await blob.arrayBuffer()),
-    width: out.width,
-    height: out.height
-  };
 }
 
 /**
  * Turns a near-white background into real transparency, for an imported signature
  * photographed or scanned on paper (SGN-01). Pixels above `cutoff` luminance with
  * low saturation become transparent; ink is left alone.
+ *
+ * HRD-27 H3: the per-pixel pass runs in the cv worker
+ * (`workers/signature-pixels.ts`) on a transferred copy of `bitmap`; the
+ * result comes back as a bitmap and is drawn (one blit, no pixel loop) into
+ * the canvas this has always returned.
  */
 export async function removeWhiteBackground(
   bitmap: ImageBitmap,
   cutoff = 235
 ): Promise<OffscreenCanvas | null> {
-  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  if (!ctx) return null;
-  ctx.drawImage(bitmap, 0, 0);
-
-  const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const data = image.data;
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    // Only neutral light pixels are paper. A coloured highlight stays.
-    if (min >= cutoff && max - min < 24) data[i + 3] = 0;
+  const [{ cvWorker }, Comlink] = await Promise.all([import('./workers'), import('comlink')]);
+  const copy = await bitmapCopyFor(bitmap);
+  let cleared: ImageBitmap | null;
+  try {
+    cleared = await cvWorker.lease(api =>
+      api.removeSignatureBackground(Comlink.transfer(copy, [copy]), cutoff)
+    );
+  } finally {
+    copy.close();
   }
-  ctx.putImageData(image, 0, 0);
-  return canvas;
+  if (!cleared) return null;
+  try {
+    const canvas = new OffscreenCanvas(cleared.width, cleared.height);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(cleared, 0, 0);
+    return canvas;
+  } finally {
+    cleared.close();
+  }
 }

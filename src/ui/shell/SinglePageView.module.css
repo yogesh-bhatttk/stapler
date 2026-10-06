@@ -64,6 +64,20 @@
   margin-inline-start: auto;
 }
 
+/* Phone width: Previous / label / Next plus the zoom group do not fit one row
+   at 390px, which clipped the zoom-in button off the right edge. Let the
+   zoom group take its own centred row instead. */
+@media (max-width: 599px) {
+  .pager {
+    flex-wrap: wrap;
+    row-gap: var(--space-xxs);
+  }
+
+  .zoom {
+    margin-inline-start: 0;
+  }
+}
+
 .zoomLabel {
   font: var(--text-mono);
   letter-spacing: var(--text-mono-ls);

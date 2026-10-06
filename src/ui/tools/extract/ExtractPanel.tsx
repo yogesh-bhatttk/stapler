@@ -39,6 +39,7 @@ import { panelStyles } from '../../shell/panelStyles';
 import { extractSettings, extractedText } from './state';
 import { useJob } from '../../useJob';
 import type { JobOptions } from '../../../core/workers/protocol';
+import { withErrorToast } from '../../asyncHandler';
 
 export function ExtractPanel() {
   const t = useTranslation();
@@ -161,7 +162,7 @@ export function ExtractPanel() {
         )}
       </p>
 
-      <Button variant="secondary" icon={FileText} onClick={extract}>
+      <Button variant="secondary" icon={FileText} onClick={() => void extract()}>
         {t('Extract text')}
       </Button>
 
@@ -172,17 +173,27 @@ export function ExtractPanel() {
               variant="tertiary"
               size="compact"
               icon={Copy}
-              onClick={async () => {
+              onClick={withErrorToast('extract.copy', async () => {
                 await navigator.clipboard.writeText(text);
                 notify('success', translate('Copied to the clipboard.'));
-              }}
+              })}
             >
               {t('Copy')}
             </Button>
-            <Button variant="tertiary" size="compact" icon={Download} onClick={download}>
+            <Button
+              variant="tertiary"
+              size="compact"
+              icon={Download}
+              onClick={withErrorToast('extract.download', download)}
+            >
               {t('Download')}
             </Button>
-            <Button variant="tertiary" size="compact" icon={FileScan} onClick={retryWithOcr}>
+            <Button
+              variant="tertiary"
+              size="compact"
+              icon={FileScan}
+              onClick={() => void retryWithOcr()}
+            >
               {t("Doesn't look right? Try OCR instead")}
             </Button>
           </div>

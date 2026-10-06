@@ -27,6 +27,11 @@ export function CompareView({ pages, pageIndex }: CompareViewProps) {
   const baseCanvasRef = useRef<HTMLCanvasElement>(null);
   const compareCanvasRef = useRef<HTMLCanvasElement>(null);
   const diffCanvasRef = useRef<HTMLCanvasElement>(null);
+  // X-13 — the two rendered pages, kept so the sensitivity slider only
+  // recomputes the diff instead of reloading and re-rendering both documents
+  // on every tick. `rendered` bumps when a new pair lands.
+  const imagesRef = useRef<{ base: ImageData; compare: ImageData } | null>(null);
+  const [rendered, setRendered] = useState(0);
 
   const source = page ? sources.value[page.sourceDocId] : undefined;
   const pageSize = source?.pageSizes[page?.sourceIndex ?? 0];
@@ -48,6 +53,8 @@ export function CompareView({ pages, pageIndex }: CompareViewProps) {
 
     const runDiff = async () => {
       setIsProcessing(true);
+      // Another page or file: the cached pair no longer applies.
+      imagesRef.current = null;
 
       let baseHandle: string | undefined;
       let compareHandle: string | undefined;
@@ -114,7 +121,6 @@ export function CompareView({ pages, pageIndex }: CompareViewProps) {
             cCtx?.clearRect(0, 0, compareBitmap.width, compareBitmap.height);
             cCtx?.drawImage(compareBitmap, 0, 0);
 
-            // Compute diff
             if (bCtx && cCtx) {
               const bData = bCtx.getImageData(0, 0, baseBitmap.width, baseBitmap.height);
               // Resize cData to match bData to avoid out of bounds
@@ -132,24 +138,8 @@ export function CompareView({ pages, pageIndex }: CompareViewProps) {
                 tempCtx.drawImage(compareBitmap, 0, 0, baseBitmap.width, baseBitmap.height);
                 cData = tempCtx.getImageData(0, 0, baseBitmap.width, baseBitmap.height);
               }
-
-              const diffImg = pixelDiff(bData, cData, settings.sensitivity);
-
-              dCanvas.width = baseBitmap.width;
-              dCanvas.height = baseBitmap.height;
-              const dCtx = dCanvas.getContext('2d');
-              // Draw the compare image as base, then draw diff on top
-              dCtx?.putImageData(cData, 0, 0);
-              // We need to draw the diffImg with transparency.
-              // putImageData ignores globalCompositeOperation.
-              // So we create a temporary canvas to draw the diff data, then drawImage that on top.
-              const diffTempCanvas = document.createElement('canvas');
-              diffTempCanvas.width = baseBitmap.width;
-              diffTempCanvas.height = baseBitmap.height;
-              const diffTempCtx = diffTempCanvas.getContext('2d')!;
-              diffTempCtx.putImageData(diffImg, 0, 0);
-
-              dCtx?.drawImage(diffTempCanvas, 0, 0);
+              imagesRef.current = { base: bData, compare: cData };
+              setRendered(n => n + 1);
             }
           }
 
@@ -169,7 +159,8 @@ export function CompareView({ pages, pageIndex }: CompareViewProps) {
       }
     };
 
-    runDiff().finally(() => {
+    // runDiff catches and logs its own failures; this only releases the pinned clients.
+    void runDiff().finally(() => {
       baseClient.release();
       compareClient.release();
     });
@@ -177,7 +168,34 @@ export function CompareView({ pages, pageIndex }: CompareViewProps) {
     return () => {
       cancelled = true;
     };
-  }, [page, source, pageSize, settings.compareSourceId, settings.diffMode, settings.sensitivity]);
+  }, [page, source, pageSize, settings.compareSourceId, settings.diffMode]);
+
+  // X-13 — the diff overlay alone, from the cached renders: all a
+  // sensitivity change needs.
+  useEffect(() => {
+    if (settings.diffMode !== 'visual') return;
+    const images = imagesRef.current;
+    const dCanvas = diffCanvasRef.current;
+    if (!images || !dCanvas) return;
+    const frame = requestAnimationFrame(() => {
+      const { base, compare } = images;
+      const diffImg = pixelDiff(base, compare, settings.sensitivity);
+      dCanvas.width = base.width;
+      dCanvas.height = base.height;
+      const dCtx = dCanvas.getContext('2d');
+      // Draw the compare image as base, then draw diff on top. putImageData
+      // ignores globalCompositeOperation, so the transparent diff goes
+      // through a temporary canvas and drawImage.
+      dCtx?.putImageData(compare, 0, 0);
+      const diffTempCanvas = document.createElement('canvas');
+      diffTempCanvas.width = base.width;
+      diffTempCanvas.height = base.height;
+      diffTempCanvas.getContext('2d')?.putImageData(diffImg, 0, 0);
+      dCtx?.drawImage(diffTempCanvas, 0, 0);
+      diffTempCanvas.width = 0;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [rendered, settings.sensitivity, settings.diffMode]);
 
   if (!settings.compareSourceId) {
     return (

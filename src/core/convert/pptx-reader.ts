@@ -93,13 +93,14 @@
  * {@link childElements}, which counts depth.
  */
 
+import { wholeMegabytes } from '../bytes';
 import { corrupt, StaplerError, unsupported } from '../errors';
 import { checkpoint, type JobHandle } from '../workers/protocol';
 import { inflateZipVetted, readZipDirectory } from './zip-guard';
 import { tKey, translate } from '../i18n';
 
 /** Largest single XML part the reader will inflate (CONV-4/CONV-5). */
-export const MAX_XML_PART_BYTES = 32 * 1024 * 1024;
+export const MAX_XML_PART_BYTES = 32_000_000; // decimal: the refusal says "32 MB" (X-10)
 
 /**
  * Deepest group nesting the shape walk follows. Each level rescans its own body
@@ -1137,8 +1138,8 @@ export async function readPptx(
                 'any real slide needs. Nothing was read.',
               {
                 name: entry.name,
-                size: Math.round(entry.uncompressedSize / 1024 / 1024),
-                limit: MAX_XML_PART_BYTES / 1024 / 1024
+                size: wholeMegabytes(entry.uncompressedSize),
+                limit: wholeMegabytes(MAX_XML_PART_BYTES)
               }
             )
           );

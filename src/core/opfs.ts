@@ -3,7 +3,7 @@
  * Keeps memory overhead low by offloading the raw Uint8Arrays
  * of documents to the Origin Private File System (OPFS).
  */
-import { internal } from './errors';
+import { internal, logEvent } from './errors';
 import { forgetSourceSize, recordSourceSize } from './workspace-limits';
 
 export const __memoryFallback = new Map<string, Uint8Array>();
@@ -85,7 +85,7 @@ export function __resetOpfsProbeForTests(): void {
  * Writes one file into the OPFS root, turning quota exhaustion into the same
  * clear, actionable message `core/db.ts`'s IndexedDB guard already gives for the
  * identical failure, instead of an uncaught `QuotaExceededError` that surfaces as
- * a generic "Something went wrong" (see AUDIT-EDGE-CASES-2026-09-15.md §1.9). OPFS
+ * a generic "Something went wrong" (AUDIT-EDGE-CASES-2026-09-15 §1.9 in docs/TICKETS.md EPIC-19). OPFS
  * holds the actual document bytes — often the largest thing this app ever writes
  * to disk — so it is the storage path most likely to hit quota.
  */
@@ -478,15 +478,31 @@ export async function listStoredFiles(): Promise<StoredFile[]> {
   return out;
 }
 
+/** What {@link clearStaplerFiles} did. */
+export interface ClearFilesResult {
+  removed: number;
+  /**
+   * AUDIT-2026-10-01 RT-3 — Stapler files still there afterwards: a
+   * `removeEntry` that threw (locked by a writable elsewhere), or 1 when the
+   * directory could not even be listed, so an unknown number remain.
+   */
+  failed: number;
+}
+
 /**
  * GAP-12 — deletes every Stapler file in OPFS (documents, uploaded OCR models,
  * legacy face-detector weights, probe scratch files) and empties the in-memory
- * fallback. Files Stapler did not write are left alone. Returns how many were
- * removed; never throws.
+ * fallback. Files Stapler did not write are left alone. Never throws.
+ *
+ * RT-3 — failures are counted, not swallowed: a locked pre-redaction original
+ * that survives must not be reported as deleted.
  */
-export async function clearStaplerFiles(kinds?: readonly StoredFileKind[]): Promise<number> {
+export async function clearStaplerFiles(
+  kinds?: readonly StoredFileKind[]
+): Promise<ClearFilesResult> {
   const wanted = (kind: StoredFileKind) => !kinds || kinds.includes(kind);
   let removed = 0;
+  let failed = 0;
   for (const key of [...__memoryFallback.keys()]) {
     const kind: StoredFileKind = key.startsWith('model_') ? 'ocr-model' : 'document';
     if (!wanted(kind)) continue;
@@ -495,11 +511,11 @@ export async function clearStaplerFiles(kinds?: readonly StoredFileKind[]): Prom
   }
   try {
     const root = await tryGetOpfsRoot();
-    if (!root) return removed;
+    if (!root) return { removed, failed };
     const dir = root as unknown as {
       entries?: () => AsyncIterableIterator<[string, FileSystemHandle]>;
     };
-    if (typeof dir.entries !== 'function') return removed;
+    if (typeof dir.entries !== 'function') return { removed, failed };
     const names: string[] = [];
     for await (const [name, handle] of dir.entries()) {
       if (handle.kind !== 'file') continue;
@@ -510,14 +526,20 @@ export async function clearStaplerFiles(kinds?: readonly StoredFileKind[]): Prom
       try {
         await root.removeEntry(name);
         removed += 1;
-      } catch {
-        // Locked by a writable elsewhere, or already gone.
+      } catch (err) {
+        // Already gone is what was asked for; anything else (typically
+        // locked by a writable in another tab) leaves the file behind.
+        if (err instanceof DOMException && err.name === 'NotFoundError') continue;
+        failed += 1;
+        logEvent('warn', 'opfs', `Could not delete ${name}: ${String(err)}`);
       }
     }
-  } catch {
-    // Enumeration failed — nothing more can be removed from here.
+  } catch (err) {
+    // Enumeration failed — an unknown number of files remain.
+    failed += 1;
+    logEvent('warn', 'opfs', `Could not list stored files to clear: ${String(err)}`);
   }
-  return removed;
+  return { removed, failed };
 }
 
 /** Test hook: forget that this module already holds the tab lock. */

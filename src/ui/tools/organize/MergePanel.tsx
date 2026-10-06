@@ -95,7 +95,7 @@ export function MergePanel() {
 
   return (
     <>
-      <Button variant="secondary" icon={Plus} onClick={addFiles} disabled={busy}>
+      <Button variant="secondary" icon={Plus} onClick={() => void addFiles()} disabled={busy}>
         {t('Add PDFs or images')}
       </Button>
       {node}

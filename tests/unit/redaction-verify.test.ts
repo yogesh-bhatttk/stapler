@@ -355,7 +355,9 @@ function wireStubs(pixels: { checkRegionPixels: any }) {
     applyRedactions: vi.fn(async () => output),
     scrubMetadata: vi.fn(async () => output),
     collectOffPageText: vi.fn(async () => []),
-    scanResidualText: vi.fn(async () => ({ found: [], orphanPages: 0, undecodableStreams: 0 }))
+    scanResidualText: vi.fn(async () => ({ found: [], orphanPages: 0, undecodableStreams: 0 })),
+    // HRD-41: the stub output has no tiling patterns to look inside.
+    patternResidue: vi.fn(async () => [])
   };
   stubs.render = {
     loadDocument: vi.fn(async () => ({ handle: 'h' })),

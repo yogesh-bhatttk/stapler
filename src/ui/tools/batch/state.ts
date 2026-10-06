@@ -1,24 +1,31 @@
 import { signal } from '@preact/signals';
 import type { ToolId } from '../../../core/tools';
-import type { CompressSettings } from '../compress/state';
-import type { WatermarkSettings, HeaderFooterSettings } from '../watermark/state';
-import type { NUpSettings } from '../nup/state';
-import type { NormalizeSettings } from '../normalize/state';
+import type { RecipeSettings } from './recipe-settings';
+import {
+  listRecipes,
+  putRecipe,
+  deleteRecipe,
+  type Recipe as StoredRecipe
+} from '../../../core/db';
 
-export interface Recipe {
-  id: string;
-  name: string;
+export type { StoredRecipe };
+
+/**
+ * A recipe as this build creates it. What comes back from storage is a
+ * `StoredRecipe` — `tools` and `settings` unchecked — and the runner narrows it
+ * with `parseRecipe` before use.
+ */
+export interface Recipe extends StoredRecipe {
   tools: ToolId[];
-  settings: {
-    compress?: CompressSettings;
-    watermark?: WatermarkSettings;
-    headerFooter?: HeaderFooterSettings;
-    nup?: NUpSettings;
-    normalize?: NormalizeSettings;
-  };
+  settings: RecipeSettings;
 }
 
-import { listRecipes, putRecipe, deleteRecipe } from '../../../core/db';
+/** The minimum a record needs to be listed, selected and deleted: a string id and name. */
+export function isStoredRecipe(value: unknown): value is StoredRecipe {
+  if (typeof value !== 'object' || value === null) return false;
+  const r = value as Record<string, unknown>;
+  return typeof r.id === 'string' && r.id !== '' && typeof r.name === 'string';
+}
 
 /**
  * localStorage throws in Safari private mode and other hardened contexts, and
@@ -45,7 +52,7 @@ function writeLocal(key: string, value: string | null): void {
   }
 }
 
-export const savedRecipes = signal<Recipe[]>([]);
+export const savedRecipes = signal<StoredRecipe[]>([]);
 export const recipesLoaded = signal<boolean>(false);
 
 export async function loadRecipes() {
@@ -53,18 +60,18 @@ export async function loadRecipes() {
   const recipes = await listRecipes();
   const legacyStr = readLocal('stapler:recipes');
   if (legacyStr && recipes.length === 0) {
-    const legacy = JSON.parse(legacyStr) as Recipe[];
-    for (const r of legacy) {
+    const legacy: unknown = JSON.parse(legacyStr);
+    for (const r of Array.isArray(legacy) ? legacy.filter(isStoredRecipe) : []) {
       await putRecipe(r);
       recipes.push(r);
     }
     writeLocal('stapler:recipes', null);
   }
-  savedRecipes.value = recipes as Recipe[];
+  savedRecipes.value = recipes;
   recipesLoaded.value = true;
 }
 
-export async function addRecipe(recipe: Recipe) {
+export async function addRecipe(recipe: StoredRecipe) {
   await putRecipe(recipe);
   savedRecipes.value = [...savedRecipes.value, recipe];
 }

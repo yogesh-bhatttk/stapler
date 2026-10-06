@@ -24,6 +24,7 @@ import { Button } from '../../components/Button';
 import { panelStyles } from '../../shell/panelStyles';
 import { useJob } from '../../useJob';
 import { translate, useTranslation } from '../../../core/i18n';
+import { withErrorToast } from '../../asyncHandler';
 
 export function BarcodeScanSection() {
   const t = useTranslation();
@@ -70,7 +71,12 @@ export function BarcodeScanSection() {
       <p className={panelStyles.description}>
         {t('Scans every page for QR codes and 1D barcodes, on-device.')}
       </p>
-      <Button variant="secondary" icon={ScanBarcode} onClick={scan} disabled={busy || isRunning()}>
+      <Button
+        variant="secondary"
+        icon={ScanBarcode}
+        onClick={() => void scan()}
+        disabled={busy || isRunning()}
+      >
         {t('Scan for barcodes')}
       </Button>
 
@@ -105,7 +111,12 @@ export function BarcodeScanSection() {
                 : [])
             ])}
           </ul>
-          <Button size="compact" variant="tertiary" icon={Download} onClick={exportList}>
+          <Button
+            size="compact"
+            variant="tertiary"
+            icon={Download}
+            onClick={withErrorToast('barcodes.export', exportList)}
+          >
             {t('Export {count} as a list', { count: totalFound })}
           </Button>
         </>

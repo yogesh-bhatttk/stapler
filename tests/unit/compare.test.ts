@@ -124,9 +124,23 @@ describe('pixelDiff', () => {
     ]);
   });
 
-  it('rejects images with different dimensions', () => {
-    expect(() => pixelDiff(new ImageData(2, 2), new ImageData(1, 4), 50)).toThrow(
-      'different dimensions'
-    );
+  // AUDIT-2026-10-01 X-3 — a size mismatch (A4 vs Letter, a rotated page) is
+  // resampled to the first image's size, as the Compare view does, not refused.
+  it('resamples an image of different dimensions instead of throwing', () => {
+    const white = (w: number, h: number) => {
+      const img = new ImageData(w, h);
+      img.data.fill(255);
+      return img;
+    };
+    const same = pixelDiff(white(2, 2), white(1, 4), 50);
+    expect(same.width).toBe(2);
+    expect(same.height).toBe(2);
+    expect(Array.from(same.data).every(v => v === 0)).toBe(true);
+
+    const black = new ImageData(4, 4);
+    for (let i = 3; i < black.data.length; i += 4) black.data[i] = 255;
+    const changed = pixelDiff(white(2, 2), black, 50);
+    expect(changed.width).toBe(2);
+    expect(changed.data[3]).toBe(255);
   });
 });

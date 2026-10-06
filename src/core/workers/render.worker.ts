@@ -8,6 +8,7 @@
  * Documents live behind an opaque handle so callers never re-parse bytes they have
  * already loaded, and every multi-page loop is a cancellation point.
  */
+import './network-guard'; // PLT-2: first, so it wraps the network APIs before any library runs
 import * as Comlink from 'comlink';
 import { loadLocale, translate } from '../i18n';
 import type { LocaleAware } from './client';
@@ -35,9 +36,11 @@ import { loadBundledFaceModelWeights } from '../faceblur/model';
 import { cropUnitRect, intersectionOverUnion, matchTemplate } from '../faceblur/logoMatch';
 import { decodeBarcodesFromImage, type DecodedBarcode } from '../barcode';
 import { fillPolygonMask, polygonOverlapsBox, shrinkMask } from '../geometry';
-import { clampRenderScale } from '../render-limits';
+import { assertExactSizeWithinLimit, clampRenderScale } from '../render-limits';
+import { exactOutputSize } from '../image-target';
 import { applyAdaptiveThreshold } from '../cv/enhance';
 import type { GrayImageData, GrayMode, GrayRaster } from '../pdf/grayscale';
+import { encodeGraySamples } from '../gray-encode';
 import { resizeToTarget, type SizedImageRequest, type SizedImageResult } from '../image-resize';
 
 export interface DocumentInfo {
@@ -333,19 +336,24 @@ export interface RenderJob extends LocaleAware {
    */
   decodeImagesGray(
     handle: string,
-    requests: { pageIndex: number; objectNumbers: number[] }[],
+    requests: { pageIndex: number; objectNumbers: number[]; lossy?: number[] }[],
     mode: GrayMode,
     job?: JobHandle
   ): Promise<GrayImageData[]>;
   /**
-   * GAP-6 — renders one page, unrotated and without annotations (they are
-   * converted separately and stay annotations), to grey pixels at `dpi`.
+   * GAP-6 — renders one page, unrotated, to grey pixels at `dpi`, encoded
+   * for the page image. Annotations are left out (they are converted
+   * separately and stay annotations) unless `includeAnnotations` — for a page
+   * where one of them could not be converted, so the raster shows it in grey
+   * and the caller hides the original.
    */
   renderPageGray(
     handle: string,
     pageIndex: number,
     dpi: number,
-    mode: GrayMode
+    mode: GrayMode,
+    includeAnnotations?: boolean,
+    job?: JobHandle
   ): Promise<GrayRaster>;
   checkRegionText(
     handle: string,
@@ -526,8 +534,16 @@ async function textRuns(page: pdfjsLib.PDFPageProxy): Promise<TextRun[]> {
   return (content.items as unknown[]).filter(isTextRun);
 }
 
+/**
+ * Whole pixels covering `size` — rounded up, but not past floating-point noise:
+ * 595 × (400 / 595) is 400.00000000000006, and must give 400 px, not 401.
+ */
+function canvasPixels(size: number): number {
+  return Math.max(1, Math.ceil(size - 1e-6));
+}
+
 function offscreen(width: number, height: number) {
-  const canvas = new OffscreenCanvas(Math.max(1, Math.ceil(width)), Math.max(1, Math.ceil(height)));
+  const canvas = new OffscreenCanvas(canvasPixels(width), canvasPixels(height));
   const ctx = canvas.getContext('2d');
   if (!ctx) throw internal('OffscreenCanvas 2D context unavailable');
   return { canvas, ctx };
@@ -1274,16 +1290,45 @@ const api: RenderJob = {
   async pageToSizedImage(handle, pageIndex, format, dpi, request, job) {
     const page = await entry(handle).doc.getPage(pageIndex + 1);
     try {
+      // The rotated viewport (the page's own `/Rotate`), so a turned page is
+      // sized on the sides it is seen with.
       const base = page.getViewport({ scale: 1 });
-      let scale = dpi / 72;
-      const longestPt = Math.max(base.width, base.height);
-      if (request.maxDimension && longestPt * scale > request.maxDimension) {
-        scale = request.maxDimension / longestPt;
+      // CNV-14 — an exact size replaces both `dpi` and the longest-side box:
+      // the page is rendered straight to those pixels (vector, so nothing is
+      // upscaled from a smaller raster), stretched per axis when unlocked.
+      const exact = exactOutputSize(base, request);
+      if (exact) assertExactSizeWithinLimit(exact);
+      let viewport: pdfjsLib.PageViewport;
+      let canvasSize: { width: number; height: number };
+      let transform: number[] | undefined;
+      if (exact) {
+        const sx = exact.width / base.width;
+        const sy = exact.height / base.height;
+        viewport = page.getViewport({ scale: sx });
+        // Applied before the viewport's own transform, in canvas pixels: this
+        // takes the height from `base.height × sx` to `base.height × sy`.
+        transform = Math.abs(sy - sx) > 1e-9 ? [1, 0, 0, sy / sx, 0, 0] : undefined;
+        // Allocated at exactly the integers asked for, never via `ceil`.
+        canvasSize = exact;
+      } else {
+        let scale = dpi / 72;
+        const longestPt = Math.max(base.width, base.height);
+        if (request.maxDimension && longestPt * scale > request.maxDimension) {
+          scale = request.maxDimension / longestPt;
+        }
+        scale = clampRenderScale(base.width, base.height, scale).scale;
+        viewport = page.getViewport({ scale });
+        // IMG-6 — "longest side at most N" is a promise about pixels: never let
+        // rounding up a fractional edge give N + 1.
+        const box = request.maxDimension ?? Infinity;
+        canvasSize = {
+          width: Math.min(box, viewport.width),
+          height: Math.min(box, viewport.height)
+        };
       }
-      scale = clampRenderScale(base.width, base.height, scale).scale;
-      const viewport = page.getViewport({ scale });
-      const { canvas, ctx } = offscreen(viewport.width, viewport.height);
-      await page.render(renderParams(ctx, viewport)).promise;
+      const { canvas, ctx } = offscreen(canvasSize.width, canvasSize.height);
+      await page.render({ ...renderParams(ctx, viewport), ...(transform ? { transform } : {}) })
+        .promise;
       try {
         if (format === 'png') {
           const blob = await canvas.convertToBlob({ type: 'image/png' });
@@ -1303,8 +1348,12 @@ const api: RenderJob = {
         }
         const result = await resizeToTarget(
           canvas,
-          // The box was already applied by rendering smaller.
-          { targetBytes: request.targetBytes, maxDimension: null },
+          // The box (or the exact size) was already applied by rendering at
+          // it. An exact size is still passed on, as the canvas's own, so the
+          // target search only ever lowers quality and never the pixel size.
+          exact
+            ? { targetBytes: request.targetBytes, maxDimension: null, ...exact }
+            : { targetBytes: request.targetBytes, maxDimension: null },
           {
             onTrial: (index, max) =>
               checkpoint(
@@ -1407,9 +1456,9 @@ const api: RenderJob = {
       done++;
       const page = await doc.getPage(pageIndex + 1);
       try {
-        const wanted = new Map(pageRequests.map(r => [r.objectNumber, r.rects]));
+        const wanted = rectsByObject(pageRequests);
         const seen = new Set<number>();
-        for (const placement of imagePlacements(await page.getOperatorList())) {
+        for (const placement of imagePlacements(await page.getOperatorList(), { patterns: true })) {
           if (seen.size === wanted.size) break;
           const decoded = await decodeImage(page, placement.objId);
           if (!decoded) continue;
@@ -1972,6 +2021,7 @@ const api: RenderJob = {
     const done = new Set<number>();
     for (let i = 0; i < requests.length; i++) {
       const { pageIndex, objectNumbers } = requests[i];
+      const lossy = new Set(requests[i].lossy ?? []);
       await checkpoint(
         job,
         i / Math.max(1, requests.length),
@@ -1988,7 +2038,7 @@ const api: RenderJob = {
           const decoded = await decodeImage(page, placement.objId);
           done.add(objectNumber);
           if (!decoded) continue;
-          out.push(grayFromDecoded(decoded, mode));
+          out.push(grayFromDecoded(decoded, mode, lossy.has(objectNumber)));
         }
       } finally {
         page.cleanup();
@@ -1996,11 +2046,15 @@ const api: RenderJob = {
     }
     return Comlink.transfer(
       out,
-      out.flatMap(o => (o.alpha ? [o.gray.buffer, o.alpha.buffer] : [o.gray.buffer]))
+      out.flatMap(o => [
+        ...(o.encoded ? [o.encoded.data.buffer as ArrayBuffer] : []),
+        ...(o.alpha ? [o.alpha.buffer as ArrayBuffer] : [])
+      ])
     );
   },
 
-  async renderPageGray(handle, pageIndex, dpi, mode) {
+  async renderPageGray(handle, pageIndex, dpi, mode, includeAnnotations = false, job) {
+    await checkpoint(job, 0, translate('Rendering page {page}', { page: pageIndex + 1 }));
     const page = await entry(handle).doc.getPage(pageIndex + 1);
     try {
       const at = (s: number) => page.getViewport({ scale: s, rotation: 0 });
@@ -2010,17 +2064,35 @@ const api: RenderJob = {
       const { canvas, ctx } = offscreen(viewport.width, viewport.height);
       await page.render({
         ...renderParams(ctx, viewport),
-        annotationMode: pdfjsLib.AnnotationMode.DISABLE
+        annotationMode: includeAnnotations
+          ? pdfjsLib.AnnotationMode.ENABLE
+          : pdfjsLib.AnnotationMode.DISABLE
       }).promise;
+      await checkpoint(job, 0.8, translate('Rendering page {page}', { page: pageIndex + 1 }));
       const width = canvas.width;
       const height = canvas.height;
       const rgba = ctx.getImageData(0, 0, width, height).data;
       canvas.width = 0;
       canvas.height = 0;
-      const gray = rgbaToGray(rgba, width, height, mode);
+      // Encoded here, while this page's pixels are the only ones held: the
+      // caller accumulates compressed pages, never raw ones (PDF-5).
+      const encoded = encodeGraySamples(
+        rgbaToGray(rgba, width, height, mode),
+        width,
+        height,
+        mode,
+        true
+      );
       const [x0, y0, x1, y1] = page.view;
-      const raster: GrayRaster = { pageIndex, width, height, gray, view: [x0, y0, x1, y1] };
-      return Comlink.transfer(raster, [gray.buffer]);
+      const raster: GrayRaster = {
+        pageIndex,
+        width,
+        height,
+        encoded,
+        view: [x0, y0, x1, y1],
+        annotationsIncluded: includeAnnotations
+      };
+      return Comlink.transfer(raster, [encoded.data.buffer as ArrayBuffer]);
     } finally {
       page.cleanup();
     }
@@ -2030,11 +2102,11 @@ const api: RenderJob = {
     if (requests.length === 0) return [];
     const page = await entry(handle).doc.getPage(pageIndex + 1);
     try {
-      const wanted = new Map(requests.map(r => [r.objectNumber, r.rects]));
+      const wanted = rectsByObject(requests);
       const results: RedactedImageResult[] = [];
       const seen = new Set<number>();
 
-      for (const placement of imagePlacements(await page.getOperatorList())) {
+      for (const placement of imagePlacements(await page.getOperatorList(), { patterns: true })) {
         if (seen.size === wanted.size) break;
         const decoded = await decodeImage(page, placement.objId);
         // A null decode is pdf.js saying it could not read the image — JBIG2 and
@@ -2090,7 +2162,7 @@ const api: RenderJob = {
   async extractImageRegion(handle, pageIndex, objectNumber, rect) {
     const page = await entry(handle).doc.getPage(pageIndex + 1);
     try {
-      for (const placement of imagePlacements(await page.getOperatorList())) {
+      for (const placement of imagePlacements(await page.getOperatorList(), { patterns: true })) {
         const decoded = await decodeImage(page, placement.objId);
         if (!decoded || decoded.objectNumber !== objectNumber) continue;
         const crop = cropUnitRect(decoded, rect);
@@ -2112,7 +2184,7 @@ const api: RenderJob = {
       const seen = new Set<number>();
       let done = 0;
 
-      for (const placement of imagePlacements(await page.getOperatorList())) {
+      for (const placement of imagePlacements(await page.getOperatorList(), { patterns: true })) {
         if (seen.size === wanted.size) break;
         const decoded = await decodeImage(page, placement.objId);
         // A null decode is pdf.js saying it could not read the image. There is
@@ -2272,6 +2344,23 @@ type Matrix = [number, number, number, number, number, number];
 const IDENTITY: Matrix = [1, 0, 0, 1, 0, 0];
 
 /** `m` applied first, then `ctm` — pdf.js's `Util.transform(ctm, m)`. */
+/**
+ * Object number → every rect asked for it. One image can be requested more than
+ * once on a page — drawn by the page and again from a pattern's cell (HRD-41),
+ * or named twice — and a plain `Map` of the requests kept only the last one's
+ * rects, so the area the first mark covered was neither blacked out nor
+ * checked. The union over-covers each placement, never under-covers one.
+ */
+function rectsByObject<R>(requests: { objectNumber: number; rects: R[] }[]): Map<number, R[]> {
+  const wanted = new Map<number, R[]>();
+  for (const request of requests) {
+    const existing = wanted.get(request.objectNumber);
+    if (existing) existing.push(...request.rects);
+    else wanted.set(request.objectNumber, [...request.rects]);
+  }
+  return wanted;
+}
+
 function concat(ctm: Matrix, m: Matrix): Matrix {
   return [
     ctm[0] * m[0] + ctm[2] * m[1],
@@ -2339,62 +2428,98 @@ export function largerPlacement(candidate: ImagePlacement, incumbent: ImagePlace
  * canvas transform in ways that are not visible from the operator list, so any
  * image drawn inside one is marked unmeasured and re-encoded at source size.
  */
-function imagePlacements(ops: { fnArray: number[]; argsArray: unknown[] }): ImagePlacement[] {
+function imagePlacements(
+  ops: { fnArray: number[]; argsArray: unknown[] },
+  options: { patterns?: boolean } = {}
+): ImagePlacement[] {
   const OPS = pdfjsLib.OPS;
   const found = new Map<string, ImagePlacement>();
-  const stack: Matrix[] = [];
-  let ctm: Matrix = IDENTITY;
 
-  const record = (objId: unknown, scaleX: number, scaleY: number) => {
-    if (typeof objId !== 'string') return;
-    const widthPt = Math.abs(scaleX) * Math.hypot(ctm[0], ctm[1]);
-    const heightPt = Math.abs(scaleY) * Math.hypot(ctm[2], ctm[3]);
-    const previous = found.get(objId);
-    if (!previous) {
-      found.set(objId, { objId, widthPt, heightPt, measured: true });
-      return;
+  const walk = (
+    list: { fnArray: number[]; argsArray: unknown[] },
+    depth: number,
+    inPattern: boolean
+  ) => {
+    const stack: Matrix[] = [];
+    let ctm: Matrix = IDENTITY;
+
+    const record = (objId: unknown, scaleX: number, scaleY: number) => {
+      if (typeof objId !== 'string') return;
+      const widthPt = Math.abs(scaleX) * Math.hypot(ctm[0], ctm[1]);
+      const heightPt = Math.abs(scaleY) * Math.hypot(ctm[2], ctm[3]);
+      const previous = found.get(objId);
+      if (!previous) {
+        // An image in a pattern cell is drawn in pattern space, once per tile,
+        // under a matrix the page's operator list does not carry: its size on
+        // the page is unknown, so it is never reported as measured.
+        found.set(objId, { objId, widthPt, heightPt, measured: !inPattern });
+        return;
+      }
+      // An image drawn twice has to survive at the size of its largest use.
+      previous.widthPt = Math.max(previous.widthPt, widthPt);
+      previous.heightPt = Math.max(previous.heightPt, heightPt);
+      if (inPattern) previous.measured = false;
+    };
+
+    for (let i = 0; i < list.fnArray.length; i++) {
+      const args = list.argsArray[i];
+      switch (list.fnArray[i]) {
+        case OPS.save:
+          stack.push(ctm);
+          break;
+        case OPS.restore:
+          ctm = stack.pop() ?? IDENTITY;
+          break;
+        case OPS.transform:
+          if (isMatrix(args)) ctm = concat(ctm, args);
+          break;
+        case OPS.paintFormXObjectBegin: {
+          stack.push(ctm);
+          const matrix = Array.isArray(args) ? args[0] : null;
+          if (isMatrix(matrix)) ctm = concat(ctm, matrix);
+          break;
+        }
+        case OPS.paintFormXObjectEnd:
+          ctm = stack.pop() ?? IDENTITY;
+          break;
+        case OPS.paintImageXObject:
+          if (Array.isArray(args)) record(args[0], 1, 1);
+          break;
+        case OPS.paintImageXObjectRepeat:
+          // pdf.js collapses three or more identical draws into one op carrying
+          // the per-instance scale.
+          if (Array.isArray(args)) record(args[0], Number(args[1]) || 1, Number(args[2]) || 1);
+          break;
+        case OPS.setFillColorN:
+        case OPS.setStrokeColorN: {
+          // HRD-41 — a tiling pattern's cell is its own operator list, carried
+          // inside the colour operator as `['TilingPattern', color, ir, …]`. Its
+          // images decode into the page's object store like any other, so a
+          // caller that has to reach them (redaction, face blur) can.
+          if (!options.patterns || depth >= MAX_PATTERN_DEPTH || !Array.isArray(args)) break;
+          const ir = args[2] as { fnArray?: unknown; argsArray?: unknown } | undefined;
+          if (
+            args[0] === 'TilingPattern' &&
+            ir &&
+            Array.isArray(ir.fnArray) &&
+            Array.isArray(ir.argsArray)
+          ) {
+            walk(ir as { fnArray: number[]; argsArray: unknown[] }, depth + 1, true);
+          }
+          break;
+        }
+        default:
+          break;
+      }
     }
-    // An image drawn twice has to survive at the size of its largest use.
-    previous.widthPt = Math.max(previous.widthPt, widthPt);
-    previous.heightPt = Math.max(previous.heightPt, heightPt);
   };
 
-  for (let i = 0; i < ops.fnArray.length; i++) {
-    const args = ops.argsArray[i];
-    switch (ops.fnArray[i]) {
-      case OPS.save:
-        stack.push(ctm);
-        break;
-      case OPS.restore:
-        ctm = stack.pop() ?? IDENTITY;
-        break;
-      case OPS.transform:
-        if (isMatrix(args)) ctm = concat(ctm, args);
-        break;
-      case OPS.paintFormXObjectBegin: {
-        stack.push(ctm);
-        const matrix = Array.isArray(args) ? args[0] : null;
-        if (isMatrix(matrix)) ctm = concat(ctm, matrix);
-        break;
-      }
-      case OPS.paintFormXObjectEnd:
-        ctm = stack.pop() ?? IDENTITY;
-        break;
-      case OPS.paintImageXObject:
-        if (Array.isArray(args)) record(args[0], 1, 1);
-        break;
-      case OPS.paintImageXObjectRepeat:
-        // pdf.js collapses three or more identical draws into one op carrying
-        // the per-instance scale.
-        if (Array.isArray(args)) record(args[0], Number(args[1]) || 1, Number(args[2]) || 1);
-        break;
-      default:
-        break;
-    }
-  }
-
+  walk(ops, 0, false);
   return [...found.values()];
 }
+
+/** How deep patterns drawing patterns are followed by {@link imagePlacements}. */
+const MAX_PATTERN_DEPTH = 4;
 
 interface DecodedImage {
   objectNumber: number;
@@ -2790,12 +2915,18 @@ function rgbaToGray(
   return gray;
 }
 
-function grayFromDecoded(decoded: DecodedImage, mode: GrayMode): GrayImageData {
+function grayFromDecoded(decoded: DecodedImage, mode: GrayMode, lossy: boolean): GrayImageData {
   return {
     objectNumber: decoded.objectNumber,
     width: decoded.width,
     height: decoded.height,
-    gray: rgbaToGray(decoded.rgba, decoded.width, decoded.height, mode),
+    encoded: encodeGraySamples(
+      rgbaToGray(decoded.rgba, decoded.width, decoded.height, mode),
+      decoded.width,
+      decoded.height,
+      mode,
+      lossy
+    ),
     alpha: decoded.mask
   };
 }

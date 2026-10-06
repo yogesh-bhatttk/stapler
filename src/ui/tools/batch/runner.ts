@@ -31,6 +31,7 @@ import {
 import { corrupt } from '../../../core/errors';
 import { looksLikePdf } from '../../../core/import';
 import { zipSync } from 'fflate';
+import { parseRecipe } from './recipe-settings';
 
 /** Appends a per-file outcome to the run summary. */
 function addNote(note: BatchNote): void {
@@ -123,21 +124,38 @@ async function runBatchBody(
     ? savedRecipes.value.find(r => r.id === activeRecipeId.value)
     : null;
 
+  // A stored recipe's tools and settings are unchecked (`core/db.ts` types them
+  // `unknown`): an older build or an imported file may have written anything.
+  // Check them once, here, and refuse to run on a malformed one — a bad slice
+  // used to reach the worker as-is and either crash it mid-folder or stamp
+  // pages with nonsense values (AUDIT-2026-10-01 X-15).
+  const parsed = recipe ? parseRecipe(recipe) : null;
+  if (recipe && parsed && !parsed.ok) {
+    notify('danger', translate('Recipe settings could not be read'), {
+      detail: translate(
+        '"{name}" has settings this version cannot use ({fields}). No files were processed. Delete the recipe and save it again.',
+        { name: recipe.name, fields: parsed.problems.join(', ') }
+      )
+    });
+    return;
+  }
+  const replay = parsed?.ok ? parsed.recipe : null;
+
   // If a recipe is active, only the tools it lists are applied, in the order
   // they appear in recipe.tools. Without this gate every tool was unconditionally
   // applied even if the recipe was created for watermark-only or compress-only.
   // Fall back to sensible defaults when no recipe is active.
-  const activeTools: string[] = recipe?.tools ?? ['watermark', 'compress'];
+  const activeTools: string[] = replay?.tools ?? ['watermark', 'compress'];
 
   // A recipe replays *its own* snapshot. It must never reach for a live signal:
   // that is how a saved recipe silently picked up whatever the N-up or Normalize
   // panel happened to have open at run time. A setting the recipe does not carry
   // means "this recipe does not configure that tool", not "ask the current UI".
-  const compress = recipe ? recipe.settings.compress : compressSettings.value;
-  const watermark = recipe ? recipe.settings.watermark : watermarkSettings.value;
-  const headerFooter = recipe ? recipe.settings.headerFooter : headerFooterSettings.value;
-  const nup = recipe ? recipe.settings.nup : nupSettings.value;
-  const normalize = recipe ? recipe.settings.normalize : normalizeSettings.value;
+  const compress = replay ? replay.settings.compress : compressSettings.value;
+  const watermark = replay ? replay.settings.watermark : watermarkSettings.value;
+  const headerFooter = replay ? replay.settings.headerFooter : headerFooterSettings.value;
+  const nup = replay ? replay.settings.nup : nupSettings.value;
+  const normalize = replay ? replay.settings.normalize : normalizeSettings.value;
 
   if (recipe) {
     // Recipes saved by older builds can list a tool whose settings were never
@@ -214,7 +232,7 @@ async function runBatchBody(
         // Batch had no equivalent of importPdf()'s validation gate: a non-PDF file
         // fell straight into pdf-lib's tolerant parser and surfaced a raw internal
         // TypeError, and a truncated file could silently lose trailing pages with
-        // no error at all (see AUDIT-EDGE-CASES-2026-09-15.md §1.8). Mirror the
+        // no error at all (AUDIT-EDGE-CASES-2026-09-15 §1.8 in docs/TICKETS.md EPIC-19). Mirror the
         // single-file import path's checks — magic-byte sniff, then the pdf.js
         // parse importPdf() also uses as the real corruption gate — so a bad file
         // in a batch folder fails the same clear, classified way an equally bad

@@ -47,21 +47,28 @@ function makeClient(): FakeClient {
   return client;
 }
 
-vi.mock('../../src/core/workers', () => ({
-  renderWorker: { pin: () => makeClient() }
-}));
+// The pixel read-back and diff run in the cv worker (`compare-pages.ts` ›
+// `reviewPage`); this fake stands in for it with each side's size.
+interface FakeBitmap {
+  width: number;
+  height: number;
+}
+const image = (b: FakeBitmap | null) => (b ? new ImageData(b.width || 1, b.height || 1) : null);
 
-// `toImageData` draws the bitmap on a detached canvas; Node has none.
-(globalThis as unknown as { document: unknown }).document = {
-  createElement: () => ({
-    width: 0,
-    height: 0,
-    getContext: () => ({
-      drawImage: () => {},
-      getImageData: (_x: number, _y: number, w: number, h: number) => new ImageData(w || 1, h || 1)
-    })
-  })
-};
+vi.mock('../../src/core/workers', () => ({
+  renderWorker: { pin: () => makeClient() },
+  cvWorker: {
+    lease: async (fn: (api: unknown) => unknown) =>
+      fn({
+        reviewPage: (pair: { a: FakeBitmap | null; b: FakeBitmap | null }) => ({
+          before: image(pair.a),
+          after: image(pair.b),
+          diff: pair.a && pair.b ? image(pair.b) : null,
+          comparable: !!(pair.a && pair.b)
+        })
+      })
+  }
+}));
 
 const {
   createPreviewSession,

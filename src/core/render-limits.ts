@@ -15,6 +15,8 @@
  *    side-by-side) asks for at most: past this, extra pixels are not visible
  *    detail, only memory. A view that hits it says so.
  */
+import { unsupported } from './errors';
+import { translate } from './i18n';
 
 /** Hard ceiling for any one render: 8192² pixels, 256 MB of RGBA. */
 export const MAX_RENDER_PIXELS = 8192 * 8192;
@@ -54,4 +56,44 @@ export function clampRenderScale(
   );
   while (!fits(safe) && safe > 0) safe *= 0.995;
   return { scale: safe, clamped: true };
+}
+
+/* ------------------------------------------------------------------ *
+ * CNV-14 — the one limit on an exact width × height, for both "Image to
+ * size" and PDF → Images: the canvas it is drawn on has to be one a browser
+ * can allocate, so at most {@link MAX_RENDER_PIXELS} pixels and no side past
+ * {@link MAX_RENDER_SIDE}. The per-side cap matters with the aspect locked:
+ * a width of 100 on a 1:400 panorama makes a 40,000 px height.
+ * ------------------------------------------------------------------ */
+
+/** Whether an exact output of `size` is past what a canvas can be allocated at. */
+export function exactSizeOverLimit(size: { width: number; height: number }): boolean {
+  return (
+    size.width * size.height > MAX_RENDER_PIXELS ||
+    Math.max(size.width, size.height) > MAX_RENDER_SIDE
+  );
+}
+
+/** What to tell the person when {@link exactSizeOverLimit} is true for `size`. */
+export function exactSizeLimitMessage(size: { width: number; height: number }): string {
+  if (Math.max(size.width, size.height) > MAX_RENDER_SIDE) {
+    return translate(
+      '{width}×{height} px has a side longer than the {limit} px a browser can draw. Choose a smaller size.',
+      { width: size.width, height: size.height, limit: MAX_RENDER_SIDE.toLocaleString('en-US') }
+    );
+  }
+  return translate(
+    '{width}×{height} px is larger than the {limit}-pixel limit a browser can draw. Choose a smaller size.',
+    { width: size.width, height: size.height, limit: MAX_RENDER_PIXELS.toLocaleString('en-US') }
+  );
+}
+
+/**
+ * Throws an `UnsupportedFeature` error carrying {@link exactSizeLimitMessage}
+ * when `size` is over the limit — before any canvas is allocated.
+ */
+export function assertExactSizeWithinLimit(size: { width: number; height: number }): void {
+  if (exactSizeOverLimit(size)) {
+    throw unsupported(exactSizeLimitMessage(size), { width: size.width, height: size.height });
+  }
 }

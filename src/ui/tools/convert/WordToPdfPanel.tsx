@@ -30,6 +30,7 @@ import {
   wordToPdfPreviewIsStale,
   wordToPdfSource
 } from './word-to-pdf-state';
+import { withErrorToast } from '../../asyncHandler';
 
 /**
  * Every limitation of this converter, in the panel the user actually reads.
@@ -108,7 +109,7 @@ export function WordToPdfPanel() {
   const handlePreview = () => {
     const file = wordToPdfSource.value;
     if (!file) return;
-    run({ label: translate('Converting to PDF'), scope: 'convert.word-to-pdf' }, async job => {
+    void run({ label: translate('Converting to PDF'), scope: 'convert.word-to-pdf' }, async job => {
       // Captured before the bytes are read, so a change made *during* the
       // conversion still invalidates its result.
       const revision = wordToPdfInputRevision.value;
@@ -191,7 +192,11 @@ export function WordToPdfPanel() {
       </div>
 
       <div className={panelStyles.section}>
-        <Button variant="secondary" icon={Upload} onClick={chooseFile}>
+        <Button
+          variant="secondary"
+          icon={Upload}
+          onClick={withErrorToast('convert.choose-file', chooseFile)}
+        >
           {source ? t('Choose a different .docx') : t('Choose a .docx file')}
         </Button>
         {source && (

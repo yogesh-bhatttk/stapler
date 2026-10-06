@@ -253,11 +253,14 @@ so it gets its own explicit step below rather than being buried inside "run veri
 - [ ] **Package:** Run `pnpm package` (`scripts/package.mjs`). It builds all three
       targets, runs `validate-builds.mjs`, re-checks the built manifests (version matches
       `package.json`, zero permissions, no content scripts, `THIRD_PARTY_LICENSES.txt`
-      present, no extension `manifest.json` in `dist/web`), then writes
-      `dist/release/stapler-<version>-chrome.zip` and `…-firefox.zip` — the *contents*
-      of `dist/ext` / `dist/firefox`, every `*.map` left out, fixed timestamps so a
-      rebuild of the same tree gives identical bytes — plus `dist/release/SHA256SUMS`.
-      Do not zip by hand. (`--skip-build` re-packages existing `dist/` output.)
+      present, no extension `manifest.json` in `dist/web`, the website's entry scripts
+      content-hashed), then writes `dist/release/stapler-<version>-chrome.zip`,
+      `…-firefox.zip` and `…-web.zip` — the *contents* of `dist/ext` / `dist/firefox` /
+      `dist/web`, every `*.map` left out, fixed timestamps so a rebuild of the same tree
+      gives identical bytes — plus a `<zip>.sha256` next to each zip and
+      `dist/release/SHA256SUMS` covering all three. Do not zip by hand. (`--skip-build`
+      re-packages existing `dist/` output.) On a tag push, the release workflow (§6) runs
+      this for you; run it locally only to rehearse.
 - [ ] **Extension e2e:** `pnpm test:e2e:ext` passes against that build (with
       `STAPLER_EXT_PREBUILT=1` to test the `dist/ext` you just packaged rather than a
       rebuild).
@@ -294,6 +297,49 @@ so it gets its own explicit step below rather than being buried inside "run veri
       [addons.mozilla.org/developers](https://addons.mozilla.org/developers/).
 
 ## 6. Post-Release
-- [ ] **Git Tag:** Create a git tag for the release (e.g., `git tag v1.0.0` and `git push --tags`).
-- [ ] **GitHub Release:** Create a release on GitHub using the tag, copy the changelog notes, and attach both zips from `dist/release/` and its `SHA256SUMS` as release assets.
+- [ ] **Git Tag:** `git tag v<version> && git push origin v<version>` — the tag must
+      equal `v` + `package.json`'s `version`, or the workflow stops at its first step.
+- [ ] **Release workflow:** the tag push runs `.github/workflows/release.yml`
+      (audit 2026-10-01 PLT-7 / DIST-07). It builds **once** (`pnpm package`, job
+      `build`) and uploads `dist/release/` as the `release` artifact; every later job
+      uses that artifact rather than rebuilding:
+      - `bundle-network` unpacks all three shipped zips and runs the zero-network
+        bundle scan on them;
+      - `e2e-extension` unpacks the shipped Chrome zip into `dist/ext` and runs the
+        packaged-extension suite against it;
+      - `e2e-web-shipped` unpacks the shipped web zip and, with no test hooks and
+        no rebuild, runs the zero-network, offline (PWA), share-target and
+        service-worker-network suites against it
+        (`tests/e2e/pwa-shipped.config.ts`; locally:
+        `STAPLER_SHIPPED_WEB=<unzipped dir> pnpm exec playwright test -c tests/e2e/pwa-shipped.config.ts`);
+      - `e2e-web` and `perf` build their own *instrumented* copy of the same commit
+        for every other web suite (they need `VITE_E2E_TEST_HOOKS`, which the shipped
+        site must not contain) — they gate the release too;
+      - `check` runs lint, types, tokens, invariants and the unit tests;
+      - `release` needs all of the above, re-verifies `SHA256SUMS` and every
+        `<zip>.sha256`, and creates a **draft** GitHub Release with the three zips,
+        their `.sha256` files and `SHA256SUMS`, with generated notes (`-` in the tag →
+        pre-release).
+- [ ] **Review and publish the draft:** on the repository's Releases page, check the
+      draft has all seven assets, replace the generated notes with this version's
+      `CHANGELOG.md` section, then publish. The zips you upload to the stores (§5,
+      §5b) should be the draft's own assets — `sha256sum --check <zip>.sha256` on the
+      downloaded file proves it — not a local rebuild.
+- [ ] **Website deploy:** unpack `stapler-<version>-web.zip` onto the static host. The
+      site's entry scripts are content-hashed and its service worker serves each page
+      from its own versioned cache, so open tabs keep running their version until the
+      user accepts the "new version" reload.
+      **The host must serve every file byte for byte.** The service worker checks each
+      downloaded file against the SHA-256 recorded at build time and refuses to install
+      a cache that does not match. Turn off anything that rewrites responses: HTML
+      minification, injected analytics or banners, Cloudflare email obfuscation and
+      Rocket Loader, and similar features. Otherwise the site still works online, but it
+      never installs for offline use. To check, open the deployed site, then in DevTools
+      → Application → Service workers confirm that `sw.js` is *activated* and that Cache
+      Storage holds a `stapler-precache-<version>` cache.
+- [ ] **Share to the installed web app (Android, manual — no CI can do this):**
+      install the deployed site, share a PDF to it from another app. Expected: the app
+      opens and asks "Open 1 shared file?" naming the file (the service worker cannot
+      tell an OS share from a website posting one, audit 2026-10-01 PLT-3); **Open**
+      imports it, **Discard** opens nothing and a reload does not bring it back.
 - [ ] **Celebrate:** Grab a coffee! ☕

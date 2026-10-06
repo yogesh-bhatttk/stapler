@@ -29,7 +29,10 @@ describe('parseSizeParam', () => {
     ['1.5mb', { amount: 1.5, unit: 'MB' }],
     ['1,5 MB', { amount: 1.5, unit: 'MB' }],
     ['2m', { amount: 2, unit: 'MB' }],
-    ['500KiB', { amount: 500, unit: 'KB' }],
+    // IMG-11: binary units are scaled by 1024 (500 KiB = 512,000 B) and
+    // expressed in decimal KB, rounded down so a limit is never exceeded.
+    ['500KiB', { amount: 512, unit: 'KB' }],
+    ['1MiB', { amount: 1048.57, unit: 'KB' }],
     ['.5MB', { amount: 0.5, unit: 'MB' }]
   ])('parses %j', (raw, expected) => {
     expect(parseSizeParam(raw)).toEqual(expected);
@@ -167,6 +170,22 @@ describe('applyToolParams', () => {
 
     applyToolParams('image-to-size', new URLSearchParams('target=1KB'));
     expect(imageSizeSettings.value.target).toEqual({ amount: 5, unit: 'KB' });
+  });
+
+  it('a PDF to images max= link switches an exact size off too', () => {
+    const exact = pdfToImageSettings.value.exact!;
+    pdfToImageSettings.value = { ...pdfToImageSettings.value, exact: { ...exact, on: true } };
+    expect(applyToolParams('pdf-to-img', new URLSearchParams('max=1200'))).toBe(true);
+    expect(pdfToImageSettings.value.maxDimension).toBe(1200);
+    expect(pdfToImageSettings.value.exact?.on).toBe(false);
+  });
+
+  it('a max= link switches an exact size off, so the longest side it asks for applies', () => {
+    const exact = imageSizeSettings.value.exact!;
+    imageSizeSettings.value = { ...imageSizeSettings.value, exact: { ...exact, on: true } };
+    expect(applyToolParams('image-to-size', new URLSearchParams('max=800'))).toBe(true);
+    expect(imageSizeSettings.value.maxDimension).toBe(800);
+    expect(imageSizeSettings.value.exact?.on).toBe(false);
   });
 
   it('pre-fills PDF to images in target mode (JPEG) with a pixel box', () => {

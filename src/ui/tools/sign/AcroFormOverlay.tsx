@@ -102,8 +102,10 @@ export function AcroFormOverlay({ pageIndex, width, height }: AcroFormOverlayPro
           input = (
             <select
               className={styles.select}
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              value={value as any}
+              // X-15 — typed instead of `as any`. A single-choice list takes its
+              // one value here; a multi-select (`string[]`) marks each option
+              // `selected` below, since a `<select>`'s `value` is one string.
+              value={typeof value === 'string' ? value : undefined}
               disabled={field.isReadOnly}
               multiple={field.type === 'OptionList'}
               onChange={e => {
@@ -113,7 +115,11 @@ export function AcroFormOverlay({ pageIndex, width, height }: AcroFormOverlayPro
               }}
             >
               {field.options?.map(opt => (
-                <option key={opt} value={opt}>
+                <option
+                  key={opt}
+                  value={opt}
+                  selected={Array.isArray(value) ? value.includes(opt) : undefined}
+                >
                   {opt}
                 </option>
               ))}

@@ -14,6 +14,7 @@ import {
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { unzipSync, unzlibSync } from 'fflate';
+import { drawnText } from './pdf-bytes';
 import {
   acroformPdf,
   ANNOTATION_TEXT,
@@ -230,58 +231,6 @@ async function highlightStrokes(bytes: Uint8Array): Promise<HighlightStroke[]> {
 }
 
 /**
- * Every string a document draws on page 0, including inside the form XObjects the
- * page invokes — which is where a flattened form field's value ends up.
- *
- * Show-text operands may be literal `(text)` or hex `<hex>`, and the hex code width
- * depends on the font, so all readings are concatenated and the caller asserts a
- * substring. The point is to check the value is *drawn*, not merely stored in /V.
- */
-async function drawnText(bytes: Uint8Array): Promise<string> {
-  const { inflateSync } = await import('node:zlib');
-  const doc = await PDFDocument.load(bytes);
-  const page = doc.getPage(0);
-
-  const decode = (stream: unknown): string => {
-    if (!(stream instanceof PDFStream)) return '';
-    const raw = Buffer.from((stream as PDFRawStream).contents ?? []);
-    const isFlate = String(stream.dict.get(PDFName.of('Filter'))) === '/FlateDecode';
-    let text: string;
-    try {
-      text = (isFlate ? inflateSync(raw) : raw).toString('latin1');
-    } catch (err) {
-      const message = `Failed to decode a content stream while reading page text: ${
-        err instanceof Error ? err.message : String(err)
-      }`;
-      throw new Error(message, { cause: err });
-    }
-    // Append both decodings of every hex literal alongside the raw operators.
-    let decoded = text;
-    for (const match of text.matchAll(/<([0-9A-Fa-f\s]+)>/g)) {
-      const hex = match[1].replace(/\s+/g, '');
-      for (const width of [2, 4]) {
-        if (hex.length % width !== 0) continue;
-        let out = '';
-        for (let i = 0; i < hex.length; i += width) {
-          out += String.fromCharCode(parseInt(hex.slice(i, i + width), 16));
-        }
-        decoded += `\n${out}`;
-      }
-    }
-    return decoded;
-  };
-
-  let all = '';
-  const contents = page.node.Contents();
-  const streams = contents instanceof PDFArray ? contents.asArray() : contents ? [contents] : [];
-  for (const stream of streams) all += decode(doc.context.lookup(stream));
-
-  const xobjects = page.node.Resources()?.lookupMaybe(PDFName.of('XObject'), PDFDict);
-  for (const [, ref] of xobjects?.entries() ?? []) all += decode(doc.context.lookup(ref));
-  return all;
-}
-
-/**
  * Every string anywhere in a produced file: the raw bytes, every stream decompressed
  * (object streams included, which is where the Info dictionary ends up), and the
  * readable form of every hex literal. RED-04 asks for absence from the *bytes*, and a
@@ -422,6 +371,26 @@ async function outlineTitles(bytes: Uint8Array): Promise<string[]> {
     item = item.lookupMaybe(PDFName.of('Next'), PDFDict);
   }
   return titles;
+}
+
+/**
+ * A locator's box once it has stopped moving. Fit-to-view settles a page's
+ * size over the first frames after layout, so a box read too early can put a
+ * drag outside the page under load.
+ */
+async function settledBox(locator: import('@playwright/test').Locator) {
+  let box = await locator.boundingBox();
+  await expect
+    .poll(async () => {
+      const next = await locator.boundingBox();
+      const stable =
+        !!next && !!box && next.x === box.x && next.y === box.y && next.width === box.width;
+      box = next;
+      return stable;
+    })
+    .toBe(true);
+  if (!box) throw new Error('no box');
+  return box;
 }
 
 test.describe('tool flows', () => {
@@ -1687,10 +1656,9 @@ test.describe('tool flows', () => {
     await gotoTool(page, 'crop');
 
     const layer = page.locator('[data-index="0"]');
-    const box = await layer.boundingBox();
-    if (!box) throw new Error('no box');
-
     await waitForPageRendered(page);
+    const box = await settledBox(layer);
+
     await page.mouse.move(box.x + 50, box.y + 50);
     await page.mouse.down();
     await page.mouse.move(box.x + 200, box.y + 200, { steps: 5 });
@@ -1711,11 +1679,9 @@ test.describe('tool flows', () => {
     await page.getByLabel('Apply crop to').selectOption('odd');
 
     const layer = page.locator('[data-index="0"]');
-    const box = await layer.boundingBox();
-    if (!box) throw new Error('no box');
-
     // Draw an initial crop box on page 1 (odd) while the "odd pages" scope is active.
     await waitForPageRendered(page);
+    const box = await settledBox(layer);
     await page.mouse.move(box.x + 40, box.y + 40);
     await page.mouse.down();
     await page.mouse.move(box.x + 220, box.y + 220, { steps: 5 });

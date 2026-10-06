@@ -5,7 +5,7 @@ import { cspFindings } from './csp.mjs';
 import { analyzeNetwork } from './network-guard.mjs';
 
 // Kept in sync with .claude/hooks/check-invariants.mjs — this is the same guard
-// run as a one-shot, whole-repo scan (see item §9 of docs/AUDIT-FINDINGS.md: the
+// run as a one-shot, whole-repo scan (see AUDIT-FINDINGS §9 (EPIC-19 in docs/TICKETS.md): the
 // PostToolUse hook only fires on Write/Edit and only looks at src/, so a file
 // written by shell command, or a file outside src/ like public/privacy.html,
 // needs this script wired into `pnpm check` to be covered at all).
@@ -16,7 +16,7 @@ import { analyzeNetwork } from './network-guard.mjs';
 // starting with `*`. Both guards now call the same AST-based analyzer, which
 // also owns the allowlist (the OCR model download in `src/core/ocr/model.ts`
 // + `download.ts`; `devanagariFont.ts` may fetch a same-origin target only).
-// §4 (docs/AUDIT-EDGE-CASES-2026-09-15.md), tightened by audit 2026-09-25
+// AUDIT-EDGE-CASES-2026-09-15 §4 (EPIC-19 in docs/TICKETS.md), tightened by audit 2026-09-25
 // PLT-3: the CSP allowlist and its checker live in `scripts/csp.mjs`, the same
 // module the web build's `<meta>` CSP is generated from.
 

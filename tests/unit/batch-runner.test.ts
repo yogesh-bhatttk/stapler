@@ -112,6 +112,7 @@ const { runBatch } = await import('../../src/ui/tools/batch/runner');
 const state = await import('../../src/ui/tools/batch/state');
 const { compressSettings } = await import('../../src/ui/tools/compress/state');
 const { watermarkSettings } = await import('../../src/ui/tools/watermark/state');
+const { toasts } = await import('../../src/core/notify');
 
 interface Written {
   name: string;
@@ -267,7 +268,7 @@ describe('§2.1: a second concurrent runBatch() call is a no-op', () => {
 });
 
 /**
- * §1.8 (AUDIT-EDGE-CASES-2026-09-15.md) — batch had no equivalent of
+ * §1.8 (AUDIT-EDGE-CASES-2026-09-15, EPIC-19 in docs/TICKETS.md) — batch had no equivalent of
  * importPdf()'s validation gate, so a non-PDF or corrupt file in a batch
  * folder either threw a raw internal error or silently produced wrong output.
  * It must fail the same clear, classified way "Add PDF" would.
@@ -331,13 +332,13 @@ describe('BAT-01: a recipe replays its own snapshot', () => {
     state.inputDirHandle.value = inDir as never;
     state.outputDirHandle.value = outDir as never;
 
-    const saved = { preset: 'balanced', imageQuality: 0.6 };
+    const saved = { dpi: 120, quality: 0.6 };
     state.savedRecipes.value = [
       {
         id: 'r2',
         name: 'Balanced',
         tools: ['compress'],
-        settings: { compress: saved as never }
+        settings: { compress: saved }
       }
     ];
     state.activeRecipeId.value = 'r2';
@@ -347,6 +348,75 @@ describe('BAT-01: a recipe replays its own snapshot', () => {
 
     expect(planCompression).toHaveBeenCalledTimes(1);
     expect(planCompression.mock.calls[0][1]).toEqual(saved);
+  });
+});
+
+describe('X-15: a malformed stored recipe stops the run with a clear message', () => {
+  it('refuses to run, names the bad fields, and writes nothing', async () => {
+    const { inDir, outDir, written } = dirs([fileHandle('a.pdf')]);
+    state.inputDirHandle.value = inDir as never;
+    state.outputDirHandle.value = outDir as never;
+    toasts.value = [];
+    // What an older build or a hand-edited import could leave in IndexedDB:
+    // a numeric field stored as a string and a watermark with no position.
+    state.savedRecipes.value = [
+      {
+        id: 'bad',
+        name: 'Broken',
+        tools: ['compress', 'watermark'],
+        settings: {
+          compress: { dpi: '150', quality: 0.75 },
+          watermark: { ...watermarkSettings.value, text: 'DRAFT', position: undefined }
+        }
+      }
+    ];
+    state.activeRecipeId.value = 'bad';
+
+    await runBatch();
+
+    expect(planCompression).not.toHaveBeenCalled();
+    expect(written).toEqual([]);
+    expect(state.batchProgress.value.isProcessing).toBe(false);
+    const toast = toasts.value.find(t => t.tone === 'danger');
+    expect(toast?.title).toBe('Recipe settings could not be read');
+    expect(toast?.detail).toContain('"Broken"');
+    expect(toast?.detail).toContain('compress.dpi');
+    expect(toast?.detail).toContain('watermark.position');
+  });
+
+  it('refuses a recipe whose tools are not a list of tool ids', async () => {
+    const { inDir, outDir, written } = dirs([fileHandle('a.pdf')]);
+    state.inputDirHandle.value = inDir as never;
+    state.outputDirHandle.value = outDir as never;
+    toasts.value = [];
+    state.savedRecipes.value = [{ id: 'bad', name: 'Broken', tools: 'compress', settings: {} }];
+    state.activeRecipeId.value = 'bad';
+
+    await runBatch();
+
+    expect(written).toEqual([]);
+    expect(toasts.value.find(t => t.tone === 'danger')?.detail).toContain('tools');
+  });
+
+  it('still runs a recipe an older build saved with null for untouched tools', async () => {
+    const { inDir, outDir, written } = dirs([fileHandle('a.pdf')]);
+    state.inputDirHandle.value = inDir as never;
+    state.outputDirHandle.value = outDir as never;
+    state.savedRecipes.value = [
+      {
+        id: 'old',
+        name: 'Old',
+        tools: ['compress'],
+        settings: { compress: { dpi: 150, quality: 0.75 }, nup: null, normalize: null }
+      }
+    ];
+    state.activeRecipeId.value = 'old';
+
+    await runBatch();
+
+    expect(planCompression).toHaveBeenCalledTimes(1);
+    expect(planCompression.mock.calls[0][1]).toEqual({ dpi: 150, quality: 0.75 });
+    expect(written.map(w => w.name)).toEqual(['a.pdf']);
   });
 });
 

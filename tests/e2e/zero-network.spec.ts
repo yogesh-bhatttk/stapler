@@ -559,7 +559,7 @@ test.describe('zero network', () => {
    * element (the `stapler:web-csp` Vite plugin). The request watch above is
    * the test; this is the runtime backstop on the deployed site.
    */
-  test('every web entry page carries the default-deny CSP meta tag', async ({ page }) => {
+  test('every web entry page carries the default-deny CSP meta tag', async ({ browser }) => {
     const pages = [
       '/',
       '/editor.html',
@@ -581,14 +581,24 @@ test.describe('zero network', () => {
       '/ppt-to-pdf.html',
       '/privacy.html'
     ];
+    // A fresh context per page, closed before the next one opens. Nineteen full
+    // app boots in one tab (workers, pdf.js, the share inbox) piled up until
+    // the renderer crashed on a low-memory machine; each page's tag is
+    // independent, so nothing is lost by isolating them.
     for (const path of pages) {
-      await page.goto(path);
-      const csp = await page
-        .locator('meta[http-equiv="Content-Security-Policy"]')
-        .getAttribute('content');
-      expect(csp, path).toContain("default-src 'self'");
-      expect(csp, path).toContain("object-src 'none'");
-      expect(csp, path).not.toMatch(/connect-src[^;]*https:\/\/cdn\.jsdelivr\.net(\s|;)/);
+      const context = await browser.newContext();
+      try {
+        const page = await context.newPage();
+        await page.goto(path);
+        const csp = await page
+          .locator('meta[http-equiv="Content-Security-Policy"]')
+          .getAttribute('content');
+        expect(csp, path).toContain("default-src 'self'");
+        expect(csp, path).toContain("object-src 'none'");
+        expect(csp, path).not.toMatch(/connect-src[^;]*https:\/\/cdn\.jsdelivr\.net(\s|;)/);
+      } finally {
+        await context.close();
+      }
     }
   });
 });

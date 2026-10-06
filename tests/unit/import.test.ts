@@ -231,9 +231,11 @@ describe('DOC-02: the >100MB warning', () => {
     expect(largeFileWarning(LARGE_FILE_BYTES + 1)).toBe(
       '100MB is a large document — operations on it will be slower.'
     );
-    expect(largeFileWarning(250 * 1024 * 1024)).toBe(
+    // Decimal megabytes, like every size the app shows (X-10).
+    expect(largeFileWarning(250_000_000)).toBe(
       '250MB is a large document — operations on it will be slower.'
     );
+    expect(LARGE_FILE_BYTES).toBe(100_000_000);
   });
 
   it('warns rather than refuses: an oversized PDF still imports', async () => {

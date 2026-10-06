@@ -23,6 +23,7 @@ import {
   confirmAndClearCategory,
   type ClearCategory
 } from '../clearLocalData';
+import { withErrorToast } from '../asyncHandler';
 
 interface Row {
   id: string;
@@ -37,12 +38,23 @@ export function LocalDataSection() {
   const [report, setReport] = useState<LocalDataReport | null>(null);
   const [asked, setAsked] = useState<PersistOutcome | null>(null);
   const [working, setWorking] = useState(false);
+  const [failed, setFailed] = useState(false);
 
   const refresh = useCallback(() => {
     let live = true;
-    void gatherLocalDataReport().then(next => {
-      if (live) setReport(next);
-    });
+    // AUDIT-2026-10-01 X-11 — `gatherLocalDataReport` is written never to
+    // throw, but a rejection here used to leave "Checking browser storage…"
+    // on screen forever as an unhandled rejection.
+    gatherLocalDataReport().then(
+      next => {
+        if (!live) return;
+        setFailed(false);
+        setReport(next);
+      },
+      () => {
+        if (live) setFailed(true);
+      }
+    );
     return () => {
       live = false;
     };
@@ -86,9 +98,29 @@ export function LocalDataSection() {
         <h3 id="stored-data-title" className={styles.groupTitle}>
           {t('Stored on this device')}
         </h3>
-        <p className={styles.pointBody} role="status">
-          {t('Checking browser storage…')}
-        </p>
+        {failed ? (
+          <>
+            <p className={styles.pointBody} role="alert">
+              {t('Browser storage could not be read.')}
+            </p>
+            <div>
+              <Button
+                variant="secondary"
+                size="compact"
+                onClick={() => {
+                  setFailed(false);
+                  refresh();
+                }}
+              >
+                {t('Try again')}
+              </Button>
+            </div>
+          </>
+        ) : (
+          <p className={styles.pointBody} role="status">
+            {t('Checking browser storage…')}
+          </p>
+        )}
       </section>
     );
   }
@@ -180,7 +212,12 @@ export function LocalDataSection() {
       </p>
       {persisted === false && (
         <div>
-          <Button variant="secondary" size="compact" disabled={working} onClick={askPersistence}>
+          <Button
+            variant="secondary"
+            size="compact"
+            disabled={working}
+            onClick={withErrorToast('local-data.persist', askPersistence)}
+          >
             {t('Ask the browser to keep this data')}
           </Button>
           {asked === 'denied' && (
@@ -224,7 +261,7 @@ export function LocalDataSection() {
             ? tPlural('Clearing everything also closes the {count} open documents.', openDocs)
             : t('Clearing everything deletes all of the above and reloads Stapler.')}
         </p>
-        <Button variant="danger" size="compact" disabled={working} onClick={clearAll}>
+        <Button variant="danger" size="compact" disabled={working} onClick={() => void clearAll()}>
           {t('Clear all local data…')}
         </Button>
       </div>

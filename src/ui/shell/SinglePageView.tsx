@@ -18,6 +18,7 @@ import { translate } from '../../core/i18n';
  */
 import type { ComponentChildren } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { fitZoomFor, isDifferentDocument, zoomContextKey } from './single-page-zoom';
 import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-preact';
 import { sources, type PageRef } from '../../core/store';
 import { normalizeRotation } from '../../core/rotation';
@@ -39,8 +40,6 @@ export interface SinglePageViewProps {
 }
 
 const ZOOM_STEPS = [0.5, 0.75, 1, 1.5, 2, 3, 4] as const;
-const MIN_FIT_ZOOM = 0.1;
-const MAX_FIT_ZOOM = 8;
 
 export function SinglePageView({
   pages,
@@ -50,7 +49,11 @@ export function SinglePageView({
 }: SinglePageViewProps) {
   const t = useTranslation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const stageRef = useRef<HTMLDivElement>(null);
+  // UI-5 — a callback ref (held in state), not `useRef` + a `[]` effect: the
+  // stage is not rendered while the page's size is still unknown (session
+  // restore), so a mount-only effect found no element and never observed it,
+  // leaving fit-to-view stuck at 100%.
+  const [stageEl, setStageEl] = useState<HTMLDivElement | null>(null);
 
   const page = pages[pageIndex];
   const source = page ? sources.value[page.sourceDocId] : undefined;
@@ -65,35 +68,64 @@ export function SinglePageView({
   // is actually visible.
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   useEffect(() => {
-    const el = stageRef.current;
+    const el = stageEl;
     if (!el) return;
+    let frame = 0;
     const measure = () => {
+      frame = 0;
       const cs = getComputedStyle(el);
       const padX = parseFloat(cs.paddingLeft || '0') + parseFloat(cs.paddingRight || '0');
       const padY = parseFloat(cs.paddingTop || '0') + parseFloat(cs.paddingBottom || '0');
-      setStageSize({
-        width: Math.max(0, el.clientWidth - padX),
-        height: Math.max(0, el.clientHeight - padY)
-      });
+      const width = Math.max(0, Math.floor(el.clientWidth - padX));
+      const height = Math.max(0, Math.floor(el.clientHeight - padY));
+      setStageSize(prev =>
+        prev.width === width && prev.height === height ? prev : { width, height }
+      );
+    };
+    // UI-7 — one measurement per frame, however many resize ticks arrive.
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(measure);
     };
     measure();
-    const observer = new ResizeObserver(measure);
+    const observer = new ResizeObserver(schedule);
     observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
+    return () => {
+      observer.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [stageEl]);
 
-  const fitZoom = useMemo(() => {
-    if (!fitWidth || !fitHeight || !stageSize.width || !stageSize.height) return 1;
-    const fit = Math.min(stageSize.width / fitWidth, stageSize.height / fitHeight);
-    return Math.min(MAX_FIT_ZOOM, Math.max(MIN_FIT_ZOOM, fit));
-  }, [fitWidth, fitHeight, stageSize.width, stageSize.height]);
+  const fitZoom = useMemo(
+    () => fitZoomFor(stageSize, fitWidth, fitHeight),
+    [fitWidth, fitHeight, stageSize.width, stageSize.height]
+  );
 
-  // `null` = auto-fit (recomputed live from `fitZoom`); a number pins zoom to
-  // that `ZOOM_STEPS` index until the page identity changes again.
-  const [manualZoomStep, setManualZoomStep] = useState<number | null>(null);
+  // UI-6 — which document this is, as a generation number: bumped only when
+  // the page list shares no page with the previous one (another document),
+  // never by an edit to this one.
+  const documentRef = useRef({ pages, generation: 0 });
+  if (documentRef.current.pages !== pages) {
+    documentRef.current = {
+      pages,
+      generation:
+        documentRef.current.generation +
+        (isDifferentDocument(documentRef.current.pages, pages) ? 1 : 0)
+    };
+  }
+  const zoomContext = zoomContextKey(documentRef.current.generation, fitWidth, fitHeight, rotation);
+
+  // `null` = auto-fit (recomputed live from `fitZoom`); otherwise a pinned
+  // `ZOOM_STEPS` index, kept while paging through the same document and only
+  // while the page's displayed size and rotation match those it was chosen on
+  // (the header comment's guarantee: anything else re-fits).
+  const [manualZoom, setManualZoom] = useState<{ step: number; context: string } | null>(null);
+  const manualZoomStep = manualZoom && manualZoom.context === zoomContext ? manualZoom.step : null;
   useEffect(() => {
-    setManualZoomStep(null);
-  }, [page?.key]);
+    // Forget a zoom chosen for another context, so returning to a page of the
+    // old size does not revive it.
+    if (manualZoom && manualZoom.context !== zoomContext) setManualZoom(null);
+  }, [zoomContext]);
+  const setManualZoomStep = (step: number) => setManualZoom({ step, context: zoomContext });
 
   const zoom = manualZoomStep === null ? fitZoom : ZOOM_STEPS[manualZoomStep];
   const nextStepUp = ZOOM_STEPS.findIndex(step => step > zoom + 0.001);
@@ -101,19 +133,15 @@ export function SinglePageView({
     .map((step, i) => [step, i] as const)
     .findLast(([step]) => step < zoom - 0.001);
 
-  const { state, reduced, size } = usePageRender(
-    canvasRef,
-    page,
-    source,
-    pageSize,
-    zoom,
-    'single-page'
-  );
+  const { state, reduced } = usePageRender(canvasRef, page, source, pageSize, zoom, 'single-page');
 
   if (!page || !pageSize) return null;
 
-  const rawWidth = size.width || pageSize.width * zoom;
-  const rawHeight = size.height || pageSize.height * zoom;
+  // The box follows the zoom at once (UI-7): a re-render of the same page is
+  // coalesced, and meanwhile its current pixels are shown stretched to the
+  // new size — so the overlay and the page never disagree on geometry.
+  const rawWidth = pageSize.width * zoom;
+  const rawHeight = pageSize.height * zoom;
 
   const displayWidth = swapped ? rawHeight : rawWidth;
   const displayHeight = swapped ? rawWidth : rawHeight;
@@ -121,7 +149,7 @@ export function SinglePageView({
   return (
     <div className={styles.wrapper}>
       <div
-        ref={stageRef}
+        ref={setStageEl}
         className={styles.stage}
         tabIndex={0}
         aria-label={translate('Page preview, scrollable')}

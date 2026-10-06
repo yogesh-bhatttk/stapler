@@ -64,7 +64,7 @@ export function PdfToPptPanel() {
   if (!doc) return null;
 
   const handlePreview = () => {
-    run(
+    void run(
       { label: translate('Converting to PowerPoint'), scope: 'convert.pdf-to-ppt' },
       async job => {
         // Captured before the bytes are read, so an edit made *during* the

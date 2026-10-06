@@ -53,6 +53,37 @@ const NETWORK_PROPERTIES = [
  */
 const NETWORK_ALLOWED_FILES = ['src/core/ocr/download.ts', 'src/core/ocr/devanagariFont.ts'];
 
+/**
+ * HRD-40 / AUDIT-2026-09-25 M1 ("fix once"). pdf-lib's `copyPages`, `embedPage`,
+ * `embedPages` and `embedPdf` each build a fresh `PDFObjectCopier`, so calling
+ * one per page (or per cell, per contributor page…) duplicates every shared
+ * font and image per call, and copies any page something else points at as an
+ * orphan that still carries the original, unredacted content. Every rebuild
+ * goes through the one copier in `src/core/pdf/rebuild.ts` (`premapSourcePages`
+ * + `copyPageInto`), or makes a single call for all pages, outside any loop.
+ *
+ * Caught: a call anywhere in a loop's body (`for`, `for…of`, `for…in`, `while`,
+ * `do…while`) or inside a callback passed to an array iteration method. A call
+ * in a loop's *head* (`for (const p of await out.copyPages(src, all))`) runs
+ * once and is not flagged. `tests/unit/lint-rebuild-copier.test.ts` proves the
+ * rule fires.
+ */
+const PER_PAGE_COPIER_METHODS = 'copyPages|embedPage|embedPages|embedPdf';
+const PER_PAGE_COPIER_CALL = `CallExpression[callee.property.name=/^(${PER_PAGE_COPIER_METHODS})$/]`;
+const PER_PAGE_COPIER_MESSAGE =
+  'No copyPages/embedPage/embedPages/embedPdf inside a loop: each call builds a new object ' +
+  'copier, duplicating shared resources and leaking orphan page copies (HRD-40, M1). Use one ' +
+  'copier via premapSourcePages + copyPageInto in src/core/pdf/rebuild.ts, or one call for ' +
+  'all pages outside the loop.';
+const PER_PAGE_COPIER_RULES = [
+  'ForStatement > .body',
+  'ForOfStatement > .body',
+  'ForInStatement > .body',
+  'WhileStatement > .body',
+  'DoWhileStatement > .body',
+  'CallExpression[callee.property.name=/^(forEach|map|flatMap|reduce|reduceRight|filter|some|every|find|findIndex)$/] > :function'
+].map(loop => ({ selector: `${loop} ${PER_PAGE_COPIER_CALL}`, message: PER_PAGE_COPIER_MESSAGE }));
+
 export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
@@ -91,6 +122,28 @@ export default tseslint.config(
     rules: {
       'no-restricted-globals': ['error', ...LAYER_GLOBALS],
       'no-restricted-properties': 'off'
+    }
+  },
+  {
+    // HRD-40: one object copier per rebuild. rebuild.ts *is* that copier.
+    files: ['src/**/*.{ts,tsx}'],
+    ignores: ['src/core/pdf/rebuild.ts'],
+    rules: {
+      'no-restricted-syntax': ['error', ...PER_PAGE_COPIER_RULES]
+    }
+  },
+  {
+    // HRD-60 / AUDIT-2026-10-01 pattern 8: every async effect has an error state. A promise
+    // nobody awaits or catches turns a failure into an unhandled rejection the user never
+    // sees (UI-2, X-11, X-12). Type-aware, so it runs only on src/ (tsconfig.json); a
+    // deliberate fire-and-forget is spelled `void promise` with its errors handled inside.
+    files: ['src/**/*.{ts,tsx}'],
+    languageOptions: {
+      parserOptions: { projectService: true, tsconfigRootDir: import.meta.dirname }
+    },
+    rules: {
+      '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-misused-promises': 'error'
     }
   },
   {

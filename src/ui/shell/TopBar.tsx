@@ -97,8 +97,10 @@ export function TopBar() {
         />
         <select
           value={currentLocale.value}
+          // setLocale never rejects: a dictionary that fails to load leaves the
+          // current locale in place.
           onChange={e =>
-            setLocale(
+            void setLocale(
               (e.currentTarget as HTMLSelectElement).value as Parameters<typeof setLocale>[0]
             )
           }
@@ -145,7 +147,8 @@ export function TopBar() {
                   downloads
                 )
           }
-          aria-describedby={trustTooltip.anchor ? trustTooltipId : undefined}
+          // UI-11: no aria-describedby — the bubble only repeats the claim the
+          // accessible name already carries, so describing it would read it twice.
           {...trustTooltip.triggerProps}
         >
           {/* Below 600px the chip collapses to its shield (GAP-3); the full

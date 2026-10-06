@@ -376,7 +376,13 @@ export default defineConfig(() => {
       rollupOptions: {
         input,
         output: {
-          entryFileNames: '[name].js',
+          // Audit 2026-10-01 PLT-1: on the website every entry script is
+          // content-hashed like every chunk, so a page can only ever load the
+          // scripts of its own build — never a stale `editor.js` from the HTTP
+          // cache or a service worker's cache after a deploy. The extension
+          // keeps stable names: its manifest names `background.js`, and a
+          // package is installed whole, so it has no mixed-version state.
+          entryFileNames: isAnyExt ? '[name].js' : '[name]-[hash].js',
           chunkFileNames: 'assets/[name]-[hash].js',
           assetFileNames: 'assets/[name]-[hash][extname]'
         }

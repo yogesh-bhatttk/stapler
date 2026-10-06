@@ -23,6 +23,7 @@ tests/fixtures/*
 !tests/fixtures/sample.png
 !tests/fixtures/sample.webp
 !tests/fixtures/sample.tiff
+!tests/fixtures/multipage.tiff
 !tests/fixtures/sample.heic
 !tests/fixtures/photo-rotated.heic
 !tests/fixtures/face-chip.png
@@ -33,3 +34,6 @@ tests/fixtures/*
 # Agent worktrees (see eslint.config.js ignores) — transient per-session tooling
 # artifacts, never part of the codebase itself.
 .claude/worktrees/
+
+# Merge leftovers (AUDIT-2026-10-01 RT-10)
+*.orig

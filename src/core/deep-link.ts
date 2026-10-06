@@ -41,6 +41,15 @@ export const PDF_TARGET_BOUNDS: SizeBounds = { minBytes: 10_000, maxBytes: 2_000
  */
 export const IMAGE_TARGET_BOUNDS: SizeBounds = { minBytes: 5_000, maxBytes: 50_000_000 };
 
+/**
+ * PDF to Images' per-image target, typed in KB, is inside
+ * {@link IMAGE_TARGET_BOUNDS} — the same rule {@link validateSizeParam} applies
+ * to every other target-size field.
+ */
+export function targetKbInRange(kb: number): boolean {
+  return validateSizeParam({ amount: kb, unit: 'KB' }, IMAGE_TARGET_BOUNDS).ok;
+}
+
 /** Longest-side limits for the `max` parameter, in pixels. */
 export const MAX_DIMENSION_BOUNDS = { min: 16, max: 16_384 } as const;
 
@@ -55,7 +64,8 @@ const SIZE_PATTERN = /^(\d{1,10}(?:[.,]\d{1,4})?|[.,]\d{1,4})(k|kb|kib|m|mb|mib)
 
 /**
  * Parses `100KB`, `100 kb`, `1.5MB`, `1,5 MB`, `250` (KB when no unit is
- * given — the unit these limits are almost always quoted in) and clamps the
+ * given — the unit these limits are almost always quoted in), `500KiB` and
+ * `1MiB` (binary, scaled by 1024 — see below) and clamps the
  * result into `bounds`. Returns null for anything else: an empty value,
  * negative or zero sizes, other units, stray characters, `Infinity`, `NaN`.
  *
@@ -75,10 +85,52 @@ export function parseSizeParam(
   const amount = Number(match[1].replace(',', '.'));
   if (!Number.isFinite(amount) || amount <= 0) return null;
   const unit: SizeUnit = match[2]?.startsWith('m') ? 'MB' : 'KB';
+  // IMG-11: KiB and MiB are binary units. A portal that says "500 KiB" means
+  // 512,000 bytes, so it is scaled by 1024 and expressed in (decimal) KB,
+  // rounded *down* — a limit must never be pre-filled above what it allows.
+  const binary = match[2]?.endsWith('ib') ?? false;
+  if (binary) {
+    const bytes = amount * (unit === 'MB' ? 1024 * 1024 : 1024);
+    if (bytes < bounds.minBytes) return fromBytes(bounds.minBytes);
+    if (bytes > bounds.maxBytes) return fromBytes(bounds.maxBytes);
+    return { amount: Math.floor((bytes / UNIT_SCALE.KB) * 100) / 100, unit: 'KB' };
+  }
   const bytes = amount * UNIT_SCALE[unit];
   if (bytes < bounds.minBytes) return fromBytes(bounds.minBytes);
   if (bytes > bounds.maxBytes) return fromBytes(bounds.maxBytes);
   return { amount: roundAmount(amount), unit };
+}
+
+/**
+ * The same size in another unit (IMG-2): switching "0.5 MB" to KB reads
+ * "500 KB", not "0.5 KB". Rounded to two decimals, like every amount here.
+ */
+export function convertSizeUnit(size: SizeParam, unit: SizeUnit): SizeParam {
+  if (size.unit === unit) return size;
+  if (!Number.isFinite(size.amount)) return { amount: size.amount, unit };
+  return { amount: roundAmount((size.amount * UNIT_SCALE[size.unit]) / UNIT_SCALE[unit]), unit };
+}
+
+export type SizeValidation =
+  | { ok: true; bytes: number }
+  | { ok: false; reason: 'invalid' | 'too-small' | 'too-large'; min: SizeParam; max: SizeParam };
+
+/**
+ * Whether a typed target is usable as it stands (IMG-2, IMG-12). An input
+ * shows exactly what will run, so an out-of-range value is not silently
+ * replaced by the last good one: it is reported, with the range, and the run
+ * refuses it until it is fixed.
+ */
+export function validateSizeParam(size: SizeParam, bounds: SizeBounds): SizeValidation {
+  const min = fromBytes(bounds.minBytes);
+  const max = fromBytes(bounds.maxBytes);
+  if (!Number.isFinite(size.amount) || size.amount <= 0) {
+    return { ok: false, reason: 'invalid', min, max };
+  }
+  const bytes = sizeParamBytes(size);
+  if (bytes < bounds.minBytes) return { ok: false, reason: 'too-small', min, max };
+  if (bytes > bounds.maxBytes) return { ok: false, reason: 'too-large', min, max };
+  return { ok: true, bytes };
 }
 
 /** The whole-unit form of a byte count: MB when it divides evenly, else KB. */

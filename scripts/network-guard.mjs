@@ -55,13 +55,32 @@
  *
  * Allowed without analysis: `src/core/ocr/model.ts` and
  * `src/core/ocr/download.ts`, the one consented, pinned, hash-verified model
- * download. `src/core/ocr/devanagariFont.ts` may call `fetch()` only with a
+ * download, and `src/core/workers/network-guard.ts`, which wraps the network
+ * APIs inside workers so they refuse remote URLs (audit 2026-10-01 PLT-2). `src/platform/pwa/passthrough.ts` forwards a
+ * held same-origin GET unchanged from the web service worker (PLT-4). `src/core/ocr/devanagariFont.ts` may call `fetch()` only with a
  * statically same-origin target (its bundled font).
  */
 import ts from 'typescript';
 
 /** The one documented exception to zero-network (CLAUDE.md invariant #1). */
-export const NETWORK_ALLOWED_FILES = new Set(['src/core/ocr/model.ts', 'src/core/ocr/download.ts']);
+export const NETWORK_ALLOWED_FILES = new Set([
+  'src/core/ocr/model.ts',
+  'src/core/ocr/download.ts',
+  // Audit 2026-10-01 PLT-2: the worker-side backstop. It names `fetch`,
+  // `XMLHttpRequest` and `importScripts` only to *replace* them with versions
+  // that refuse remote URLs; the URL rule it applies lives in the analysed
+  // `src/core/workers/network-policy.ts`.
+  'src/core/workers/network-guard.ts',
+  // Audit 2026-10-01 PLT-4 follow-up: the web service worker's passthrough.
+  // A request it held after a restart and then found not to be a kept file
+  // is forwarded to the network unchanged (`fetch(event.request)`), exactly as
+  // if the worker had not intercepted it. No static check can prove a runtime
+  // `Request` same-origin, so the file proves it itself: it forwards only a
+  // GET to the worker's own origin (`isPassThroughAllowed`, unit-tested in
+  // tests/unit/pwa-sw-routing.test.ts) and does nothing else — no URL is
+  // built, no header added, nothing stored. Never a remote URL.
+  'src/platform/pwa/passthrough.ts'
+]);
 
 /**
  * Files that may call `fetch()` — but only on a target the analyzer can prove

@@ -32,6 +32,7 @@
  * are methods here rather than a sixth and seventh worker: this worker is where
  * the Office-format libraries live, one lazy chunk each.
  */
+import './network-guard'; // PLT-2: first, so it wraps the network APIs before any library runs
 import * as Comlink from 'comlink';
 import { loadLocale, tPlural, translate } from '../i18n';
 import type { LocaleAware } from './client';

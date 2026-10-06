@@ -7,6 +7,7 @@
  */
 
 import { signal } from '@preact/signals';
+import { useEffect, useState } from 'preact/hooks';
 import { translate } from '../../core/i18n';
 import { useActiveTool } from '../useActiveTool';
 import { activeDoc } from '../../core/store';
@@ -53,6 +54,7 @@ import { SideBySidePanel } from '../tools/side-by-side/SideBySidePanel';
 import { GrayscalePanel } from '../tools/grayscale/GrayscalePanel';
 import { RepairPanel } from '../tools/repair/RepairPanel';
 import styles from './OptionsPanel.module.css';
+import shellStyles from './AppShell.module.css';
 
 const BODIES: Record<string, () => preact.JSX.Element | null> = {
   merge: MergePanel,
@@ -101,8 +103,58 @@ const BODIES: Record<string, () => preact.JSX.Element | null> = {
 /** Whether the bottom-sheet form of the panel is folded down to its title row. */
 export const optionsSheetCollapsed = signal(false);
 
+/**
+ * DS-10 AC: "no overlap between the options sheet and the preview".
+ *
+ * Below 1100px the panel is an absolutely positioned bottom sheet laid over the
+ * lower part of the canvas, ending where the action bar starts — exactly the
+ * canvas wrapper's bottom edge. Its height follows its content and the
+ * Hide/Show toggle, so it is measured, and the wrapper reserves that much at
+ * its bottom: the preview, the page grid and every other canvas view shrink to
+ * the space above the sheet, and SinglePageView's own stage observer re-fits
+ * the page to it. Folding the sheet gives the space straight back. As the side
+ * panel (>= 1100px) it takes its own room in the flex row, so nothing is
+ * reserved.
+ *
+ * An inline style rather than a custom property: every `var()` must be a
+ * declared design token (check-invariants), and this is a measurement. No
+ * transition — an animated padding would re-render the page every frame.
+ */
+function useSheetReservation(el: HTMLElement | null) {
+  useEffect(() => {
+    // The shell's `.main` row holds both the panel and the canvas.
+    const wrapper = el?.parentElement?.querySelector<HTMLElement>(`.${shellStyles.canvasWrapper}`);
+    if (!el || !wrapper) return;
+    let frame = 0;
+    const measure = () => {
+      frame = 0;
+      const sheet = getComputedStyle(el).position === 'absolute';
+      const next = sheet ? `${Math.ceil(el.getBoundingClientRect().height)}px` : '';
+      if (wrapper.style.paddingBottom !== next) wrapper.style.paddingBottom = next;
+    };
+    // One write per frame however many resize ticks arrive (UI-7).
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(measure);
+    };
+    measure();
+    const observer = new ResizeObserver(schedule);
+    observer.observe(el);
+    // Crossing the breakpoint flips `position` even if the size happens not to change.
+    const sheetQuery = window.matchMedia('(max-width: 1100px)');
+    sheetQuery.addEventListener('change', schedule);
+    return () => {
+      observer.disconnect();
+      sheetQuery.removeEventListener('change', schedule);
+      if (frame) cancelAnimationFrame(frame);
+      wrapper.style.paddingBottom = '';
+    };
+  }, [el]);
+}
+
 export function OptionsPanel() {
   const tool = useActiveTool();
+  const [panelEl, setPanelEl] = useState<HTMLElement | null>(null);
+  useSheetReservation(panelEl);
   if (!tool || !tool.needsOptionsPanel) return null;
 
   const Body = BODIES[tool.id];
@@ -112,6 +164,7 @@ export function OptionsPanel() {
 
   return (
     <aside
+      ref={setPanelEl}
       className={`${styles.panel} ${collapsed ? styles.collapsed : ''}`}
       aria-label={translate('{tool} options', { tool: translate(tool.title) })}
     >

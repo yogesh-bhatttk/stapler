@@ -4,6 +4,7 @@
  * Off the main thread because a 12MP phone photo is ~48MB of RGBA and the
  * threshold pass touches every pixel twice — far past the 50ms main-thread budget.
  */
+import './network-guard'; // PLT-2: first, so it wraps the network APIs before any library runs
 import * as Comlink from 'comlink';
 import { loadLocale, translate } from '../i18n';
 import type { LocaleAware } from './client';
@@ -25,6 +26,8 @@ import {
 import { checkpoint, releaseJobHandlesAfterCall, type JobHandle } from './protocol';
 import { internal } from '../errors';
 import { diffText, type DiffChunk } from '../diff';
+import { comparePagesApi, type ComparePagesJob } from './compare-pages';
+import { signaturePixelsApi, type SignaturePixelsJob } from './signature-pixels';
 
 export interface ScanSettings {
   preset: Preset;
@@ -38,7 +41,9 @@ export interface ScanSettings {
   despeckle: boolean;
 }
 
-export interface CVJob extends LocaleAware {
+// X-6 — the Compare exports' per-page diff and compression (see compare-pages.ts).
+// HRD-27 H3 — signature trimming and paper-white removal (see signature-pixels.ts).
+export interface CVJob extends LocaleAware, ComparePagesJob, SignaturePixelsJob {
   detectCorners(imageData: ImageData): CornerDetection;
   processScan(imageData: ImageData, settings: ScanSettings, job?: JobHandle): Promise<ImageData>;
   trimBox(imageData: ImageData): { x: number; y: number; width: number; height: number } | null;
@@ -67,6 +72,8 @@ function bitmapToImageData(bitmap: ImageBitmap): ImageData {
 
 const api: CVJob = {
   setLocale: loadLocale,
+  ...comparePagesApi,
+  ...signaturePixelsApi,
   diffText(oldText, newText) {
     return diffText(oldText, newText);
   },

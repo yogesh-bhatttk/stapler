@@ -25,7 +25,8 @@ import {
   commit,
   forgetDocumentInHistory,
   historySourceIds,
-  historySourceRefCount
+  historySourceRefCount,
+  rebaseHistory
 } from './history';
 import { normalizeRotation } from './rotation';
 import { checkOpenCapacity, knownSourceBytes, type OpenCapacity } from './workspace-limits';
@@ -109,6 +110,13 @@ export interface StaplerDoc {
    * not push undo history or flip `dirty`.
    */
   baseline: PageRef[];
+  /**
+   * AUDIT-2026-10-01 RT-1 — `annotations` as of the last successful save, so
+   * undo/redo can tell whether the state it lands on differs from the file on
+   * disk. Absent until the first save: every open path starts a document with
+   * no annotations, so absent means `[]`.
+   */
+  baselineAnnotations?: Annotation[];
 }
 
 /** Workspace documents — what the file tabs show. */
@@ -437,19 +445,39 @@ export function switchDocument(id: string): void {
  * not a user edit, so it bypasses `mutateDoc`/`commit()` on purpose: it must not
  * flip `dirty` or push an undo entry.
  */
-export function refreshBaseline(docId: string, pages: PageRef[]): void {
+export function refreshBaseline(
+  docId: string,
+  pages: PageRef[],
+  /** The annotations that were written with `pages` — what is now on disk. */
+  annotations?: Annotation[]
+): void {
+  const doc = documents.value.find(d => d.id === docId);
+  if (!doc) return;
+  // The written annotations become the anchor. A caller that does not say
+  // which were written gets the live ones only when the page list is still
+  // the one written; otherwise the previous anchor stays.
+  const baselineAnnotations =
+    annotations ?? (doc.pages === pages ? doc.annotations : doc.baselineAnnotations);
+  // RT-1 (AUDIT-2026-10-01) — undo past this save must land dirty against
+  // what is now on disk, so the whole history is re-anchored here too.
+  rebaseHistory(docId, pages, baselineAnnotations);
   documents.value = documents.value.map(d =>
     d.id === docId
       ? {
           ...d,
           baseline: pages,
+          baselineAnnotations,
           // RT-17 — what was just written is the document as it stands, so it
           // no longer has unsaved changes. Before, `dirty` was never cleared:
           // the dot stayed after a save and closing the tab still asked to
           // discard, which trains users to click through that prompt. Only
-          // when the saved page list *is* the current one, though — an edit
-          // made while the save was in flight is still unsaved.
-          dirty: d.pages === pages ? false : d.dirty
+          // when the written pages *and* annotations are the current ones,
+          // though — an edit made while the save was in flight (an annotation
+          // added under the save dialog, say) is still unsaved.
+          dirty:
+            d.pages === pages && (annotations === undefined || d.annotations === annotations)
+              ? false
+              : d.dirty
         }
       : d
   );

@@ -269,10 +269,38 @@ export function topLevelSlices(tree: OutlineEntry[], pageKeys: string[]): Bookma
     .map(([pageIndex, title]) => ({ title, pageIndex }));
 }
 
-/** Flat list of `[entry, depth]` pairs, in the order the panel renders rows. */
-export function flattenEntries(
-  tree: OutlineEntry[],
-  depth = 0
-): { entry: OutlineEntry; depth: number }[] {
-  return tree.flatMap(entry => [{ entry, depth }, ...flattenEntries(entry.children, depth + 1)]);
+/**
+ * Which of the row's tree edits would change anything (HRD-24 §12.10). Each
+ * flag is false exactly when the matching edit is a no-op: `moveEntry` swaps
+ * only within one sibling list, `indentEntry` needs a sibling above to nest
+ * under, and `outdentEntry` does nothing at the top level.
+ */
+export interface EntryMoves {
+  up: boolean;
+  down: boolean;
+  indent: boolean;
+  outdent: boolean;
+}
+
+export interface FlatEntry {
+  entry: OutlineEntry;
+  depth: number;
+  moves: EntryMoves;
+}
+
+/** Flat list of rows, in the order the panel renders them, with what each row can do. */
+export function flattenEntries(tree: OutlineEntry[], depth = 0): FlatEntry[] {
+  return tree.flatMap((entry, index) => [
+    {
+      entry,
+      depth,
+      moves: {
+        up: index > 0,
+        down: index < tree.length - 1,
+        indent: index > 0,
+        outdent: depth > 0
+      }
+    },
+    ...flattenEntries(entry.children, depth + 1)
+  ]);
 }

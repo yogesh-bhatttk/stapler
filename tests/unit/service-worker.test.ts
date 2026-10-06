@@ -110,9 +110,16 @@ function installChromeMock(
     chromeMock as unknown as typeof chrome;
 }
 
+let worker: typeof import('../../src/background/service-worker') | undefined;
+
 async function loadServiceWorker(): Promise<void> {
   vi.resetModules();
-  await import('../../src/background/service-worker');
+  worker = await import('../../src/background/service-worker');
+}
+
+/** Listeners are synchronous (HRD-60); wait for the task the last one started. */
+async function settle(): Promise<void> {
+  await worker?.settled();
 }
 
 describe('service worker: openEditor Firefox fallback', () => {
@@ -128,7 +135,8 @@ describe('service worker: openEditor Firefox fallback', () => {
     installChromeMock(vi.fn().mockResolvedValue([{ tabId: 42, windowId: 7 }]));
     await loadServiceWorker();
 
-    await clickListener?.();
+    clickListener?.();
+    await settle();
 
     expect(chromeMock.runtime.getContexts).toHaveBeenCalled();
     expect(chromeMock.tabs.update).toHaveBeenCalledWith(42, { active: true });
@@ -140,7 +148,8 @@ describe('service worker: openEditor Firefox fallback', () => {
     installChromeMock(vi.fn().mockResolvedValue([]));
     await loadServiceWorker();
 
-    await clickListener?.();
+    clickListener?.();
+    await settle();
 
     expect(chromeMock.tabs.create).toHaveBeenCalledWith({
       url: 'chrome-extension://test-id/editor.html',
@@ -152,7 +161,8 @@ describe('service worker: openEditor Firefox fallback', () => {
     installChromeMock(undefined);
     await loadServiceWorker();
 
-    await clickListener?.();
+    clickListener?.();
+    await settle();
 
     expect(chromeMock.tabs.create).toHaveBeenCalledWith({
       url: 'chrome-extension://test-id/editor.html',
@@ -184,7 +194,8 @@ describe('service worker: omnibox keyword (GAP-7)', () => {
     installChromeMock(vi.fn().mockResolvedValue([]));
     await loadServiceWorker();
 
-    await inputEntered?.('compress', 'newForegroundTab');
+    inputEntered?.('compress', 'newForegroundTab');
+    await settle();
 
     expect(chromeMock.tabs.create).toHaveBeenCalledWith({
       url: 'chrome-extension://test-id/editor.html#/tool/compress',
@@ -196,7 +207,8 @@ describe('service worker: omnibox keyword (GAP-7)', () => {
     installChromeMock(vi.fn().mockResolvedValue([]));
     await loadServiceWorker();
 
-    await inputEntered?.('merge', 'currentTab');
+    inputEntered?.('merge', 'currentTab');
+    await settle();
 
     expect(chromeMock.tabs.update).toHaveBeenCalledWith({
       url: 'chrome-extension://test-id/editor.html#/tool/merge'
@@ -210,7 +222,8 @@ describe('service worker: omnibox keyword (GAP-7)', () => {
     });
     await loadServiceWorker();
 
-    await inputEntered?.('sign', 'currentTab');
+    inputEntered?.('sign', 'currentTab');
+    await settle();
 
     expect(chromeMock.runtime.sendMessage).toHaveBeenCalledWith({
       type: 'stapler:navigate',
@@ -230,7 +243,8 @@ describe('service worker: omnibox keyword (GAP-7)', () => {
     });
     await loadServiceWorker();
 
-    await inputEntered?.('sign', 'newForegroundTab');
+    inputEntered?.('sign', 'newForegroundTab');
+    await settle();
 
     expect(chromeMock.tabs.update).toHaveBeenCalledWith(42, {
       url: 'chrome-extension://test-id/editor.html#/tool/sign'
@@ -243,7 +257,8 @@ describe('service worker: omnibox keyword (GAP-7)', () => {
     installChromeMock(vi.fn().mockResolvedValue([]));
     await loadServiceWorker();
 
-    await inputEntered?.('zzzzqqqq', 'newForegroundTab');
+    inputEntered?.('zzzzqqqq', 'newForegroundTab');
+    await settle();
 
     expect(chromeMock.tabs.create).toHaveBeenCalledWith({
       url: 'chrome-extension://test-id/editor.html#/',
@@ -267,12 +282,14 @@ describe('service worker: What’s new on update (GAP-7)', () => {
     installChromeMock(vi.fn().mockResolvedValue([]), { version: '0.2.1' });
     await loadServiceWorker();
 
-    await installedListener?.({ reason: 'update', previousVersion: '0.2.0' });
+    installedListener?.({ reason: 'update', previousVersion: '0.2.0' });
+    await settle();
     expect(chromeMock.tabs.create).toHaveBeenCalledWith({ url: whatsNewUrl });
     expect(shownVersion.value).toBe('0.2.1');
 
     chromeMock.tabs.create.mockClear();
-    await installedListener?.({ reason: 'update', previousVersion: '0.2.0' });
+    installedListener?.({ reason: 'update', previousVersion: '0.2.0' });
+    await settle();
     expect(chromeMock.tabs.create).not.toHaveBeenCalled();
   });
 
@@ -280,7 +297,8 @@ describe('service worker: What’s new on update (GAP-7)', () => {
     installChromeMock(vi.fn().mockResolvedValue([]));
     await loadServiceWorker();
 
-    await installedListener?.({ reason: 'install' });
+    installedListener?.({ reason: 'install' });
+    await settle();
     expect(chromeMock.tabs.create).toHaveBeenCalledTimes(1);
     expect(chromeMock.tabs.create).toHaveBeenCalledWith({
       url: 'chrome-extension://test-id/editor.html#/welcome'
@@ -292,7 +310,8 @@ describe('service worker: What’s new on update (GAP-7)', () => {
     installChromeMock(vi.fn().mockResolvedValue([]), { version: '0.2.1' });
     await loadServiceWorker();
 
-    await installedListener?.({ reason: 'update', previousVersion: '0.2.1' });
+    installedListener?.({ reason: 'update', previousVersion: '0.2.1' });
+    await settle();
     expect(chromeMock.tabs.create).not.toHaveBeenCalled();
   });
 
@@ -300,7 +319,8 @@ describe('service worker: What’s new on update (GAP-7)', () => {
     installChromeMock(vi.fn().mockResolvedValue([]), { version: '99.0.0' });
     await loadServiceWorker();
 
-    await installedListener?.({ reason: 'update', previousVersion: '0.2.1' });
+    installedListener?.({ reason: 'update', previousVersion: '0.2.1' });
+    await settle();
     expect(chromeMock.tabs.create).not.toHaveBeenCalled();
   });
 });

@@ -123,7 +123,7 @@ export function InsertPanel() {
         )}
       </Field>
 
-      <Button variant="secondary" icon={FilePlus} onClick={addFiles} disabled={busy}>
+      <Button variant="secondary" icon={FilePlus} onClick={() => void addFiles()} disabled={busy}>
         {t('Choose PDFs or images to insert')}
       </Button>
 

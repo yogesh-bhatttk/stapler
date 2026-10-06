@@ -91,3 +91,57 @@ export function pageDisplayFrame(page: PDFPage, rotation?: number): DisplayFrame
   const box = visiblePageBox(page);
   return displayFrame(box.width, box.height, rotation ?? page.getRotation().angle, box.x, box.y);
 }
+
+/**
+ * A point in raw page space (PDF user space, bottom-left origin) → the same
+ * point in display space (top-left origin, `/Rotate` applied). The exact inverse
+ * of `displayPointToPage` for the same frame.
+ */
+export function pagePointToDisplay(
+  frame: DisplayFrame,
+  pageX: number,
+  pageY: number
+): { x: number; y: number } {
+  const { rawWidth: w, rawHeight: h, originX, originY } = frame;
+  const dx = pageX - originX;
+  const dy = pageY - originY;
+  switch (frame.rotation) {
+    case 90:
+      return { x: dy, y: dx };
+    case 180:
+      return { x: w - dx, y: dy };
+    case 270:
+      return { x: h - dy, y: w - dx };
+    default:
+      return { x: dx, y: h - dy };
+  }
+}
+
+/**
+ * HRD-42 — reading geometry *back* into the UI (M2's reverse direction). A
+ * rectangle in raw page space, such as a widget's `/Rect`, as top-left
+ * fractions of the page as pdf.js displays it: relative to the visible box
+ * (CropBox ∩ MediaBox, with its origin) and turned by `/Rotate`. This is what
+ * pdf.js's `viewport.convertToViewportRectangle` gives, divided by the
+ * viewport's size. Not clipped: a widget hanging over the crop edge reports the
+ * part outside as fractions below 0 or above 1, just as pdf.js places it.
+ */
+export function pageRectToDisplayFractions(
+  frame: DisplayFrame,
+  rect: PageBox
+): { x: number; y: number; width: number; height: number } {
+  const corners = [
+    pagePointToDisplay(frame, rect.x, rect.y),
+    pagePointToDisplay(frame, rect.x + rect.width, rect.y + rect.height)
+  ];
+  const x0 = Math.min(corners[0].x, corners[1].x);
+  const x1 = Math.max(corners[0].x, corners[1].x);
+  const y0 = Math.min(corners[0].y, corners[1].y);
+  const y1 = Math.max(corners[0].y, corners[1].y);
+  return {
+    x: x0 / frame.displayWidth,
+    y: y0 / frame.displayHeight,
+    width: (x1 - x0) / frame.displayWidth,
+    height: (y1 - y0) / frame.displayHeight
+  };
+}

@@ -9,7 +9,7 @@ import { tKey, tPlural, translate } from '../../core/i18n';
  */
 import { platform } from '../../platform/current';
 import { confirmAction, notify, requestExportReview } from '../../core/notify';
-import { internal } from '../../core/errors';
+import { internal, isCancellation } from '../../core/errors';
 import { unzipSync, zipSync } from 'fflate';
 import {
   applyRedactions,
@@ -30,8 +30,10 @@ import {
   planSizeSplitBoundaries,
   sanitizeFileStem,
   splitBoundaries,
+  splitPointsError,
   splitDocument,
   grayscaleDocument,
+  progressBand,
   repairDocument
 } from '../../core/operations';
 import { grayscaleReport, grayscaleSettings } from './grayscale/state';
@@ -46,16 +48,23 @@ import {
   registerSource,
   replaceWithSource,
   selectedPageKeys,
+  sources,
   type PageRef,
   type StaplerDoc
 } from '../../core/store';
 import { alignPages, type PageAlignment } from '../../core/page-alignment';
-import { formatBytes } from '../components/Feedback';
+import {
+  formatBytes,
+  formatBytesUp,
+  formatTargetMiss,
+  formatTargetMisses
+} from '../components/Feedback';
 import type { JobOptions } from '../../core/workers/protocol';
 import { createJobHandle } from '../../core/workers/protocol';
 import { findTool, type ToolId } from '../../core/tools';
 import { readSourceBytes, writeSourceBytes } from '../../core/opfs';
 import {
+  compressColour,
   compressMode,
   compressSettings,
   compressTarget,
@@ -63,6 +72,7 @@ import {
   lastCompressionResult,
   targetSizeBytes
 } from './compress/state';
+import { applyGrayLever, type CompressColour, type GreyGap } from '../../core/compress-gray';
 import {
   annotateFlattenOnExport,
   imagesToPdfSettings,
@@ -74,9 +84,34 @@ import {
   extractImagesSettings
 } from './state';
 import { extractSettings } from './extract/state';
-import { pdfToImageReport } from './convert/pdf-to-img-state';
-import { imageSizeRequest, imageSizeResult, imageSizeSettings } from './image-size/state';
-import { jpegPassthrough, resizeImageFile } from '../../core/image';
+import {
+  exactPageOutputs,
+  exactSizeOverCap,
+  exportedPageSizes,
+  pdfExactRequest,
+  pdfToImageReport,
+  sizedArchiveSuffix
+} from './convert/pdf-to-img-state';
+import { exactSizeLimitMessage, exactSizeOverLimit } from '../../core/render-limits';
+import {
+  describeTargetMiss,
+  exactOutputFor,
+  exactSizeProblem,
+  imageSizeRequest,
+  imageSizeResult,
+  imageSizeSettings
+} from './image-size/state';
+import { EXACT_SIDE_BOUNDS, matchesExactSize } from '../../core/image-target';
+import { orientedHeaderSizeOf } from '../../core/raster-decode';
+import { imageOriginalSatisfies, resizeImageFile } from '../../core/image';
+import { chooseSmaller } from '../../core/size-guard';
+import {
+  IMAGE_TARGET_BOUNDS,
+  PDF_TARGET_BOUNDS,
+  targetKbInRange,
+  validateSizeParam,
+  type SizeBounds
+} from '../../core/deep-link';
 import { extractImagesReport, summarize } from './extract-images/state';
 import { formFields, formValues, formulas } from './sign/state';
 import { applyFormulas } from '../../core/formula';
@@ -123,10 +158,106 @@ import {
 import { runOcr } from '../../core/ocr/runOcr';
 import { renderWorker } from '../../core/workers';
 import { altTextMap } from './acc/state';
+import { fastWebViewExport, loadExportSettings } from './export-settings';
+
+/**
+ * IMG-2 / IMG-12 — a target-size field holds something outside its range (the
+ * panel already shows why, inline). Nothing runs: running with the last good
+ * value, or a clamped one, would use a number the person cannot see.
+ */
+function notifyExactSizeProblem(problem: 'missing' | 'invalid'): void {
+  notify(
+    'warning',
+    problem === 'missing'
+      ? translate('Enter a width or a height.')
+      : translate('Enter a whole number of pixels between {min} and {max}.', {
+          min: EXACT_SIDE_BOUNDS.min,
+          max: EXACT_SIDE_BOUNDS.max
+        })
+  );
+}
+
+function notifyInvalidTarget(bounds: SizeBounds): void {
+  notify(
+    'warning',
+    translate('Enter a size between {min} and {max}.', {
+      min: formatBytes(bounds.minBytes),
+      max: formatBytes(bounds.maxBytes)
+    }),
+    {
+      detail: translate('Fix the target size in the options panel, then try again.')
+    }
+  );
+}
+
+/**
+ * The document differs from the single file it was opened from: other pages,
+ * order or rotation, annotations, or a crop on one of its own pages. Panel
+ * settings (watermark, header/footer, N-up) and crops on other documents'
+ * pages are not edits of this document.
+ */
+function hasDocumentEdits(doc: StaplerDoc): boolean {
+  const first = doc.pages[0];
+  if (!first) return true;
+  const source = sources.value[first.sourceDocId];
+  if (!source || doc.pages.length !== source.pageCount) return true;
+  if (doc.annotations.length > 0) return true;
+  return doc.pages.some(
+    (p, i) =>
+      p.sourceDocId !== first.sourceDocId ||
+      p.sourceIndex !== i ||
+      p.rotation !== 0 ||
+      p.key in cropBoxes.value
+  );
+}
 
 /** Strips the extension so suffixes can be appended without doubling `.pdf`. */
 function stem(name: string): string {
   return name.replace(/\.[^.]+$/, '') || 'document';
+}
+
+/**
+ * OPS-19 — the note on Compress's success toast after a grey pass. Never claims
+ * the whole file was converted when `gaps` (pages left in colour) says otherwise.
+ */
+function greyConvertedNote(
+  colour: Exclude<CompressColour, 'keep'>,
+  gaps: readonly GreyGap[],
+  pageCount: number
+): string {
+  if (gaps.length === 0) {
+    return colour === 'bw'
+      ? translate('Converted to black and white.')
+      : translate('Converted to shades of grey.');
+  }
+  if (gaps.length >= pageCount) {
+    return translate('No page could be converted, so only compression was applied.');
+  }
+  const pages = gaps.map(g => g.pageIndex + 1).join(', ');
+  return colour === 'bw'
+    ? translate('Converted to black and white, except pages {pages}.', { pages })
+    : translate('Converted to shades of grey, except pages {pages}.', { pages });
+}
+
+/** OPS-19 — each page grey left in colour, and why, mirroring the Grayscale panel's report. */
+function greyGapDetail(gaps: readonly GreyGap[]): string {
+  const lines = gaps.map(gap => {
+    const reasons = [...gap.reasons];
+    if (gap.undecodableImages > 0) {
+      reasons.push(
+        tPlural(
+          '{count} images use an encoding (JPEG 2000 or JBIG2) that cannot be decoded here',
+          gap.undecodableImages
+        )
+      );
+    }
+    if (reasons.length === 0) reasons.push(translate('could not be converted directly'));
+    return translate('Page {page}: {reason}', {
+      page: gap.pageIndex + 1,
+      reason: reasons.join('; ')
+    });
+  });
+  return `${lines.join('. ')}.`;
 }
 
 /** What `applyProtection` decided, so `save` can describe the file honestly. */
@@ -276,10 +407,95 @@ async function applyProtection(
 export interface GrowthGuard {
   /** The original, pre-compression byte length — never the pre-restriction one. */
   maxBytes: number;
+  /**
+   * False keeps `maxBytes` as a ceiling for the fast-web-view rewrite only, and
+   * lets the file itself exceed it — for Protect, whose growth is the user's own
+   * explicit choice. Fast web view is dropped rather than allowed to push a
+   * compressed file past the original either way. Default true.
+   */
+  enforce?: boolean;
   /** English key, marked with `tKey` at construction; translated when shown. */
   title: string;
   /** English key, marked with `tKey` at construction; translated when shown. */
   detail: string;
+}
+
+/** What `save` tells a caller about the bytes it is about to write. */
+export interface FinalBytesInfo {
+  /** True when the written file was rewritten for fast web view (HRD-23). */
+  fastWebView: boolean;
+}
+
+type OnFinalBytes = (bytes: Uint8Array, info: FinalBytesInfo) => void;
+
+/**
+ * `applied`: rewritten for fast web view. `off`: the option is off, or this is
+ * not a PDF. `failed`: the rewrite threw, so the ordinary bytes are written.
+ * `dropped`: the rewrite would have made a compressed file larger than the
+ * original, so the ordinary bytes are written.
+ */
+type FastWebViewOutcome = 'applied' | 'off' | 'failed' | 'dropped';
+
+/**
+ * HRD-23 / DOC-08 — the opt-in fast-web-view rewrite of one finished PDF export.
+ *
+ * Done here, on the last unencrypted bytes, rather than in each worker save an
+ * export happens to run: an export is often several saves in a row (compose,
+ * then alt text, flatten, protection), and only the last decides the layout of
+ * the written file. Never fatal: if the rewrite fails, the ordinary bytes are
+ * written and the success message says fast web view was not applied.
+ */
+async function forFastWebView(
+  bytes: Uint8Array,
+  name: string,
+  job?: JobOptions
+): Promise<{ bytes: Uint8Array; outcome: FastWebViewOutcome }> {
+  if (!name.toLowerCase().endsWith('.pdf')) return { bytes, outcome: 'off' };
+  await loadExportSettings();
+  if (!fastWebViewExport.value) return { bytes, outcome: 'off' };
+  try {
+    const out = await processWorker.lease(api =>
+      api.saveForFastWebView(bytes, createJobHandle(job ?? {}))
+    );
+    return { bytes: out, outcome: 'applied' };
+  } catch (err) {
+    if (isCancellation(err)) throw err;
+    return { bytes, outcome: 'failed' };
+  }
+}
+
+/** The size part of a "Saved" detail line, plus a word when fast web view was not applied. */
+function fastWebViewNote(size: string, outcome: FastWebViewOutcome): string {
+  if (outcome === 'dropped') {
+    return translate(
+      '{size} · saved without fast web view, which would have made it larger than the original',
+      { size }
+    );
+  }
+  if (outcome === 'failed') {
+    return translate('{size} · fast web view could not be applied, so it was saved without it', {
+      size
+    });
+  }
+  return size;
+}
+
+/**
+ * The fast-web-view rewrite for the exports that write with
+ * `platform.saveFileAs` directly instead of `save` (images-to-pdf, md-to-pdf,
+ * repair, the Office-to-PDF conversions). Saves, and says so when fast web
+ * view had to be left out. Resolves `platform.saveFileAs`'s answer.
+ */
+async function saveDirectPdf(bytes: Uint8Array, name: string, job?: JobOptions): Promise<boolean> {
+  const fast = await forFastWebView(bytes, name, job);
+  const saved = await platform.saveFileAs(fast.bytes, name);
+  if (saved && fast.outcome === 'failed') {
+    notify(
+      'info',
+      translate('Fast web view could not be applied, so the file was saved without it.')
+    );
+  }
+  return saved;
 }
 
 /**
@@ -297,7 +513,7 @@ async function save(
   bytes: Uint8Array,
   name: string,
   job?: JobOptions,
-  onFinalBytes?: (bytes: Uint8Array) => void,
+  onFinalBytes?: OnFinalBytes,
   growthGuard?: GrowthGuard,
   // False for any export whose bytes are not a faithful rendering of
   // `doc.pages` as the document itself — a page subset (split), a derived
@@ -312,25 +528,58 @@ async function save(
   // pass through on their way to disk, rather than threaded through each
   // handler: a tool that forgot to pass it would quietly export an
   // unrestricted copy, which is the failure this whole path exists to prevent.
-  const result = await applyProtection(bytes, name, job, documentRestrictions(doc));
+  const restrictions = documentRestrictions(doc);
+  // HRD-23: fast web view is a layout rewrite of the unencrypted bytes, so it
+  // runs before protection — whose plain-xref, object-number-order re-save
+  // keeps the first-page-first numbering it produces.
+  const fast = await forFastWebView(bytes, name, job);
+  let fastWebView = fast.outcome;
+  let toProtect = fast.bytes;
+  // The fast-web-view ceiling is checked on the *unprotected* bytes, before
+  // anything is encrypted: what fast web view is answerable for is its own
+  // share of the growth (no object streams), not the AES pass that follows.
+  // Checking after encryption used to blame fast web view for Protect's
+  // bytes, and then ran a second full encryption pass over the plain bytes to
+  // find out — even with `enforce: false`, where the result was never going
+  // to be refused anyway.
+  if (
+    fastWebView === 'applied' &&
+    growthGuard &&
+    fast.bytes.byteLength > growthGuard.maxBytes &&
+    fast.bytes.byteLength > bytes.byteLength
+  ) {
+    toProtect = bytes;
+    fastWebView = 'dropped';
+  }
+  // Encrypted once. No second pass over the plain bytes if this comes out
+  // over the ceiling: the encryption re-save (`protectDocument` /
+  // `restrictDocument`) writes a plain xref without object streams whatever
+  // it is given, so the plain bytes encrypt to the same size give or take a
+  // few bytes — the growth past this point is the encryption's own, and it is
+  // either the user's choice (Protect, `enforce: false`) or refused below.
+  const result = await applyProtection(toProtect, name, job, restrictions);
   if (!result) return false;
-  bytes = result.bytes;
-  if (growthGuard && bytes.byteLength > growthGuard.maxBytes) {
+  const protectedResult = result;
+  bytes = protectedResult.bytes;
+  if (growthGuard && growthGuard.enforce !== false && bytes.byteLength > growthGuard.maxBytes) {
     notify('warning', translate(growthGuard.title), {
       detail: translate(growthGuard.detail),
       timeout: 0
     });
     return false;
   }
-  onFinalBytes?.(bytes);
-  const note = (size: string) => {
-    if (result.passwordApplied) return translate('{size} · password required to open', { size });
+  onFinalBytes?.(bytes, { fastWebView: fastWebView === 'applied' });
+  const note = (bytesLabel: string) => {
+    const size = fastWebViewNote(bytesLabel, fastWebView);
+    if (protectedResult.passwordApplied) {
+      return translate('{size} · password required to open', { size });
+    }
     // No password either before or after, but the restrictions this document
     // arrived with were carried through by re-encrypting under this handler's
     // one fixed algorithm (AES-256/R6) — worth a word, since a reader that
     // opened the input under an older/weaker handler is not guaranteed to
     // open this output.
-    if (result.restrictionsPreserved) {
+    if (protectedResult.restrictionsPreserved) {
       return translate(
         "{size} · this document's restrictions were preserved (now AES-256-encrypted; needs a reader from the last decade or so)",
         { size }
@@ -356,7 +605,7 @@ async function save(
     if (overwrite) {
       const saved = await platform.saveOver(doc.sourceHandle.fileId, bytes);
       if (saved) {
-        refreshBaseline(doc.id, doc.pages);
+        refreshBaseline(doc.id, doc.pages, doc.annotations);
         notify('success', translate('Saved {name}', { name: doc.name }), {
           detail: note(formatBytes(bytes.byteLength))
         });
@@ -371,7 +620,7 @@ async function save(
 
   const saved = await platform.saveFileAs(bytes, name);
   if (saved) {
-    if (refreshesBaseline) refreshBaseline(doc.id, doc.pages);
+    if (refreshesBaseline) refreshBaseline(doc.id, doc.pages, doc.annotations);
     notify('success', translate('Saved {name}', { name }), {
       detail: note(formatBytes(bytes.byteLength))
     });
@@ -408,7 +657,7 @@ async function reviewAndSave(
   bytes: Uint8Array,
   name: string,
   job?: JobOptions,
-  onFinalBytes?: (bytes: Uint8Array) => void,
+  onFinalBytes?: OnFinalBytes,
   alignment?: PageAlignment,
   // See `save()` — false when `bytes` is a page subset or a different layout
   // entirely (split's single-file branch, the contact sheet), so it must not
@@ -756,7 +1005,13 @@ async function commitConvertedPreview<P extends { bytes: Uint8Array }>(input: {
 
   const name = input.name(preview);
   let bytes = preview.bytes;
+  let fastWebView: FastWebViewOutcome = 'off';
   if (input.protectAsPdf) {
+    // HRD-23: a layout-only rewrite (numbering and xref), not a re-conversion,
+    // so the saved pages are still exactly the ones the preview showed.
+    const fast = await forFastWebView(bytes, name, input.protectAsPdf);
+    bytes = fast.bytes;
+    fastWebView = fast.outcome;
     // No `restrictions` argument: these three convert *into* PDF from a Word,
     // Excel or PowerPoint file, so there is no imported `/Encrypt` to carry —
     // and the other three write `.docx`/`.xlsx`/`.pptx`, which take no PDF
@@ -769,6 +1024,12 @@ async function commitConvertedPreview<P extends { bytes: Uint8Array }>(input: {
   const saved = await platform.saveFileAs(bytes, name);
   if (!saved) return;
   notify('success', translate('Saved {name}', { name }), { detail: input.detail(preview, bytes) });
+  if (fastWebView === 'failed') {
+    notify(
+      'info',
+      translate('Fast web view could not be applied, so the file was saved without it.')
+    );
+  }
 }
 
 /**
@@ -902,6 +1163,15 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   split: async ({ doc, job }) => {
     const settings = splitSettings.value;
 
+    // X-8: refuse rather than cut at pages the user did not ask for.
+    if (settings.mode === 'custom') {
+      const invalid = splitPointsError(settings.customBoundaries);
+      if (invalid) {
+        notify('warning', invalid);
+        return;
+      }
+    }
+
     if (settings.mode === 'extract') {
       const selected = doc.pages.filter(p => selectedPageKeys.value.has(p.key));
       if (selected.length === 0) {
@@ -958,7 +1228,9 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
                 bates: getBates(),
                 barcodeStamp: getBarcodeStamp()
               },
-              settings.targetSizeKb * 1024,
+              // Decimal, like every size Stapler shows: "5000 KB" means
+              // 5,000,000 bytes, the way upload portals count it (IMG-4).
+              settings.targetSizeKb * 1000,
               job
             );
             oversizedPages = plan.oversized;
@@ -995,7 +1267,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
             oversizedPages.length,
             {
               pages: oversizedPages
-                .map(p => `${p.pageIndex + 1} (${formatBytes(p.bytes)})`)
+                .map(p => `${p.pageIndex + 1} (${formatBytesUp(p.bytes)})`)
                 .join(', ')
             }
           ),
@@ -1095,6 +1367,35 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
 
   'pdf-to-img': async ({ doc, job }) => {
     const settings = pdfToImageSettings.value;
+    // GAP-5 — a pixel limit or a size target goes through the measured
+    // per-image search; plain resolution exports keep the original path.
+    const targetMode = settings.sizeMode === 'target';
+    // Same rule as IMG-2: never run with a size the field is not showing —
+    // checked before composing, so a refusal costs nothing.
+    if (targetMode && !targetKbInRange(settings.targetKb)) {
+      notifyInvalidTarget(IMAGE_TARGET_BOUNDS);
+      return;
+    }
+    // CNV-14: the same for an exact width × height, and for one that some
+    // exported page would take past what a render may allocate — all known
+    // from the page sizes, so refused before anything is composed.
+    const exactProblem = exactSizeProblem(settings.exact);
+    if (exactProblem) {
+      notifyExactSizeProblem(exactProblem);
+      return;
+    }
+    const exact = pdfExactRequest(settings);
+    if (exact) {
+      const tooBig = exactSizeOverCap(
+        exactPageOutputs(exportedPageSizes(doc, sources.value, selectedPageKeys.value), exact)
+      );
+      if (tooBig) {
+        notify('warning', exactSizeLimitMessage(tooBig), {
+          detail: translate('Page {page}', { page: tooBig.pageIndex + 1 })
+        });
+        return;
+      }
+    }
     const bytes = await currentDocumentBytes(job);
     const selected = selectedPageKeys.value;
     const indices = doc.pages
@@ -1102,10 +1403,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       .filter(({ page }) => selected.size === 0 || selected.has(page.key))
       .map(({ index }) => index);
 
-    // GAP-5 — a pixel limit or a size target goes through the measured
-    // per-image search; plain resolution exports keep the original path.
-    const targetMode = settings.sizeMode === 'target';
-    if (!targetMode && settings.maxDimension === null) {
+    if (!targetMode && !exact && settings.maxDimension === null) {
       const archive = await pagesToImageArchive(bytes, indices, settings.format, settings.dpi, job);
       await reviewAndSaveZip(doc, archive, `${stem(doc.name)}-${settings.dpi}dpi.zip`);
       return;
@@ -1117,34 +1415,47 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       indices,
       targetMode ? 'jpeg' : settings.format,
       settings.dpi,
-      { targetBytes, maxDimension: settings.maxDimension },
+      exact
+        ? { targetBytes, maxDimension: null, width: exact.width, height: exact.height }
+        : { targetBytes, maxDimension: settings.maxDimension },
       job
     );
     pdfToImageReport.value = { docId: doc.id, targetBytes, pages };
     const missed = pages.filter(page => !page.reached);
-    const suffix = targetMode ? `${settings.targetKb}kb` : `max${settings.maxDimension}px`;
+    const suffix = sizedArchiveSuffix(settings);
     const saved = await reviewAndSaveZip(doc, archive, `${stem(doc.name)}-${suffix}.zip`);
     if (saved && missed.length > 0 && targetBytes !== null) {
       // Never a silent miss: name the pages and their measured sizes.
+      // Rounded so that no miss reads as the target itself (IMG-3).
+      const shown = formatTargetMisses(
+        targetBytes,
+        missed.map(page => page.bytes)
+      );
+      const missedPages = missed
+        .map((page, index) =>
+          translate('page {page} ({size})', {
+            page: page.pageIndex + 1,
+            size: shown.achieved[index]
+          })
+        )
+        .join(', ');
       notify(
         'warning',
         tPlural('{count} images are over {size}.', missed.length, {
-          size: formatBytes(targetBytes)
+          size: shown.target
         }),
         {
-          detail: translate(
-            'Each was saved at the smallest size Stapler could make: {pages}. Lower the starting resolution or the page count, or raise the target.',
-            {
-              pages: missed
-                .map(page =>
-                  translate('page {page} ({size})', {
-                    page: page.pageIndex + 1,
-                    size: formatBytes(page.bytes)
-                  })
-                )
-                .join(', ')
-            }
-          ),
+          // At an exact size only quality moved (CNV-14), so resolution is
+          // not a lever to suggest.
+          detail: exact
+            ? translate(
+                'Each was saved at the lowest quality Stapler could use at the pixel size you set: {pages}. Choose a smaller pixel size, or raise the target.',
+                { pages: missedPages }
+              )
+            : translate(
+                'Each was saved at the smallest size Stapler could make: {pages}. Lower the starting resolution or the page count, or raise the target.',
+                { pages: missedPages }
+              ),
           timeout: 0
         }
       );
@@ -1166,21 +1477,52 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       });
       return;
     }
+    // IMG-2: the run uses exactly the value on screen, so an unusable one is
+    // refused here rather than replaced by some other number.
+    if (settings.useTarget && !validateSizeParam(settings.target, IMAGE_TARGET_BOUNDS).ok) {
+      notifyInvalidTarget(IMAGE_TARGET_BOUNDS);
+      return;
+    }
+    // CNV-14: the same rule for an exact width × height.
+    const exactProblem = exactSizeProblem(settings.exact);
+    if (exactProblem) {
+      notifyExactSizeProblem(exactProblem);
+      return;
+    }
     const request = imageSizeRequest(settings);
+    // CNV-14: an exact size no canvas can hold is refused before the image is
+    // decoded. Unlocked, both sides are known; locked, the following side is
+    // worked out from the size the header declares (EXIF-oriented). A HEIC or
+    // TIFF, whose size only the worker knows, is checked there instead.
+    if (request.width !== null || request.height !== null) {
+      const header =
+        request.width === null || request.height === null ? await orientedHeaderSizeOf(file) : null;
+      const output = exactOutputFor(request, header);
+      if (output && exactSizeOverLimit(output)) {
+        notify('warning', exactSizeLimitMessage(output));
+        return;
+      }
+    }
     const resized = await resizeImageFile(file, request, job);
 
-    // A JPEG that already meets every limit is better left alone: re-encoding
-    // it can only lose quality, and could even make it bigger.
+    // IMG-1 — an original that already meets every limit is better left
+    // alone whenever the re-encode is no smaller: re-encoding can only lose
+    // quality, and a PNG or WebP re-saved as JPEG easily grows. "Meets every
+    // limit" includes format and orientation (`imageOriginalSatisfies`), so a
+    // HEIC or a sideways JPEG is still converted.
     const original = new Uint8Array(await file.arrayBuffer());
-    const upright = jpegPassthrough(original)?.orientation === 1;
-    const fitsBox =
-      request.maxDimension === null ||
-      Math.max(resized.sourceWidth, resized.sourceHeight) <= request.maxDimension;
-    const fitsTarget = request.targetBytes === null || original.byteLength <= request.targetBytes;
-    const keepOriginal =
-      upright && fitsBox && fitsTarget && original.byteLength <= resized.bytes.byteLength;
+    const choice = chooseSmaller({
+      originalBytes: original.byteLength,
+      resultBytes: resized.bytes.byteLength,
+      // An exact size the original does not have (CNV-14) must be converted.
+      originalSatisfies:
+        matchesExactSize({ width: resized.sourceWidth, height: resized.sourceHeight }, request) &&
+        imageOriginalSatisfies(original, resized, request)
+    });
+    const keepOriginal = choice === 'original';
 
     const bytes = keepOriginal ? original : resized.bytes;
+    // Every claim below is measured on `bytes`, the file about to be written.
     const reached = request.targetBytes === null || bytes.byteLength <= request.targetBytes;
     imageSizeResult.value = {
       source: file,
@@ -1194,23 +1536,27 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       reached,
       attempts: resized.attempts,
       sourcePages: resized.sourcePages,
+      sourceFrames: keepOriginal ? 1 : resized.sourceFrames,
       keptOriginal: keepOriginal
     };
 
     if (!reached && request.targetBytes !== null) {
+      const miss = describeTargetMiss(request.targetBytes, bytes.byteLength);
       announceWaiting(job, translate('Waiting for confirmation…'));
       const proceed = await confirmAction({
-        title: translate('Could not reach {size}', { size: formatBytes(request.targetBytes) }),
+        title: translate('Could not reach {size}', { size: miss.target }),
         body: translate(
-          'The smallest Stapler could make is {size}, at {width}×{height} px — measured, after {attempts}. Save it anyway?',
+          'The smallest Stapler could make is {size} — {over} over your {target} target — at {width}×{height} px, measured after {attempts}. Save it anyway?',
           {
-            size: formatBytes(bytes.byteLength),
+            size: miss.achieved,
+            over: miss.over,
+            target: miss.target,
             width: resized.width,
             height: resized.height,
             attempts: tPlural('{count} attempts', resized.attempts)
           }
         ),
-        confirmLabel: translate('Save at {size}', { size: formatBytes(bytes.byteLength) }),
+        confirmLabel: translate('Save at {size}', { size: miss.achieved }),
         cancelLabel: translate('Don’t save')
       });
       if (!proceed) return;
@@ -1219,7 +1565,9 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     const suffix =
       request.targetBytes !== null
         ? `${settings.target.amount}${settings.target.unit.toLowerCase()}`
-        : `${request.maxDimension ?? 'resized'}px`;
+        : request.width !== null || request.height !== null
+          ? `${resized.width}x${resized.height}`
+          : `${request.maxDimension ?? 'resized'}px`;
     const name = keepOriginal ? file.name : `${stem(file.name)}-${suffix}.jpg`;
     const saved = await platform.saveFileAs(bytes, name);
     if (!saved) return;
@@ -1234,7 +1582,18 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
             size: formatBytes(bytes.byteLength),
             width: resized.width,
             height: resized.height
-          })
+          }),
+      choice === 'larger'
+        ? {
+            // Never a silent size increase: the original could not be kept
+            // (wrong format, sideways, or outside a limit), so say why the
+            // file grew.
+            detail: translate(
+              'That is larger than the original ({before}), which had to be converted to an upright JPEG to meet your limits.',
+              { before: formatBytes(original.byteLength) }
+            )
+          }
+        : undefined
     );
   },
 
@@ -1258,7 +1617,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // UX-04: no "before" PDF exists yet — this builds one from scratch — so
     // it's an after-only review, purely to confirm the layout came out right.
     if (!(await reviewOnly(bytes, name, job))) return;
-    const saved = await platform.saveFileAs(bytes, name);
+    const saved = await saveDirectPdf(bytes, name, job);
     if (!saved) return;
 
     for (const warning of warnings) {
@@ -1334,6 +1693,12 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // is about to write; when the floor cannot reach the target it says so and
     // asks, rather than saving a file that quietly misses what was asked for.
     if (compressMode.value === 'target') {
+      // IMG-12: the same bounds the `?target=` link clamps to, refused here
+      // rather than silently run with (the field shows the error inline).
+      if (!validateSizeParam(compressTarget.value, PDF_TARGET_BOUNDS).ok) {
+        notifyInvalidTarget(PDF_TARGET_BOUNDS);
+        return;
+      }
       const targetBytes = targetSizeBytes(compressTarget.value);
       if (original.byteLength <= targetBytes) {
         notify('info', translate('Already under the target.'), {
@@ -1391,14 +1756,15 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
                 { items: outcome.plan.skipped.join('; ') }
               )
             : '';
+        const miss = formatTargetMiss(targetBytes, outcome.achievedBytes);
         announceWaiting(job, translate('Waiting for confirmation…'));
         const proceed = await confirmAction({
-          title: translate('Could not reach {size}', { size: formatBytes(targetBytes) }),
+          title: translate('Could not reach {size}', { size: miss.target }),
           body: [
             translate(
               'The smallest Stapler can produce without destroying this document is {size}, at {dpi} DPI and {quality}% quality — measured, after {attempts}.',
               {
-                size: formatBytes(outcome.achievedBytes),
+                size: miss.achieved,
                 dpi: String(outcome.settings?.dpi),
                 quality: Math.round((outcome.settings?.quality ?? 0) * 100),
                 attempts: tPlural('{count} attempts', outcome.trials.length)
@@ -1409,7 +1775,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
           ]
             .filter(Boolean)
             .join(' '),
-          confirmLabel: translate('Save at {size}', { size: formatBytes(outcome.achievedBytes) }),
+          confirmLabel: translate('Save at {size}', { size: miss.achieved }),
           cancelLabel: translate('Keep the original')
         });
         if (!proceed) return;
@@ -1419,13 +1785,15 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       // not `outcome.achievedBytes`, which is measured before that pass and can
       // undercount it by the handful of bytes the AES pass adds.
       let finalSize = outcome.achievedBytes;
+      let savedFastWebView = false;
       const savedTarget = await save(
         doc,
         outcome.bytes,
         `${stem(doc.name)}-compressed.pdf`,
         undefined,
-        finalBytes => {
+        (finalBytes, info) => {
           finalSize = finalBytes.byteLength;
+          savedFastWebView = info.fastWebView;
           if (lastCompressionResult.value?.documentId === doc.id) {
             lastCompressionResult.value = {
               ...lastCompressionResult.value,
@@ -1433,22 +1801,47 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
             };
           }
         },
-        // Not applied when the user turned Protect on: they asked for encryption
+        // Not enforced when the user turned Protect on: they asked for encryption
         // on top of compression, which adds bytes by design, and blocking their
         // own explicit choice under the never-grow guarantee would be a worse
         // surprise than the size it exists to prevent. This guard is for the
-        // *silent* case — a restriction the document merely arrived with.
-        protectionActive()
-          ? undefined
-          : {
-              maxBytes: outcome.originalBytes,
-              title: tKey('Kept the original file.'),
-              detail: tKey(
-                'Re-applying this document’s restrictions after compression would have produced a file no smaller than the original, so nothing was written. This document is already as small as it usefully gets.'
-              )
-            }
+        // *silent* case — a restriction the document merely arrived with. The
+        // ceiling still applies to fast web view (HRD-23), which is dropped
+        // rather than allowed to make a compressed file larger than the original.
+        {
+          maxBytes: outcome.originalBytes,
+          enforce: !protectionActive(),
+          title: tKey('Kept the original file.'),
+          detail: tKey(
+            'Re-applying this document’s restrictions after compression would have produced a file no smaller than the original, so nothing was written. This document is already as small as it usefully gets.'
+          )
+        }
       );
-      if (savedTarget && outcome.reachedTarget) {
+      // IMG-5: "Reached" is said about the file actually written — after
+      // Protect or re-applied restrictions, which add bytes — not about the
+      // search's measurement before them.
+      if (savedTarget && finalSize > targetBytes && outcome.reachedTarget) {
+        const miss = formatTargetMiss(targetBytes, finalSize);
+        notify(
+          'warning',
+          translate('Saved at {size}, over the {target} target.', {
+            size: miss.achieved,
+            target: miss.target
+          }),
+          {
+            detail: translate(
+              savedFastWebView
+                ? 'Compression reached {reached}, but saving for fast web view (and Protect or this document’s restrictions, if any) added {extra}. Turn fast web view off in the export review, or aim a little lower, to get under the target.'
+                : 'Compression reached {reached}, but encrypting the file for Protect (or re-applying its restrictions) added {extra}. Turn Protect off, or aim a little lower, to get under the target.',
+              {
+                reached: formatBytes(outcome.achievedBytes),
+                extra: formatBytesUp(finalSize - outcome.achievedBytes)
+              }
+            ),
+            timeout: 0
+          }
+        );
+      } else if (savedTarget && outcome.reachedTarget) {
         notify('success', translate('Reached {size}', { size: formatBytes(finalSize) }), {
           detail: translate(
             'Target was {target}. {before} → {after} at {dpi} DPI, {quality}% quality.',
@@ -1465,9 +1858,17 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       return;
     }
 
+    // OPS-19 — grey / black and white as a compression lever. Off by default;
+    // when off, everything below runs exactly as it always has.
+    const colour = compressColour.value;
+    const toGrey = colour !== 'keep';
+
     // CMP-04: tell the truth *before* spending the user's time, not after.
+    // The pre-flight models re-encoding only, so with the grey lever on its
+    // "already optimized" verdict says nothing about what B&W will save on a
+    // scan, and asking would be wrong.
     const report = await planCompression(original, settings, job);
-    if (report.alreadyOptimized) {
+    if (report.alreadyOptimized && !toGrey) {
       announceWaiting(job, translate('Waiting for confirmation…'));
       const proceed = await confirmAction({
         title: translate('Already optimized'),
@@ -1491,16 +1892,115 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       if (!proceed) return;
     }
 
-    const result = await compressDocument(original, settings, report, job);
+    const result = await compressDocument(
+      original,
+      settings,
+      report,
+      toGrey && job ? progressBand(job, 0, 0.5) : job
+    );
+    let output = result.bytes;
+    let keptOriginal = result.keptOriginal;
+    let greyNote: string | null = null;
+    // Said only once the file is written: the pages grey left in colour, or why
+    // grey was dropped in favour of the colour-compressed file.
+    let afterSave: { title: string; detail: string } | null = null;
+    if (toGrey) {
+      // Compress first, then convert: see `compress-gray.ts`. `result.bytes` is
+      // the original itself when re-encoding did not pay, and grey still runs on
+      // it — a colour scan already at its best JPEG is exactly the case B&W is for.
+      const grey = await applyGrayLever({
+        compressed: result.bytes,
+        originalBytes: result.originalBytes,
+        pageCount: doc.pages.length,
+        mode: colour,
+        rasterDpi: settings.dpi,
+        job: job ? progressBand(job, 0.5, 1) : undefined
+      });
+      // Grey did not help, but colour compression alone did: that file is valid
+      // and smaller than the original, so it is what gets written — with the
+      // reason grey was not applied. Only when neither helps is the original kept.
+      const colourFallback = !result.keptOriginal;
+      if (grey.kind === 'unverified') {
+        if (!colourFallback) {
+          notify('danger', translate('The conversion could not be verified — nothing was saved.'), {
+            detail: translate(
+              'Colour was still found on pages {pages} after converting. Your document is unchanged.',
+              { pages: grey.colourLeft.map(i => i + 1).join(', ') }
+            ),
+            timeout: 0
+          });
+          return;
+        }
+        greyNote = translate('Compressed in colour; grey was not applied.');
+        afterSave = {
+          title: translate('Colour was kept.'),
+          detail: translate(
+            'Colour was still found on pages {pages} after converting, so the conversion was discarded and the colour-compressed file was saved instead.',
+            { pages: grey.colourLeft.map(i => i + 1).join(', ') }
+          )
+        };
+      } else if (grey.kind === 'not-smaller') {
+        // Formatted so the larger size never prints the same as the smaller.
+        const sizes = formatTargetMiss(result.originalBytes, grey.resultBytes);
+        if (!colourFallback) {
+          lastCompressionResult.value = {
+            documentId: doc.id,
+            plan: result.plan,
+            originalBytes: result.originalBytes,
+            compressedBytes: result.originalBytes,
+            keptOriginal: true
+          };
+          notify('warning', translate('Kept the original file.'), {
+            detail: translate(
+              '{before} → {after}. Converting to grey did not make this file smaller, so Stapler discarded it and nothing was written. Try again with “Keep colour”.',
+              { before: sizes.target, after: sizes.achieved }
+            ),
+            timeout: 0
+          });
+          return;
+        }
+        greyNote = translate('Compressed in colour; grey was not applied.');
+        afterSave = {
+          title: translate('Colour was kept.'),
+          detail: translate(
+            'Converting to grey would have made this file {after} (from {before}), no smaller than the original, so the colour-compressed file was saved instead.',
+            { before: sizes.target, after: sizes.achieved }
+          )
+        };
+      } else if (grey.kind === 'smaller') {
+        output = grey.bytes;
+        keptOriginal = false;
+        greyNote = greyConvertedNote(colour, grey.gaps, doc.pages.length);
+        if (grey.gaps.length > 0) {
+          afterSave = {
+            title: tPlural('{count} pages were left in colour.', grey.gaps.length),
+            detail: greyGapDetail(grey.gaps)
+          };
+        }
+        if (grey.rasterPages > 0) {
+          notify('warning', tPlural('{count} pages were rendered as images.', grey.rasterPages), {
+            detail: translate(
+              'They contain something that cannot be converted to grey directly; their text is no longer selectable.'
+            )
+          });
+        }
+      } else {
+        // 'already-grey': nothing carried colour, so the compressed bytes stand.
+        greyNote = translate('The pages were already grey, so only compression was applied.');
+      }
+    }
+
     lastCompressionResult.value = {
       documentId: doc.id,
       plan: result.plan,
       originalBytes: result.originalBytes,
-      compressedBytes: result.bytes.byteLength,
-      keptOriginal: result.keptOriginal,
-      imageStats: result.imageStats
+      compressedBytes: output.byteLength,
+      keptOriginal,
+      // CMP-06's per-image sizes are measured before the grey pass re-encoded
+      // those images again, so they would misstate the written file.
+      imageStats: output === result.bytes ? result.imageStats : undefined
     };
-    if (result.keptOriginal) {
+    if (keptOriginal) {
       notify('warning', translate('Kept the original file.'), {
         detail: translate(
           'Re-encoding produced a larger file, so Stapler discarded it. Nothing was written. This document is already as small as it usefully gets.'
@@ -1513,10 +2013,10 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // Same reasoning as the target-size branch above: the percentage and the
     // detail string have to reflect the bytes actually written, not the
     // pre-restriction ones `compressDocument` measured.
-    let finalSize = result.bytes.byteLength;
+    let finalSize = output.byteLength;
     const saved = await save(
       doc,
-      result.bytes,
+      output,
       `${stem(doc.name)}-compressed.pdf`,
       undefined,
       finalBytes => {
@@ -1528,24 +2028,25 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
           };
         }
       },
-      // See the target-size branch above: not applied when Protect is on, since
+      // See the target-size branch above: not enforced when Protect is on, since
       // that growth is the user's own explicit choice, not the silent kind this
-      // guard exists to catch.
-      protectionActive()
-        ? undefined
-        : {
-            maxBytes: result.originalBytes,
-            title: tKey('Kept the original file.'),
-            detail: tKey(
-              'Re-applying this document’s restrictions after compression would have produced a file no smaller than the original, so nothing was written. This document is already as small as it usefully gets.'
-            )
-          }
+      // guard exists to catch — but still the ceiling for fast web view.
+      {
+        maxBytes: result.originalBytes,
+        enforce: !protectionActive(),
+        title: tKey('Kept the original file.'),
+        detail: tKey(
+          'Re-applying this document’s restrictions after compression would have produced a file no smaller than the original, so nothing was written. This document is already as small as it usefully gets.'
+        )
+      }
     );
     if (saved) {
       const percent = Math.round((1 - finalSize / result.originalBytes) * 100);
+      const sizes = `${formatBytes(result.originalBytes)} → ${formatBytes(finalSize)}`;
       notify('success', translate('Reduced by {percent}%', { percent }), {
-        detail: `${formatBytes(result.originalBytes)} → ${formatBytes(finalSize)}`
+        detail: greyNote ? `${sizes}. ${greyNote}` : sizes
       });
+      if (afterSave) notify('warning', afterSave.title, { detail: afterSave.detail, timeout: 0 });
     }
   },
 
@@ -2012,23 +2513,58 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       });
     }
     // Never a silent size increase: B&W is meant to shrink scans, so a file
-    // that grew is said out loud before it is written.
-    if (result.bytes.byteLength > result.originalBytes) {
+    // that grew is said out loud before it is written. Not a blocking choice:
+    // this tool was asked for grey, which the original is not (`chooseSmaller`
+    // with `originalSatisfies: false`), and the export review that follows
+    // already shows both sizes before anything is saved.
+    const sizeChoice = chooseSmaller({
+      originalBytes: result.originalBytes,
+      resultBytes: result.bytes.byteLength,
+      originalSatisfies: false
+    });
+    if (sizeChoice === 'larger') {
+      // Formatted so the larger size never prints the same as the smaller.
+      const sizes = formatTargetMiss(result.originalBytes, result.bytes.byteLength);
       notify('warning', translate('The converted file is larger than the original.'), {
         detail: translate(
           '{before} → {after}. Re-encoding the images as grey cost more than it saved; Compress may help afterwards.',
-          { before: formatBytes(result.originalBytes), after: formatBytes(result.bytes.byteLength) }
+          { before: sizes.target, after: sizes.achieved }
         ),
         timeout: 0
       });
     }
-    await reviewAndSave(
+    // Password protection (or re-applied restrictions) is added in `save()`,
+    // after the check above: when that alone pushes the written file past the
+    // original, say so — measured on the bytes actually written (pattern 3).
+    let finalSize = result.bytes.byteLength;
+    let savedFastWebView = false;
+    const saved = await reviewAndSave(
       doc,
       current,
       result.bytes,
       `${stem(doc.name)}-${settings.mode === 'bw' ? 'bw' : 'grayscale'}.pdf`,
-      job
+      job,
+      (finalBytes, info) => {
+        finalSize = finalBytes.byteLength;
+        savedFastWebView = info.fastWebView;
+      }
     );
+    if (saved && sizeChoice !== 'larger' && finalSize > result.originalBytes) {
+      const sizes = formatTargetMiss(result.originalBytes, finalSize);
+      notify('warning', translate('The converted file is larger than the original.'), {
+        detail: translate(
+          savedFastWebView
+            ? '{before} → {after}. Converting to grey made it smaller, but saving for fast web view (and password protection or re-applied restrictions, if any) added {extra}.'
+            : '{before} → {after}. Converting to grey made it smaller, but encrypting it for password protection (or re-applying its restrictions) added {extra}.',
+          {
+            before: sizes.target,
+            after: sizes.achieved,
+            extra: formatBytesUp(finalSize - result.bytes.byteLength)
+          }
+        ),
+        timeout: 0
+      });
+    }
   },
 
   // GAP-6 — repair. `worksWithoutDocument`: the file is often one that never
@@ -2042,13 +2578,35 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       bytes = new Uint8Array(await candidate.arrayBuffer());
       name = candidate.name;
     } else if (doc) {
-      // A document drawn from one file is repaired from that file's own bytes;
-      // a merge has no single file, so its current composition is used.
+      // UI-3: "the open document" means what is on screen — but only its own
+      // edits. An untouched document is repaired from its file's raw bytes,
+      // the case a damaged file needs: rebuilding it first would let pdf-lib
+      // quietly drop the very objects repair could have salvaged. An edited
+      // one is composed from its pages, rotations, crops and annotations
+      // alone — never the Watermark/Header-footer/N-up panel settings, which
+      // are not part of the document.
       const sourceIds = new Set(doc.pages.map(p => p.sourceDocId));
-      bytes =
-        sourceIds.size === 1
-          ? await readSourceBytes([...sourceIds][0])
-          : await currentDocumentBytes(job);
+      if (!hasDocumentEdits(doc)) {
+        bytes = await readSourceBytes(doc.pages[0].sourceDocId);
+      } else {
+        try {
+          bytes = await composeDocument(
+            { pages: doc.pages, annotations: doc.annotations, cropBoxes: cropBoxes.value },
+            job
+          );
+        } catch (err) {
+          if (isCancellation(err) || sourceIds.size !== 1) throw err;
+          // The edits could not be written into this (damaged) file. Repair the
+          // file as it was opened, and say plainly that the edits are not in it.
+          bytes = await readSourceBytes([...sourceIds][0]);
+          notify('warning', translate('Your edits could not be included.'), {
+            detail: translate(
+              'This file is too damaged to apply page edits or annotations to, so the original file is repaired instead. Re-open the repaired copy and make the edits again.'
+            ),
+            timeout: 0
+          });
+        }
+      }
       name = doc.name;
     } else {
       notify('warning', translate('Choose a PDF to repair first.'), {
@@ -2067,7 +2625,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       return;
     }
     if (!(await reviewOnly(result.bytes, outName, job))) return;
-    const saved = await platform.saveFileAs(result.bytes, outName);
+    const saved = await saveDirectPdf(result.bytes, outName, job);
     if (saved) {
       notify('success', translate('Saved {name}', { name: outName }), {
         detail: tPlural('{count} pages recovered and verified.', result.pageCount)
@@ -2093,7 +2651,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     );
     // UX-04: built from scratch, no "before" PDF to compare against.
     if (!(await reviewOnly(bytes, 'document.pdf', job))) return;
-    const saved = await platform.saveFileAs(bytes, 'document.pdf');
+    const saved = await saveDirectPdf(bytes, 'document.pdf', job);
     if (!saved) return;
     if (hadUnsupportedCharacters) {
       notify('warning', translate('PDF saved, but some characters could not be represented.'), {

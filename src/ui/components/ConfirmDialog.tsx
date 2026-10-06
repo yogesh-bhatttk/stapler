@@ -39,8 +39,9 @@ export const ConfirmDialog = forwardRef<HTMLDivElement, Record<string, never>>(
         {request.body}
         {request.details && request.details.length > 0 && (
           <ul className={styles.steps}>
-            {request.details.map(line => (
-              <li key={line}>{line}</li>
+            {/* Keyed by position: lines can repeat (two shared files with one name). */}
+            {request.details.map((line, i) => (
+              <li key={i}>{line}</li>
             ))}
           </ul>
         )}

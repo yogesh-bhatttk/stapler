@@ -25,12 +25,13 @@
  * readers give them {@link repackStored} of the vetted entries — the same
  * bytes, stored uncompressed, so there is nothing left for them to inflate.
  */
+import { formatBytes } from '../bytes';
 import { inflateSync, zipSync } from 'fflate';
 import { corrupt, unsupported } from '../errors';
 import { tKey, translate } from '../i18n';
 
 /** Total declared uncompressed bytes the readers will accept. */
-export const MAX_ZIP_UNCOMPRESSED_BYTES = 256 * 1024 * 1024;
+export const MAX_ZIP_UNCOMPRESSED_BYTES = 256_000_000; // decimal: the refusal says "256 MB" (X-10)
 /** Entries a package may list. A 500-slide deck with media is a few thousand. */
 export const MAX_ZIP_ENTRIES = 10_000;
 
@@ -162,7 +163,7 @@ export function readZipDirectory(
 }
 
 function megabytes(n: number): string {
-  return `${Math.round(n / 1024 / 1024)} MB`;
+  return formatBytes(n);
 }
 
 /**

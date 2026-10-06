@@ -59,30 +59,33 @@ export function PdfToWordPanel() {
   if (!doc) return null;
 
   const handlePreview = () => {
-    run({ label: translate('Converting to Word'), scope: 'convert.pdf-to-word' }, async job => {
-      // Captured before the bytes are read, so an edit made *during* the
-      // conversion still invalidates its result.
-      const revision = historyVersion.value;
-      const bytes = await currentDocumentBytes(job);
-      const result = await convertPdfToDocx(
-        bytes,
-        { ...pdfToWordOptions.value, documentName: doc.name },
-        job
-      );
-      setPdfToWordPreview(result, doc.id, revision);
-      notify(
-        'success',
-        translate('Converted {pages}. Review the preview, then save.', {
-          pages: tPlural('{count} pages', result.pageCount)
-        }),
-        {
-          detail: translate('{size} · {blocks}', {
-            size: formatBytes(result.bytes.byteLength),
-            blocks: tPlural('{count} blocks', result.outline.length)
-          })
-        }
-      );
-    });
+    void run(
+      { label: translate('Converting to Word'), scope: 'convert.pdf-to-word' },
+      async job => {
+        // Captured before the bytes are read, so an edit made *during* the
+        // conversion still invalidates its result.
+        const revision = historyVersion.value;
+        const bytes = await currentDocumentBytes(job);
+        const result = await convertPdfToDocx(
+          bytes,
+          { ...pdfToWordOptions.value, documentName: doc.name },
+          job
+        );
+        setPdfToWordPreview(result, doc.id, revision);
+        notify(
+          'success',
+          translate('Converted {pages}. Review the preview, then save.', {
+            pages: tPlural('{count} pages', result.pageCount)
+          }),
+          {
+            detail: translate('{size} · {blocks}', {
+              size: formatBytes(result.bytes.byteLength),
+              blocks: tPlural('{count} blocks', result.outline.length)
+            })
+          }
+        );
+      }
+    );
   };
 
   return (

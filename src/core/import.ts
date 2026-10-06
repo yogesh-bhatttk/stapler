@@ -23,12 +23,18 @@ import {
   type SourceDocument
 } from './store';
 import { deleteSourceBytes, usesMemoryFallback, writeSourceBytes } from './opfs';
-import { imageFileToPdfImages, isSupportedImage, type PdfImageSource } from './image';
+import {
+  gifFrameCountOf,
+  imageFileToPdfImages,
+  isSupportedImage,
+  type PdfImageSource
+} from './image';
 import { hasXfaMarker, XFA_MESSAGE } from './pdf/xfa';
 import { tPlural, translate } from './i18n';
+import { wholeMegabytes } from './bytes';
 
 /** Warn rather than refuse — the plan has no size limit, only a warning (§5.1). */
-export const LARGE_FILE_BYTES = 100 * 1024 * 1024;
+export const LARGE_FILE_BYTES = 100_000_000; // decimal, as the warning's "100MB" says (X-10)
 
 /** The formats `importFiles` accepts, named once so every message agrees. */
 export const SUPPORTED_FORMATS = 'PDF, PNG, JPEG, WebP, GIF, TIFF, and HEIC';
@@ -42,7 +48,7 @@ export const SUPPORTED_FORMATS = 'PDF, PNG, JPEG, WebP, GIF, TIFF, and HEIC';
 export function largeFileWarning(byteLength: number): string | null {
   if (byteLength <= LARGE_FILE_BYTES) return null;
   return translate('{size}MB is a large document — operations on it will be slower.', {
-    size: (byteLength / 1024 / 1024).toFixed(0)
+    size: wholeMegabytes(byteLength)
   });
 }
 
@@ -168,7 +174,7 @@ async function importPdf(
   // Pending from before the bytes land until the caller has had its chance to
   // add the document (RT-5) — see `importFiles`.
   const id = crypto.randomUUID();
-  stage(0.5, `Saving ${file.name}`);
+  stage(0.5, translate('Saving {name}', { name: file.name }));
   markSourcePending(id);
   onPending(id);
   await writeSourceBytes(id, bytes);
@@ -265,6 +271,20 @@ export async function imagesToPdfBytes(
     images.push(
       ...(await imageFileToPdfImages(files[i], imageOptions?.quality ?? 0.9, options.signal))
     );
+    // IMG-9: an animated GIF becomes one page of its first frame; say so per
+    // file rather than drop the rest silently.
+    const frames = await gifFrameCountOf(files[i]);
+    if (frames > 1) {
+      warnings.push(
+        translate('{name}: {warning}', {
+          name: files[i].name,
+          warning: translate(
+            'This GIF is animated ({count} frames); only the first frame was used.',
+            { count: frames }
+          )
+        })
+      );
+    }
   }
 
   const bytes = await processWorker.lease(api => api.imagesToPdf(images, imageOptions, job));

@@ -138,14 +138,17 @@ describe('faceblur/runFaceBlur — offline by construction', () => {
           unaddressablePages: [],
           formImagePages: []
         }),
-        planImageRedactions: async () => [
-          {
-            pageIndex: 0,
-            name: 'Im0',
-            objectNumber: 7,
-            rects: [{ x: 0, y: 0, width: 1, height: 1 }]
-          }
-        ],
+        planLogoMark: async () => ({
+          requests: [
+            {
+              pageIndex: 0,
+              name: 'Im0',
+              objectNumber: 7,
+              rects: [{ x: 0, y: 0, width: 1, height: 1 }]
+            }
+          ],
+          skipped: []
+        }),
         replacePageImages: async () => new Uint8Array([9])
       })
     );

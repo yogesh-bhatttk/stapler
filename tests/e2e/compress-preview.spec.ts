@@ -67,12 +67,34 @@ test.describe('CMP-05 quality preview', () => {
     test.setTimeout(180_000);
     const file = await ensureFixture('image-on-last-page.pdf', imageOnLastPagePdf);
     await importFixture(page, file);
+    // Every page the preview ever called `ready`. Page 1 is drawn as a
+    // placeholder while the analysis runs; it used to be announced `ready`
+    // when it finished first, so a test (or a user) judged a blank page 1
+    // that was about to be replaced by page 3.
+    await page.evaluate(() => {
+      const seen: string[] = [];
+      (window as unknown as { __readyPages: string[] }).__readyPages = seen;
+      new MutationObserver(() => {
+        const el = document.querySelector('[data-preview-status]');
+        if (el?.getAttribute('data-preview-status') === 'ready')
+          seen.push(el.getAttribute('data-preview-page') ?? '');
+      }).observe(document.body, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ['data-preview-status', 'data-preview-page']
+      });
+    });
     await gotoTool(page, 'compress');
 
     // Page 3 carries the 1600×1200 image; pages 1 and 2 carry none and a small
     // one. Choosing by image area is the whole requirement.
     const preview = await waitForPreview(page, 75);
     await expect(preview).toHaveAttribute('data-preview-page', '3');
+    const readyPages = await page.evaluate(
+      () => (window as unknown as { __readyPages: string[] }).__readyPages
+    );
+    expect(new Set(readyPages), 'ready was only ever reported for page 3').toEqual(new Set(['3']));
 
     // Both halves are painted, and they are not the same image: the "after"
     // canvas came from bytes the encoder produced, not from a copy of "before".
@@ -245,8 +267,9 @@ test.describe('DOC-07 compress to a target size', () => {
     const file = path.resolve(process.cwd(), 'tests/fixtures/scanned_skewed.pdf');
     await importFixture(page, file);
     await gotoTool(page, 'compress');
-    // 5KB is below anything the quality floor can produce for a full-page scan.
-    await setTarget(page, 5, 'KB');
+    // 10KB — the smallest target Compress accepts (PDF_TARGET_BOUNDS, IMG-12) —
+    // is below anything the quality floor can produce for a full-page scan.
+    await setTarget(page, 10, 'KB');
 
     let downloaded = false;
     page.on('download', () => {
@@ -266,9 +289,9 @@ test.describe('DOC-07 compress to a target size', () => {
     const achieved = Number(await outcome.getAttribute('data-target-achieved'));
     const attempts = Number(await outcome.getAttribute('data-target-attempts'));
     console.log(
-      `DOC-07 unreachable: target 5000 B, smallest achievable ${achieved} B after ${attempts} attempt(s)`
+      `DOC-07 unreachable: target 10000 B, smallest achievable ${achieved} B after ${attempts} attempt(s)`
     );
-    expect(achieved).toBeGreaterThan(5_000);
+    expect(achieved).toBeGreaterThan(10_000);
     // The floor answers it outright — degrading further is not on offer.
     expect(attempts).toBe(1);
 

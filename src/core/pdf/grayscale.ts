@@ -54,18 +54,33 @@ import {
   type Token
 } from './interpreter';
 import { parseFunction, parseFunctionOrArray, type PdfFunction } from './functions';
-import { encodeGrayJpeg } from '../jpeg-gray';
+import { encodeGraySamples, GRAY_JPEG_QUALITY, packOneBit, type EncodedGray } from '../gray-encode';
 import { translate } from '../i18n';
 
 export type GrayMode = 'gray' | 'bw';
+
+// Re-exported: the converter's public encoding API predates `gray-encode.ts`.
+export { encodeGraySamples, GRAY_JPEG_QUALITY, packOneBit, type EncodedGray };
+
+/**
+ * Grey samples already encoded as a DeviceGray image stream's data. The render
+ * worker encodes each image and page raster as soon as it has the pixels, so
+ * a whole document's worth of raw pixels is never held at once (PDF-5): only
+ * the compressed payloads travel to the process worker.
+ */
 
 /** Decoded pixels for one image XObject, from the render worker. */
 export interface GrayImageData {
   objectNumber: number;
   width: number;
   height: number;
-  /** One byte per pixel, 0 = black … 255 = white. In `bw` mode already 0 or 255. */
-  gray: Uint8Array;
+  /**
+   * One byte per pixel, 0 = black … 255 = white. In `bw` mode already 0 or
+   * 255. Absent when `encoded` carries the samples instead.
+   */
+  gray?: Uint8Array;
+  /** The samples, already encoded — used as is when present. */
+  encoded?: EncodedGray;
   /** Alpha, when pdf.js reported transparency — needed only to replace a colour-key `/Mask`. */
   alpha?: Uint8Array;
 }
@@ -75,9 +90,17 @@ export interface GrayRaster {
   pageIndex: number;
   width: number;
   height: number;
-  gray: Uint8Array;
+  /** Raw samples; absent when `encoded` carries them instead. */
+  gray?: Uint8Array;
+  encoded?: EncodedGray;
   /** The box pdf.js rendered (unrotated user space): `[x0, y0, x1, y1]`. */
   view: [number, number, number, number];
+  /**
+   * True when the page's annotations were rendered into the raster (one of
+   * them could not be converted as vectors). They are then hidden on the
+   * output page so they are not drawn a second time, in colour, on top.
+   */
+  annotationsIncluded?: boolean;
 }
 
 export interface GrayPagePlan {
@@ -88,6 +111,14 @@ export interface GrayPagePlan {
   images: number[];
   /** Of `images`, those in an encoding pdf.js cannot decode (JPX, JBIG2). */
   undecodable: number[];
+  /** Of `images`, those stored lossily (DCT, JPX) — their grey copy is written as JPEG. */
+  lossy: number[];
+  /**
+   * True when a *visible* annotation on the page could not be converted as
+   * vectors: a raster of the page must then include the annotations (and the
+   * annotations be hidden), or their colour would stay on top of it.
+   */
+  flattenAnnotations: boolean;
   /** Colour constructs found: operators, shadings, patterns, images, annotation colours. */
   colourConstructs: number;
   /** Of those, the ones that visibly carry colour — zero means "already grey". */
@@ -186,8 +217,10 @@ function toGray(cs: ColorSpace, comps: readonly number[]): number | null {
       }
       return toGray(cs.base, base);
     }
-    case 'tint':
-      return toGray(cs.alt, cs.fn.evaluate(comps));
+    case 'tint': {
+      const alt = cs.fn.evaluate(comps);
+      return alt ? toGray(cs.alt, alt) : null;
+    }
     default:
       return null;
   }
@@ -411,6 +444,18 @@ class ResourceScope {
   }
 
   private built: PDFDict | undefined;
+  private identityKey: string | undefined;
+
+  /**
+   * What the original resources *say* — two scopes whose dictionaries list
+   * the same names for the same objects resolve every name identically, even
+   * when they are different dictionary objects (each page's own direct
+   * /Resources, say).
+   */
+  identity(): string {
+    this.identityKey ??= this.original ? this.original.toString() : '';
+    return this.identityKey;
+  }
 
   /** The resources to write, or `undefined` when nothing changed. */
   result(): PDFDict | undefined {
@@ -431,6 +476,9 @@ interface Effects {
   reasons: Set<string>;
   images: Set<number>;
   undecodable: Set<number>;
+  lossy: Set<number>;
+  /** Visible annotations whose conversion gave a reason. */
+  annotationFailures: number;
   constructs: number;
   /** Of `constructs`, those that actually carry colour (not black written as `0 0 0 rg`). */
   chromatic: number;
@@ -441,6 +489,8 @@ function newEffects(): Effects {
     reasons: new Set(),
     images: new Set(),
     undecodable: new Set(),
+    lossy: new Set(),
+    annotationFailures: 0,
     constructs: 0,
     chromatic: 0
   };
@@ -450,6 +500,8 @@ function mergeEffects(into: Effects, from: Effects): void {
   for (const r of from.reasons) into.reasons.add(r);
   for (const i of from.images) into.images.add(i);
   for (const u of from.undecodable) into.undecodable.add(u);
+  for (const l of from.lossy) into.lossy.add(l);
+  into.annotationFailures += from.annotationFailures;
   into.constructs += from.constructs;
   into.chromatic += from.chromatic;
 }
@@ -499,7 +551,13 @@ export class GrayConverter {
   private effects: Effects = newEffects();
   private readonly csCache = new Map<unknown, ColorSpace>();
   private readonly imageMemo = new Map<number, { converted: Converted; effects: Effects }>();
-  private readonly formMemo = new Map<number, FormMemo>();
+  /**
+   * Keyed by object number — plus, for a form with no /Resources of its own,
+   * the resources it inherits, since what its names mean depends on them. A
+   * resource-less form shared by many pages with the same resources is then
+   * converted once, not once per page (PDF-6).
+   */
+  private readonly formMemo = new Map<string, FormMemo>();
   private readonly objectMemo = new Map<string, { converted: Converted; effects: Effects }>();
   private readonly smaskMemo = new Map<number, PDFRef>();
   /** Set while converting one content stream: which inherited spaces an `sc` relied on. */
@@ -511,13 +569,31 @@ export class GrayConverter {
     private readonly mode: GrayMode,
     /** Decoded pixels by object number; `null` in plan mode, where nothing is replaced. */
     private readonly images: Map<number, GrayImageData> | null,
-    private readonly jpegQuality = 0.85
+    private readonly jpegQuality = GRAY_JPEG_QUALITY
   ) {
     this.context = doc.context;
   }
 
   private get planning(): boolean {
     return this.images === null;
+  }
+
+  /**
+   * PDF-5 — drops the decoded samples of every image already converted (or
+   * found to need nothing). Once an object is memoised its samples are never
+   * read again, and the grey payload now lives in the document, so the batch
+   * that delivered them can be let go. Returns how many entries were dropped.
+   */
+  releaseUsedImageData(): number {
+    if (!this.images) return 0;
+    let dropped = 0;
+    for (const objectNumber of [...this.images.keys()]) {
+      if (this.imageMemo.has(objectNumber)) {
+        this.images.delete(objectNumber);
+        dropped++;
+      }
+    }
+    return dropped;
   }
 
   private mapGray(v: number): number {
@@ -676,6 +752,23 @@ export class GrayConverter {
   /* -------------------------- content streams --------------------------- */
 
   /**
+   * The luminance of `nums` in `cs`, or null — with the reason recorded, so
+   * the page is rasterised — when it cannot be computed (a tint transform
+   * that fails at this input). Never a guessed grey.
+   */
+  private grayOrReason(cs: ColorSpace, nums: readonly number[]): number | null {
+    const gray = toGray(cs, nums);
+    if (gray === null) {
+      this.reason(
+        translate('uses a colour space Stapler cannot convert ({space})', {
+          space: cs.kind === 'tint' ? 'Separation/DeviceN' : cs.kind
+        })
+      );
+    }
+    return gray;
+  }
+
+  /**
    * Rewrites one content stream's statements. `scope` receives any resource
    * that had to change (converted forms, images, patterns, shadings, fonts).
    */
@@ -780,9 +873,14 @@ export class GrayConverter {
             emit([nameToken(grayPattern)], op);
             break;
           }
+          const initialGray = this.grayOrReason(cs, initialComponents(cs));
+          if (initialGray === null) {
+            out.push(statement);
+            break;
+          }
           this.hit(false);
           emit([nameToken('DeviceGray')], op);
-          const initial = this.mapGray(toGray(cs, initialComponents(cs)) ?? 0);
+          const initial = this.mapGray(initialGray);
           if (initial !== 0) emit([numberToken(initial)], stroke ? 'SC' : 'sc');
           break;
         }
@@ -815,14 +913,15 @@ export class GrayConverter {
             if (patternName !== null) this.usePattern(patternName, scope, depth);
             if (cs.base && convertible(cs.base) && patternName !== null) {
               const nums = numericOperands(operands.slice(0, -1));
-              if (nums && nums.length === components(cs.base)) {
+              const baseGray =
+                nums && nums.length === components(cs.base)
+                  ? this.grayOrReason(cs.base, nums)
+                  : null;
+              if (nums && baseGray !== null) {
                 this.hit(
                   cs.base.kind !== 'rgb' && cs.base.kind !== 'cmyk' ? true : !neutral(cs.base, nums)
                 );
-                emit(
-                  [numberToken(this.mapGray(toGray(cs.base, nums) ?? 0)), nameToken(patternName)],
-                  op
-                );
+                emit([numberToken(this.mapGray(baseGray)), nameToken(patternName)], op);
                 break;
               }
             }
@@ -838,7 +937,7 @@ export class GrayConverter {
             out.push(statement);
             break;
           }
-          const gray = toGray(cs, nums);
+          const gray = this.grayOrReason(cs, nums);
           if (gray === null) {
             out.push(statement);
             break;
@@ -906,11 +1005,25 @@ export class GrayConverter {
     inherited: ColorState,
     depth: number
   ): { bytes: Uint8Array; changed: boolean } | null {
+    let tokens: Token[];
     let statements: Statement[];
     try {
-      statements = parseContentStream(tokenizeContentStream(bytes));
+      tokens = tokenizeContentStream(bytes);
     } catch {
-      this.reason(translate('contains an inline image'));
+      this.reason(translate('has drawing instructions Stapler cannot read'));
+      return null;
+    }
+    try {
+      statements = parseContentStream(tokens);
+    } catch {
+      // The parser refuses inline images (`BI … ID … EI`); anything else it
+      // throws on is reported as what it is, not as an inline image (PDF-8).
+      const inline = tokens.some(t => t.type === 'operator' && tokenText(t) === 'ID');
+      this.reason(
+        inline
+          ? translate('contains an inline image')
+          : translate('has drawing instructions Stapler cannot read')
+      );
       return null;
     }
     const converted = this.convertStatements(statements, scope, inherited, depth);
@@ -990,6 +1103,7 @@ export class GrayConverter {
     this.hit(true);
     this.effects.images.add(ref.objectNumber);
     if (filters.some(f => UNDECODABLE.has(f))) this.effects.undecodable.add(ref.objectNumber);
+    if (filters.some(f => LOSSY_FILTERS.has(f))) this.effects.lossy.add(ref.objectNumber);
     if (this.planning) return unchanged;
 
     const data = this.images?.get(ref.objectNumber);
@@ -997,6 +1111,22 @@ export class GrayConverter {
     const replacement = this.buildGrayImage(stream, filters, data);
     this.convertedImages.add(ref.objectNumber);
     return { value: replacement, changed: true };
+  }
+
+  /** Encodes raw grey samples the way this conversion writes them. */
+  private encode(
+    data: { gray?: Uint8Array; width: number; height: number },
+    lossy: boolean
+  ): EncodedGray {
+    if (!data.gray) throw new Error('grey image has neither samples nor an encoding');
+    return encodeGraySamples(
+      data.gray,
+      data.width,
+      data.height,
+      this.mode,
+      lossy,
+      this.jpegQuality
+    );
   }
 
   private buildGrayImage(original: PDFStream, filters: string[], data: GrayImageData): PDFRef {
@@ -1009,20 +1139,15 @@ export class GrayConverter {
     dict.set(PDFName.of('Height'), PDFNumber.of(data.height));
     dict.set(PDFName.of('ColorSpace'), PDFName.of('DeviceGray'));
 
-    let payload: Uint8Array;
-    if (this.mode === 'bw') {
-      payload = zlibSync(packOneBit(data.gray, data.width, data.height));
-      dict.set(PDFName.of('BitsPerComponent'), PDFNumber.of(1));
-      dict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
-    } else if (filters.some(f => LOSSY_FILTERS.has(f))) {
-      payload = encodeGrayJpeg(data.gray, data.width, data.height, { quality: this.jpegQuality });
-      dict.set(PDFName.of('BitsPerComponent'), PDFNumber.of(8));
-      dict.set(PDFName.of('Filter'), PDFName.of('DCTDecode'));
-    } else {
-      payload = zlibSync(data.gray);
-      dict.set(PDFName.of('BitsPerComponent'), PDFNumber.of(8));
-      dict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
-    }
+    const encoded =
+      data.encoded ??
+      this.encode(
+        data,
+        filters.some(f => LOSSY_FILTERS.has(f))
+      );
+    const payload = encoded.data;
+    dict.set(PDFName.of('BitsPerComponent'), PDFNumber.of(encoded.bitsPerComponent));
+    dict.set(PDFName.of('Filter'), PDFName.of(encoded.filter));
 
     // Masks. An /SMask is already DeviceGray by definition and is kept as the
     // same object — unless it carries /Matte, the pre-blend colour in the
@@ -1074,7 +1199,12 @@ export class GrayConverter {
   ): Converted {
     const ref = value instanceof PDFRef ? value : undefined;
     const ownResources = stream.dict.lookupMaybe(PDFName.of('Resources'), PDFDict);
-    const memo = ref && ownResources ? this.formMemo.get(ref.objectNumber) : undefined;
+    const memoKey = ref
+      ? ownResources
+        ? String(ref.objectNumber)
+        : `${ref.objectNumber}|${scope.identity()}`
+      : undefined;
+    const memo = memoKey !== undefined ? this.formMemo.get(memoKey) : undefined;
     if (
       memo &&
       !(memo.dependsFill && memo.inherited.fill !== state.fill) &&
@@ -1094,8 +1224,8 @@ export class GrayConverter {
     } finally {
       this.inheritedUse = savedTracker;
     }
-    if (ref && ownResources) {
-      this.formMemo.set(ref.objectNumber, {
+    if (memoKey !== undefined) {
+      this.formMemo.set(memoKey, {
         converted: captured.result,
         effects: captured.effects,
         inherited: state,
@@ -1268,12 +1398,15 @@ export class GrayConverter {
       for (let i = 0; i < size; i++) {
         const input = [domain[0] + ((domain[1] - domain[0]) * i) / (size - 1)];
         if (inputs === 2) input.push(domain[2] + ((domain[3] - domain[2]) * j) / (size - 1));
-        const gray = toGray(cs, fn.evaluate(input));
+        const outputs = fn.evaluate(input);
+        const gray = outputs ? toGray(cs, outputs) : null;
         if (gray === null) failed = true;
         samples[j * size + i] = Math.round(this.mapGray(gray ?? 0) * 255);
       }
     }
-    if (failed) {
+    const background = numberList(dict.get(PDFName.of('Background')), this.context);
+    const backgroundGray = background ? toGray(cs, background) : null;
+    if (failed || (background && backgroundGray === null)) {
       this.reason(translate('has a colour gradient Stapler cannot convert'));
       return unchanged;
     }
@@ -1295,12 +1428,8 @@ export class GrayConverter {
     const copy = dict.clone(this.context);
     copy.set(PDFName.of('ColorSpace'), PDFName.of('DeviceGray'));
     copy.set(PDFName.of('Function'), sampled);
-    const background = numberList(dict.get(PDFName.of('Background')), this.context);
-    if (background) {
-      copy.set(
-        PDFName.of('Background'),
-        this.context.obj([this.mapGray(toGray(cs, background) ?? 0)])
-      );
+    if (backgroundGray !== null) {
+      copy.set(PDFName.of('Background'), this.context.obj([this.mapGray(backgroundGray)]));
     }
     if (stream) {
       return {
@@ -1443,44 +1572,63 @@ export class GrayConverter {
     for (let i = 0; i < annots.size(); i++) {
       const annot = lookup(annots.get(i), this.context);
       if (!(annot instanceof PDFDict)) continue;
-      const ap = annot.lookupMaybe(PDFName.of('AP'), PDFDict);
-      if (ap) {
-        const apCopy = ap.clone(this.context);
-        let apChanged = false;
-        for (const key of ['N', 'R', 'D']) {
-          const entry = ap.get(PDFName.of(key));
-          if (entry === undefined) continue;
-          const converted = this.convertAppearance(entry, 0);
-          if (converted.changed) {
-            apCopy.set(PDFName.of(key), converted.value);
-            apChanged = true;
-          }
+      // Each annotation's effects are kept apart: one that cannot be
+      // converted is either invisible (nothing to rasterise for it) or makes
+      // the page's raster include the annotations (PDF-2).
+      const saved = this.effects;
+      const local = newEffects();
+      this.effects = local;
+      try {
+        this.convertAnnotation(annot);
+      } finally {
+        this.effects = saved;
+        if (local.reasons.size > 0) {
+          if (annotationVisible(annot, this.context)) local.annotationFailures++;
+          else local.reasons.clear();
         }
-        if (apChanged && !this.planning) annot.set(PDFName.of('AP'), apCopy);
+        mergeEffects(saved, local);
       }
-      for (const key of ['C', 'IC']) {
-        const gray = this.grayArray(annot.get(PDFName.of(key)));
-        if (gray) {
-          this.hit(this.lastChromatic);
-          if (!this.planning) annot.set(PDFName.of(key), gray);
-        }
-      }
-      const mk = annot.lookupMaybe(PDFName.of('MK'), PDFDict);
-      if (mk) {
-        const mkCopy = mk.clone(this.context);
-        let mkChanged = false;
-        for (const key of ['BG', 'BC']) {
-          const gray = this.grayArray(mk.get(PDFName.of(key)));
-          if (gray) {
-            mkCopy.set(PDFName.of(key), gray);
-            mkChanged = true;
-            this.hit(this.lastChromatic);
-          }
-        }
-        if (mkChanged && !this.planning) annot.set(PDFName.of('MK'), mkCopy);
-      }
-      this.convertDaEntry(annot);
     }
+  }
+
+  private convertAnnotation(annot: PDFDict): void {
+    const ap = annot.lookupMaybe(PDFName.of('AP'), PDFDict);
+    if (ap) {
+      const apCopy = ap.clone(this.context);
+      let apChanged = false;
+      for (const key of ['N', 'R', 'D']) {
+        const entry = ap.get(PDFName.of(key));
+        if (entry === undefined) continue;
+        const converted = this.convertAppearance(entry, 0);
+        if (converted.changed) {
+          apCopy.set(PDFName.of(key), converted.value);
+          apChanged = true;
+        }
+      }
+      if (apChanged && !this.planning) annot.set(PDFName.of('AP'), apCopy);
+    }
+    for (const key of ['C', 'IC']) {
+      const gray = this.grayArray(annot.get(PDFName.of(key)));
+      if (gray) {
+        this.hit(this.lastChromatic);
+        if (!this.planning) annot.set(PDFName.of(key), gray);
+      }
+    }
+    const mk = annot.lookupMaybe(PDFName.of('MK'), PDFDict);
+    if (mk) {
+      const mkCopy = mk.clone(this.context);
+      let mkChanged = false;
+      for (const key of ['BG', 'BC']) {
+        const gray = this.grayArray(mk.get(PDFName.of(key)));
+        if (gray) {
+          mkCopy.set(PDFName.of(key), gray);
+          mkChanged = true;
+          this.hit(this.lastChromatic);
+        }
+      }
+      if (mkChanged && !this.planning) annot.set(PDFName.of('MK'), mkCopy);
+    }
+    this.convertDaEntry(annot);
   }
 
   /** The AcroForm's document-wide default appearance, for a whole-document conversion. */
@@ -1557,8 +1705,8 @@ export class GrayConverter {
     }
   }
 
-  /** Replaces a page's content with a grey raster of itself. */
-  applyRaster(pageIndex: number, raster: GrayRaster): void {
+  /** Replaces a page's content with a grey raster of itself; returns the annotations flattened. */
+  applyRaster(pageIndex: number, raster: GrayRaster): number {
     const page = this.doc.getPage(pageIndex);
     const context = this.context;
     const imageDict = context.obj({
@@ -1568,42 +1716,64 @@ export class GrayConverter {
       Height: raster.height,
       ColorSpace: 'DeviceGray'
     });
-    let payload: Uint8Array;
-    if (this.mode === 'bw') {
-      payload = zlibSync(packOneBit(raster.gray, raster.width, raster.height));
-      imageDict.set(PDFName.of('BitsPerComponent'), PDFNumber.of(1));
-      imageDict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
-    } else {
-      payload = encodeGrayJpeg(raster.gray, raster.width, raster.height, {
-        quality: this.jpegQuality
-      });
-      imageDict.set(PDFName.of('BitsPerComponent'), PDFNumber.of(8));
-      imageDict.set(PDFName.of('Filter'), PDFName.of('DCTDecode'));
-    }
-    const image = context.register(PDFRawStream.of(imageDict, payload));
+    const encoded = raster.encoded ?? this.encode(raster, true);
+    imageDict.set(PDFName.of('BitsPerComponent'), PDFNumber.of(encoded.bitsPerComponent));
+    imageDict.set(PDFName.of('Filter'), PDFName.of(encoded.filter));
+    const image = context.register(PDFRawStream.of(imageDict, encoded.data));
     const [x0, y0, x1, y1] = raster.view;
     const content =
       `q ${formatBox(x1 - x0)} 0 0 ${formatBox(y1 - y0)} ${formatBox(x0)} ${formatBox(y0)} cm ` +
       '/StaplerGrayPage Do Q';
     page.node.set(PDFName.of('Contents'), flateStream(context, ascii(content)));
     page.node.set(PDFName.of('Resources'), context.obj({ XObject: { StaplerGrayPage: image } }));
+    return raster.annotationsIncluded ? this.hideRasterisedAnnotations(page.node.Annots()) : 0;
   }
+
+  /**
+   * The annotations a raster rendered *with* annotations already shows. Each
+   * is hidden (flag bit 2) rather than removed — it is still referenced from
+   * the AcroForm and from its popup — so it is not drawn a second time, in
+   * its original colour, over the grey raster. A link keeps working: only its
+   * appearance is dropped. Popups draw nothing of their own. Returns how many
+   * annotations were flattened.
+   */
+  private hideRasterisedAnnotations(annots: PDFArray | undefined): number {
+    if (!annots) return 0;
+    let hidden = 0;
+    for (let i = 0; i < annots.size(); i++) {
+      const annot = lookup(annots.get(i), this.context);
+      if (!(annot instanceof PDFDict) || !annotationVisible(annot, this.context)) continue;
+      const subtype = nameString(annot.lookup(PDFName.of('Subtype')));
+      if (subtype === 'Popup') continue;
+      if (subtype === 'Link') {
+        if (annot.get(PDFName.of('AP')) !== undefined) {
+          annot.delete(PDFName.of('AP'));
+          hidden++;
+        }
+        continue;
+      }
+      const flags = annot.lookup(PDFName.of('F'));
+      const value = flags instanceof PDFNumber ? flags.asNumber() : 0;
+      annot.set(PDFName.of('F'), PDFNumber.of(value | ANNOT_HIDDEN));
+      hidden++;
+    }
+    return hidden;
+  }
+}
+
+/** Annotation flag bits (§12.5.3): Hidden and NoView. */
+const ANNOT_HIDDEN = 1 << 1;
+const ANNOT_NOVIEW = 1 << 5;
+
+/** Whether a viewer draws `annot` on screen at all. */
+function annotationVisible(annot: PDFDict, context: PDFContext): boolean {
+  const flags = lookup(annot.get(PDFName.of('F')), context);
+  const value = flags instanceof PDFNumber ? flags.asNumber() : 0;
+  return (value & (ANNOT_HIDDEN | ANNOT_NOVIEW)) === 0;
 }
 
 function formatBox(v: number): string {
   return String(Number(v.toFixed(4)));
-}
-
-/** 8-bit 0/255 samples → 1-bit rows (1 = white, as DeviceGray 1bpc reads). */
-export function packOneBit(gray: Uint8Array, width: number, height: number): Uint8Array {
-  const rowBytes = Math.ceil(width / 8);
-  const out = new Uint8Array(rowBytes * height);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (gray[y * width + x] >= 128) out[y * rowBytes + (x >> 3)] |= 0x80 >> (x & 7);
-    }
-  }
-  return out;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1616,6 +1786,8 @@ function pagePlanFrom(pageIndex: number, effects: Effects): GrayPagePlan {
     rasterReasons: [...effects.reasons],
     images: [...effects.images],
     undecodable: [...effects.undecodable],
+    lossy: [...effects.lossy],
+    flattenAnnotations: effects.annotationFailures > 0,
     colourConstructs: effects.constructs,
     chromaticConstructs: effects.chromatic
   };
@@ -1638,60 +1810,111 @@ export async function planGrayscale(
   return plans;
 }
 
-export interface ApplyGrayscaleInput {
+/** One batch of pages for {@link GrayscaleApplication.applyBatch}. */
+export interface GrayApplyBatch {
+  /** The pages to convert now, in order. */
   pageIndices: readonly number[];
-  mode: GrayMode;
-  images: Map<number, GrayImageData>;
-  rasters: Map<number, GrayRaster>;
-  /** True when every page of the document is being converted. */
-  wholeDocument: boolean;
-  jpegQuality?: number;
+  /**
+   * Decoded images first used by these pages — plus any delivered early. An
+   * image is delivered once, in (or before) the batch of the first page that
+   * uses it; later batches reuse the memoised grey copy.
+   */
+  images: readonly GrayImageData[];
+  /** Rasters for those of `pageIndices` that are rasterised. */
+  rasters: readonly GrayRaster[];
 }
 
-/** Rewrites `doc` in place. The caller saves (and verifies) the result. */
-export async function applyGrayscale(
-  doc: PDFDocument,
-  input: ApplyGrayscaleInput,
-  onPage?: (done: number, total: number) => Promise<void>
-): Promise<GrayPageOutcome[]> {
-  const converter = new GrayConverter(doc, input.mode, input.images, input.jpegQuality);
-  const outcomes: GrayPageOutcome[] = [];
-  for (let i = 0; i < input.pageIndices.length; i++) {
-    await onPage?.(i, input.pageIndices.length);
-    const pageIndex = input.pageIndices[i];
-    const raster = input.rasters.get(pageIndex);
-    const { effects, wrote } = converter.convertPage(pageIndex, raster !== undefined);
-    const converted = [...effects.images].filter(n => converter.convertedImages.has(n)).length;
-    const leftInColour = effects.images.size - converted;
-    if (raster) {
-      converter.applyRaster(pageIndex, raster);
-      outcomes.push({
-        pageIndex,
-        route: 'raster',
-        reasons: [...effects.reasons],
-        imagesConverted: 0,
-        imagesLeftInColour: 0
-      });
-      continue;
+/**
+ * PDF-5 — rewrites `doc` in place, a batch of pages at a time, so only one
+ * batch's decoded images and page rasters are in hand at once. The converter
+ * (and its image, form and soft-mask memos) lives across batches: an image or
+ * form shared by pages in different batches is written once, exactly as when
+ * every page is converted in one call. The caller calls {@link finish} once,
+ * then saves (and verifies) the result.
+ */
+export class GrayscaleApplication {
+  private readonly images = new Map<number, GrayImageData>();
+  private readonly converter: GrayConverter;
+  private finished = false;
+
+  constructor(
+    doc: PDFDocument,
+    private readonly options: {
+      mode: GrayMode;
+      /** True when every page of the document is being converted. */
+      wholeDocument: boolean;
+      jpegQuality?: number;
     }
-    if (effects.reasons.size > 0) {
-      outcomes.push({
-        pageIndex,
-        route: 'failed',
-        reasons: [...effects.reasons],
-        imagesConverted: 0,
-        imagesLeftInColour: effects.images.size
-      });
-      continue;
-    }
-    outcomes.push({
-      pageIndex,
-      route: wrote || effects.constructs > 0 ? 'vector' : 'unchanged',
-      reasons: [],
-      imagesConverted: converted,
-      imagesLeftInColour: leftInColour
-    });
+  ) {
+    this.converter = new GrayConverter(doc, options.mode, this.images, options.jpegQuality);
   }
-  if (input.wholeDocument) converter.convertAcroFormDefaults();
-  return outcomes;
+
+  /** Decoded images received and not yet consumed — what this batch still holds. */
+  get heldImages(): number {
+    return this.images.size;
+  }
+
+  async applyBatch(
+    batch: GrayApplyBatch,
+    onPage?: (done: number, total: number) => Promise<void>
+  ): Promise<GrayPageOutcome[]> {
+    if (this.finished) throw new Error('grayscale application already finished');
+    const converter = this.converter;
+    for (const image of batch.images) this.images.set(image.objectNumber, image);
+    const rasters = new Map(batch.rasters.map(raster => [raster.pageIndex, raster]));
+    const outcomes: GrayPageOutcome[] = [];
+    for (let i = 0; i < batch.pageIndices.length; i++) {
+      await onPage?.(i, batch.pageIndices.length);
+      const pageIndex = batch.pageIndices[i];
+      const raster = rasters.get(pageIndex);
+      const { effects, wrote } = converter.convertPage(pageIndex, raster !== undefined);
+      const converted = [...effects.images].filter(n => converter.convertedImages.has(n)).length;
+      const leftInColour = effects.images.size - converted;
+      if (raster) {
+        const flattened = converter.applyRaster(pageIndex, raster);
+        // The raster's payload now lives in the document; drop this batch's handle on it.
+        rasters.delete(pageIndex);
+        outcomes.push({
+          pageIndex,
+          route: 'raster',
+          reasons: [
+            ...effects.reasons,
+            ...(flattened > 0
+              ? [translate('its annotations and form fields were flattened into the page image')]
+              : [])
+          ],
+          imagesConverted: 0,
+          imagesLeftInColour: 0
+        });
+        continue;
+      }
+      if (effects.reasons.size > 0) {
+        outcomes.push({
+          pageIndex,
+          route: 'failed',
+          reasons: [...effects.reasons],
+          imagesConverted: 0,
+          imagesLeftInColour: effects.images.size
+        });
+        continue;
+      }
+      outcomes.push({
+        pageIndex,
+        route: wrote || effects.constructs > 0 ? 'vector' : 'unchanged',
+        reasons: [],
+        imagesConverted: converted,
+        imagesLeftInColour: leftInColour
+      });
+    }
+    this.converter.releaseUsedImageData();
+    return outcomes;
+  }
+
+  /** Document-level work done once, after every page. Releases what is left. */
+  finish(): void {
+    if (this.finished) return;
+    this.finished = true;
+    if (this.options.wholeDocument) this.converter.convertAcroFormDefaults();
+    this.images.clear();
+  }
 }

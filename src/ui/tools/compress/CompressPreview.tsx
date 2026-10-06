@@ -190,10 +190,21 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
    * one, or the settings changed), this does nothing.
    */
   const revision = activeDoc.value;
+  /**
+   * Until the analysis lands, `index` is a placeholder (page 1), not the page
+   * with the most image area. The placeholder is still drawn so the stage is
+   * not empty, but the preview must not report `ready` for it: that was a real
+   * race — page 1 could finish rendering before the analysis did, so "ready"
+   * briefly described a page that was about to be replaced. If the analysis
+   * fails there is nothing better to wait for, and page 1 stands.
+   */
+  const [analysisFailed, setAnalysisFailed] = useState(false);
   useEffect(() => {
+    setAnalysisFailed(false);
     if (compressReport.value) return;
     const controller = new AbortController();
-    (async () => {
+    // Errors are caught inside and shown as the preview's failed state.
+    void (async () => {
       try {
         const bytes = await currentDocumentBytes({ signal: controller.signal });
         const analysed = await planCompression(bytes, compressSettings.value, {
@@ -201,7 +212,9 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
         });
         if (!controller.signal.aborted) compressReport.value = analysed;
       } catch (err) {
-        if (!isCancellation(err)) logEvent('error', 'compress.preview', fromUnknown(err).message);
+        if (isCancellation(err) || controller.signal.aborted) return;
+        logEvent('error', 'compress.preview', fromUnknown(err).message);
+        setAnalysisFailed(true);
       }
     })();
     return () => controller.abort();
@@ -215,7 +228,7 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
   useEffect(() => {
     if (!page) return;
     const controller = new AbortController();
-    (async () => {
+    void (async () => {
       try {
         const composed = await composeOnce(page, controller.signal);
         if (controller.signal.aborted) return;
@@ -303,7 +316,10 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
         setShown({ dpi, quality, scale, pageKey: page.key });
         setFailed(false);
       } catch (err) {
-        if (isCancellation(err)) return;
+        // A job torn down mid-flight can reject with something other than a
+        // cancellation (a worker call cut off by the abort); it describes a
+        // superseded page or setting, so it must not mark the current one failed.
+        if (isCancellation(err) || controller.signal.aborted) return;
         // Never leave a stale "after" passing for the current settings: the
         // preview says so instead of quietly showing the previous encode.
         logEvent('error', 'compress.preview', fromUnknown(err).message);
@@ -313,7 +329,7 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
       }
     };
 
-    const timer = setTimeout(run, SETTLE_MS);
+    const timer = setTimeout(() => void run(), SETTLE_MS);
     return () => {
       clearTimeout(timer);
       controller.abort();
@@ -328,6 +344,7 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
   const width = Math.max(beforeSize.width, afterSize.width) * zoom;
   const height = Math.max(beforeSize.height, afterSize.height) * zoom;
   const upToDate =
+    (report !== null || analysisFailed) &&
     shown?.dpi === settings.dpi &&
     shown?.quality === settings.quality &&
     shown?.scale === scale &&

@@ -27,59 +27,45 @@ function noText(count: number): PageTextPresence[] {
 }
 
 describe('CMP-01: classification against the real static fixture corpus', () => {
-  it('jbig2.pdf: the filter is detected and the image is never surgically re-encoded', async () => {
-    const inventory = await processWorkerImpl.imageInventory(fixture('jbig2.pdf'));
-    expect(inventory[0].images[0].filter).toBe('JBIG2Decode');
+  /*
+   * HRD-39 — the real route, on the real fixture inventory. Both fixtures are a
+   * textless 612×792 page carrying one 1×1 image whose stream is JBIG2/JPX.
+   * The surgical route never re-encodes such a stream (it would have to decode
+   * it and write a JPEG), but the raster route never reads it: pdf.js renders
+   * the page with its bundled JBIG2/OpenJPEG decoders. So the textless page is
+   * rasterised — and, being rasterised wholesale, the image is not listed as
+   * "left untouched" in the report's skip list, because it is not.
+   */
+  it.each([
+    ['jbig2.pdf', 'JBIG2Decode'],
+    ['jpx.pdf', 'JPXDecode']
+  ])(
+    '%s: a textless page routes to raster, never to a surgical re-encode',
+    async (name, filter) => {
+      const inventory = await processWorkerImpl.imageInventory(fixture(name));
+      expect(inventory[0].images[0].filter).toBe(filter);
 
-    // No text on this page, so the page is still compressible via the raster
-    // route (which rasterises the whole page through pdf.js's own decoder); the
-    // image itself is simply never a surgical re-encode candidate.
-    const plan = classifyPages(inventory, noText(inventory.length), { rasterDpi: 150 });
-    expect(plan.pages[0].reencode).toEqual([]);
-    expect(plan.skipped.some(reason => reason.includes('JBIG2Decode'))).toBe(true);
-  });
+      const plan = classifyPages(inventory, noText(inventory.length), { rasterDpi: 150 });
+      expect(plan.pages[0].route).toBe('raster');
+      expect(plan.pages[0].reencode).toEqual([]);
+      expect(plan.skipped.some(reason => reason.includes(filter))).toBe(false);
+    }
+  );
 
-  it('jpx.pdf: the filter is detected and the image is never surgically re-encoded', async () => {
-    const inventory = await processWorkerImpl.imageInventory(fixture('jpx.pdf'));
-    expect(inventory[0].images[0].filter).toBe('JPXDecode');
-
-    const plan = classifyPages(inventory, noText(inventory.length), { rasterDpi: 150 });
-    expect(plan.pages[0].reencode).toEqual([]);
-    expect(plan.skipped.some(reason => reason.includes('JPXDecode'))).toBe(true);
-  });
-
-  it('a page with real text and an undecodable image is routed to skip, not raster', () => {
-    // jbig2.pdf/jpx.pdf themselves carry no text layer, so this proves the other
-    // half of the routing rule (compress-plan.ts's `!hasText` branch) using the
-    // same real inventory shape those fixtures produce, plus a text census that
-    // says the page has a real body of extractable text.
-    const inventory = [
-      {
-        pageIndex: 0,
-        width: 612,
-        height: 792,
-        images: [
-          {
-            name: 'Im1',
-            objectNumber: 4,
-            width: 1,
-            height: 1,
-            bitsPerComponent: 1,
-            colorSpace: 'DeviceGray',
-            filter: 'JBIG2Decode',
-            hasSMask: false,
-            hasMask: false,
-            maskKind: 'none' as const,
-            isImageMask: false,
-            byteLength: 0
-          }
-        ]
-      }
-    ];
+  it.each([
+    ['jbig2.pdf', 'JBIG2Decode'],
+    ['jpx.pdf', 'JPXDecode']
+  ])('%s: the same page with real text is left untouched and says why', async (name, filter) => {
+    // The other half of the routing rule: with a text layer to keep, the page
+    // cannot be rasterised, and the image cannot be re-encoded in place. Same
+    // real inventory, plus a census saying the page has a body of text.
+    const inventory = await processWorkerImpl.imageInventory(fixture(name));
     const plan = classifyPages(inventory, [{ pageIndex: 0, charCount: 4000, runCount: 40 }], {
       rasterDpi: 150
     });
     expect(plan.pages[0].route).toBe('skip');
+    expect(plan.pages[0].reencode).toEqual([]);
+    expect(plan.skipped.some(reason => reason.includes(filter))).toBe(true);
   });
 
   it('cmyk.pdf: a real ImageMagick-encoded CMYK JPEG resolves to DeviceCMYK, not unknown', async () => {
@@ -140,21 +126,28 @@ describe('CMP-01: classification against the real static fixture corpus', () => 
   it.each([
     ['indexed.pdf', 'Indexed'],
     ['icc.pdf', 'ICCBased'],
-    ['soft-mask.pdf', 'soft mask']
-  ])('%s: re-encodes an over-sampled image that uses %s', async filename => {
-    const inventory = await processWorkerImpl.imageInventory(fixture(filename));
-    // The image must be over-sampled (width > 595 at 150 DPI) to route to surgical rather than already-optimized
-    // We can just force the width/height of the inventory image to be huge since we only care about the classification logic here,
-    // but actually our raw stubs define Width 1, Height 1, which means it will be classified as 'already-optimized' instead of 'surgical'
-    // if we don't mock it. Let's just override the width/height on the returned inventory before classifyPages!
-    inventory[0].images[0].width = 3000;
-    inventory[0].images[0].height = 4000;
+    ['soft-mask.pdf', 'soft']
+  ])(
+    '%s: an image using %s is safe to re-encode, judged at its own size',
+    async (filename, kind) => {
+      const inventory = await processWorkerImpl.imageInventory(fixture(filename));
+      const image = inventory[0].images[0];
+      // Classified at the fixture's own dimensions — a 1×1 image on a 612×792
+      // page — not at a size written over the inventory. Proves the property
+      // this case exists for: the colour space / soft mask is read correctly
+      // and does not disqualify the image.
+      expect([image.colorSpace, image.maskKind]).toContain(kind);
+      expect([image.width, image.height]).toEqual([1, 1]);
 
-    const plan = classifyPages(inventory, [{ pageIndex: 0, charCount: 3000, runCount: 30 }], {
-      rasterDpi: 150
-    });
-    expect(plan.pages[0].route).toBe('surgical');
-    expect(plan.pages[0].reencode.length).toBeGreaterThan(0);
-    expect(plan.skipped).toEqual([]);
-  });
+      const plan = classifyPages(inventory, [{ pageIndex: 0, charCount: 3000, runCount: 30 }], {
+        rasterDpi: 150
+      });
+      // Safe, so not `skip`; one pixel is far below 150 DPI, so not over-sampled
+      // and there is nothing to re-encode. (`compress-plan.test.ts` covers the
+      // over-sampled → `surgical` path with images that really are large.)
+      expect(plan.pages[0].route).toBe('already-optimized');
+      expect(plan.pages[0].reencode).toEqual([]);
+      expect(plan.skipped).toEqual([]);
+    }
+  );
 });

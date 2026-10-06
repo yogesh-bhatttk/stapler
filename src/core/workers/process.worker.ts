@@ -1,4 +1,7 @@
+import './network-guard'; // PLT-2: first, so it wraps the network APIs before any library runs
 import { pseudoLinearize } from '../pdf/linearize';
+import { saveFastWebView } from '../pdf/fast-web-view';
+import { compactStructuralObjects } from '../pdf/compact-save';
 import {
   copyPageInto,
   createPageTombstone,
@@ -8,6 +11,8 @@ import {
   sweepUnreachableObjects
 } from '../pdf/rebuild';
 import { scanResidualText } from '../pdf/residual-text';
+// ANN-04 — the annotation summary's PDF build (see annotation-summary-pdf.ts).
+import { annotationSummaryApi, type AnnotationSummaryJob } from './annotation-summary-pdf';
 import type { ResidualTextScan } from '../pdf/residual-text';
 /**
  * DOC-12 — vendored, not fetched: `?inline` forces Vite to bundle this as a
@@ -141,23 +146,26 @@ import {
   placeDisplayBox,
   type DisplayFrame
 } from '../rotation';
-import { pageDisplayFrame, visiblePageBox } from '../pdf/display-frame';
+import { pageDisplayFrame, pageRectToDisplayFractions, visiblePageBox } from '../pdf/display-frame';
 import {
   tokenizeContentStream,
   parseContentStream,
   filterContentStream,
   serializeStatements,
   decodeStream,
-  areaTouches
+  areaTouches,
+  sameStatements
 } from '../pdf/interpreter';
 import type {
   Rect,
   RedactionArea,
+  ExtGStateInfo,
   FontInfo,
   FormContent,
   FormRewrite,
   GraphicsState,
   Matrix,
+  PatternInfo,
   Statement,
   XObjectInfo
 } from '../pdf/interpreter';
@@ -177,8 +185,9 @@ import {
 } from '../pdf/encrypt';
 import { applyAltTextToDoc } from '../pdf/accessibility';
 import {
-  applyGrayscale,
+  GrayscaleApplication,
   planGrayscale,
+  type GrayApplyBatch,
   type GrayImageData,
   type GrayMode,
   type GrayPageOutcome,
@@ -193,6 +202,8 @@ import {
   textShowSignature,
   type FontProgram
 } from '../pdf/font-substitute';
+// X-7 — the one page-range parser, shared with the watermark preview.
+import { parsePageRange } from '../page-range';
 
 /** A page in the output, pointing back at the bytes it came from. */
 export interface PageSource {
@@ -512,7 +523,8 @@ export interface PageImageRef {
   objectNumber: number;
   /**
    * PDF-14 — the image is drawn through a Form XObject (a Word/Office letterhead,
-   * a Quartz page wrapper), not straight from the page. `name` is then its name
+   * a Quartz page wrapper, or — HRD-41 — an annotation's appearance stream), not
+   * straight from the page. `name` is then its name
    * inside the innermost form, which the page cannot address; the replacement is
    * keyed by `objectNumber` instead (see `FormImageReplacements`).
    */
@@ -625,7 +637,7 @@ export interface ComposeExtras {
   allowXfaLoss?: boolean;
 }
 
-export interface ProcessJob extends LocaleAware {
+export interface ProcessJob extends LocaleAware, AnnotationSummaryJob {
   inspect(bytes: Uint8Array): Promise<DocumentFacts>;
   imageInventory(bytes: Uint8Array, job?: JobHandle): Promise<PageImageInventory[]>;
   getFormFields(
@@ -795,6 +807,16 @@ export interface ProcessJob extends LocaleAware {
    */
   restrictDocument(bytes: Uint8Array, permissions: number, job?: JobHandle): Promise<Uint8Array>;
   /**
+   * HRD-23 / DOC-08 — rewrites a finished export for fast web view: page 1's
+   * objects first, plain xref, no object streams. Content, page order and
+   * every object are unchanged; only numbering and layout differ. Run on the
+   * export's last unencrypted bytes, because an export is several worker saves
+   * in sequence and only the last one decides the file's layout — and RED-06's
+   * encryption re-saves with a plain xref in object-number order, which this
+   * renumbering is built to survive.
+   */
+  saveForFastWebView(bytes: Uint8Array, job?: JobHandle): Promise<Uint8Array>;
+  /**
    * Applies redactions through operator-level content removal, removing intersecting text
    * and image objects from the content stream while keeping the rest of the page selectable.
    */
@@ -820,6 +842,24 @@ export interface ProcessJob extends LocaleAware {
     regions: RedactionRegion[]
   ): Promise<ImageRedactionRequest[]>;
   /**
+   * RED-08 — the images a face/logo blur *logo mark* lies on, for the logo
+   * template.
+   *
+   * Not {@link ProcessJob.planImageRedactions}: that is the redaction planner,
+   * and it refuses whatever it cannot prove clean — a pattern without a
+   * `/BBox`, one drawn through a form, a cell it cannot read. None of that
+   * stops blur from finding the picture under a logo, so here those patterns
+   * are skipped and said so in `skipped`, in blur's own terms; images in the
+   * cells of patterns that *can* be read are still found.
+   */
+  planLogoMark(
+    bytes: Uint8Array,
+    region: RedactionRegion
+  ): Promise<{
+    requests: ImageRedactionRequest[];
+    skipped: { pageIndex: number; reason: string }[];
+  }>;
+  /**
    * RED-08 — every image XObject the given pages draw.
    *
    * Unlike {@link ProcessJob.planImageRedactions} this is not driven by marks:
@@ -841,7 +881,16 @@ export interface ProcessJob extends LocaleAware {
   planPageImages(
     bytes: Uint8Array,
     pageIndices?: number[]
-  ): Promise<{ images: PageImageRef[]; unaddressablePages: number[]; formImagePages: number[] }>;
+  ): Promise<{
+    images: PageImageRef[];
+    unaddressablePages: number[];
+    formImagePages: number[];
+    /**
+     * HRD-41 — pages with an image only an annotation appearance pdf.js does
+     * not paint draws (hidden annotation, `/D` or `/R` look, inactive state).
+     */
+    hiddenAppearancePages: number[];
+  }>;
   /**
    * RED-08 — substitutes image XObjects and changes nothing else.
    *
@@ -879,6 +928,20 @@ export interface ProcessJob extends LocaleAware {
     markedPages?: number[]
   ): Promise<ResidualTextScan>;
   /**
+   * HRD-41 — the verifier's view inside tiling patterns. pdf.js page text
+   * never reads a pattern's cell, so text or vectors a mark covers there are
+   * invisible to every other text check. For each marked page this re-runs the
+   * cell filter against the output: any cell it would still remove something
+   * from is reported, as is a page whose cells could not be examined
+   * (`reason`). An empty result means no pattern content remains under a mark;
+   * partly covered images in cells are left to the image check.
+   */
+  patternResidue(
+    bytes: Uint8Array,
+    regions: RedactionRegion[],
+    source?: Uint8Array
+  ): Promise<{ pageIndex: number; reason?: string }[]>;
+  /**
    * OCR-01 — writes recognised words back as an invisible text layer.
    *
    * Additive only: nothing already in the file is rewritten, so the page still
@@ -911,30 +974,54 @@ export interface ProcessJob extends LocaleAware {
     job?: JobHandle
   ): Promise<GrayPagePlan[]>;
   /**
-   * GAP-6 — rewrites the pages with the decoded image pixels and page rasters
-   * in hand, saves, and re-plans the *output* as verification: every converted
-   * page must come back with nothing left to convert.
+   * GAP-6 / PDF-5 — opens a greyscale application on `bytes`, kept on this
+   * worker instance (call inside one lease). Pages are then converted batch by
+   * batch with {@link grayscaleApplyBatch}, so only one batch's decoded images
+   * and page rasters are ever handed over at once, and the converter's memos
+   * persist across batches: shared images and forms are still written once.
+   * Returns the session id.
    */
-  grayscaleApply(
+  grayscaleBegin(
     bytes: Uint8Array,
-    input: GrayscaleApplyInput,
+    options: { mode: GrayMode; wholeDocument: boolean },
     job?: JobHandle
-  ): Promise<GrayscaleApplyResult>;
+  ): Promise<string>;
+  /** Converts one batch of pages with the images and rasters first needed by them. */
+  grayscaleApplyBatch(
+    session: string,
+    batch: GrayApplyBatch,
+    job?: JobHandle
+  ): Promise<GrayscaleBatchResult>;
+  /**
+   * Finishes the session: document-level conversion, unreachable-object
+   * sweep, save, and a re-plan of the *output* as verification — every
+   * converted page must come back with nothing left to convert. Closes the
+   * session whatever happens.
+   */
+  grayscaleFinish(
+    session: string,
+    converted: number[],
+    job?: JobHandle
+  ): Promise<GrayscaleFinishResult>;
+  /** Closes a session without saving (cancelled or failed). Never throws. */
+  grayscaleDiscard(session: string): Promise<void>;
   /** GAP-6 — re-saves a damaged PDF through the tolerant parser (`pdf/repair.ts`). */
   repairDocument(bytes: Uint8Array, job?: JobHandle): Promise<RepairOutcome>;
 }
 
-export interface GrayscaleApplyInput {
-  pageIndices: number[];
-  mode: GrayMode;
-  images: GrayImageData[];
-  rasters: GrayRaster[];
-  wholeDocument: boolean;
+export interface GrayscaleBatchResult {
+  outcomes: GrayPageOutcome[];
+  /**
+   * Bytes of decoded image and raster payload this call received — the
+   * measured PDF-5 bound: one batch's worth, never the document's.
+   */
+  payloadBytes: number;
+  /** Decoded images still held by the session after the batch (not yet used). */
+  heldImages: number;
 }
 
-export interface GrayscaleApplyResult {
+export interface GrayscaleFinishResult {
   bytes: Uint8Array;
-  outcomes: GrayPageOutcome[];
   /** The output re-planned (always in `gray` mode) for every converted page. */
   verification: GrayPagePlan[];
 }
@@ -945,6 +1032,31 @@ export interface GrayscaleApplyResult {
 
 /** Thin local name for the shared loader — see `core/pdf/load.ts` for the encryption-retry logic. */
 const load = loadPdfDocument;
+
+/** How a document this worker built is written out. */
+export interface OutputSaveOptions {
+  /**
+   * HRD-23 / DOC-08 — the opt-in "Fast web view" export: page 1's objects first,
+   * plain xref, no object streams. Off (the default) is DOC-05's object-stream
+   * save, which is smaller.
+   */
+  fastWebView?: boolean;
+}
+
+/**
+ * The one way this worker serialises a finished document, so the DOC-05 /
+ * DOC-08 choice is made in one place rather than at every save call.
+ *
+ * Default: object streams (DOC-05), with `pseudoLinearize`'s ordering applied
+ * because it is a free permutation — but under object streams it orders only
+ * the content streams (see `linearize.ts`). With `fastWebView`, the document is
+ * renumbered first-page-first and written with a plain xref, which is what
+ * actually puts page 1 first in the bytes (`fast-web-view.ts`).
+ */
+function saveOutput(doc: PDFDocument, options: OutputSaveOptions = {}): Promise<Uint8Array> {
+  if (options.fastWebView) return saveFastWebView(doc);
+  return pseudoLinearize(doc).save({ useObjectStreams: true });
+}
 
 /** pdf-lib Colors built from the document-colour tuples, made once. */
 const DOC_INK = rgb(...DOC_INK_RGB);
@@ -982,6 +1094,34 @@ function transfer(bytes: Uint8Array): Uint8Array {
  */
 function transferOut<T extends { bytes: Uint8Array }>(result: T): T {
   return Comlink.transfer(result, [result.bytes.buffer as ArrayBuffer]);
+}
+
+/**
+ * PDF-5 — open greyscale applications on this worker instance, by session
+ * id. Each holds the parsed document being rewritten; batches of decoded
+ * images and rasters arrive one call at a time and are dropped once written.
+ */
+const graySessions = new Map<string, { doc: PDFDocument; application: GrayscaleApplication }>();
+let graySessionCounter = 0;
+
+function graySession(id: string): { doc: PDFDocument; application: GrayscaleApplication } {
+  const entry = graySessions.get(id);
+  if (!entry) throw new Error(`unknown greyscale session ${id}`);
+  return entry;
+}
+
+/** Bytes of image/raster payload in one batch (encoded data, raw samples, alpha). */
+function grayPayloadBytes(
+  images: readonly GrayImageData[],
+  rasters: readonly GrayRaster[]
+): number {
+  let total = 0;
+  for (const item of [...images, ...rasters]) {
+    total += item.encoded?.data.byteLength ?? 0;
+    total += item.gray?.byteLength ?? 0;
+    if ('alpha' in item) total += item.alpha?.byteLength ?? 0;
+  }
+  return total;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1384,7 +1524,21 @@ async function applyNUp(
   // brought across that no sheet draws is collected before it can be saved.
   await finalDoc.flush();
   sweepUnreachableObjects(finalDoc);
-  return finalDoc;
+  // HRD-40: each embedded page is a Form XObject — a stream, so its dictionary
+  // can never go into an object stream — and `embedPages` writes the page's
+  // whole `/Resources` dictionary inline in it. Moved to an indirect object of
+  // its own, the same entries are packed and compressed with everything else;
+  // nothing a viewer reads changes.
+  for (const embedded of embeddedPages) {
+    const form = finalDoc.context.lookup(embedded.ref);
+    if (!(form instanceof PDFStream)) continue;
+    const resources = form.dict.get(PDFName.of('Resources'));
+    if (resources instanceof PDFDict) {
+      form.dict.set(PDFName.of('Resources'), finalDoc.context.register(resources));
+    }
+  }
+  // HRD-40: the imposed sheets are fresh page leaves, like any rebuild.
+  return compactStructuralObjects(finalDoc);
 }
 
 /* ------------------------------------------------------------------ *
@@ -3145,32 +3299,10 @@ async function composePages(
   resolvePageTombstone(outDoc, tombstone);
   await outDoc.flush();
   sweepUnreachableObjects(outDoc);
-  return outDoc;
-}
-
-/**
- * Converts a user-facing 1-based page list into output page indexes. Invalid
- * fragments are ignored: an empty/invalid list must not silently watermark every
- * page, while ranges are clamped to the document that is actually being exported.
- */
-function parsePageRange(value: string | undefined, pageCount: number): Set<number> | null {
-  if (!value || value.trim().toLowerCase() === 'all') return null;
-  const selected = new Set<number>();
-  for (const part of value.split(',')) {
-    const match = part.trim().match(/^(\d+)(?:\s*-\s*(\d+))?$/);
-    if (!match) continue;
-    const from = Number(match[1]);
-    const to = Number(match[2] ?? match[1]);
-    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to)) continue;
-    for (
-      let page = Math.max(1, Math.min(from, to));
-      page <= Math.min(pageCount, Math.max(from, to));
-      page++
-    ) {
-      selected.add(page - 1);
-    }
-  }
-  return selected;
+  // HRD-40: every page here is a fresh `PDFPageLeaf`, which pdf-lib writes in
+  // clear text outside the object streams; compose, extract and split all save
+  // through this.
+  return compactStructuralObjects(outDoc);
 }
 
 /* ------------------------------------------------------------------ *
@@ -4487,6 +4619,7 @@ function flattenAnnotations(doc: PDFDocument): { baked: number; dropped: number 
 
 const api: ProcessJob = {
   setLocale: loadLocale,
+  ...annotationSummaryApi,
   async inspect(bytes) {
     // Inspection must be able to report on a file it cannot rewrite, so this is
     // the one place encryption is tolerated — read-only, and reported.
@@ -4551,6 +4684,7 @@ const api: ProcessJob = {
 
     const pages = doc.getPages();
     const fields: FormFieldData[] = [];
+    const frames = new Map<number, ReturnType<typeof pageDisplayFrame>>();
 
     // A 2000-widget government form walks every widget and searches the page
     // list for each; on a 300-page document that is genuinely slow, and it used
@@ -4598,7 +4732,6 @@ const api: ProcessJob = {
         const pageIndex = pageRef ? pages.findIndex(p => p.ref === pageRef) : -1;
         if (pageIndex < 0) continue;
         const rect = widget.getRectangle();
-        const { width, height } = pages[pageIndex].getSize();
         if (field instanceof PDFRadioGroup) {
           const onValue = widget.getOnValue();
           if (!onValue) continue;
@@ -4608,13 +4741,17 @@ const api: ProcessJob = {
           options ??= [];
           options.push(exportValue);
         }
-        rects.push({
-          pageIndex,
-          x: rect.x / width,
-          y: 1 - (rect.y + rect.height) / height,
-          width: rect.width / width,
-          height: rect.height / height
-        });
+        // HRD-42 (M2, reverse direction): the overlay is laid over pdf.js's
+        // viewport — the visible box with its origin, turned by `/Rotate` —
+        // so the rect is reported in that frame, not against `getSize()`'s
+        // raw MediaBox, which put fields off their artwork on any cropped,
+        // offset or rotated page.
+        let frame = frames.get(pageIndex);
+        if (!frame) {
+          frame = pageDisplayFrame(pages[pageIndex]);
+          frames.set(pageIndex, frame);
+        }
+        rects.push({ pageIndex, ...pageRectToDisplayFractions(frame, rect) });
       }
 
       fields.push({
@@ -4853,7 +4990,7 @@ const api: ProcessJob = {
       for (const { fontsDict, name } of uses) fontsDict.set(name, replacementRef);
     }
 
-    const out = await pseudoLinearize(doc).save({ useObjectStreams: true });
+    const out = await saveOutput(doc);
 
     // Re-extract from the bytes we are about to hand back, not from our own
     // in-memory edit.
@@ -4965,7 +5102,7 @@ const api: ProcessJob = {
       }
     }
     await checkpoint(job, 0.9, translate('Writing file'));
-    return transfer(await pseudoLinearize(doc).save({ useObjectStreams: true }));
+    return transfer(await saveOutput(doc));
   },
 
   async flattenBackground(
@@ -5180,7 +5317,7 @@ Q
     // content operation: pdf-lib may retain orphaned streams, so output size is
     // not evidence that no change occurred.
     if (!changed) return { bytes, changed: false };
-    const output = await pseudoLinearize(doc).save({ useObjectStreams: true });
+    const output = await saveOutput(doc);
     return { bytes: output, changed: true };
   },
   async flattenDocument(bytes, job) {
@@ -5227,7 +5364,7 @@ Q
     const { baked, dropped } = flattenAnnotations(doc);
     await checkpoint(job, 0.8, translate('Writing file'));
     return transferOut({
-      bytes: await pseudoLinearize(doc).save({ useObjectStreams: true }),
+      bytes: await saveOutput(doc),
       fields,
       annotationsBaked: baked,
       annotationsDropped: dropped
@@ -5263,7 +5400,7 @@ Q
       extras
     );
     await checkpoint(job, 0.95, translate('Writing file'));
-    return transfer(await pseudoLinearize(outDoc).save({ useObjectStreams: true }));
+    return transfer(await saveOutput(outDoc));
   },
 
   async readOutline(bytes) {
@@ -5332,7 +5469,7 @@ Q
         sliceExtras
       );
       return transferOut({
-        bytes: await pseudoLinearize(outDoc).save({ useObjectStreams: true }),
+        bytes: await saveOutput(outDoc),
         isZip: false,
         fileCount: 1
       });
@@ -5370,7 +5507,7 @@ Q
           extras?.fileNames?.[i],
           `${baseName}-${String(i + 1).padStart(pad, '0')}`
         )
-      ] = await pseudoLinearize(outDoc).save({ useObjectStreams: true });
+      ] = await saveOutput(outDoc);
     }
 
     await checkpoint(job, 0.95, translate('Compressing archive'));
@@ -5905,7 +6042,7 @@ Q
     // operation exists to save.
     sweepUnreachableObjects(out);
     await checkpoint(job, 0.95, translate('Writing file'));
-    const rebuilt = await pseudoLinearize(out).save({ useObjectStreams: true });
+    const rebuilt = await saveOutput(out);
 
     // CMP-04: a "compressed" file that is not smaller is not saved. Returning the
     // original bytes is the only honest outcome.
@@ -5930,7 +6067,7 @@ Q
     // We cannot use object streams because it breaks accessibility testing tools
     // that don't fully support PDF 1.5 object streams (like Acrobat Reader sometimes when debugging).
     // Plus, it ensures our `/K` arrays in StructTreeRoot are easily readable.
-    return transfer(await pseudoLinearize(doc).save({ useObjectStreams: true }));
+    return transfer(await saveOutput(doc));
   },
 
   async markdownToPdf(
@@ -6010,7 +6147,7 @@ Q
 
       drawPlacedImage(page, embedded, { x, y, width: drawWidth, height: drawHeight });
     }
-    return transfer(await pseudoLinearize(doc).save({ useObjectStreams: true }));
+    return transfer(await saveOutput(doc));
   },
 
   /**
@@ -6411,6 +6548,15 @@ Q
     return out;
   },
 
+  async saveForFastWebView(bytes, job) {
+    await checkpoint(job, 0, translate('Reading the document'));
+    const doc = await load(bytes);
+    await checkpoint(job, 0.5, translate('Writing file'));
+    const out = await saveOutput(doc, { fastWebView: true });
+    await checkpoint(job, 1, translate('Writing file'));
+    return transfer(out);
+  },
+
   async scrubMetadata(bytes, settings, job) {
     await checkpoint(job, 0, translate('Reading the document'));
     const doc = await load(bytes);
@@ -6600,8 +6746,11 @@ Q
     reattachAcroForm(out, [doc]);
     resolvePageTombstone(out, tombstone);
     sweepUnreachableObjects(out);
+    // HRD-40: the rebuilt page dictionaries go into object streams, as the
+    // source's usually were, so a no-op scrub does not grow the file.
+    compactStructuralObjects(out);
     await checkpoint(job, 0.95, translate('Writing file'));
-    return transfer(await pseudoLinearize(out).save({ useObjectStreams: true }));
+    return transfer(await saveOutput(out));
   },
 
   async planImageRedactions(bytes, regions) {
@@ -6609,12 +6758,46 @@ Q
     const pages = source.getPages();
     const regionsByPage = groupRegionsByPage(regions);
     const requests: ImageRedactionRequest[] = [];
+    const cellCache: PatternCellCache = new Map();
 
     for (const [pageIndex, pageRegions] of regionsByPage) {
       const page = pages[pageIndex];
       if (!page) continue;
       const rects = redactionRectsForPage(page, pageRegions);
-      const { partialImages } = await filterPageForRedaction(page, source.context, rects);
+      const { partialImages, patternCells } = await filterPageForRedaction(
+        page,
+        source.context,
+        rects,
+        { patterns: true, cellCache }
+      );
+      // HRD-41 — images inside a tiling pattern's cell, addressed by the
+      // cell's own `/XObject` resources.
+      for (const cell of patternCells) {
+        const cellXObjects = resourceSubDict(
+          resourceSubDict(cell.stream.dict, 'Resources', source.context),
+          'XObject',
+          source.context
+        );
+        for (const [name, unitRects] of cell.partialImages) {
+          const entry = cellXObjects?.get(PDFName.of(name));
+          if (!(entry instanceof PDFRef)) {
+            throw unsupported(
+              translate(
+                'An image on page {page} is partly covered by a redaction mark but is ' +
+                  'stored in a form Stapler cannot address for pixel-level removal. Nothing was ' +
+                  'changed — your original document is untouched.',
+                { page: pageIndex + 1 }
+              )
+            );
+          }
+          requests.push({
+            pageIndex,
+            name: patternImageKey(cell.name, name),
+            objectNumber: entry.objectNumber,
+            rects: unitRects
+          });
+        }
+      }
       if (partialImages.size === 0) continue;
       const xObjects = pageXObjectDictOf(page, source.context);
       for (const [name, unitRects] of partialImages) {
@@ -6639,6 +6822,82 @@ Q
     return requests;
   },
 
+  async planLogoMark(bytes, region) {
+    const source = await load(bytes);
+    const pageIndex = region.pageIndex;
+    const page = source.getPages()[pageIndex];
+    const requests: ImageRedactionRequest[] = [];
+    const skipped: { pageIndex: number; reason: string }[] = [];
+    if (!page) return { requests, skipped };
+    const rects = redactionRectsForPage(page, [region]);
+
+    // The page's own images, with patterns not tracked at all — exactly what
+    // this planned before tiling patterns were looked into.
+    const plain = await filterPageForRedaction(page, source.context, rects, { patterns: false });
+    const xObjects = pageXObjectDictOf(page, source.context);
+    let unaddressable = false;
+    for (const [name, unitRects] of plain.partialImages) {
+      const entry = xObjects?.get(PDFName.of(name));
+      if (entry instanceof PDFRef) {
+        requests.push({ pageIndex, name, objectNumber: entry.objectNumber, rects: unitRects });
+      } else {
+        unaddressable = true;
+      }
+    }
+    if (unaddressable) {
+      skipped.push({
+        pageIndex,
+        reason: translate(
+          'An image under the marked logo on page {page} is stored in a way Stapler cannot ' +
+            'address, so it was not used to find the logo.',
+          { page: pageIndex + 1 }
+        )
+      });
+    }
+
+    // Then the cells of the tiling patterns under the mark, through the same
+    // filter redaction uses. Where that filter would refuse (a pattern it
+    // cannot read or place, or one drawn through a form), blur simply does not
+    // look inside that pattern, and says so. It differs from the pass above
+    // only in how patterns are treated, so a refusal here is always about one.
+    // One page and one mark: running the filter twice costs nothing worth
+    // saving.
+    try {
+      const strict = await filterPageForRedaction(page, source.context, rects, {
+        patterns: true
+      });
+      for (const cell of strict.patternCells) {
+        const cellXObjects = resourceSubDict(
+          resourceSubDict(cell.stream.dict, 'Resources', source.context),
+          'XObject',
+          source.context
+        );
+        for (const [name, unitRects] of cell.partialImages) {
+          const entry = cellXObjects?.get(PDFName.of(name));
+          if (!(entry instanceof PDFRef)) continue;
+          requests.push({
+            pageIndex,
+            name: patternImageKey(cell.name, name),
+            objectNumber: entry.objectNumber,
+            rects: unitRects
+          });
+        }
+      }
+    } catch {
+      skipped.push({
+        pageIndex,
+        reason: translate(
+          'Part of the marked logo area on page {page} is filled with a pattern Stapler ' +
+            'could not look inside, so any picture drawn by that pattern was not used to ' +
+            'find the logo.',
+          { page: pageIndex + 1 }
+        )
+      });
+    }
+
+    return { requests, skipped };
+  },
+
   async planPageImages(bytes, pageIndices) {
     const source = await load(bytes);
     const pages = source.getPages();
@@ -6650,6 +6909,7 @@ Q
     const images: PageImageRef[] = [];
     const unaddressablePages = new Set<number>();
     const formImagePages = new Set<number>();
+    const hiddenAppearancePages = new Set<number>();
     // Per form stream: every image it (or a form it draws) names. Shared across
     // pages, so a letterhead form on 300 pages is walked once.
     const formScan = new Map<PDFStream, FormImageScan>();
@@ -6685,15 +6945,65 @@ Q
           result.tooDeep ||= sub.tooDeep;
         }
       }
+      // HRD-41 — a tiling pattern's cell is a content stream with resources of
+      // its own; pdf.js decodes its images into the page's object store (the
+      // render worker's placement walk descends into the pattern's operator
+      // list), and `FormImageCloner` substitutes through it, so it is scanned
+      // like a nested form.
+      for (const pattern of tilingPatternsOf(resources, source.context)) {
+        if (depth >= MAX_FORM_DEPTH) {
+          result.tooDeep = true;
+          continue;
+        }
+        const sub = scanForm(pattern, depth + 1);
+        if (sub === result) continue;
+        result.images.push(...sub.images);
+        result.unaddressable ||= sub.unaddressable;
+        result.tooDeep ||= sub.tooDeep;
+      }
       return result;
     };
 
     for (const pageIndex of wanted) {
       const page = pages[pageIndex];
       if (!page) continue;
-      const xObjects = pageXObjectDictOf(page, source.context);
-      if (!xObjects) continue;
       const formObjectsOnPage = new Set<number>();
+      const directObjectsOnPage = new Set<number>();
+
+      // HRD-41 (PDF-14): annotation appearance streams are forms reached from
+      // `/Annots`, not `/Resources`. The painted ones are decoded from pdf.js's
+      // operator list like any form image; the rest are reported.
+      const unpainted = new Set<number>();
+      for (const appearance of annotationAppearancesOf(page, source.context)) {
+        const scan = scanForm(appearance.stream, 1);
+        if (!appearance.painted) {
+          for (const image of scan.images) unpainted.add(image.objectNumber);
+          if (scan.unaddressable) hiddenAppearancePages.add(pageIndex);
+          continue;
+        }
+        if (scan.unaddressable) unaddressablePages.add(pageIndex);
+        if (scan.tooDeep) formImagePages.add(pageIndex);
+        for (const image of scan.images) {
+          if (formObjectsOnPage.has(image.objectNumber)) continue;
+          formObjectsOnPage.add(image.objectNumber);
+          images.push({ pageIndex, ...image, inForm: true });
+        }
+      }
+
+      // HRD-41 — images in the cells of the page's own tiling patterns.
+      for (const pattern of tilingPatternsOf(page.node.Resources(), source.context)) {
+        const scan = scanForm(pattern, 1);
+        if (scan.unaddressable) unaddressablePages.add(pageIndex);
+        if (scan.tooDeep) formImagePages.add(pageIndex);
+        for (const image of scan.images) {
+          if (formObjectsOnPage.has(image.objectNumber)) continue;
+          formObjectsOnPage.add(image.objectNumber);
+          images.push({ pageIndex, ...image, inForm: true });
+        }
+      }
+
+      const xObjects =
+        pageXObjectDictOf(page, source.context) ?? PDFDict.withContext(source.context);
       for (const [key, value] of xObjects.entries()) {
         // `/Subtype /Image` is the only thing that can hold a face; a `/Form`
         // is a nested content stream whose images are collected by object
@@ -6716,18 +7026,30 @@ Q
           unaddressablePages.add(pageIndex);
           continue;
         }
+        directObjectsOnPage.add(value.objectNumber);
         images.push({
           pageIndex,
           name: key.asString().replace(/^\//, ''),
           objectNumber: value.objectNumber
         });
       }
+
+      // An image drawn only by an appearance pdf.js does not paint (hidden
+      // annotation, pressed/rollover look, inactive check-box state) cannot be
+      // decoded. One that is also painted elsewhere on the page is blurred
+      // there, and the substitution reaches every appearance that names it.
+      for (const objectNumber of unpainted) {
+        if (!formObjectsOnPage.has(objectNumber) && !directObjectsOnPage.has(objectNumber)) {
+          hiddenAppearancePages.add(pageIndex);
+        }
+      }
     }
 
     return {
       images,
       unaddressablePages: [...unaddressablePages],
-      formImagePages: [...formImagePages]
+      formImagePages: [...formImagePages],
+      hiddenAppearancePages: [...hiddenAppearancePages]
     };
   },
 
@@ -6780,22 +7102,28 @@ Q
         translate('Updating page {page}', { page: pageIndex + 1 })
       );
       const page = pages[pageIndex];
-      const xObjects = localizePageResources(page, doc.context);
+      const byName = Object.entries(replacements[pageIndex] ?? {});
+      // An image reached only through an annotation appearance (HRD-41) needs
+      // no page `/XObject` dict, so only a page-level replacement requires one.
+      const xObjects =
+        byName.length > 0 || pageXObjectDictOf(page, doc.context)
+          ? localizePageResources(page, doc.context)
+          : undefined;
       // Reachable only if the caller's plan disagrees with what this page
       // actually has — `planPageImages` uses the same resource lookup, so a
       // page it found images on always has one here too. Continuing quietly
       // would let the caller believe this page's image was replaced (it
       // counts toward `pagesTouched`) when nothing was written at all.
-      if (!xObjects) {
+      if (!xObjects && byName.length > 0) {
         throw internal(
           `Page ${pageIndex + 1} has an image replacement queued, but no image resources to apply it to.`
         );
       }
 
-      for (const [name, replacement] of Object.entries(replacements[pageIndex] ?? {})) {
+      for (const [name, replacement] of byName) {
         const pdfName = PDFName.of(name);
-        const previous = xObjects.get(pdfName);
-        xObjects.set(pdfName, await embed(replacement));
+        const previous = xObjects!.get(pdfName);
+        xObjects!.set(pdfName, await embed(replacement));
         if (previous instanceof PDFRef) retired.add(previous);
       }
 
@@ -6810,14 +7138,43 @@ Q
         // and *this page* is re-pointed at the clone. A form shared with a
         // page outside the selection keeps drawing the original there.
         let replacedAny = false;
-        for (const [key, value] of xObjects.entries()) {
+        for (const [key, value] of xObjects?.entries() ?? []) {
           const stream = value instanceof PDFRef ? doc.context.lookup(value) : value;
           if (!(stream instanceof PDFStream)) continue;
           if (stream.dict.get(PDFName.of('Subtype')) !== PDFName.of('Form')) continue;
           const clone = formClones.clone(stream, targets, 1);
           if (!clone) continue;
-          xObjects.set(key, clone);
+          xObjects!.set(key, clone);
           if (value instanceof PDFRef) formRetired.add(value);
+          replacedAny = true;
+        }
+        // HRD-41: the page's own tiling patterns, the same way. The page gets
+        // a `/Pattern` dictionary of its own before an entry is re-pointed.
+        const resources = page.node.Resources();
+        const pagePatterns = resourceSubDict(resources, 'Pattern', doc.context);
+        let localPatterns: PDFDict | undefined;
+        for (const [key, value] of pagePatterns?.entries() ?? []) {
+          const stream = value instanceof PDFRef ? doc.context.lookup(value) : value;
+          if (!(stream instanceof PDFStream) || !isTilingPattern(stream)) continue;
+          const clone = formClones.clone(stream, targets, 1);
+          if (!clone) continue;
+          if (!localPatterns) {
+            // Resources already made page-local above keep their identity, so
+            // the form clones written into `xObjects` stay where they are.
+            if (!xObjects) localizePageResources(page, doc.context);
+            localPatterns = pagePatterns!.clone(doc.context);
+            page.node.Resources()!.set(PDFName.of('Pattern'), localPatterns);
+          }
+          localPatterns.set(key, clone);
+          if (value instanceof PDFRef) formRetired.add(value);
+          replacedAny = true;
+        }
+        // HRD-41: the same copy-on-write through annotation appearances. Every
+        // appearance that names the image — painted or not — gets the blurred
+        // one, since it is the same picture; the `/AP` (and any state
+        // sub-dictionary) is copied before it is changed, so nothing shared
+        // with another annotation is edited in place.
+        if (replaceInAppearances(doc.context, page, targets, formClones, formRetired)) {
           replacedAny = true;
         }
         // Same reasoning as the missing-resources check above: a queued
@@ -6833,11 +7190,14 @@ Q
     // Purged after every page has been rewritten, not during: an image shared
     // between two pages is still named by the second one while the first is
     // being processed, and purging then would leave a dangling reference.
-    for (const ref of retired) purgeXObjectIfUnreferenced(doc, ref);
-    purgeUnreferencedObjects(doc, formRetired);
+    // A whole-document reference check for both: an image replaced on this
+    // page can still be drawn by a tiling pattern's cell or an appearance on a
+    // page outside the selection, and the old page-`/XObject`-only check
+    // deleted it from under them (HRD-41 review).
+    purgeUnreferencedObjects(doc, new Set([...retired, ...formRetired]));
 
     await checkpoint(job, 0.95, translate('Writing file'));
-    return transfer(await doc.save({ useObjectStreams: true }));
+    return transfer(await saveOutput(doc));
   },
 
   async applyRedactions(bytes, regions, imageReplacements, job) {
@@ -6870,10 +7230,10 @@ Q
     preserveDocumentCatalog(source, out, copier, REDACTION_CATALOG_KEYS);
     const optionalContent = preserveOptionalContent(source, out, copier);
 
-    // Every page is copied and in the tree before any is redacted, so a check
-    // like `purgeXObjectIfUnreferenced` ("does any page still draw this?") sees
-    // pages that come *after* the one being redacted — with a shared copier
-    // they share objects, and a later page still using an image must keep it.
+    // Every page is copied and in the tree before any is redacted. With a shared
+    // copier pages share objects, and a later page still using an image must
+    // keep it — which is why nothing below deletes an object on its own say-so
+    // (see the sweep at the end).
     const copiedPages: PDFPage[] = [];
     for (let i = 0; i < total; i++) {
       const copied = copyPageInto(copier, sourcePages[i], reserved.get(i)!, out);
@@ -6887,6 +7247,8 @@ Q
 
     /** Terminal fields whose value a mark removed, for the post-merge pass. */
     const redactedFieldNames = new Set<string>();
+    /** Parsed pattern cells, shared by every page that uses the same pattern. */
+    const cellCache: PatternCellCache = new Map();
 
     for (let i = 0; i < total; i++) {
       await checkpoint(
@@ -6906,8 +7268,14 @@ Q
       localizeContentsArray(copied, out.context);
 
       // 1. Operator-level content removal.
-      const { content, strippedXObjectNames, partialImages, formRewrites, survivingXObjectNames } =
-        await filterPageForRedaction(copied, out.context, rects);
+      const {
+        content,
+        strippedXObjectNames,
+        partialImages,
+        formRewrites,
+        survivingXObjectNames,
+        patternCells
+      } = await filterPageForRedaction(copied, out.context, rects, { patterns: true, cellCache });
       if (content) {
         const newStream = out.context.flateStream(content);
         copied.node.set(PDFName.of('Contents'), out.context.register(newStream));
@@ -6927,17 +7295,26 @@ Q
         applyFormRewrites(out, xObjects, formRewrites, survivingXObjectNames);
       }
 
-      // 2. Image XObjects whose `Do` was removed outright: unhook the name, then
-      // drop the stream itself. pdf-lib serialises every object in its context
-      // whether or not anything references it, so unhooking alone leaves the
-      // image bytes recoverable with `pdfimages`.
+      // 1c. Tiling patterns whose cell a mark reached (HRD-41): each is
+      // replaced, for this page, by a copy whose cell had the covered content
+      // removed. The paint that uses it stays, so what the mark did not cover
+      // still shows.
+      if (patternCells.length > 0) {
+        await applyPatternRewrites(out, copied, patternCells, imageReplacements?.[i], i);
+      }
+
+      // 2. Image XObjects whose `Do` was removed outright: unhook the name. The
+      // stream itself is deleted by `sweepUnreachableObjects` below once nothing
+      // reaches it — pdf-lib serialises every object in its context whether or
+      // not anything references it, so unhooking alone would leave the image
+      // bytes recoverable with `pdfimages`. It is *not* deleted here: the same
+      // image can still be drawn by a tiling pattern's cell (the original or a
+      // rewritten copy, on this page or another), by an annotation appearance,
+      // or by a page later in the document, and deleting it from under any of
+      // those leaves a dangling reference and unmarked content lost (HRD-41
+      // review: the old per-page check looked only at page `/XObject` trees).
       if (strippedXObjectNames.length > 0 && xObjects) {
-        for (const name of strippedXObjectNames) {
-          const pdfName = PDFName.of(name);
-          const entry = xObjects.get(pdfName);
-          xObjects.delete(pdfName);
-          if (entry instanceof PDFRef) purgeXObjectIfUnreferenced(out, entry);
-        }
+        for (const name of strippedXObjectNames) xObjects.delete(PDFName.of(name));
       }
 
       // 3. Image XObjects a mark only *partly* covers. The `Do` has to stay (the
@@ -6970,7 +7347,8 @@ Q
         // on save. Forcing it now is what makes the object exist to point at.
         await image.embed();
         xObjects!.set(PDFName.of(name), image.ref);
-        if (entry instanceof PDFRef) purgeXObjectIfUnreferenced(out, entry);
+        // The original goes in the sweep below if, and only if, nothing else
+        // still draws it (see step 2).
       }
 
       // 4. Annotations overlapping a mark. Their /Contents, field values and
@@ -7018,12 +7396,61 @@ Q
     // serialise an orphaned annotation, form field, or appearance stream whose
     // text was supposed to be gone.
     sweepUnreachableObjects(out);
+    // HRD-40: without this every rebuilt page dictionary is written in clear
+    // text outside the object streams, and a text-only file roughly doubles.
+    compactStructuralObjects(out);
     await checkpoint(job, 0.95, translate('Writing file'));
-    return transfer(await pseudoLinearize(out).save({ useObjectStreams: true }));
+    return transfer(await saveOutput(out));
   },
 
   async scanResidualText(bytes, needles, markedPages) {
     return scanResidualText(bytes, needles, load, markedPages ?? []);
+  },
+
+  async patternResidue(bytes, regions, sourceBytes) {
+    const doc = await load(bytes);
+    const pages = doc.getPages();
+    // The source, when given, says which part of each cell its paints showed
+    // under a mark — including paints the redaction then removed (a covered
+    // stencil mask or form), which the output can no longer say anything about.
+    const source = sourceBytes ? await load(sourceBytes) : undefined;
+    const sourcePages = source?.getPages();
+    const cellCache: PatternCellCache = new Map();
+    const sourceCache: PatternCellCache = new Map();
+    const out: { pageIndex: number; reason?: string }[] = [];
+    for (const [pageIndex, pageRegions] of groupRegionsByPage(regions)) {
+      const page = pages[pageIndex];
+      if (!page) continue;
+      try {
+        let extraFootprints: Map<string, RedactionArea[]> | undefined;
+        if (sourcePages) {
+          const sourcePage = sourcePages[pageIndex];
+          if (!sourcePage) {
+            throw internal('The redacted document has a page the original does not', {
+              pageIndex
+            });
+          }
+          extraFootprints = (
+            await filterPageForRedaction(
+              sourcePage,
+              source!.context,
+              redactionRectsForPage(sourcePage, pageRegions),
+              { patterns: true, cellCache: sourceCache, footprintsOnly: true }
+            )
+          ).footprints;
+        }
+        const { patternCells } = await filterPageForRedaction(
+          page,
+          doc.context,
+          redactionRectsForPage(page, pageRegions),
+          { patterns: true, cellCache, extraFootprints }
+        );
+        if (patternCells.some(cell => cell.removes)) out.push({ pageIndex });
+      } catch (error) {
+        out.push({ pageIndex, reason: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    return out;
   },
 
   async collectOffPageText(bytes) {
@@ -7082,7 +7509,7 @@ Q
 
     await checkpoint(job, 0.95, translate('Saving'));
     return transferOut({
-      bytes: await pseudoLinearize(doc).save({ useObjectStreams: true }),
+      bytes: await saveOutput(doc),
       ...report
     });
   },
@@ -7098,36 +7525,55 @@ Q
     );
   },
 
-  async grayscaleApply(bytes, input, job) {
+  async grayscaleBegin(bytes, options, job) {
+    await checkpoint(job, 0, translate('Reading…'));
     const doc = await load(bytes);
-    const outcomes = await applyGrayscale(
-      doc,
-      {
-        pageIndices: input.pageIndices,
-        mode: input.mode,
-        images: new Map(input.images.map(image => [image.objectNumber, image])),
-        rasters: new Map(input.rasters.map(raster => [raster.pageIndex, raster])),
-        wholeDocument: input.wholeDocument
-      },
-      (done, total) =>
+    const id = `gray-${++graySessionCounter}`;
+    graySessions.set(id, { doc, application: new GrayscaleApplication(doc, options) });
+    return id;
+  },
+
+  async grayscaleApplyBatch(session, batch, job) {
+    const entry = graySession(session);
+    const payloadBytes = grayPayloadBytes(batch.images, batch.rasters);
+    const outcomes = await entry.application.applyBatch(batch, (done, total) =>
+      checkpoint(
+        job,
+        done / Math.max(1, total),
+        translate('Converting page {page}', { page: batch.pageIndices[done] + 1 })
+      )
+    );
+    const last = batch.pageIndices[batch.pageIndices.length - 1] ?? 0;
+    await checkpoint(job, 1, translate('Converting page {page}', { page: last + 1 }));
+    return { outcomes, payloadBytes, heldImages: entry.application.heldImages };
+  },
+
+  async grayscaleFinish(session, converted, job) {
+    const { doc, application } = graySession(session);
+    try {
+      await checkpoint(job, 0, translate('Saving'));
+      application.finish();
+      // Colour images no page uses any more would otherwise stay in the file at
+      // full size, invisible — and still in colour.
+      sweepUnreachableObjects(doc);
+      await checkpoint(job, 0.1, translate('Saving'));
+      const output = await saveOutput(doc);
+      await checkpoint(job, 0.5, translate('Verifying the result'));
+      const verification = await planGrayscale(await load(output), converted, 'gray', done =>
         checkpoint(
           job,
-          (done / Math.max(1, total)) * 0.8,
-          translate('Converting page {page}', { page: input.pageIndices[done] + 1 })
+          0.5 + (0.5 * done) / Math.max(1, converted.length),
+          translate('Verifying the result')
         )
-    );
-    // Colour images no page uses any more would otherwise stay in the file at
-    // full size, invisible — and still in colour.
-    sweepUnreachableObjects(doc);
-    await checkpoint(job, 0.85, translate('Saving'));
-    const output = await doc.save({ useObjectStreams: true });
+      );
+      return transferOut({ bytes: output, verification });
+    } finally {
+      graySessions.delete(session);
+    }
+  },
 
-    await checkpoint(job, 0.9, translate('Verifying the result'));
-    const converted = outcomes
-      .filter(o => o.route === 'vector' || o.route === 'raster')
-      .map(o => o.pageIndex);
-    const verification = await planGrayscale(await load(output), converted, 'gray');
-    return transferOut({ bytes: output, outcomes, verification });
+  async grayscaleDiscard(session) {
+    graySessions.delete(session);
   },
 
   async repairDocument(bytes, job) {
@@ -7184,7 +7630,7 @@ Q
     }
 
     await checkpoint(job, 0.95, translate('Saving'));
-    return transfer(await pseudoLinearize(out).save({ useObjectStreams: true }));
+    return transfer(await saveOutput(out));
   }
 };
 
@@ -7916,6 +8362,50 @@ interface PageRedactionFilter {
   formRewrites: FormRewrite[];
   /** Every `/XObject` name the *filtered* page still draws with `Do`. */
   survivingXObjectNames: Set<string>;
+  /** HRD-41 — tiling patterns whose cell a mark reached; see {@link PatternCellRedaction}. */
+  patternCells: PatternCellRedaction[];
+  /** Pattern name → the cell-space area the page's own paints put under a mark. */
+  footprints: Map<string, RedactionArea[]>;
+}
+
+/**
+ * HRD-41 — one tiling pattern on a page whose cell a mark reached, filtered
+ * against the cell-space area the marks cover in any tile.
+ *
+ * The cell is filtered exactly like a page: its text and vectors under the
+ * footprint go, an image it fully covers is unhooked, and an image it partly
+ * covers has to have its pixels blacked out — named here relative to the
+ * *cell's* `/XObject` resources, and addressed from outside by
+ * {@link patternImageKey}. The caller writes the result as a new pattern and
+ * points the page's `/Pattern` entry at it.
+ */
+interface PatternCellRedaction {
+  /** The page's `/Pattern` resource name. */
+  name: string;
+  stream: PDFStream;
+  filtered: Statement[];
+  strippedXObjectNames: string[];
+  partialImages: Map<string, RedactionArea[]>;
+  formRewrites: FormRewrite[];
+  /** Whether anything besides partly covered images' pixels has to change. */
+  removes: boolean;
+}
+
+/**
+ * HRD-41 — the key a partly covered image inside pattern `pattern`'s cell is
+ * requested and replaced under. A PDF name written in a file never contains a
+ * raw space (it is `#20`), so this can never equal a page `/XObject` name.
+ */
+export function patternImageKey(pattern: string, image: string): string {
+  return `pattern ${pattern} ${image}`;
+}
+
+/** One tiling pattern's cell, parsed, for the redaction filter. */
+interface PatternCell {
+  stream: PDFStream;
+  info: PatternInfo;
+  /** Absent when the cell could not be decoded. */
+  content?: FormContent;
 }
 
 /** The `/XObject` names a statement list still paints, by their `Do` operands. */
@@ -7944,6 +8434,38 @@ function resourceSubDict(
 }
 
 /**
+ * The stroke parameters `/ExtGState` resource `name` sets, or `undefined` when
+ * they cannot be read — the name is missing, the entry is not a dictionary, or
+ * `/LW`, `/LC`, `/LJ` or `/ML` holds something other than a number. The
+ * filter treats `undefined` as an unknown line width and over-reaches; it
+ * never treats it as "unchanged". `/D` (dash) is ignored: dashing only removes
+ * ink, so the solid extent bounds it.
+ */
+function extGStateInfoFor(
+  name: string,
+  extGStates: PDFDict | undefined,
+  context: PDFContext
+): ExtGStateInfo | undefined {
+  const raw = extGStates?.get(PDFName.of(name));
+  const dict = raw instanceof PDFRef ? context.lookup(raw) : raw;
+  if (!(dict instanceof PDFDict)) return undefined;
+  const info: ExtGStateInfo = {};
+  const keys = [
+    ['LW', 'lineWidth'],
+    ['LC', 'lineCap'],
+    ['LJ', 'lineJoin'],
+    ['ML', 'miterLimit']
+  ] as const;
+  for (const [key, field] of keys) {
+    const value = dict.lookup(PDFName.of(key));
+    if (value === undefined) continue;
+    if (!(value instanceof PDFNumber) || !Number.isFinite(value.asNumber())) return undefined;
+    info[field] = value.asNumber();
+  }
+  return info;
+}
+
+/**
  * The redaction filter's view of one `/Resources` dictionary: what every
  * `/XObject` name in it is, and how wide every `/Font` name in it draws.
  *
@@ -7964,14 +8486,67 @@ async function buildRedactionResolvers(
   context: PDFContext,
   usedNames: Set<string>,
   ancestors: Set<PDFStream>,
-  depth: number
+  depth: number,
+  patterns: boolean
 ): Promise<{
   resolveXObject: (name: string) => XObjectInfo | undefined;
   resolveFont: (name: string) => FontInfo | undefined;
+  /** Absent when `patterns` is off: the filter then tracks no pattern at all. */
+  resolvePattern?: (name: string) => PatternInfo | undefined;
+  /** `undefined` for a name that cannot be read: the filter fails closed on it. */
+  resolveExtGState: (name: string) => ExtGStateInfo | undefined;
+  /** This dictionary's tiling patterns, by name — their cells *not* parsed. */
+  tilingPatterns: Map<string, { stream: PDFStream; info: PatternInfo }>;
 }> {
   const xObjects = resourceSubDict(resources, 'XObject', context);
   const fonts = resourceSubDict(resources, 'Font', context);
+  const extGStates = resourceSubDict(resources, 'ExtGState', context);
   const infos = new Map<string, XObjectInfo>();
+
+  // HRD-41 — `/Pattern` resources. Only the dictionary is read here; a cell's
+  // content is decoded and parsed by `loadPatternCell`, and only once a mark is
+  // known to reach a paint in that pattern (HRD-41 review: parsing every cell
+  // on every marked page, and again in the verifier, cost a full decode of
+  // patterns no mark came near).
+  const tilingPatterns = new Map<string, { stream: PDFStream; info: PatternInfo }>();
+  const patternInfos = new Map<string, PatternInfo>();
+  const patternDict = patterns ? resourceSubDict(resources, 'Pattern', context) : undefined;
+  for (const [key, entry] of patternDict?.entries() ?? []) {
+    const name = key.asString().replace(/^\//, '');
+    const resolved = entry instanceof PDFRef ? context.lookup(entry) : entry;
+    const dict =
+      resolved instanceof PDFStream
+        ? resolved.dict
+        : resolved instanceof PDFDict
+          ? resolved
+          : undefined;
+    if (!dict) continue;
+    const patternType = dict.lookup(PDFName.of('PatternType'));
+    const tiling = patternType instanceof PDFNumber && patternType.asNumber() === 1;
+    if (!tiling || !(resolved instanceof PDFStream)) {
+      patternInfos.set(name, { tiling: false });
+      continue;
+    }
+    const numbers = (key: string, size: number) => {
+      const array = asArray(dict.get(PDFName.of(key)), context);
+      if (!array || array.size() !== size) return undefined;
+      const values = Array.from({ length: size }, (_, k) => numberAt(array, k, context));
+      return values.every((v): v is number => v !== undefined) ? values : undefined;
+    };
+    const step = (key: string) => {
+      const value = dict.lookup(PDFName.of(key));
+      return value instanceof PDFNumber ? value.asNumber() : undefined;
+    };
+    const info: PatternInfo = {
+      tiling: true,
+      bbox: numbers('BBox', 4) as [number, number, number, number] | undefined,
+      matrix: numbers('Matrix', 6) as Matrix | undefined,
+      xStep: step('XStep'),
+      yStep: step('YStep')
+    };
+    patternInfos.set(name, info);
+    tilingPatterns.set(name, { stream: resolved, info });
+  }
 
   if (xObjects) {
     for (const [key, entry] of xObjects.entries()) {
@@ -7991,7 +8566,11 @@ async function buildRedactionResolvers(
             ? ('Image' as const)
             : ('Unknown' as const);
       if (subtype !== 'Form') {
-        infos.set(name, { subtype });
+        const imageMask = dict.lookup(PDFName.of('ImageMask'));
+        infos.set(name, {
+          subtype,
+          imageMask: imageMask instanceof PDFBool && imageMask.asBoolean()
+        });
         continue;
       }
 
@@ -8024,9 +8603,16 @@ async function buildRedactionResolvers(
             context,
             usedNames,
             new Set([...ancestors, stream]),
-            depth + 1
+            depth + 1,
+            patterns
           );
-          content = { statements, ...nested };
+          content = {
+            statements,
+            resolveXObject: nested.resolveXObject,
+            resolveFont: nested.resolveFont,
+            resolvePattern: nested.resolvePattern,
+            resolveExtGState: nested.resolveExtGState
+          };
         } catch {
           // An undecodable filter chain, or an inline image this filter cannot
           // take apart. Left absent so the mark's own geometry decides whether
@@ -8040,13 +8626,82 @@ async function buildRedactionResolvers(
   }
 
   const fontCache = new Map<string, FontInfo | undefined>();
+  const extGStateCache = new Map<string, ExtGStateInfo | undefined>();
   return {
     resolveXObject: name => infos.get(name),
     resolveFont: name => {
       if (!fontCache.has(name)) fontCache.set(name, fontInfoFor(name, fonts, context));
       return fontCache.get(name);
-    }
+    },
+    resolvePattern: patterns ? name => patternInfos.get(name) : undefined,
+    resolveExtGState: name => {
+      if (!extGStateCache.has(name)) {
+        extGStateCache.set(name, extGStateInfoFor(name, extGStates, context));
+      }
+      return extGStateCache.get(name);
+    },
+    tilingPatterns
   };
+}
+
+/** One parsed tiling-pattern cell, and the `/XObject` names its resources use. */
+interface LoadedPatternCell {
+  /** Absent when the cell could not be decoded or parsed. */
+  content?: FormContent;
+  names: Set<string>;
+}
+
+/**
+ * HRD-41 review — parsed cells, memoised per pattern object for one operation
+ * (a redaction, a plan, a verification), so a pattern shared by every page of
+ * a document is decoded once rather than once per marked page. Keyed by the
+ * stream object, which within one `PDFContext` is the indirect object itself
+ * (a pattern is always a stream, and so always indirect).
+ *
+ * Only valid while the cached streams are not edited in place — true of every
+ * caller: a redacted cell is always written as a *new* object.
+ */
+type PatternCellCache = Map<PDFStream, Promise<LoadedPatternCell>>;
+
+function loadPatternCell(
+  stream: PDFStream,
+  context: PDFContext,
+  cache: PatternCellCache
+): Promise<LoadedPatternCell> {
+  let loaded = cache.get(stream);
+  if (!loaded) {
+    loaded = (async (): Promise<LoadedPatternCell> => {
+      const names = new Set<string>();
+      try {
+        const statements = parseContentStream(
+          tokenizeContentStream(await decodeContentStreamBytes(stream, context))
+        );
+        const nested = await buildRedactionResolvers(
+          resourceSubDict(stream.dict, 'Resources', context),
+          context,
+          names,
+          new Set([stream]),
+          1,
+          true
+        );
+        return {
+          content: {
+            statements,
+            resolveXObject: nested.resolveXObject,
+            resolveFont: nested.resolveFont,
+            resolvePattern: nested.resolvePattern,
+            resolveExtGState: nested.resolveExtGState
+          },
+          names
+        };
+      } catch {
+        // Unreadable: refused by `filterPatternCells` if a mark reaches it.
+        return { content: undefined, names };
+      }
+    })();
+    cache.set(stream, loaded);
+  }
+  return loaded;
 }
 
 /**
@@ -8059,8 +8714,11 @@ async function buildRedactionResolvers(
 async function filterPageForRedaction(
   page: PDFPage,
   context: PDFContext,
-  rects: RedactionArea[]
+  rects: RedactionArea[],
+  options: PageFilterOptions = {}
 ): Promise<PageRedactionFilter> {
+  const patterns = options.patterns ?? true;
+  const cellCache = options.cellCache ?? new Map();
   const rawContents = page.node.Contents();
   const streamRefs: unknown[] = [];
   if (rawContents) {
@@ -8075,13 +8733,15 @@ async function filterPageForRedaction(
   const partialImages = new Map<string, RedactionArea[]>();
   const formRewrites: FormRewrite[] = [];
   const survivingXObjectNames = new Set<string>();
-  if (streamRefs.length === 0) {
+  if (streamRefs.length === 0 && !(options.extraFootprints?.size ?? 0)) {
     return {
       content: null,
       strippedXObjectNames,
       partialImages,
       formRewrites,
-      survivingXObjectNames
+      survivingXObjectNames,
+      patternCells: [],
+      footprints: new Map()
     };
   }
 
@@ -8090,13 +8750,15 @@ async function filterPageForRedaction(
   // decides what a mark that only partly covers it actually reaches. Both come
   // out of the page's resources, walked once, here.
   const usedNames = new Set<string>();
-  const { resolveXObject, resolveFont } = await buildRedactionResolvers(
-    page.node.Resources(),
-    context,
-    usedNames,
-    new Set(),
-    0
-  );
+  const { resolveXObject, resolveFont, resolvePattern, resolveExtGState, tilingPatterns } =
+    await buildRedactionResolvers(
+      page.node.Resources(),
+      context,
+      usedNames,
+      new Set(),
+      0,
+      patterns
+    );
 
   // Replacement names for rewritten forms. Checked against every XObject name
   // at every level, so one can never shadow a resource the page already has.
@@ -8110,6 +8772,8 @@ async function filterPageForRedaction(
 
   const filteredChunks: Uint8Array[] = [];
   let carryState: GraphicsState | undefined;
+  /** Pattern name → the cell-space footprint of every mark, over every chunk. */
+  const footprints = new Map<string, RedactionArea[]>();
 
   for (const ref of streamRefs) {
     const resolved = ref instanceof PDFStream ? ref : context.lookup(ref as never);
@@ -8131,9 +8795,16 @@ async function filterPageForRedaction(
     const decoded = await decodeContentStreamBytes(resolved, context);
     const statements = parseContentStream(tokenizeContentStream(decoded));
     const result = filterContentStream(statements, rects, carryState, resolveXObject, resolveFont, {
-      allocateFormName
+      allocateFormName,
+      resolvePattern,
+      resolveExtGState
     });
     carryState = result.finalState;
+    for (const footprint of result.patternFootprints) {
+      const existing = footprints.get(footprint.name);
+      if (existing) existing.push(...footprint.rects);
+      else footprints.set(footprint.name, [...footprint.rects]);
+    }
     strippedXObjectNames.push(...result.strippedXObjectNames);
     for (const partial of result.partialImageCoverage) {
       const existing = partialImages.get(partial.name);
@@ -8155,13 +8826,295 @@ async function filterPageForRedaction(
     merged[pos++] = 0x0a;
   }
 
+  // HRD-41 — the cells of the tiling patterns a mark reached, and only those:
+  // loaded now, once the page's paints have said which patterns matter.
+  let patternCells: PatternCellRedaction[] = [];
+  if (patterns && !options.footprintsOnly) {
+    const wanted = new Map<string, RedactionArea[]>();
+    for (const [name, areas] of footprints) wanted.set(name, [...areas]);
+    for (const [name, areas] of options.extraFootprints ?? []) {
+      // A name this page does not define as a tiling pattern draws nothing
+      // here, so nothing of it can be under this page's marks.
+      if (!tilingPatterns.has(name)) continue;
+      const existing = wanted.get(name);
+      if (existing) existing.push(...areas);
+      else wanted.set(name, [...areas]);
+    }
+    const cells = new Map<string, PatternCell>();
+    for (const [name, areas] of wanted) {
+      const pattern = tilingPatterns.get(name);
+      if (areas.length === 0 || !pattern) continue;
+      const loaded = await loadPatternCell(pattern.stream, context, cellCache);
+      // Names allocated for rewrites inside the cell must not shadow its own.
+      for (const used of loaded.names) usedNames.add(used);
+      cells.set(name, { stream: pattern.stream, info: pattern.info, content: loaded.content });
+    }
+    patternCells = filterPatternCells(wanted, cells, allocateFormName);
+  }
+
   return {
-    content: merged.slice(0, pos),
+    content: streamRefs.length > 0 ? merged.slice(0, pos) : null,
     strippedXObjectNames,
     partialImages,
     formRewrites,
-    survivingXObjectNames
+    survivingXObjectNames,
+    patternCells,
+    footprints
   };
+}
+
+/** How {@link filterPageForRedaction} treats tiling patterns. */
+interface PageFilterOptions {
+  /**
+   * Track tiling patterns (HRD-41): record what every mark covers inside a
+   * pattern's cell, filter the cell, and refuse what cannot be filtered. On by
+   * default — every redaction caller needs it. Face/logo blur turns it off: it
+   * only wants the images a mark lies on, and must not inherit refusals that
+   * exist to keep *redacted* content out of the file.
+   */
+  patterns?: boolean;
+  /** Parsed cells, shared across the pages of one operation. */
+  cellCache?: PatternCellCache;
+  /**
+   * The verifier's footprints from the *source* page, unioned in before the
+   * cells are filtered: a paint the redaction removed (a covered stencil mask, a
+   * covered form) no longer says in the output which part of the cell it showed.
+   */
+  extraFootprints?: Map<string, RedactionArea[]>;
+  /** Compute the footprints only; do not load or filter any cell. */
+  footprintsOnly?: boolean;
+}
+
+/**
+ * HRD-41 — filters each tiling pattern's cell against the area the page's
+ * marks cover in it. A cell that cannot be read, or that itself paints with a
+ * pattern under the mark, is refused: what the mark covers inside it is
+ * unknown, and keeping it whole would keep that content in the file.
+ */
+function filterPatternCells(
+  footprints: Map<string, RedactionArea[]>,
+  cells: Map<string, PatternCell>,
+  allocateFormName: () => string
+): PatternCellRedaction[] {
+  const out: PatternCellRedaction[] = [];
+  for (const [name, rects] of footprints) {
+    if (rects.length === 0) continue;
+    const cell = cells.get(name);
+    if (!cell?.content) {
+      throw unsupported(
+        translate(
+          'A redaction mark falls across an area filled with a tiling pattern whose content ' +
+            'Stapler could not read, so what the mark covers inside the pattern cannot be ' +
+            'removed. Covering it would leave that content inside the file. Nothing was ' +
+            'changed — your original document is untouched. Rasterise the page first.'
+        )
+      );
+    }
+    const filterCell = (statements: Statement[], resolveXObject: FormContent['resolveXObject']) => {
+      const result = filterContentStream(
+        statements,
+        rects,
+        undefined,
+        resolveXObject,
+        cell.content!.resolveFont,
+        {
+          allocateFormName,
+          depth: 1,
+          resolvePattern: cell.content!.resolvePattern,
+          resolveExtGState: cell.content!.resolveExtGState
+        }
+      );
+      if (result.patternFootprints.length > 0) {
+        throw unsupported(
+          translate(
+            'A redaction mark falls across a tiling pattern whose content is itself filled with ' +
+              'another pattern. Stapler cannot remove content that far down, and covering it ' +
+              'would leave that content inside the file. Nothing was changed — your original ' +
+              'document is untouched. Rasterise the page first.'
+          )
+        );
+      }
+      return result;
+    };
+    // Every form rewritten so far, resolvable under its new name — so a second
+    // round can look inside the replacement rather than stopping at it.
+    const rewrites: FormRewrite[] = [];
+    let resolveXObject = cell.content.resolveXObject;
+    const filterRound = (statements: Statement[]) => {
+      const round = filterCell(statements, resolveXObject);
+      if (round.formRewrites.length > 0) {
+        rewrites.push(...round.formRewrites);
+        resolveXObject = withFormRewrites(cell.content!.resolveXObject, rewrites);
+      }
+      return round;
+    };
+    let result = filterRound(cell.content.statements);
+    const stripped = [...result.strippedXObjectNames];
+    // Run to a fixed point. A partly removed run comes back as a `TJ` whose
+    // kept glyphs sit beside a wide displacement, and the even-spacing model
+    // the filter also tests (see `filterContentStream`) can read those kept
+    // glyphs as under the mark on a second look. The verifier re-runs this
+    // same filter over the output, so a cell that is not a fixed point would
+    // fail it for content that is not under the mark — or, worse, would be
+    // right to. Every round only removes, so it converges. A form rewritten in
+    // one round is resolved under its new name in the next (`withFormRewrites`),
+    // exactly as `applyFormRewrites` will write it and as the verifier will read
+    // it back — so a rewrite no longer ends the loop early (HRD-41 review: it
+    // did, and the verifier then failed a correct redaction).
+    for (let round = 0; round < 16; round++) {
+      const again = filterRound(result.filtered);
+      const changed =
+        !sameStatements(again.filtered, result.filtered) || again.strippedXObjectNames.length > 0;
+      if (!changed) break;
+      stripped.push(...again.strippedXObjectNames);
+      result = {
+        ...again,
+        partialImageCoverage: [...result.partialImageCoverage, ...again.partialImageCoverage]
+      };
+    }
+    result = { ...result, strippedXObjectNames: stripped, formRewrites: rewrites };
+    const partialImages = new Map<string, RedactionArea[]>();
+    for (const partial of result.partialImageCoverage) {
+      const existing = partialImages.get(partial.name);
+      if (existing) existing.push(...partial.rects);
+      else partialImages.set(partial.name, [...partial.rects]);
+    }
+    const removes =
+      !sameStatements(result.filtered, cell.content.statements) ||
+      result.strippedXObjectNames.length > 0 ||
+      result.formRewrites.length > 0;
+    if (!removes && partialImages.size === 0) continue;
+    out.push({
+      name,
+      stream: cell.stream,
+      filtered: result.filtered,
+      strippedXObjectNames: result.strippedXObjectNames,
+      partialImages,
+      formRewrites: result.formRewrites,
+      removes
+    });
+  }
+  return out;
+}
+
+/**
+ * `base`, plus each of `rewrites` under its `newName`: the form it replaced
+ * (resolved through earlier rewrites, so a rewrite of a rewrite chains), with
+ * the filtered content in place of the original and its own nested rewrites
+ * resolvable inside it.
+ *
+ * This mirrors what {@link applyFormRewrites} writes — the replacement keeps
+ * the original's dictionary and resources, plus a name for every nested
+ * replacement — so filtering against this view and filtering the saved output
+ * agree.
+ */
+function withFormRewrites(
+  base: FormContent['resolveXObject'],
+  rewrites: FormRewrite[]
+): FormContent['resolveXObject'] {
+  if (rewrites.length === 0) return base;
+  const added = new Map<string, XObjectInfo>();
+  for (const rewrite of rewrites) {
+    const original = added.get(rewrite.originalName) ?? base?.(rewrite.originalName);
+    // A rewrite is only ever emitted for a form whose content was read.
+    if (!original?.content) continue;
+    added.set(rewrite.newName, {
+      ...original,
+      content: {
+        ...original.content,
+        statements: rewrite.filtered,
+        resolveXObject: withFormRewrites(original.content.resolveXObject, rewrite.nested)
+      }
+    });
+  }
+  return name => added.get(name) ?? base?.(name);
+}
+
+/**
+ * HRD-41 — writes the redacted copy of every tiling pattern a page's marks
+ * reached and points the page's own `/Pattern` entry at it.
+ *
+ * The original pattern is not edited: another page may still use it, and a
+ * page no mark touched keeps painting what it always painted. Once no page
+ * names the original, `sweepUnreachableObjects` deletes it — the unfiltered
+ * cell still holds what the mark covered. The copy keeps the pattern's own
+ * dictionary (`/BBox`, `/XStep`, `/Matrix`, `/PaintType`…) and gets resource
+ * dictionaries of its own, so an image removed from or replaced in it is not
+ * removed from the original's view of the world.
+ */
+async function applyPatternRewrites(
+  doc: PDFDocument,
+  page: PDFPage,
+  cells: PatternCellRedaction[],
+  replacements: Record<string, RedactedImage> | undefined,
+  pageIndex: number
+): Promise<void> {
+  const context = doc.context;
+  // The caller has already made `/Resources` page-local. Localising again here
+  // would orphan the `/XObject` dictionary it goes on to edit (unhooking
+  // stripped images, substituting blacked-out ones) — those edits would land
+  // in a dictionary no page uses, and the originals would stay drawn.
+  const resources = page.node.Resources();
+  const sourcePatterns = resourceSubDict(resources, 'Pattern', context);
+  if (!resources || !sourcePatterns) {
+    throw internal('A page whose patterns were rewritten has no /Pattern resources', {
+      pageIndex
+    });
+  }
+  const patterns = context.obj({}) as PDFDict;
+  for (const [key, value] of sourcePatterns.entries()) patterns.set(key, value);
+  resources.set(PDFName.of('Pattern'), patterns);
+
+  for (const cell of cells) {
+    const replacement = context.flateStream(serializeStatements(cell.filtered));
+    for (const [key, value] of cell.stream.dict.entries()) {
+      if (
+        key === PDFName.of('Filter') ||
+        key === PDFName.of('Length') ||
+        key === PDFName.of('DecodeParms')
+      ) {
+        continue;
+      }
+      replacement.dict.set(key, value);
+    }
+
+    const sourceResources = resourceSubDict(cell.stream.dict, 'Resources', context);
+    const localResources = context.obj({}) as PDFDict;
+    for (const [key, value] of sourceResources?.entries() ?? []) localResources.set(key, value);
+    const sourceXObjects = resourceSubDict(sourceResources, 'XObject', context);
+    const localXObjects = context.obj({}) as PDFDict;
+    for (const [key, value] of sourceXObjects?.entries() ?? []) localXObjects.set(key, value);
+    localResources.set(PDFName.of('XObject'), localXObjects);
+    replacement.dict.set(PDFName.of('Resources'), localResources);
+
+    for (const name of cell.strippedXObjectNames) localXObjects.delete(PDFName.of(name));
+
+    for (const name of cell.partialImages.keys()) {
+      const image = replacements?.[patternImageKey(cell.name, name)];
+      if (!image) {
+        throw unsupported(
+          translate(
+            'An image on page {page} is only partly covered by a redaction mark, and its ' +
+              'pixels could not be decoded and blacked out (JBIG2 and JPEG 2000 images cannot ' +
+              'be decoded here). Drawing a black box over it would leave the original image ' +
+              'inside the file. Nothing was changed — your original document is untouched. ' +
+              'Cover the whole image with the mark, or rasterise the page first.',
+            { page: pageIndex + 1 }
+          )
+        );
+      }
+      const embedded =
+        image.format === 'png' ? await doc.embedPng(image.bytes) : await doc.embedJpg(image.bytes);
+      await embedded.embed();
+      localXObjects.set(PDFName.of(name), embedded.ref);
+    }
+
+    if (cell.formRewrites.length > 0) {
+      applyFormRewrites(doc, localXObjects, cell.formRewrites, doNamesIn(cell.filtered));
+    }
+
+    patterns.set(PDFName.of(cell.name), context.register(replacement));
+  }
 }
 
 /**
@@ -8253,6 +9206,131 @@ function applyFormRewrites(
  * dump. Shared objects (still named by another page) are deliberately left
  * alone — the remaining references keep them alive correctly.
  */
+/**
+ * HRD-41 (PDF-14) — one annotation appearance stream, and whether pdf.js paints
+ * it into the page's operator list.
+ *
+ * An appearance is a form XObject reached from `/Annots → /AP`, never from the
+ * page's `/Resources`, so the page-resource walk could not see an image in one:
+ * a stamp, a signature picture or an image comment was neither checked for
+ * faces nor reported. pdf.js (display intent, `AnnotationMode.ENABLE`) paints
+ * the *normal* appearance — the `/N` stream, or the `/N` sub-dictionary entry
+ * named by `/AS` — of every annotation not flagged Hidden (bit 2) or NoView
+ * (bit 6). Only those images can be decoded and blurred; the rest (`/D`, `/R`,
+ * inactive states, hidden annotations) are listed as not painted so the caller
+ * says so instead of claiming they were checked.
+ */
+interface AnnotationAppearance {
+  annot: PDFDict;
+  /** `N`, `D` or `R`. */
+  key: string;
+  /** The state name inside an appearance sub-dictionary, if any. */
+  state?: PDFName;
+  stream: PDFStream;
+  painted: boolean;
+}
+
+function annotationAppearancesOf(page: PDFPage, context: PDFContext): AnnotationAppearance[] {
+  const found: AnnotationAppearance[] = [];
+  const annots = asArray(page.node.get(PDFName.of('Annots')), context);
+  for (let i = 0; i < (annots?.size() ?? 0); i++) {
+    const annot = asDict(annots!.get(i), context);
+    if (!annot) continue;
+    const ap = asDict(annot.get(PDFName.of('AP')), context);
+    if (!ap) continue;
+    const flags = numberOf(annot, 'F', 0);
+    const visible = (flags & (ANNOT_FLAG_HIDDEN | ANNOT_FLAG_NOVIEW)) === 0;
+    const activeState = annot.lookup(PDFName.of('AS'));
+    for (const key of ['N', 'D', 'R']) {
+      const raw = ap.get(PDFName.of(key));
+      const value = raw instanceof PDFRef ? context.lookup(raw) : raw;
+      if (value instanceof PDFStream) {
+        found.push({ annot, key, stream: value, painted: visible && key === 'N' });
+      } else if (value instanceof PDFDict) {
+        for (const [state, entry] of value.entries()) {
+          const stream = entry instanceof PDFRef ? context.lookup(entry) : entry;
+          if (!(stream instanceof PDFStream)) continue;
+          found.push({
+            annot,
+            key,
+            state,
+            stream,
+            painted: visible && key === 'N' && activeState === state
+          });
+        }
+      }
+    }
+  }
+  return found;
+}
+
+/**
+ * HRD-41 — points every annotation appearance on `page` that draws one of
+ * `targets` at a clone that draws the replacement. Returns whether any did.
+ */
+function replaceInAppearances(
+  context: PDFContext,
+  page: PDFPage,
+  targets: Map<number, PDFRef>,
+  cloner: FormImageCloner,
+  retired: Set<PDFRef>
+): boolean {
+  const newAps = new Map<PDFDict, PDFDict>();
+  const newStates = new Map<PDFDict, Map<string, PDFDict>>();
+  let changed = false;
+  for (const appearance of annotationAppearancesOf(page, context)) {
+    const clone = cloner.clone(appearance.stream, targets, 1);
+    if (!clone) continue;
+    const { annot, key } = appearance;
+    let ap = newAps.get(annot);
+    if (!ap) {
+      const raw = annot.get(PDFName.of('AP'));
+      if (raw instanceof PDFRef) retired.add(raw);
+      ap = asDict(raw, context)!.clone(context);
+      newAps.set(annot, ap);
+      annot.set(PDFName.of('AP'), ap);
+    }
+    const name = PDFName.of(key);
+    const previous = ap.get(name);
+    if (appearance.state) {
+      let perAnnot = newStates.get(annot);
+      if (!perAnnot) newStates.set(annot, (perAnnot = new Map()));
+      let states = perAnnot.get(key);
+      if (!states) {
+        if (previous instanceof PDFRef) retired.add(previous);
+        states = asDict(previous, context)!.clone(context);
+        perAnnot.set(key, states);
+        ap.set(name, states);
+      }
+      const old = states.get(appearance.state);
+      if (old instanceof PDFRef) retired.add(old);
+      states.set(appearance.state, clone);
+    } else {
+      if (previous instanceof PDFRef) retired.add(previous);
+      ap.set(name, clone);
+    }
+    changed = true;
+  }
+  return changed;
+}
+
+/** HRD-41 — a `/PatternType 1` stream: a cell of content, not a gradient. */
+function isTilingPattern(stream: PDFStream): boolean {
+  const type = stream.dict.lookup(PDFName.of('PatternType'));
+  return type instanceof PDFNumber && type.asNumber() === 1;
+}
+
+/** HRD-41 — the tiling pattern streams one `/Resources` dictionary defines. */
+function tilingPatternsOf(resources: PDFDict | undefined, context: PDFContext): PDFStream[] {
+  const patterns = asDict(resources?.get(PDFName.of('Pattern')), context);
+  const out: PDFStream[] = [];
+  for (const [, value] of patterns?.entries() ?? []) {
+    const pattern = value instanceof PDFRef ? context.lookup(value) : value;
+    if (pattern instanceof PDFStream && isTilingPattern(pattern)) out.push(pattern);
+  }
+  return out;
+}
+
 /** PDF-14 — what one Form XObject (and the forms it draws) names as images. */
 interface FormImageScan {
   images: { name: string; objectNumber: number }[];
@@ -8305,10 +9383,25 @@ class FormImageCloner {
     memo.set(form, null); // cycle guard
     const resources = asDict(form.dict.get(PDFName.of('Resources')), this.context);
     const nested = asDict(resources?.get(PDFName.of('XObject')), this.context);
-    if (!resources || !nested) return null;
+    const patterns = asDict(resources?.get(PDFName.of('Pattern')), this.context);
+    if (!resources || (!nested && !patterns)) return null;
+
+    // HRD-41 — tiling patterns in this stream's resources, cloned the same
+    // way (a pattern stream is a content stream with `/Resources` too).
+    const patternChanges = new Map<PDFName, PDFRef>();
+    for (const [name, value] of patterns?.entries() ?? []) {
+      const inner = value instanceof PDFRef ? this.context.lookup(value) : value;
+      if (!(inner instanceof PDFStream) || !isTilingPattern(inner)) continue;
+      if (depth >= MAX_FORM_DEPTH) continue;
+      const clone = this.cloneWith(inner, targets, depth + 1, memo);
+      if (clone) {
+        patternChanges.set(name, clone);
+        if (value instanceof PDFRef) this.retired.add(value);
+      }
+    }
 
     const changes = new Map<PDFName, PDFRef>();
-    for (const [name, value] of nested.entries()) {
+    for (const [name, value] of nested?.entries() ?? []) {
       const inner = value instanceof PDFRef ? this.context.lookup(value) : value;
       if (!(inner instanceof PDFStream)) continue;
       const subtype = inner.dict.get(PDFName.of('Subtype'));
@@ -8326,17 +9419,24 @@ class FormImageCloner {
         }
       }
     }
-    if (changes.size === 0) return null;
+    if (changes.size === 0 && patternChanges.size === 0) return null;
 
     // Every stream pdf-lib parses is a `PDFRawStream`; anything else would be
     // re-encoded by `clone`, which is not a byte-for-byte copy of the content.
     if (!(form instanceof PDFRawStream)) {
       throw internal('A form holding an image to blur is not a stream Stapler can copy exactly.');
     }
-    const xObjects = nested.clone(this.context);
-    for (const [name, ref] of changes) xObjects.set(name, ref);
     const newResources = resources.clone(this.context);
-    newResources.set(PDFName.of('XObject'), xObjects);
+    if (changes.size > 0) {
+      const xObjects = nested!.clone(this.context);
+      for (const [name, ref] of changes) xObjects.set(name, ref);
+      newResources.set(PDFName.of('XObject'), xObjects);
+    }
+    if (patternChanges.size > 0) {
+      const newPatterns = patterns!.clone(this.context);
+      for (const [name, ref] of patternChanges) newPatterns.set(name, ref);
+      newResources.set(PDFName.of('Pattern'), newPatterns);
+    }
     const cloned = form.clone(this.context);
     cloned.dict.set(PDFName.of('Resources'), newResources);
     const ref = this.context.register(cloned);
@@ -8350,10 +9450,10 @@ class FormImageCloner {
  * repeating until nothing more goes (a retired form was the only thing naming a
  * retired image under it).
  *
- * Unlike {@link purgeXObjectIfUnreferenced} this checks *every* object, not just
- * the pages' `/XObject` dicts — a form can also be named by an annotation
- * appearance or a pattern, and deleting it then would leave a dangling
- * reference: exactly the silent corruption this pipeline must never produce.
+ * It checks *every* object, not just the pages' `/XObject` dicts — an image or
+ * form can also be named by an annotation appearance or a tiling pattern's
+ * cell, and deleting it then would leave a dangling reference: exactly the
+ * silent corruption this pipeline must never produce.
  * An original that is still referenced somewhere stays in the file.
  */
 function purgeUnreferencedObjects(doc: PDFDocument, candidates: Set<PDFRef>): void {
@@ -8390,59 +9490,14 @@ function purgeUnreferencedObjects(doc: PDFDocument, candidates: Set<PDFRef>): vo
     collect(context.trailerInfo.Info, referenced, new Set());
     for (const ref of remaining) {
       if (referenced.has(ref)) continue;
-      // Same private-map deletion `purgeXObjectIfUnreferenced` uses.
+      // `indirectObjects` is private on PDFContext, but the underlying Map is
+      // the only way to remove one object without rebuilding the context.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (context as any).indirectObjects.delete(ref);
       remaining.delete(ref);
       removed = true;
     }
   }
-}
-
-function purgeXObjectIfUnreferenced(doc: PDFDocument, ref: PDFRef): void {
-  for (const page of doc.getPages()) {
-    const xObjects = pageXObjectDictOf(page, doc.context);
-    if (xObjects && xObjectDictReferences(xObjects, doc.context, ref, new Set())) return;
-  }
-  // `indirectObjects` is private on PDFContext, but the underlying Map is the
-  // only way to surgically remove one object without rebuilding the context.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (doc.context as any).indirectObjects.delete(ref);
-}
-
-/**
- * True if `ref` is one of this dict's own entries, or is reachable through a
- * Form XObject entry's own nested `/Resources /XObject` dict. A page's
- * `/XObject` dict lists reusable content it *paints* — a stamp, a watermark,
- * a repeated letterhead — as a Form XObject, and that form's own resources
- * are where the real reference to a shared image can live. Without recursing
- * into it, an image still painted (indirectly, via the form) on some other
- * page looked unreferenced from every page's top-level dict and was deleted
- * — leaving that form pointing at a purged object the next time it was drawn.
- */
-function xObjectDictReferences(
-  xObjects: PDFDict,
-  context: PDFContext,
-  ref: PDFRef,
-  visitedForms: Set<PDFDict>
-): boolean {
-  if (visitedForms.has(xObjects)) return false;
-  visitedForms.add(xObjects);
-  for (const key of xObjects.keys()) {
-    const entry = xObjects.get(key);
-    if (entry === ref) return true;
-    const resolved = entry instanceof PDFRef ? context.lookup(entry) : entry;
-    if (!(resolved instanceof PDFStream)) continue;
-    if (resolved.dict.get(PDFName.of('Subtype')) !== PDFName.of('Form')) continue;
-    const resourcesRaw = resolved.dict.get(PDFName.of('Resources'));
-    const resources = resourcesRaw instanceof PDFRef ? context.lookup(resourcesRaw) : resourcesRaw;
-    if (!(resources instanceof PDFDict)) continue;
-    const nestedRaw = resources.get(PDFName.of('XObject'));
-    const nested = nestedRaw instanceof PDFRef ? context.lookup(nestedRaw) : nestedRaw;
-    if (nested instanceof PDFDict && xObjectDictReferences(nested, context, ref, visitedForms))
-      return true;
-  }
-  return false;
 }
 
 /**

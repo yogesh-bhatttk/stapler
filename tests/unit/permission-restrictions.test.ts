@@ -432,9 +432,22 @@ describe('exporting a permission-restricted document', () => {
   });
 });
 
+/**
+ * The fixture plus a trailing PDF comment, so it is larger than the smallest
+ * target Compress accepts (`PDF_TARGET_BOUNDS`, 10 KB — IMG-12). Bytes after
+ * `%%EOF` are ignored by every reader, so the restrictions are untouched.
+ */
+function paddedPastTargetFloor(bytes: Uint8Array): Uint8Array {
+  const pad = new TextEncoder().encode(`\n%${'x'.repeat(12_000)}\n`);
+  const out = new Uint8Array(bytes.byteLength + pad.byteLength);
+  out.set(bytes);
+  out.set(pad, bytes.byteLength);
+  return out;
+}
+
 describe('compress never emits a file larger than the original (CLAUDE.md)', () => {
   it('keeps the original when re-applying restrictions would erase the saving', async () => {
-    const original = fixtureBytes('permission-no-print.pdf');
+    const original = paddedPastTargetFloor(fixtureBytes('permission-no-print.pdf'));
     const doc = await openDocument('compress-restricted', original);
     expect(documentRestrictions(doc)).toBe(NO_PRINT_P);
 
@@ -460,7 +473,7 @@ describe('compress never emits a file larger than the original (CLAUDE.md)', () 
     );
 
     compressMode.value = 'target';
-    compressTarget.value = { amount: 1, unit: 'KB' };
+    compressTarget.value = { amount: 10, unit: 'KB' };
     await commitTool('compress', {});
 
     // Nothing reached `platform.saveFileAs` — the guard fires before the write,
@@ -472,7 +485,7 @@ describe('compress never emits a file larger than the original (CLAUDE.md)', () 
   it('does not block the user’s own explicit choice to add password protection', async () => {
     // Same setup, but with Protect turned on: the size increase is the user's
     // own request, not a silent side effect, so the guard must not apply.
-    const original = fixtureBytes('permission-no-print.pdf');
+    const original = paddedPastTargetFloor(fixtureBytes('permission-no-print.pdf'));
     const doc = await openDocument('compress-restricted-protect', original);
     expect(documentRestrictions(doc)).toBe(NO_PRINT_P);
 
@@ -509,7 +522,7 @@ describe('compress never emits a file larger than the original (CLAUDE.md)', () 
     });
 
     compressMode.value = 'target';
-    compressTarget.value = { amount: 1, unit: 'KB' };
+    compressTarget.value = { amount: 10, unit: 'KB' };
     await commitTool('compress', {});
 
     expect(saved).toHaveLength(1);
@@ -566,35 +579,45 @@ describe('the restriction pass itself', () => {
 
 describe('an unrestricted document is unaffected', () => {
   it('exports with no security handler at all', async () => {
-    const plain = await PDFDocument.create();
-    plain.addPage([200, 200]);
-    const doc = await openDocument('plain', await plain.save());
-    expect(documentRestrictions(doc)).toBeNull();
+    // Both saves stamp CreationDate/ModDate from the clock, and those land in a
+    // compressed object stream (HRD-40), so a second boundary between the two
+    // saves can change the deflated length by a byte. Freeze the clock so the
+    // comparison below measures only what the restriction path could add.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-05T12:00:00Z'));
+    try {
+      const plain = await PDFDocument.create();
+      plain.addPage([200, 200]);
+      const doc = await openDocument('plain', await plain.save());
+      expect(documentRestrictions(doc)).toBeNull();
 
-    await commitTool('organize', {});
-    expect(saved).toHaveLength(1);
+      await commitTool('organize', {});
+      expect(saved).toHaveLength(1);
 
-    // pdf.js returns null for a document with no security handler — nothing was
-    // added where nothing was before.
-    const pdf = await openWithNoPassword(saved[0].bytes);
-    expect(await pdf.getPermissions()).toBeNull();
-    expect(new TextDecoder('latin1').decode(saved[0].bytes)).not.toContain('/Encrypt');
+      // pdf.js returns null for a document with no security handler — nothing was
+      // added where nothing was before.
+      const pdf = await openWithNoPassword(saved[0].bytes);
+      expect(await pdf.getPermissions()).toBeNull();
+      expect(new TextDecoder('latin1').decode(saved[0].bytes)).not.toContain('/Encrypt');
 
-    // And the export is byte-identical to the same export with this whole path
-    // removed, which is what "the common case does not regress" means: the only
-    // thing that could have changed it is an `/Encrypt` that was never added.
-    const doc2 = documents.value.find(d => d.id === doc.id)!;
-    const again = await processWorkerImpl.compose(
-      doc2.pages,
-      { plain: __memoryFallback.get('plain')! },
-      [],
-      undefined,
-      undefined,
-      null,
-      null,
-      undefined
-    );
-    expect(saved[0].bytes.byteLength).toBe(again.byteLength);
+      // And the export is byte-identical to the same export with this whole path
+      // removed, which is what "the common case does not regress" means: the only
+      // thing that could have changed it is an `/Encrypt` that was never added.
+      const doc2 = documents.value.find(d => d.id === doc.id)!;
+      const again = await processWorkerImpl.compose(
+        doc2.pages,
+        { plain: __memoryFallback.get('plain')! },
+        [],
+        undefined,
+        undefined,
+        null,
+        null,
+        undefined
+      );
+      expect(saved[0].bytes.byteLength).toBe(again.byteLength);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('exports a /P -4 owner-password file without adding a handler either', async () => {

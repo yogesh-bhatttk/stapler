@@ -7,7 +7,7 @@ import { panelStyles } from '../../shell/panelStyles';
 import { platform } from '../../../platform/current';
 import { importFiles } from '../../../core/import';
 import { logEvent, fromUnknown } from '../../../core/errors';
-import { activeJob, notify } from '../../../core/notify';
+import { activeJob, notify, notifyError } from '../../../core/notify';
 import { discardImported } from '../../../core/open-document';
 import { translate, useTranslation } from '../../../core/i18n';
 import {
@@ -62,7 +62,9 @@ export function ComparePanel() {
         }
       });
     } catch (err: unknown) {
+      // `run` reports its own failures; this is the picker or reading the file.
       logEvent('error', 'compare', fromUnknown(err).message);
+      notifyError('compare.open', err);
     } finally {
       setLoading(false);
     }
@@ -104,6 +106,8 @@ export function ComparePanel() {
           sensitivity: settings.sensitivity,
           unchangedPages: settings.unchangedPages,
           signal: job.signal,
+          // X-6 — determinate per-page progress in the action bar.
+          onProgress: job.onProgress,
           onWarning: message => {
             warning = message;
           }
@@ -129,7 +133,7 @@ export function ComparePanel() {
   return (
     <>
       <div className={panelStyles.section}>
-        <Button onClick={handleOpenCompareFile} disabled={loading || isRunning()}>
+        <Button onClick={() => void handleOpenCompareFile()} disabled={loading || isRunning()}>
           {settings.compareSourceId ? t('Change comparison file...') : t('Open file to compare...')}
         </Button>
       </div>
@@ -191,7 +195,7 @@ export function ComparePanel() {
         <div className={panelStyles.section}>
           <Button
             id="compare-export-diff-btn"
-            onClick={handleExportDiff}
+            onClick={() => void handleExportDiff()}
             disabled={isRunning() || loading}
             icon={Download}
           >

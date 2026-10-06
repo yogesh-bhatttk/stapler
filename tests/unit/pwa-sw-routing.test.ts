@@ -1,14 +1,21 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { isPassThroughAllowed, passThrough } from '../../src/platform/pwa/passthrough';
 import {
   CACHE_PREFIX,
+  RETIRED_KEY,
   SHARE_TARGET_PATH,
   buildRouteTable,
   cacheName,
+  classifyShareRequest,
   pageFor,
+  parseRetiredRecord,
+  pickRetiredCache,
   planInstall,
   routeRequest,
+  scopeRelative,
   staleCaches,
-  type PrecacheManifest
+  type PrecacheManifest,
+  type ShareRequestInput
 } from '../../src/platform/pwa/sw-routing';
 
 /**
@@ -57,7 +64,7 @@ describe('routeRequest', () => {
     ).toEqual({ kind: 'ignore' });
   });
 
-  it('serves entry pages network-first, including extension-less and root URLs', () => {
+  it('serves entry pages from the cache, including extension-less and root URLs', () => {
     expect(get('https://stapler.app/')).toEqual({ kind: 'page', key: 'index.html' });
     expect(get('https://stapler.app/?share-target=1#/merge')).toEqual({
       kind: 'page',
@@ -170,5 +177,291 @@ describe('planInstall', () => {
       'manifest.webmanifest',
       'assets/editor-abc.js'
     ]);
+  });
+});
+
+describe('retired previous version (audit 2026-10-01 PLT-4)', () => {
+  const withRetired = () => ({
+    ...buildRouteTable('https://stapler.app/', MANIFEST),
+    retired: new Set([
+      'assets/editor-OLD.js',
+      'assets/editor-abc.js',
+      'index.html',
+      'old-only.html',
+      RETIRED_KEY
+    ])
+  });
+
+  it('serves a file only the previous version had from its kept cache', () => {
+    expect(get('https://stapler.app/assets/editor-OLD.js', withRetired())).toEqual({
+      kind: 'retired',
+      key: 'assets/editor-OLD.js'
+    });
+  });
+
+  it('prefers the current version for every file both have, pages above all', () => {
+    const table = withRetired();
+    expect(get('https://stapler.app/assets/editor-abc.js', table)).toEqual({
+      kind: 'asset',
+      key: 'assets/editor-abc.js'
+    });
+    expect(get('https://stapler.app/', table)).toEqual({ kind: 'page', key: 'index.html' });
+  });
+
+  it('never serves the worker’s own bookkeeping keys, and ignores retired files cross-origin', () => {
+    const table = withRetired();
+    expect(get(`https://stapler.app/${RETIRED_KEY}`, table)).toEqual({ kind: 'ignore' });
+    expect(get('https://evil.example/assets/editor-OLD.js', table)).toEqual({ kind: 'ignore' });
+  });
+
+  it('without a kept cache, an old file is left to the network as before', () => {
+    expect(get('https://stapler.app/assets/editor-OLD.js')).toEqual({ kind: 'ignore' });
+  });
+
+  it('while a restarted worker is still reading the kept cache back, holds what could be in it', () => {
+    const loading = { ...buildRouteTable('https://stapler.app/', MANIFEST), retiredLoading: true };
+    expect(get('https://stapler.app/assets/editor-OLD.js', loading)).toEqual({
+      kind: 'retired-pending',
+      key: 'assets/editor-OLD.js'
+    });
+    // This version's own files and pages are never held.
+    expect(get('https://stapler.app/assets/editor-abc.js', loading)).toEqual({
+      kind: 'asset',
+      key: 'assets/editor-abc.js'
+    });
+    expect(get('https://stapler.app/', loading)).toEqual({ kind: 'page', key: 'index.html' });
+    // Nor a navigation, a directory, bookkeeping, another origin or a non-GET.
+    expect(
+      routeRequest(
+        { url: 'https://stapler.app/old-only.html', method: 'GET', mode: 'navigate' },
+        loading
+      )
+    ).toEqual({ kind: 'ignore' });
+    expect(get('https://stapler.app/somewhere/', loading)).toEqual({ kind: 'ignore' });
+    expect(get(`https://stapler.app/${RETIRED_KEY}`, loading)).toEqual({ kind: 'ignore' });
+    expect(get('https://evil.example/assets/editor-OLD.js', loading)).toEqual({ kind: 'ignore' });
+    expect(
+      routeRequest({ url: 'https://stapler.app/assets/editor-OLD.js', method: 'PUT' }, loading)
+    ).toEqual({ kind: 'ignore' });
+  });
+
+  it('once the kept cache is known, answers from it directly, and lets the rest through', () => {
+    const loaded = { ...withRetired(), retiredLoading: false };
+    expect(get('https://stapler.app/assets/editor-OLD.js', loaded)).toEqual({
+      kind: 'retired',
+      key: 'assets/editor-OLD.js'
+    });
+    expect(get('https://stapler.app/not-a-build-file.txt', loaded)).toEqual({ kind: 'ignore' });
+  });
+
+  it('never serves a retired file to a navigation', () => {
+    expect(
+      routeRequest(
+        { url: 'https://stapler.app/assets/editor-OLD.js', method: 'GET', mode: 'navigate' },
+        withRetired()
+      )
+    ).toEqual({ kind: 'ignore' });
+  });
+
+  it('keeps the most recently activated complete cache', () => {
+    expect(
+      pickRetiredCache([
+        { name: 'a', activatedAt: 100, complete: true },
+        { name: 'b', activatedAt: 300, complete: true },
+        // Installed but never activated (a superseded waiting worker).
+        { name: 'c', activatedAt: null, complete: true },
+        // Newest, but its install never finished.
+        { name: 'd', activatedAt: 400, complete: false }
+      ])
+    ).toBe('b');
+    // A cache from before activation was recorded still counts if it is all there is.
+    expect(pickRetiredCache([{ name: 'legacy', activatedAt: null, complete: true }])).toBe(
+      'legacy'
+    );
+    expect(pickRetiredCache([{ name: 'x', activatedAt: 1, complete: false }])).toBeNull();
+    expect(pickRetiredCache([])).toBeNull();
+  });
+
+  it('accepts only a well-formed retired record naming a precache cache', () => {
+    const ok = { cache: cacheName('v1'), clients: ['a', 'b'] };
+    expect(parseRetiredRecord(ok)).toEqual(ok);
+    expect(parseRetiredRecord({ cache: 'stapler-share-inbox', clients: [] })).toBeNull();
+    expect(parseRetiredRecord({ cache: cacheName('v1'), clients: [1] })).toBeNull();
+    expect(parseRetiredRecord(null)).toBeNull();
+    expect(parseRetiredRecord('x')).toBeNull();
+  });
+
+  it('maps cache keys back to scope-relative paths', () => {
+    expect(scopeRelative('https://stapler.app/assets/a.js', 'https://stapler.app/')).toBe(
+      'assets/a.js'
+    );
+    expect(
+      scopeRelative('https://u.github.io/stapler/index.html', 'https://u.github.io/stapler/')
+    ).toBe('index.html');
+    expect(scopeRelative('https://u.github.io/other/x.js', 'https://u.github.io/stapler/')).toBe(
+      null
+    );
+    expect(scopeRelative('https://evil.example/a.js', 'https://stapler.app/')).toBeNull();
+  });
+});
+
+describe('classifyShareRequest: what may store files at all (audit 2026-10-01 PLT-3)', () => {
+  const ORIGIN = 'https://stapler.app';
+  const share = (over: Partial<ShareRequestInput>): ShareRequestInput => ({
+    origin: null,
+    secFetchSite: null,
+    referrer: '',
+    initiator: 'none',
+    ...over
+  });
+
+  it('allows what an OS share sheet sends: no origin, referrer or initiating page', () => {
+    // Stored, but marked unverified: the app asks before opening it.
+    expect(classifyShareRequest(share({}), ORIGIN)).toBe('unverified');
+    expect(classifyShareRequest(share({ origin: 'null' }), ORIGIN)).toBe('unverified');
+    expect(classifyShareRequest(share({ secFetchSite: 'none' }), ORIGIN)).toBe('unverified');
+  });
+
+  it('allows the app’s own pages', () => {
+    expect(
+      classifyShareRequest(
+        share({
+          origin: ORIGIN,
+          referrer: `${ORIGIN}/editor.html`,
+          secFetchSite: 'same-origin',
+          initiator: 'same-origin'
+        }),
+        ORIGIN
+      )
+    ).toBe('verified');
+  });
+
+  it('rejects a cross-site or same-site fetch site', () => {
+    expect(classifyShareRequest(share({ secFetchSite: 'cross-site' }), ORIGIN)).toBe('reject');
+    expect(classifyShareRequest(share({ secFetchSite: 'Same-Site' }), ORIGIN)).toBe('reject');
+  });
+
+  it('rejects a foreign Origin header, as a website auto-submitting a form sends (probed)', () => {
+    expect(
+      classifyShareRequest(
+        share({ origin: 'https://evil.example', referrer: 'https://evil.example/' }),
+        ORIGIN
+      )
+    ).toBe('reject');
+    expect(classifyShareRequest(share({ origin: 'http://stapler.app' }), ORIGIN)).toBe('reject');
+  });
+
+  it('rejects a foreign or unparseable referrer even without an Origin', () => {
+    expect(classifyShareRequest(share({ referrer: 'https://evil.example/x' }), ORIGIN)).toBe(
+      'reject'
+    );
+    expect(classifyShareRequest(share({ referrer: 'not a url' }), ORIGIN)).toBe('reject');
+  });
+
+  it('rejects a no-referrer post started by a page of another origin (Origin: null + client)', () => {
+    expect(classifyShareRequest(share({ origin: 'null', initiator: 'foreign' }), ORIGIN)).toBe(
+      'reject'
+    );
+  });
+});
+
+describe('classifyShareRequest (audit 2026-10-01 PLT-3)', () => {
+  const ORIGIN = 'https://stapler.app';
+  const share = (over: Partial<ShareRequestInput>): ShareRequestInput => ({
+    origin: null,
+    secFetchSite: null,
+    referrer: '',
+    initiator: 'none',
+    ...over
+  });
+
+  it('verifies a share that carries this origin, and nothing foreign', () => {
+    expect(classifyShareRequest(share({ origin: ORIGIN }), ORIGIN)).toBe('verified');
+    expect(classifyShareRequest(share({ referrer: `${ORIGIN}/editor.html` }), ORIGIN)).toBe(
+      'verified'
+    );
+    expect(classifyShareRequest(share({ initiator: 'same-origin' }), ORIGIN)).toBe('verified');
+    expect(classifyShareRequest(share({ secFetchSite: 'same-origin' }), ORIGIN)).toBe('verified');
+  });
+
+  it('cannot verify what an OS share sends — nor a foreign no-referrer new window, which is identical', () => {
+    expect(classifyShareRequest(share({}), ORIGIN)).toBe('unverified');
+    expect(classifyShareRequest(share({ origin: 'null' }), ORIGIN)).toBe('unverified');
+    expect(classifyShareRequest(share({ secFetchSite: 'none' }), ORIGIN)).toBe('unverified');
+  });
+
+  it('rejects any foreign sign, even next to a same-origin one', () => {
+    expect(classifyShareRequest(share({ origin: 'https://evil.example' }), ORIGIN)).toBe('reject');
+    expect(
+      classifyShareRequest(share({ origin: ORIGIN, referrer: 'https://evil.example/' }), ORIGIN)
+    ).toBe('reject');
+    expect(classifyShareRequest(share({ origin: ORIGIN, initiator: 'foreign' }), ORIGIN)).toBe(
+      'reject'
+    );
+    expect(
+      classifyShareRequest(share({ origin: ORIGIN, secFetchSite: 'cross-site' }), ORIGIN)
+    ).toBe('reject');
+    expect(classifyShareRequest(share({ referrer: 'not a url' }), ORIGIN)).toBe('reject');
+  });
+});
+
+describe('held-request passthrough (audit 2026-10-01 PLT-4 follow-up)', () => {
+  const ORIGIN = 'https://stapler.app';
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('forwards only a GET to the worker’s own origin', () => {
+    expect(isPassThroughAllowed({ url: `${ORIGIN}/x.json?v=2`, method: 'GET' }, ORIGIN)).toBe(true);
+    expect(isPassThroughAllowed({ url: `${ORIGIN}/x.json`, method: 'get' }, ORIGIN)).toBe(true);
+    expect(
+      isPassThroughAllowed({ url: 'https://evil.example/x.json', method: 'GET' }, ORIGIN)
+    ).toBe(false);
+    expect(isPassThroughAllowed({ url: 'http://stapler.app/x.json', method: 'GET' }, ORIGIN)).toBe(
+      false
+    );
+    expect(isPassThroughAllowed({ url: `${ORIGIN}/x.json`, method: 'POST' }, ORIGIN)).toBe(false);
+    expect(isPassThroughAllowed({ url: 'not a url', method: 'GET' }, ORIGIN)).toBe(false);
+  });
+
+  it('hands the browser’s own Request on unchanged — query, headers and real status kept', async () => {
+    const network = vi.fn(async () => new Response('nope', { status: 404 }));
+    vi.stubGlobal('fetch', network);
+    const request = new Request(`${ORIGIN}/data/x.json?v=2`, {
+      headers: { range: 'bytes=0-9', 'x-probe': '1' }
+    });
+    const response = await passThrough(request, ORIGIN);
+    expect(network).toHaveBeenCalledTimes(1);
+    // The very same object: nothing rebuilt from the path, nothing dropped.
+    expect(network.mock.calls[0]).toEqual([request]);
+    expect((network.mock.calls[0] as unknown[])[0]).toBe(request);
+    expect(response.status).toBe(404);
+  });
+
+  it('gives each of two concurrent requests for one URL its own response', async () => {
+    let n = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(`r${++n}`))
+    );
+    const url = `${ORIGIN}/same.txt`;
+    const [a, b] = await Promise.all([
+      passThrough(new Request(url), ORIGIN),
+      passThrough(new Request(url), ORIGIN)
+    ]);
+    expect([await a.text(), await b.text()].sort()).toEqual(['r1', 'r2']);
+  });
+
+  it('refuses anything else without touching the network', async () => {
+    const network = vi.fn(async () => new Response('x'));
+    vi.stubGlobal('fetch', network);
+    const foreign = await passThrough(new Request('https://evil.example/x.js'), ORIGIN);
+    const post = await passThrough(
+      new Request(`${ORIGIN}/x`, { method: 'POST', body: 'b' }),
+      ORIGIN
+    );
+    expect(foreign.type).toBe('error');
+    expect(post.type).toBe('error');
+    expect(network).not.toHaveBeenCalled();
   });
 });
