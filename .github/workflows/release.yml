@@ -113,7 +113,9 @@ jobs:
           path: release
       - name: Unpack the shipped zips
         run: |
+          # unzip -d creates only the last path segment; make the parents first.
           for target in chrome firefox web; do
+            mkdir -p "shipped/$target"
             unzip -q release/stapler-*-"$target".zip -d "shipped/$target"
           done
       - run: node scripts/check-bundle-network.mjs shipped/chrome shipped/firefox shipped/web
@@ -138,7 +140,7 @@ jobs:
           name: release
           path: release
       # The extension suite loads `dist/ext`; put the shipped zip's contents there.
-      - run: unzip -q release/stapler-*-chrome.zip -d dist/ext
+      - run: mkdir -p dist/ext && unzip -q release/stapler-*-chrome.zip -d dist/ext
       - run: pnpm test:e2e:ext
         env:
           STAPLER_EXT_PREBUILT: '1'
@@ -172,7 +174,7 @@ jobs:
           name: release
           path: release
       - name: Unpack the shipped web zip
-        run: unzip -q release/stapler-*-web.zip -d shipped/web
+        run: mkdir -p shipped/web && unzip -q release/stapler-*-web.zip -d shipped/web
       - name: Confirm it is the shipped build (no test hooks)
         run: |
           # The e2e build's service-worker opt-in key (src/ui/pwa.ts) is
