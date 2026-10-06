@@ -2376,5 +2376,10 @@
   "Indenting needs a bookmark above it at the same level.": "Zum Einrücken muss darüber ein Lesezeichen auf derselben Ebene stehen.",
   "Already at the top level.": "Bereits auf der obersten Ebene.",
   "Saving {name}": "{name} wird gespeichert",
-  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "Wiederhole den Vorgang. Schlägt er erneut fehl, lade die Seite neu — deine geöffneten Dokumente liegen in diesem Tab, und es wurde nichts auf die Festplatte geschrieben."
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "Wiederhole den Vorgang. Schlägt er erneut fehl, lade die Seite neu — deine geöffneten Dokumente liegen in diesem Tab, und es wurde nichts auf die Festplatte geschrieben.",
+  "New: Fast web view saves PDFs with page 1 first, so a browser can show it before the rest has loaded.": "Neu: Schnelle Webansicht speichert PDFs mit Seite 1 zuerst, sodass ein Browser sie anzeigen kann, bevor der Rest geladen ist.",
+  "New: Compress can turn scans grey or black and white, and never saves a file larger than the original.": "Neu: Komprimieren kann Scans in Grautöne oder Schwarzweiß umwandeln und speichert nie eine Datei, die größer als das Original ist.",
+  "New: Image to size and PDF to images can produce an exact width and height.": "Neu: Bild auf Größe und PDF in Bilder können eine exakte Breite und Höhe erzeugen.",
+  "New: Folder search can read scanned pages with OCR, after you approve the one-time model download.": "Neu: Die Ordnersuche kann gescannte Seiten per OCR lesen, nachdem Sie den einmaligen Download des Modells genehmigt haben.",
+  "Redaction now also removes content hidden in repeating patterns and thick strokes, and checks the result.": "Schwärzen entfernt jetzt auch Inhalte, die in sich wiederholenden Mustern und dicken Strichen versteckt sind, und überprüft das Ergebnis."
 }

@@ -2376,5 +2376,10 @@
   "Indenting needs a bookmark above it at the same level.": "要增加缩进，上方需要有一个同级书签。",
   "Already at the top level.": "已位于顶层。",
   "Saving {name}": "正在保存 {name}",
-  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "请重试该操作。如果再次失败，请重新加载页面——您打开的文档保存在此标签页中，尚未向磁盘写入任何内容。"
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "请重试该操作。如果再次失败，请重新加载页面——您打开的文档保存在此标签页中，尚未向磁盘写入任何内容。",
+  "New: Fast web view saves PDFs with page 1 first, so a browser can show it before the rest has loaded.": "新增：「快速 Web 查看」保存 PDF 时将第 1 页放在最前，浏览器无需等其余部分加载完即可显示。",
+  "New: Compress can turn scans grey or black and white, and never saves a file larger than the original.": "新增：「压缩」可将扫描件转为灰度或黑白，且绝不会保存比原文件更大的文件。",
+  "New: Image to size and PDF to images can produce an exact width and height.": "新增：「图片压缩到指定大小」和「PDF 转图片」可输出精确的宽度和高度。",
+  "New: Folder search can read scanned pages with OCR, after you approve the one-time model download.": "新增：文件夹搜索可在您批准一次性模型下载后，用 OCR 读取扫描页面。",
+  "Redaction now also removes content hidden in repeating patterns and thick strokes, and checks the result.": "涂黑现在还会移除隐藏在重复图案和粗笔画中的内容，并检查结果。"
 }

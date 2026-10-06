@@ -2376,5 +2376,10 @@
   "Indenting needs a bookmark above it at the same level.": "インデントするには、同じ階層の上にしおりが必要です。",
   "Already at the top level.": "すでに最上位の階層です。",
   "Saving {name}": "{name} を保存しています",
-  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "操作をもう一度お試しください。再び失敗する場合はページを再読み込みしてください。開いているドキュメントはこのタブに保持されており、ディスクには何も書き込まれていません。"
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "操作をもう一度お試しください。再び失敗する場合はページを再読み込みしてください。開いているドキュメントはこのタブに保持されており、ディスクには何も書き込まれていません。",
+  "New: Fast web view saves PDFs with page 1 first, so a browser can show it before the rest has loaded.": "新機能：「Web 表示用に最適化」は、1 ページ目を先頭にして PDF を保存します。残りの読み込みが終わる前に、ブラウザーで表示できます。",
+  "New: Compress can turn scans grey or black and white, and never saves a file larger than the original.": "新機能：「圧縮」でスキャンをグレーまたは白黒に変換できます。元のファイルより大きいファイルを保存することはありません。",
+  "New: Image to size and PDF to images can produce an exact width and height.": "新機能：「画像をサイズ指定で縮小」と「PDF を画像に」で、幅と高さを正確に指定して出力できます。",
+  "New: Folder search can read scanned pages with OCR, after you approve the one-time model download.": "新機能：フォルダー検索で、スキャンしたページを OCR で読み取れます（モデルの 1 回限りのダウンロードを承認した後）。",
+  "Redaction now also removes content hidden in repeating patterns and thick strokes, and checks the result.": "墨消しで、繰り返しパターンや太い線の中に隠れたコンテンツも削除し、結果を検証するようになりました。"
 }

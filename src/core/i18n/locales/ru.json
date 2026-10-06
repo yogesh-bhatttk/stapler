@@ -2712,5 +2712,10 @@
   "Indenting needs a bookmark above it at the same level.": "Чтобы увеличить отступ, над закладкой должна быть закладка того же уровня.",
   "Already at the top level.": "Уже на верхнем уровне.",
   "Saving {name}": "Сохранение {name}",
-  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "Повторите операцию. Если она снова не удастся, перезагрузите страницу — ваши открытые документы хранятся в этой вкладке, и на диск ничего не записано."
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "Повторите операцию. Если она снова не удастся, перезагрузите страницу — ваши открытые документы хранятся в этой вкладке, и на диск ничего не записано.",
+  "New: Fast web view saves PDFs with page 1 first, so a browser can show it before the rest has loaded.": "Новое: «Быстрый веб-просмотр» сохраняет PDF так, что страница 1 идёт первой, и браузер может показать её до загрузки остального.",
+  "New: Compress can turn scans grey or black and white, and never saves a file larger than the original.": "Новое: «Сжать» может переводить сканы в оттенки серого или в чёрно-белое и никогда не сохраняет файл больше исходного.",
+  "New: Image to size and PDF to images can produce an exact width and height.": "Новое: «Изображение до размера» и «PDF в изображения» могут создавать изображения точной ширины и высоты.",
+  "New: Folder search can read scanned pages with OCR, after you approve the one-time model download.": "Новое: поиск в папке может распознавать отсканированные страницы с помощью OCR после того, как вы разрешите однократную загрузку модели.",
+  "Redaction now also removes content hidden in repeating patterns and thick strokes, and checks the result.": "Скрытие теперь также удаляет содержимое, спрятанное в повторяющихся узорах и толстых линиях, и проверяет результат."
 }

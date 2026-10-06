@@ -2509,5 +2509,10 @@
   "Indenting needs a bookmark above it at the same level.": "Pour augmenter le retrait, il faut un signet au-dessus, au même niveau.",
   "Already at the top level.": "Déjà au niveau supérieur.",
   "Saving {name}": "Enregistrement de {name}",
-  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "Relancez l’opération. Si elle échoue encore, rechargez la page — vos documents ouverts sont conservés dans cet onglet et rien n’a été écrit sur le disque."
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "Relancez l’opération. Si elle échoue encore, rechargez la page — vos documents ouverts sont conservés dans cet onglet et rien n’a été écrit sur le disque.",
+  "New: Fast web view saves PDFs with page 1 first, so a browser can show it before the rest has loaded.": "Nouveau : Affichage web rapide enregistre les PDF avec la page 1 en premier, pour qu’un navigateur puisse l’afficher avant que le reste soit chargé.",
+  "New: Compress can turn scans grey or black and white, and never saves a file larger than the original.": "Nouveau : Compresser peut passer les numérisations en nuances de gris ou en noir et blanc, et n’enregistre jamais un fichier plus volumineux que l’original.",
+  "New: Image to size and PDF to images can produce an exact width and height.": "Nouveau : Image à la taille et PDF en images peuvent produire une largeur et une hauteur exactes.",
+  "New: Folder search can read scanned pages with OCR, after you approve the one-time model download.": "Nouveau : la recherche de dossier peut lire les pages numérisées par OCR, une fois que vous avez approuvé le téléchargement unique du modèle.",
+  "Redaction now also removes content hidden in repeating patterns and thick strokes, and checks the result.": "Le caviardage supprime désormais aussi le contenu caché dans les motifs répétés et les traits épais, et vérifie le résultat."
 }

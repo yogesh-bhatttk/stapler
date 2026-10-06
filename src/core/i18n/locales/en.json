@@ -2376,5 +2376,10 @@
   "Indenting needs a bookmark above it at the same level.": "Indenting needs a bookmark above it at the same level.",
   "Already at the top level.": "Already at the top level.",
   "Saving {name}": "Saving {name}",
-  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk."
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.",
+  "New: Fast web view saves PDFs with page 1 first, so a browser can show it before the rest has loaded.": "New: Fast web view saves PDFs with page 1 first, so a browser can show it before the rest has loaded.",
+  "New: Compress can turn scans grey or black and white, and never saves a file larger than the original.": "New: Compress can turn scans grey or black and white, and never saves a file larger than the original.",
+  "New: Image to size and PDF to images can produce an exact width and height.": "New: Image to size and PDF to images can produce an exact width and height.",
+  "New: Folder search can read scanned pages with OCR, after you approve the one-time model download.": "New: Folder search can read scanned pages with OCR, after you approve the one-time model download.",
+  "Redaction now also removes content hidden in repeating patterns and thick strokes, and checks the result.": "Redaction now also removes content hidden in repeating patterns and thick strokes, and checks the result."
 }

@@ -3048,5 +3048,10 @@
   "Indenting needs a bookmark above it at the same level.": "تتطلب زيادة المسافة البادئة وجود إشارة مرجعية فوقها في المستوى نفسه.",
   "Already at the top level.": "في المستوى الأعلى بالفعل.",
   "Saving {name}": "جارٍ حفظ {name}",
-  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "أعد تنفيذ العملية. إذا فشلت مرة أخرى، فأعد تحميل الصفحة — مستنداتك المفتوحة محفوظة في علامة التبويب هذه، ولم يُكتب أي شيء على القرص."
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "أعد تنفيذ العملية. إذا فشلت مرة أخرى، فأعد تحميل الصفحة — مستنداتك المفتوحة محفوظة في علامة التبويب هذه، ولم يُكتب أي شيء على القرص.",
+  "New: Fast web view saves PDFs with page 1 first, so a browser can show it before the rest has loaded.": "جديد: يحفظ «عرض الويب السريع» ملفات PDF بحيث تأتي الصفحة 1 أولًا، فيتمكن المتصفح من عرضها قبل اكتمال تحميل الباقي.",
+  "New: Compress can turn scans grey or black and white, and never saves a file larger than the original.": "جديد: يمكن لأداة «ضغط» تحويل الصفحات الممسوحة ضوئيًا إلى درجات الرمادي أو أبيض وأسود، ولا تحفظ أبدًا ملفًا أكبر من الأصلي.",
+  "New: Image to size and PDF to images can produce an exact width and height.": "جديد: يمكن لأداتي «صورة بحجم محدد» و«PDF إلى صور» إنتاج عرض وارتفاع محددين بدقة.",
+  "New: Folder search can read scanned pages with OCR, after you approve the one-time model download.": "جديد: يمكن للبحث في المجلد قراءة الصفحات الممسوحة ضوئيًا بـ OCR، بعد موافقتك على تنزيل النموذج لمرة واحدة.",
+  "Redaction now also removes content hidden in repeating patterns and thick strokes, and checks the result.": "أصبح التنقيح يزيل أيضًا المحتوى المخفي في الأنماط المتكررة والخطوط السميكة، ويتحقق من النتيجة."
 }

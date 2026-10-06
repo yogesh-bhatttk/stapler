@@ -2376,5 +2376,10 @@
   "Indenting needs a bookmark above it at the same level.": "इंडेंट करने के लिए उसी स्तर पर ऊपर एक बुकमार्क होना चाहिए।",
   "Already at the top level.": "पहले से ही शीर्ष स्तर पर है।",
   "Saving {name}": "{name} सहेजा जा रहा है",
-  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "कार्रवाई फिर से करें। अगर यह फिर विफल हो, तो पेज रीलोड करें — आपके खुले दस्तावेज़ इसी टैब में हैं और डिस्क पर कुछ भी नहीं लिखा गया है।"
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "कार्रवाई फिर से करें। अगर यह फिर विफल हो, तो पेज रीलोड करें — आपके खुले दस्तावेज़ इसी टैब में हैं और डिस्क पर कुछ भी नहीं लिखा गया है।",
+  "New: Fast web view saves PDFs with page 1 first, so a browser can show it before the rest has loaded.": "नया: फ़ास्ट वेब व्यू PDF को पृष्ठ 1 सबसे पहले रखकर सहेजता है, ताकि ब्राउज़र बाकी हिस्सा लोड होने से पहले ही उसे दिखा सके।",
+  "New: Compress can turn scans grey or black and white, and never saves a file larger than the original.": "नया: संपीड़ित करें स्कैन को ग्रे या ब्लैक एंड व्हाइट में बदल सकता है, और कभी भी मूल से बड़ी फ़ाइल नहीं सहेजता।",
+  "New: Image to size and PDF to images can produce an exact width and height.": "नया: छवि को आकार में और PDF से छवियाँ अब सटीक चौड़ाई और ऊँचाई बना सकते हैं।",
+  "New: Folder search can read scanned pages with OCR, after you approve the one-time model download.": "नया: फ़ोल्डर खोज स्कैन किए गए पृष्ठों को OCR से पढ़ सकती है, जब आप एक बार के मॉडल डाउनलोड को स्वीकृति दे दें।",
+  "Redaction now also removes content hidden in repeating patterns and thick strokes, and checks the result.": "रिडैक्शन अब दोहराए जाने वाले पैटर्न और मोटी रेखाओं में छिपी सामग्री को भी हटाता है, और परिणाम की जाँच करता है।"
 }

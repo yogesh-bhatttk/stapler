@@ -22,6 +22,24 @@ export interface ReleaseNotes {
 
 export const RELEASES: readonly ReleaseNotes[] = [
   {
+    version: '0.3.0',
+    items: [
+      tKey(
+        'New: Fast web view saves PDFs with page 1 first, so a browser can show it before the rest has loaded.'
+      ),
+      tKey(
+        'New: Compress can turn scans grey or black and white, and never saves a file larger than the original.'
+      ),
+      tKey('New: Image to size and PDF to images can produce an exact width and height.'),
+      tKey(
+        'New: Folder search can read scanned pages with OCR, after you approve the one-time model download.'
+      ),
+      tKey(
+        'Redaction now also removes content hidden in repeating patterns and thick strokes, and checks the result.'
+      )
+    ]
+  },
+  {
     version: '0.2.1',
     items: [
       tKey(

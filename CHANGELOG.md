@@ -10,6 +10,49 @@ Pre-1.0. See `docs/TICKETS.md` for the ticket-by-ticket state of every feature �
 this file starts tracking user-facing changes from the first tagged release
 onward, not the full development history before it.
 
+## [0.3.0] — 2026-10-06
+
+### Added
+
+- **Fast web view** (opt-in, in the export review): saves PDFs with page 1
+  first and no object streams, so a browser can show it before the rest has
+  loaded. Off by default, which keeps the smaller default layout.
+- **Compress: Colour option** — keep colour, shades of grey, or black and
+  white for scans. Never saves a file larger than the original; pages that
+  cannot be converted are named.
+- **Exact pixel size** (width × height, proportions locked by default) in
+  Image to size and PDF to images; a missed size target now says by how much.
+- **Folder search can read scanned pages with OCR** (opt-in), only after you
+  approve the one-time language-model download; results are cached and marked
+  as recognized text.
+- The installable web app asks before opening files shared to it that it cannot
+  verify came from your device.
+
+### Fixed
+
+- **Redaction** now also removes content hidden inside repeating (tiling)
+  patterns, under thick or widened strokes and outlined text, and under
+  stencil masks — and its verification fails if any of it survives. Redacted
+  files no longer roughly double in size.
+- Size-reducing tools (Image to size, Grayscale, Compress with Protect) never
+  silently save a file larger than the input, and their "Reached" messages are
+  measured on the file actually written. Sizes use decimal KB/MB throughout.
+- Undo after saving, "Clear all local data" (now reports anything it could not
+  delete), session restore at the document limit, and Repair (keeps your edits)
+  behave correctly.
+- The web app no longer mixes old and new code after an update, and other open
+  tabs reload safely; workers on the website refuse network requests.
+- Face and logo blur reach images in comments and fill patterns; form fields
+  line up on cropped and rotated pages; read-aloud follows page edits; Compare
+  exports use real page sizes and can be cancelled cleanly.
+- Smoother page-grid scrolling and large merges; heavy signature and summary
+  work moved off the main thread; tooltips are accessible to screen readers.
+
+### Changed
+
+- Every finding of the internal audits is now a tracked requirement in EPIC-19
+  of `docs/TICKETS.md`; the separate audit documents were removed.
+
 ## [0.2.1] — 2026-09-16
 
 ### Fixed

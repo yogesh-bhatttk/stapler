@@ -2509,5 +2509,10 @@
   "Indenting needs a bookmark above it at the same level.": "Para aumentar la sangría hace falta un marcador encima en el mismo nivel.",
   "Already at the top level.": "Ya está en el nivel superior.",
   "Saving {name}": "Guardando {name}",
-  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "Vuelve a intentar la operación. Si vuelve a fallar, recarga la página: tus documentos abiertos se conservan en esta pestaña y no se ha escrito nada en el disco."
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "Vuelve a intentar la operación. Si vuelve a fallar, recarga la página: tus documentos abiertos se conservan en esta pestaña y no se ha escrito nada en el disco.",
+  "New: Fast web view saves PDFs with page 1 first, so a browser can show it before the rest has loaded.": "Nuevo: Vista web rápida guarda los PDF con la página 1 primero, para que un navegador pueda mostrarla antes de que se cargue el resto.",
+  "New: Compress can turn scans grey or black and white, and never saves a file larger than the original.": "Nuevo: Comprimir puede pasar los escaneos a tonos de gris o a blanco y negro, y nunca guarda un archivo más grande que el original.",
+  "New: Image to size and PDF to images can produce an exact width and height.": "Nuevo: Imagen a tamaño y PDF a imágenes pueden generar un ancho y un alto exactos.",
+  "New: Folder search can read scanned pages with OCR, after you approve the one-time model download.": "Nuevo: la búsqueda en carpetas puede leer páginas escaneadas con OCR, después de que apruebes la descarga única del modelo.",
+  "Redaction now also removes content hidden in repeating patterns and thick strokes, and checks the result.": "Tachar ahora también elimina el contenido oculto en patrones repetidos y trazos gruesos, y comprueba el resultado."
 }

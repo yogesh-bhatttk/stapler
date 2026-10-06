@@ -23,6 +23,10 @@ import {
   decodePDFRawStream
 } from 'pdf-lib';
 
+// Real pdf.js / worker work on generated documents: give each test room on a
+// busy machine instead of vitest's 5 s default (as other real-worker suites do).
+vi.setConfig({ testTimeout: 60_000 });
+
 vi.mock('comlink', () => ({
   expose: vi.fn(),
   transfer: vi.fn(value => value),

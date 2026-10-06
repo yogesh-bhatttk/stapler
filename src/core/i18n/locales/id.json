@@ -2376,5 +2376,10 @@
   "Indenting needs a bookmark above it at the same level.": "Untuk menjorokkan, perlu ada penanda di atasnya pada tingkat yang sama.",
   "Already at the top level.": "Sudah di tingkat teratas.",
   "Saving {name}": "Menyimpan {name}",
-  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "Coba lagi operasinya. Jika gagal lagi, muat ulang halaman — dokumen Anda yang terbuka disimpan di tab ini dan belum ada yang ditulis ke disk."
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "Coba lagi operasinya. Jika gagal lagi, muat ulang halaman — dokumen Anda yang terbuka disimpan di tab ini dan belum ada yang ditulis ke disk.",
+  "New: Fast web view saves PDFs with page 1 first, so a browser can show it before the rest has loaded.": "Baru: Tampilan web cepat menyimpan PDF dengan halaman 1 di depan, sehingga browser dapat menampilkannya sebelum sisanya selesai dimuat.",
+  "New: Compress can turn scans grey or black and white, and never saves a file larger than the original.": "Baru: Kompres dapat mengubah hasil pindaian menjadi abu-abu atau hitam putih, dan tidak pernah menyimpan file yang lebih besar dari aslinya.",
+  "New: Image to size and PDF to images can produce an exact width and height.": "Baru: Gambar ke ukuran dan PDF ke gambar dapat menghasilkan lebar dan tinggi yang persis.",
+  "New: Folder search can read scanned pages with OCR, after you approve the one-time model download.": "Baru: Pencarian folder dapat membaca halaman pindaian dengan OCR, setelah Anda menyetujui unduhan model satu kali.",
+  "Redaction now also removes content hidden in repeating patterns and thick strokes, and checks the result.": "Penyensoran kini juga menghapus konten yang tersembunyi di pola berulang dan goresan tebal, lalu memeriksa hasilnya."
 }

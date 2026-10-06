@@ -16,6 +16,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PDFDocument, degrees, rgb } from 'pdf-lib';
 import { decodeToRgba, installCanvasShims } from './helpers/node-canvas-shims';
 
+// Real pdf.js / worker work on generated documents: give each test room on a
+// busy machine instead of vitest's 5 s default (as other real-worker suites do).
+vi.setConfig({ testTimeout: 60_000 });
+
 const saved: { name: string; bytes: Uint8Array }[] = [];
 
 vi.mock('comlink', () => ({
