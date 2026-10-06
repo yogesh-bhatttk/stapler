@@ -7,7 +7,9 @@ exactly, per Mozilla's source-code-submission requirement.
 ## Environment
 
 - **OS:** any of Linux, macOS, or Windows — the build has no OS-specific steps.
-- **Node.js:** v20 or later (developed and verified against Node v22.22.2).
+- **Node.js:** v20 or later. Released packages are built by the GitHub release
+  workflow on Ubuntu with **Node v22.23.3** and **pnpm 11.28.5** (0.3.1); use the same
+  versions to reproduce the submitted package most closely.
   Download: https://nodejs.org/en/download
 - **Package manager:** `pnpm` v11.20.0 or later.
   Install: `npm i -g pnpm` (or `corepack enable` on Node ≥16.10, then `corepack prepare pnpm@latest --activate`).
@@ -46,9 +48,12 @@ pnpm run build:ext:firefox
 
 ## Output
 
-The build writes the exact contents of the submitted `.zip` to `dist/firefox/`.
-Diffing that directory against the unzipped submission should show no
-differences (aside from filesystem metadata).
+The build writes the contents of the submitted `.zip` to `dist/firefox/`. The
+submitted package is the one the release workflow (`.github/workflows/release.yml`)
+built and tested from the release tag. Rebuilt with the same Node.js and pnpm
+versions, `dist/firefox/` should match the unzipped submission (aside from
+filesystem metadata); a different Node.js version can change the minified output
+by a few bytes without changing behaviour.
 
 ## Verifying, optionally
 
