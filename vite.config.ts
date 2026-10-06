@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { transformManifestForFirefox } from './scripts/firefox-manifest.mjs';
 import { STAPLER_CSP } from './scripts/csp.mjs';
 import { webPwa } from './scripts/pwa.mjs';
+import { amoLintPatches, patchTesseractWorker } from './scripts/amo-lint-patches.mjs';
 import { PDF_AND_IMAGES } from './src/platform/index.ts';
 import { LANDING_PAGES, type LandingPage } from './src/landing/pages.ts';
 import { renderLandingPage, renderSitemap } from './src/landing/template.ts';
@@ -126,7 +127,13 @@ function copyTesseractAssets(): Plugin {
           // user tries it. Fail the build instead.
           throw new Error(`stapler:tesseract-assets — expected ${from} to exist; run install`);
         }
-        cpSync(source, resolve(out, to));
+        if (to === 'worker.min.js') {
+          // AMO review: drop two dead `Function(...)` globalThis fallbacks
+          // (scripts/amo-lint-patches.mjs; fails the build if they moved).
+          writeFileSync(resolve(out, to), patchTesseractWorker(readFileSync(source, 'utf-8')));
+        } else {
+          cpSync(source, resolve(out, to));
+        }
       }
     }
   };
@@ -379,6 +386,9 @@ export default defineConfig(() => {
     // GAP-2: lets the extension build drop the web-only PWA bootstrap (src/ui/pwa.ts) entirely.
     define: { __STAPLER_WEB_BUILD__: JSON.stringify(!isAnyExt) },
     plugins: [
+      // AMO review: exact-match removal of dead eval/innerHTML paths in
+      // node_modules code (scripts/amo-lint-patches.mjs, docs/AMO_SOURCE_BUILD.md).
+      amoLintPatches({ verify: true }),
       preact(),
       copyPdfJsAssets(),
       copyTesseractAssets(),
@@ -419,7 +429,7 @@ export default defineConfig(() => {
     },
     worker: {
       format: 'es' as const,
-      plugins: () => [recordBundledPackages()]
+      plugins: () => [amoLintPatches(), recordBundledPackages()]
     }
   };
 });

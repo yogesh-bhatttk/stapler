@@ -1,4 +1,9 @@
-import { signal } from '@preact/signals';
+// signals-core, not `@preact/signals`: every worker imports this module for
+// `translate()`, and `@preact/signals` pulls the whole Preact renderer into each
+// worker bundle (AMO review flagged its innerHTML sink in all six). It is the
+// same `signal` — `@preact/signals` re-exports it from signals-core — so
+// components that read these still re-render as before.
+import { signal } from '@preact/signals-core';
 
 export { tKey } from './key';
 

@@ -51,6 +51,7 @@
   "dependencies": {
     "@pdf-lib/standard-fonts": "^1.0.0",
     "@preact/signals": "^2.10.1",
+    "@preact/signals-core": "^1.14.4",
     "@vladmandic/face-api": "1.7.15",
     "comlink": "^4.4.2",
     "docx": "^9.7.1",

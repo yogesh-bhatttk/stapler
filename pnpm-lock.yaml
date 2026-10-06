@@ -213,6 +213,9 @@ importers:
       '@preact/signals':
         specifier: ^2.10.1
         version: 2.11.1(preact@10.29.8)
+      '@preact/signals-core':
+        specifier: ^1.14.4
+        version: 1.14.4
       '@vladmandic/face-api':
         specifier: 1.7.15
         version: 1.7.15

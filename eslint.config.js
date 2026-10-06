@@ -84,6 +84,22 @@ const PER_PAGE_COPIER_RULES = [
   'CallExpression[callee.property.name=/^(forEach|map|flatMap|reduce|reduceRight|filter|some|every|find|findIndex)$/] > :function'
 ].map(loop => ({ selector: `${loop} ${PER_PAGE_COPIER_CALL}`, message: PER_PAGE_COPIER_MESSAGE }));
 
+/**
+ * AMO review — Mozilla's linter flags every HTML-string sink. Stapler builds
+ * DOM with Preact or `createElement`/`textContent`, and the build patches
+ * Preact's `dangerouslySetInnerHTML` branch to throw
+ * (`scripts/amo-lint-patches.mjs`), so using it would break at run time.
+ */
+const HTML_SINK_MESSAGE =
+  'No HTML-string sinks (AMO review): build nodes with Preact, createElement and textContent, ' +
+  'or parse with DOMParser. See scripts/amo-lint-patches.mjs.';
+const HTML_SINK_RULES = [
+  "JSXAttribute[name.name='dangerouslySetInnerHTML']",
+  'AssignmentExpression[left.property.name=/^(innerHTML|outerHTML)$/]',
+  "CallExpression[callee.property.name='insertAdjacentHTML']",
+  "CallExpression[callee.object.name='document'][callee.property.name=/^(write|writeln)$/]"
+].map(selector => ({ selector, message: HTML_SINK_MESSAGE }));
+
 export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
@@ -129,7 +145,13 @@ export default tseslint.config(
     files: ['src/**/*.{ts,tsx}'],
     ignores: ['src/core/pdf/rebuild.ts'],
     rules: {
-      'no-restricted-syntax': ['error', ...PER_PAGE_COPIER_RULES]
+      'no-restricted-syntax': ['error', ...PER_PAGE_COPIER_RULES, ...HTML_SINK_RULES]
+    }
+  },
+  {
+    files: ['src/core/pdf/rebuild.ts'],
+    rules: {
+      'no-restricted-syntax': ['error', ...HTML_SINK_RULES]
     }
   },
   {
