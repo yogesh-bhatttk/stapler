@@ -104,7 +104,7 @@ export function OcrPanel() {
           size="compact"
           icon={Trash2}
           disabled={removing}
-          onClick={removeModels}
+          onClick={() => void removeModels()}
         >
           {t('Remove stored language models ({langs})', { langs: storedModels.join(', ') })}
         </Button>

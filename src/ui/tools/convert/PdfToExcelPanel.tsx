@@ -55,31 +55,34 @@ export function PdfToExcelPanel() {
   if (!doc) return null;
 
   const handlePreview = () => {
-    run({ label: translate('Converting to Excel'), scope: 'convert.pdf-to-excel' }, async job => {
-      // Captured before the bytes are read, so an edit made *during* the
-      // conversion still invalidates its result.
-      const revision = historyVersion.value;
-      const bytes = await currentDocumentBytes(job);
-      const result = await convertPdfToXlsx(
-        bytes,
-        { ...pdfToExcelOptions.value, documentName: doc.name },
-        job
-      );
-      setPdfToExcelPreview(result, doc.id, revision);
-      notify(
-        'success',
-        translate('Built {sheets} from {pages}. Review the preview, then save.', {
-          sheets: tPlural('{count} sheets', result.sheetCount),
-          pages: tPlural('{count} pages', result.pageCount)
-        }),
-        {
-          detail: translate('{size} · {tables}', {
-            size: formatBytes(result.bytes.byteLength),
-            tables: tPlural('{count} detected tables', result.tableCount)
-          })
-        }
-      );
-    });
+    void run(
+      { label: translate('Converting to Excel'), scope: 'convert.pdf-to-excel' },
+      async job => {
+        // Captured before the bytes are read, so an edit made *during* the
+        // conversion still invalidates its result.
+        const revision = historyVersion.value;
+        const bytes = await currentDocumentBytes(job);
+        const result = await convertPdfToXlsx(
+          bytes,
+          { ...pdfToExcelOptions.value, documentName: doc.name },
+          job
+        );
+        setPdfToExcelPreview(result, doc.id, revision);
+        notify(
+          'success',
+          translate('Built {sheets} from {pages}. Review the preview, then save.', {
+            sheets: tPlural('{count} sheets', result.sheetCount),
+            pages: tPlural('{count} pages', result.pageCount)
+          }),
+          {
+            detail: translate('{size} · {tables}', {
+              size: formatBytes(result.bytes.byteLength),
+              tables: tPlural('{count} detected tables', result.tableCount)
+            })
+          }
+        );
+      }
+    );
   };
 
   return (

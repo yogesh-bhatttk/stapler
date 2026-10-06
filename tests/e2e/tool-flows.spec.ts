@@ -373,6 +373,26 @@ async function outlineTitles(bytes: Uint8Array): Promise<string[]> {
   return titles;
 }
 
+/**
+ * A locator's box once it has stopped moving. Fit-to-view settles a page's
+ * size over the first frames after layout, so a box read too early can put a
+ * drag outside the page under load.
+ */
+async function settledBox(locator: import('@playwright/test').Locator) {
+  let box = await locator.boundingBox();
+  await expect
+    .poll(async () => {
+      const next = await locator.boundingBox();
+      const stable =
+        !!next && !!box && next.x === box.x && next.y === box.y && next.width === box.width;
+      box = next;
+      return stable;
+    })
+    .toBe(true);
+  if (!box) throw new Error('no box');
+  return box;
+}
+
 test.describe('tool flows', () => {
   test('organize: rotating and deleting a page survives export', async ({ page }) => {
     const file = await ensureFixture('text-6.pdf', () => textPdf(6));
@@ -1636,10 +1656,9 @@ test.describe('tool flows', () => {
     await gotoTool(page, 'crop');
 
     const layer = page.locator('[data-index="0"]');
-    const box = await layer.boundingBox();
-    if (!box) throw new Error('no box');
-
     await waitForPageRendered(page);
+    const box = await settledBox(layer);
+
     await page.mouse.move(box.x + 50, box.y + 50);
     await page.mouse.down();
     await page.mouse.move(box.x + 200, box.y + 200, { steps: 5 });
@@ -1660,11 +1679,9 @@ test.describe('tool flows', () => {
     await page.getByLabel('Apply crop to').selectOption('odd');
 
     const layer = page.locator('[data-index="0"]');
-    const box = await layer.boundingBox();
-    if (!box) throw new Error('no box');
-
     // Draw an initial crop box on page 1 (odd) while the "odd pages" scope is active.
     await waitForPageRendered(page);
+    const box = await settledBox(layer);
     await page.mouse.move(box.x + 40, box.y + 40);
     await page.mouse.down();
     await page.mouse.move(box.x + 220, box.y + 220, { steps: 5 });

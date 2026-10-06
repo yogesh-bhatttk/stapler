@@ -159,7 +159,8 @@ export function CompareView({ pages, pageIndex }: CompareViewProps) {
       }
     };
 
-    runDiff().finally(() => {
+    // runDiff catches and logs its own failures; this only releases the pinned clients.
+    void runDiff().finally(() => {
       baseClient.release();
       compareClient.release();
     });

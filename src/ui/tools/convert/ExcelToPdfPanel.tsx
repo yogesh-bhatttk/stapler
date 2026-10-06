@@ -31,6 +31,7 @@ import {
   setExcelToPdfPreview,
   setExcelToPdfSource
 } from './excel-to-pdf-state';
+import { withErrorToast } from '../../asyncHandler';
 
 /**
  * What each block kind is called in the preview's left-hand gutter.
@@ -79,40 +80,43 @@ export function ExcelToPdfPanel() {
   const handlePreview = () => {
     const file = excelToPdfSource.value;
     if (!file) return;
-    run({ label: translate('Converting to PDF'), scope: 'convert.excel-to-pdf' }, async job => {
-      // Captured before the bytes are read, so a change made *during* the
-      // conversion still invalidates its result.
-      const revision = excelToPdfInputRevision.value;
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      const result = await convertXlsxToPdf(
-        bytes,
-        { ...excelToPdfOptions.value, documentName: file.name.replace(/\.xlsx$/i, '') },
-        job
-      );
-      setExcelToPdfPreview(result, file, revision);
-      notify(
-        'success',
-        translate('Converted {sheets} to {pages}. Review the preview, then save.', {
-          sheets: tPlural('{count} sheets', result.sheets.length),
-          pages: tPlural('{count} pages', result.pageCount)
-        }),
-        {
-          detail: translate('{size} · {sections}', {
-            size: formatBytes(result.bytes.byteLength),
-            sections: tPlural('{count} sections', result.outline.length)
-          })
+    void run(
+      { label: translate('Converting to PDF'), scope: 'convert.excel-to-pdf' },
+      async job => {
+        // Captured before the bytes are read, so a change made *during* the
+        // conversion still invalidates its result.
+        const revision = excelToPdfInputRevision.value;
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const result = await convertXlsxToPdf(
+          bytes,
+          { ...excelToPdfOptions.value, documentName: file.name.replace(/\.xlsx$/i, '') },
+          job
+        );
+        setExcelToPdfPreview(result, file, revision);
+        notify(
+          'success',
+          translate('Converted {sheets} to {pages}. Review the preview, then save.', {
+            sheets: tPlural('{count} sheets', result.sheets.length),
+            pages: tPlural('{count} pages', result.pageCount)
+          }),
+          {
+            detail: translate('{size} · {sections}', {
+              size: formatBytes(result.bytes.byteLength),
+              sections: tPlural('{count} sections', result.outline.length)
+            })
+          }
+        );
+        if (result.hadUnsupportedCharacters) {
+          notify('warning', translate('Some characters could not be represented.'), {
+            detail: translate(
+              'This export uses a fixed set of Latin fonts and replaced unsupported characters ' +
+                '(e.g. CJK, Cyrillic, Arabic) with "?". Check the affected text before sharing it.'
+            ),
+            timeout: 0
+          });
         }
-      );
-      if (result.hadUnsupportedCharacters) {
-        notify('warning', translate('Some characters could not be represented.'), {
-          detail: translate(
-            'This export uses a fixed set of Latin fonts and replaced unsupported characters ' +
-              '(e.g. CJK, Cyrillic, Arabic) with "?". Check the affected text before sharing it.'
-          ),
-          timeout: 0
-        });
       }
-    });
+    );
   };
 
   return (
@@ -166,7 +170,11 @@ export function ExcelToPdfPanel() {
       </div>
 
       <div className={panelStyles.section}>
-        <Button variant="secondary" icon={Upload} onClick={chooseFile}>
+        <Button
+          variant="secondary"
+          icon={Upload}
+          onClick={withErrorToast('convert.choose-file', chooseFile)}
+        >
           {source ? t('Choose a different .xlsx') : t('Choose an .xlsx file')}
         </Button>
         {source && (

@@ -101,13 +101,18 @@ export function RedactPanel() {
             placeholder={t('Account number, name…')}
             onInput={event => setQuery((event.target as HTMLInputElement).value)}
             onKeyDown={event => {
-              if (event.key === 'Enter' && query.trim()) search();
+              if (event.key === 'Enter' && query.trim()) void search();
             }}
           />
         )}
       </Field>
       <Checkbox label={t('Match case')} checked={matchCase} onChange={setMatchCase} />
-      <Button variant="secondary" icon={Search} disabled={!query.trim()} onClick={search}>
+      <Button
+        variant="secondary"
+        icon={Search}
+        disabled={!query.trim()}
+        onClick={() => void search()}
+      >
         {t('Mark every occurrence')}
       </Button>
 
@@ -139,7 +144,7 @@ export function RedactPanel() {
             'Scans the page text for emails, phone numbers, US Social Security numbers, Luhn-valid card numbers, and IP addresses. Suggestions are never redacted until you accept them; an accepted one becomes an ordinary mark you can move, resize, or remove.'
           )}
         </p>
-        <Button variant="secondary" icon={ScanSearch} onClick={scan}>
+        <Button variant="secondary" icon={ScanSearch} onClick={() => void scan()}>
           {t('Scan for sensitive data')}
         </Button>
 

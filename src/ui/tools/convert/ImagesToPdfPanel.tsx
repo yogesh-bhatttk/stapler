@@ -19,6 +19,7 @@ import { panelStyles } from '../../shell/panelStyles';
 import { imagesToPdfSettings } from '../state';
 import { tPlural, useTranslation } from '../../../core/i18n';
 import styles from './ImagesToPdfPanel.module.css';
+import { withErrorToast } from '../../asyncHandler';
 
 /** A small preview of one picked file, or the generic icon for HEIC/TIFF. */
 function FileThumb({ file }: { file: File }) {
@@ -121,7 +122,11 @@ export function ImagesToPdfPanel() {
         </div>
       )}
 
-      <Button variant="secondary" icon={Plus} onClick={addImages}>
+      <Button
+        variant="secondary"
+        icon={Plus}
+        onClick={withErrorToast('images-to-pdf.add', addImages)}
+      >
         {t('Add images')}
       </Button>
 

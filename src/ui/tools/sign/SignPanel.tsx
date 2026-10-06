@@ -431,7 +431,7 @@ export function SignPanel() {
         {armed ? t('tool.sign.placementHintActive') : t('tool.sign.placementHintIdle')}
       </p>
 
-      <Button variant="tertiary" icon={ScanSearch} onClick={detect} disabled={!doc}>
+      <Button variant="tertiary" icon={ScanSearch} onClick={() => void detect()} disabled={!doc}>
         {t('Detect signature lines')}
       </Button>
 

@@ -94,7 +94,7 @@ export function ActionBar() {
           title={gate ?? undefined}
           aria-describedby={gate ? `commit-gate-${tool.id}` : undefined}
           onClick={() =>
-            run({ label: t(tool.commitLabel), scope: `commit.${tool.id}` }, jobOptions =>
+            void run({ label: t(tool.commitLabel), scope: `commit.${tool.id}` }, jobOptions =>
               commitTool(tool.id, jobOptions)
             )
           }

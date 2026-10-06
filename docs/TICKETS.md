@@ -7511,13 +7511,17 @@ were Done on the strength of tests that could not have caught them.
 
 ### HRD-60 · Engineering rules from recurring bug patterns — `S` `P1`
 
-**Status: Done (2026-10-02) for the shared helpers; two guard rails remain open** — the shared
-helpers exist (`src/core/page-version.ts`, `size-guard.ts` `chooseSmaller`, `page-range.ts`
-`parsePageRange`, `bytes.ts` `formatBytes`/`formatBytesUp`) and every known instance is
-fixed. Still open: (1) `@typescript-eslint/no-floating-promises` is not enabled in
-`eslint.config.js`; (2) the i18n literal scan covers only `src/core/operations.ts`
-(`tests/unit/operations-i18n-labels.test.ts`), not every `stage()`/`progress()`/`detail`
-literal in `src/`.
+**Status: Done (2026-10-06)** — the shared helpers exist (`src/core/page-version.ts`,
+`size-guard.ts` `chooseSmaller`, `page-range.ts` `parsePageRange`, `bytes.ts`
+`formatBytes`/`formatBytesUp`) and every known instance is fixed. Both guard rails are in:
+(1) `@typescript-eslint/no-floating-promises` and `no-misused-promises` are enabled for
+`src/` (type-aware, in `eslint.config.js`); all 81 violations were fixed without a single
+disable — handlers whose rejection was uncaught now go through `withErrorToast`
+(`src/ui/asyncHandler.ts`), and caught-but-only-logged errors now reach `notifyError`;
+(2) `tests/unit/i18n-literal-labels.test.ts` (TypeScript compiler API) scans all of `src/`
+for untranslated progress labels, `notify()` titles/details/action labels and job labels, with
+a self-check probe; it found and fixed two literals. Cost: `eslint .` takes about 17–25 s
+(was about 8.5 s).
 
 Nine root causes produced most of the audit's findings. Each is now a rule for new code,
 so the next instance is caught in review or by a gate, not by the next audit.
@@ -7923,7 +7927,7 @@ Repo-wide instances of patterns 5, 6, 8 and 9 and of the strict-TypeScript conve
     `tests/unit/interpreter-decode.test.ts`.
   - **AUDIT-2026-10-01 X-14** — every progress label and user-facing note in `operations.ts`
     goes through `translate()` with `{page}` parameters. Was: about 15 bare English
-    labels. Tests: `tests/unit/operations-i18n-labels.test.ts`.
+    labels. Tests: `tests/unit/i18n-literal-labels.test.ts` (now scans all of `src/`, HRD-60).
   - **AUDIT-2026-10-01 X-15** — no `any` without a justifying comment. Stored
     `Recipe.settings` is `unknown`, validated by `parseRecipe`
     (`src/ui/tools/batch/recipe-settings.ts`) before a batch runs or a recipe is imported;

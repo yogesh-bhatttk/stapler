@@ -101,7 +101,24 @@ function openEditorOnce(route?: string, disposition?: string): Promise<void> {
   return pending;
 }
 
-chrome.action.onClicked.addListener(() => openEditorOnce());
+/**
+ * The most recent task a listener started. Chrome ignores a listener's return
+ * value, so listeners stay synchronous (HRD-60, `no-misused-promises`) and park
+ * their promise here instead; `settled()` lets the unit tests wait for it. Every
+ * task stored here catches and logs its own failure — a service worker has no
+ * UI to report to — so it never rejects.
+ */
+let lastTask: Promise<void> = Promise.resolve();
+function startTask(task: Promise<void>): void {
+  lastTask = task;
+}
+
+/** Resolves once the task most recently started by a listener has finished. */
+export function settled(): Promise<void> {
+  return lastTask;
+}
+
+chrome.action.onClicked.addListener(() => startTask(openEditorOnce()));
 
 /*
  * GAP-7 — the `pdf` omnibox keyword ("pdf merge", "pdf compress"). The
@@ -114,9 +131,17 @@ const descriptionsAreXml =
   typeof navigator === 'undefined' || !/firefox/i.test(navigator.userAgent ?? '');
 
 if (omnibox) {
-  omnibox.setDefaultSuggestion({
-    description: omniboxText('Open a Stapler tool — try "merge", "compress" or "sign"', false)
-  });
+  // Promise-returning in MV3; `Promise.resolve` also covers a callback-style
+  // implementation that returns nothing.
+  startTask(
+    Promise.resolve(
+      omnibox.setDefaultSuggestion({
+        description: omniboxText('Open a Stapler tool — try "merge", "compress" or "sign"', false)
+      })
+    ).catch(err => {
+      console.error('[stapler] could not set the omnibox suggestion', err);
+    })
+  );
 
   omnibox.onInputChanged.addListener((text, suggest) => {
     suggest(
@@ -128,7 +153,7 @@ if (omnibox) {
   });
 
   omnibox.onInputEntered.addListener((text, disposition) =>
-    openEditorOnce(omniboxRoute(text, TOOLS), disposition)
+    startTask(openEditorOnce(omniboxRoute(text, TOOLS), disposition))
   );
 }
 
@@ -149,12 +174,21 @@ async function showWhatsNewIfDue(previousVersion: string | undefined): Promise<v
 chrome.runtime.onInstalled.addListener(details => {
   if (details.reason === 'install') {
     const editorUrl = chrome.runtime.getURL('editor.html#/welcome');
-    chrome.tabs.create({ url: editorUrl });
+    startTask(
+      chrome.tabs.create({ url: editorUrl }).then(
+        () => undefined,
+        err => {
+          console.error('[stapler] could not open the welcome page', err);
+        }
+      )
+    );
     return;
   }
   if (details.reason === 'update') {
-    return showWhatsNewIfDue(details.previousVersion).catch(err => {
-      console.error('[stapler] could not open What’s new', err);
-    });
+    startTask(
+      showWhatsNewIfDue(details.previousVersion).catch(err => {
+        console.error('[stapler] could not open What’s new', err);
+      })
+    );
   }
 });

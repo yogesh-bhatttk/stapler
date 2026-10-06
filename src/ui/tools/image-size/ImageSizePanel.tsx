@@ -32,6 +32,7 @@ import {
 } from './state';
 import { TargetSizeInput } from './TargetSizeInput';
 import { ExactSizeInput } from './ExactSizeInput';
+import { withErrorToast } from '../../asyncHandler';
 
 /** The limits upload forms most often quote. */
 const QUICK_TARGETS_KB = [20, 50, 100, 200, 500] as const;
@@ -121,7 +122,11 @@ export function ImageSizePanel() {
   return (
     <>
       <div className={panelStyles.section}>
-        <Button variant="secondary" icon={ImagePlus} onClick={pick}>
+        <Button
+          variant="secondary"
+          icon={ImagePlus}
+          onClick={withErrorToast('image-size.pick', pick)}
+        >
           {settings.file ? t('Choose a different image') : t('Choose an image')}
         </Button>
         {openImage && openImage !== settings.file && (

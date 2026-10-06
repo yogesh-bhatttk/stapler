@@ -203,7 +203,8 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
     setAnalysisFailed(false);
     if (compressReport.value) return;
     const controller = new AbortController();
-    (async () => {
+    // Errors are caught inside and shown as the preview's failed state.
+    void (async () => {
       try {
         const bytes = await currentDocumentBytes({ signal: controller.signal });
         const analysed = await planCompression(bytes, compressSettings.value, {
@@ -227,7 +228,7 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
   useEffect(() => {
     if (!page) return;
     const controller = new AbortController();
-    (async () => {
+    void (async () => {
       try {
         const composed = await composeOnce(page, controller.signal);
         if (controller.signal.aborted) return;
@@ -328,7 +329,7 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
       }
     };
 
-    const timer = setTimeout(run, SETTLE_MS);
+    const timer = setTimeout(() => void run(), SETTLE_MS);
     return () => {
       clearTimeout(timer);
       controller.abort();

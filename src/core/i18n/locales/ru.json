@@ -2710,5 +2710,7 @@
   "Already the first bookmark at this level.": "Это уже первая закладка на этом уровне.",
   "Already the last bookmark at this level.": "Это уже последняя закладка на этом уровне.",
   "Indenting needs a bookmark above it at the same level.": "Чтобы увеличить отступ, над закладкой должна быть закладка того же уровня.",
-  "Already at the top level.": "Уже на верхнем уровне."
+  "Already at the top level.": "Уже на верхнем уровне.",
+  "Saving {name}": "Сохранение {name}",
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "Повторите операцию. Если она снова не удастся, перезагрузите страницу — ваши открытые документы хранятся в этой вкладке, и на диск ничего не записано."
 }

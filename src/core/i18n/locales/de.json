@@ -2374,5 +2374,7 @@
   "Already the first bookmark at this level.": "Bereits das erste Lesezeichen auf dieser Ebene.",
   "Already the last bookmark at this level.": "Bereits das letzte Lesezeichen auf dieser Ebene.",
   "Indenting needs a bookmark above it at the same level.": "Zum Einrücken muss darüber ein Lesezeichen auf derselben Ebene stehen.",
-  "Already at the top level.": "Bereits auf der obersten Ebene."
+  "Already at the top level.": "Bereits auf der obersten Ebene.",
+  "Saving {name}": "{name} wird gespeichert",
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "Wiederhole den Vorgang. Schlägt er erneut fehl, lade die Seite neu — deine geöffneten Dokumente liegen in diesem Tab, und es wurde nichts auf die Festplatte geschrieben."
 }

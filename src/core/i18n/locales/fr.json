@@ -2507,5 +2507,7 @@
   "Already the first bookmark at this level.": "C’est déjà le premier signet de ce niveau.",
   "Already the last bookmark at this level.": "C’est déjà le dernier signet de ce niveau.",
   "Indenting needs a bookmark above it at the same level.": "Pour augmenter le retrait, il faut un signet au-dessus, au même niveau.",
-  "Already at the top level.": "Déjà au niveau supérieur."
+  "Already at the top level.": "Déjà au niveau supérieur.",
+  "Saving {name}": "Enregistrement de {name}",
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "Relancez l’opération. Si elle échoue encore, rechargez la page — vos documents ouverts sont conservés dans cet onglet et rien n’a été écrit sur le disque."
 }

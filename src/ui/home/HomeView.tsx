@@ -13,6 +13,7 @@ import { toolRoute } from '../../core/tools';
 import { searchToolGroups } from '../toolSearch';
 import { importFilesAsDocuments } from '../../core/open-document';
 import { notify, notifyError } from '../../core/notify';
+import { withErrorToast } from '../asyncHandler';
 import { logEvent } from '../../core/errors';
 import { platform } from '../../platform/current';
 import type { RecentEntry } from '../../platform/index';
@@ -216,14 +217,10 @@ export function HomeView() {
                     icon={X}
                     size="compact"
                     aria-label={translate('Forget {name}', { name: entry.name })}
-                    onClick={async () => {
-                      try {
-                        await platform.revokeHandle(entry.id);
-                        setRecents(await platform.restoreHandles());
-                      } catch (err) {
-                        notifyError('recents.forget', err);
-                      }
-                    }}
+                    onClick={withErrorToast('recents.forget', async () => {
+                      await platform.revokeHandle(entry.id);
+                      setRecents(await platform.restoreHandles());
+                    })}
                   />
                 </li>
               ))}

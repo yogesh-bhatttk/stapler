@@ -3046,5 +3046,7 @@
   "Already the first bookmark at this level.": "هذه بالفعل أول إشارة مرجعية في هذا المستوى.",
   "Already the last bookmark at this level.": "هذه بالفعل آخر إشارة مرجعية في هذا المستوى.",
   "Indenting needs a bookmark above it at the same level.": "تتطلب زيادة المسافة البادئة وجود إشارة مرجعية فوقها في المستوى نفسه.",
-  "Already at the top level.": "في المستوى الأعلى بالفعل."
+  "Already at the top level.": "في المستوى الأعلى بالفعل.",
+  "Saving {name}": "جارٍ حفظ {name}",
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "أعد تنفيذ العملية. إذا فشلت مرة أخرى، فأعد تحميل الصفحة — مستنداتك المفتوحة محفوظة في علامة التبويب هذه، ولم يُكتب أي شيء على القرص."
 }

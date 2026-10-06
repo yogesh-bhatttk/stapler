@@ -91,7 +91,7 @@ export const OcrConsentDialog = forwardRef<HTMLDivElement, Record<string, never>
           ref={fileInputRef}
           style={{ display: 'none' }}
           accept=".traineddata,.gz"
-          onChange={handleFileChange}
+          onChange={e => void handleFileChange(e)}
         />
       </Modal>
     );

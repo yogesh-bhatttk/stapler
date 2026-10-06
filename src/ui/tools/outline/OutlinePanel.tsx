@@ -119,7 +119,12 @@ export function OutlinePanel() {
         {t('Add bookmark for page {n}', { n: currentIndex + 1 })}
       </Button>
 
-      <Button variant="secondary" icon={Wand2} onClick={detectHeadings} disabled={isRunning()}>
+      <Button
+        variant="secondary"
+        icon={Wand2}
+        onClick={() => void detectHeadings()}
+        disabled={isRunning()}
+      >
         {t('Detect headings from font size')}
       </Button>
 

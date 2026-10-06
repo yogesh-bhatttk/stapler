@@ -23,6 +23,7 @@ import {
   tableExtractFormat,
   resetTableExtract
 } from './table-extract-state';
+import { withErrorToast } from '../../asyncHandler';
 
 export function TableExtractPanel() {
   const t = useTranslation();
@@ -46,7 +47,7 @@ export function TableExtractPanel() {
   }));
 
   const handleExtract = () => {
-    run({ label: translate('Extracting table'), scope: 'extract' }, async job => {
+    void run({ label: translate('Extracting table'), scope: 'extract' }, async job => {
       const bytes = await currentDocumentBytes(job);
       const items = await extractPageTextItems(bytes, pageIndex);
       const extracted = extractTableFromPage(items);
@@ -270,13 +271,28 @@ export function TableExtractPanel() {
           </div>
 
           <div style={{ display: 'flex', gap: '8px', marginTop: '12px', flexWrap: 'wrap' }}>
-            <Button variant="tertiary" size="compact" icon={Download} onClick={handleExportCsv}>
+            <Button
+              variant="tertiary"
+              size="compact"
+              icon={Download}
+              onClick={withErrorToast('table-extract.export', handleExportCsv)}
+            >
               {t('Export CSV')}
             </Button>
-            <Button variant="tertiary" size="compact" icon={Download} onClick={handleExportTsv}>
+            <Button
+              variant="tertiary"
+              size="compact"
+              icon={Download}
+              onClick={withErrorToast('table-extract.export', handleExportTsv)}
+            >
               {t('Export TSV')}
             </Button>
-            <Button variant="tertiary" size="compact" icon={Download} onClick={handleExportXlsx}>
+            <Button
+              variant="tertiary"
+              size="compact"
+              icon={Download}
+              onClick={withErrorToast('table-extract.export', handleExportXlsx)}
+            >
               {t('Export XLSX')}
             </Button>
           </div>

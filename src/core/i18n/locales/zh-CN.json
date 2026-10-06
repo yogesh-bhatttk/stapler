@@ -2374,5 +2374,7 @@
   "Already the first bookmark at this level.": "已经是此级别的第一个书签。",
   "Already the last bookmark at this level.": "已经是此级别的最后一个书签。",
   "Indenting needs a bookmark above it at the same level.": "要增加缩进，上方需要有一个同级书签。",
-  "Already at the top level.": "已位于顶层。"
+  "Already at the top level.": "已位于顶层。",
+  "Saving {name}": "正在保存 {name}",
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "请重试该操作。如果再次失败，请重新加载页面——您打开的文档保存在此标签页中，尚未向磁盘写入任何内容。"
 }

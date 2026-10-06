@@ -55,7 +55,7 @@ export function BlanksPanel() {
         )}
       </Field>
 
-      <Button variant="secondary" icon={Search} onClick={detect}>
+      <Button variant="secondary" icon={Search} onClick={() => void detect()}>
         {t('Detect blank pages')}
       </Button>
 

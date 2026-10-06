@@ -2507,5 +2507,7 @@
   "Already the first bookmark at this level.": "Já é o primeiro marcador deste nível.",
   "Already the last bookmark at this level.": "Já é o último marcador deste nível.",
   "Indenting needs a bookmark above it at the same level.": "Para aumentar o recuo, é preciso haver um marcador acima no mesmo nível.",
-  "Already at the top level.": "Já está no nível superior."
+  "Already at the top level.": "Já está no nível superior.",
+  "Saving {name}": "Salvando {name}",
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "Tente a operação novamente. Se falhar de novo, recarregue a página — seus documentos abertos estão guardados nesta aba e nada foi gravado no disco."
 }

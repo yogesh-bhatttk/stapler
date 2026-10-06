@@ -92,7 +92,7 @@ export function AnnotatePanel() {
             placeholder={t('tool.annotate.findPlaceholder')}
             onInput={event => setQuery((event.target as HTMLInputElement).value)}
             onKeyDown={event => {
-              if (event.key === 'Enter' && query.trim() && doc) highlightMatches();
+              if (event.key === 'Enter' && query.trim() && doc) void highlightMatches();
             }}
           />
         )}
@@ -102,7 +102,7 @@ export function AnnotatePanel() {
         variant="secondary"
         icon={Search}
         disabled={!query.trim() || !doc}
-        onClick={highlightMatches}
+        onClick={() => void highlightMatches()}
       >
         {t('tool.annotate.highlightEvery')}
       </Button>
@@ -173,7 +173,12 @@ export function AnnotatePanel() {
       </div>
 
       <hr className={panelStyles.divider} />
-      <Button variant="secondary" icon={FileText} disabled={!doc} onClick={handleExportSummary}>
+      <Button
+        variant="secondary"
+        icon={FileText}
+        disabled={!doc}
+        onClick={() => void handleExportSummary()}
+      >
         {t('Export annotation summary')}
       </Button>
 

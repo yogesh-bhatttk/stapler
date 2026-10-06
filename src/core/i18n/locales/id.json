@@ -2374,5 +2374,7 @@
   "Already the first bookmark at this level.": "Sudah penanda pertama di tingkat ini.",
   "Already the last bookmark at this level.": "Sudah penanda terakhir di tingkat ini.",
   "Indenting needs a bookmark above it at the same level.": "Untuk menjorokkan, perlu ada penanda di atasnya pada tingkat yang sama.",
-  "Already at the top level.": "Sudah di tingkat teratas."
+  "Already at the top level.": "Sudah di tingkat teratas.",
+  "Saving {name}": "Menyimpan {name}",
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "Coba lagi operasinya. Jika gagal lagi, muat ulang halaman — dokumen Anda yang terbuka disimpan di tab ini dan belum ada yang ditulis ke disk."
 }

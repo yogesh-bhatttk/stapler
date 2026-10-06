@@ -14,7 +14,24 @@ import { ESLint } from 'eslint';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
-const eslint = new ESLint({ cwd: root });
+/**
+ * The repo's own config, minus type information: the probes are in-memory
+ * snippets at paths no tsconfig project contains, so `projectService` cannot
+ * type them, and the two type-aware rules src/ enables (HRD-60) are switched
+ * off here. Every syntax rule, including the copier block under test, runs
+ * exactly as configured.
+ */
+const eslint = new ESLint({
+  cwd: root,
+  overrideConfig: {
+    files: ['**/*.ts'],
+    languageOptions: { parserOptions: { projectService: false, project: null } },
+    rules: {
+      '@typescript-eslint/no-floating-promises': 'off',
+      '@typescript-eslint/no-misused-promises': 'off'
+    }
+  }
+});
 
 async function copierErrors(code: string, filePath = 'src/core/lint-probe.ts'): Promise<number> {
   const [result] = await eslint.lintText(code, { filePath: `${root}/${filePath}` });

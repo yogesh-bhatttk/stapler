@@ -516,13 +516,13 @@ export function ReadAloudPanel() {
         <IconButton
           icon={ChevronsLeft}
           aria-label={t('Previous page')}
-          onClick={() => handlePageStep(-1)}
+          onClick={() => void handlePageStep(-1)}
           disabled={progress.pageIndex === 0}
         />
         <IconButton
           icon={ChevronLeft}
           aria-label={t('Previous sentence')}
-          onClick={() => handleSentenceStep(-1)}
+          onClick={() => void handleSentenceStep(-1)}
           disabled={progress.pageIndex === 0 && progress.sentenceIndex === 0}
         />
         {progress.status === 'playing' ? (
@@ -530,7 +530,7 @@ export function ReadAloudPanel() {
             {t('Pause')}
           </Button>
         ) : (
-          <Button icon={Play} onClick={handlePlay}>
+          <Button icon={Play} onClick={() => void handlePlay()}>
             {progress.status === 'paused' ? t('Resume') : t('Play')}
           </Button>
         )}
@@ -545,12 +545,12 @@ export function ReadAloudPanel() {
         <IconButton
           icon={ChevronRight}
           aria-label={t('Next sentence')}
-          onClick={() => handleSentenceStep(1)}
+          onClick={() => void handleSentenceStep(1)}
         />
         <IconButton
           icon={ChevronsRight}
           aria-label={t('Next page')}
-          onClick={() => handlePageStep(1)}
+          onClick={() => void handlePageStep(1)}
           disabled={progress.pageIndex >= doc.pages.length - 1}
         />
       </div>

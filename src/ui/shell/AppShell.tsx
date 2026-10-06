@@ -68,6 +68,7 @@ import {
 } from '../../core/open-document';
 import { platform } from '../../platform/current';
 import { notify, confirmAction, confirmRequest } from '../../core/notify';
+import { withErrorToast } from '../asyncHandler';
 import { readSetting, writeSetting } from '../../core/db';
 import {
   eventMatchesRedoShortcut,
@@ -217,7 +218,7 @@ export function AppShell({ children }: { children: ComponentChildren }) {
   }, []);
 
   useEffect(() => {
-    const onPaste = async (event: ClipboardEvent) => {
+    const pasteImage = async (event: ClipboardEvent) => {
       if (isTypingTarget(event.target)) return;
 
       const doc = activeDoc.value;
@@ -285,6 +286,7 @@ export function AppShell({ children }: { children: ComponentChildren }) {
       }
     };
 
+    const onPaste = withErrorToast('paste', pasteImage);
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
   }, []);

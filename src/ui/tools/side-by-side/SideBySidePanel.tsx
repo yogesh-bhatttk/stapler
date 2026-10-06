@@ -13,7 +13,7 @@ import { panelStyles } from '../../shell/panelStyles';
 import { useTranslation } from '../../../core/i18n';
 import { sources, releaseSourceIfUnused } from '../../../core/store';
 import { sideBySideSourceId } from './state';
-import { activeJob, notify } from '../../../core/notify';
+import { activeJob, notify, notifyError } from '../../../core/notify';
 import { translate } from '../../../core/i18n';
 import { discardImported } from '../../../core/open-document';
 import { useJob } from '../../useJob';
@@ -63,7 +63,9 @@ export function SideBySidePanel() {
         }
       });
     } catch (err: unknown) {
+      // `run` reports its own failures; this is the picker or reading the file.
       logEvent('error', 'side-by-side', fromUnknown(err).message);
+      notifyError('side-by-side.open', err);
     } finally {
       setLoading(false);
     }
@@ -76,7 +78,7 @@ export function SideBySidePanel() {
           'View this document next to another one. Scrolling, page turns, and zoom stay in sync between the two.'
         )}
       </p>
-      <Button onClick={openSecondFile} disabled={loading}>
+      <Button onClick={() => void openSecondFile()} disabled={loading}>
         {compareSource ? t('Change the other document…') : t('Open a document to view alongside…')}
       </Button>
       {compareSource && (

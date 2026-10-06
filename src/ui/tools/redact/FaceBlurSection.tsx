@@ -199,7 +199,12 @@ export function FaceBlurSection() {
         )}
       </Field>
 
-      <Button variant="secondary" icon={ScanFace} disabled={!canRun || busy} onClick={blur}>
+      <Button
+        variant="secondary"
+        icon={ScanFace}
+        disabled={!canRun || busy}
+        onClick={() => void blur()}
+      >
         {t('Find and blur')}
       </Button>
 

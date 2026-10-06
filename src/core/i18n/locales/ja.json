@@ -2374,5 +2374,7 @@
   "Already the first bookmark at this level.": "すでにこの階層の最初のしおりです。",
   "Already the last bookmark at this level.": "すでにこの階層の最後のしおりです。",
   "Indenting needs a bookmark above it at the same level.": "インデントするには、同じ階層の上にしおりが必要です。",
-  "Already at the top level.": "すでに最上位の階層です。"
+  "Already at the top level.": "すでに最上位の階層です。",
+  "Saving {name}": "{name} を保存しています",
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "操作をもう一度お試しください。再び失敗する場合はページを再読み込みしてください。開いているドキュメントはこのタブに保持されており、ディスクには何も書き込まれていません。"
 }

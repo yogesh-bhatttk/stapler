@@ -60,7 +60,7 @@ export function ContactSheetPanel() {
       <div className={panelStyles.section}>
         <Button
           id="contact-sheet-export-btn"
-          onClick={handleExport}
+          onClick={() => void handleExport()}
           disabled={isRunning()}
           icon={LayoutGrid}
         >

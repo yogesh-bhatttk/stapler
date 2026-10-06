@@ -37,6 +37,7 @@ import { useJob } from '../../useJob';
 import { fromUnknown, isCancellation, logEvent } from '../../../core/errors';
 import { tKey, translate, useTranslation } from '../../../core/i18n';
 import type { CompressColour } from '../../../core/compress-gray';
+import { withErrorToast } from '../../asyncHandler';
 
 const DPI_OPTIONS = [
   { value: 72, label: tKey('72 DPI — smallest') },
@@ -323,7 +324,7 @@ export function CompressPanel() {
         </>
       )}
 
-      <Button variant="secondary" icon={Gauge} onClick={analyse}>
+      <Button variant="secondary" icon={Gauge} onClick={() => void analyse()}>
         {t('Analyse without changing anything')}
       </Button>
 
@@ -401,7 +402,11 @@ export function CompressPanel() {
             </p>
           )}
 
-          <Button variant="secondary" icon={Download} onClick={exportReport}>
+          <Button
+            variant="secondary"
+            icon={Download}
+            onClick={withErrorToast('compress.report', exportReport)}
+          >
             {t('Export Report')}
           </Button>
         </div>

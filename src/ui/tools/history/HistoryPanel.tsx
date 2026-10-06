@@ -13,6 +13,7 @@ import { platform } from '../../../platform/current';
 import { Button } from '../../components/Button';
 import { panelStyles } from '../../shell/panelStyles';
 import { translate, useTranslation } from '../../../core/i18n';
+import { withErrorToast } from '../../asyncHandler';
 
 function formatEntry(entry: { label: string; timestamp: number }): string {
   // `label` is a tool title stored as its English key (`tKey`), translated here.
@@ -67,7 +68,7 @@ export function HistoryPanel() {
       </div>
 
       <div className={panelStyles.section}>
-        <Button icon={Download} onClick={handleExport}>
+        <Button icon={Download} onClick={withErrorToast('history.export', handleExport)}>
           {t('Export log as text')}
         </Button>
       </div>

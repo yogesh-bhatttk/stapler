@@ -91,7 +91,7 @@ export function FontEmbeddingSection() {
           'A font referenced by name but not embedded can look different in a viewer that lacks it.'
         )}
       </p>
-      <Button variant="secondary" icon={ScanSearch} onClick={check} disabled={busy}>
+      <Button variant="secondary" icon={ScanSearch} onClick={() => void check()} disabled={busy}>
         {t('Check font embedding')}
       </Button>
 
@@ -116,7 +116,7 @@ export function FontEmbeddingSection() {
                   size="compact"
                   variant="tertiary"
                   disabled={busy}
-                  onClick={() => embed(finding.baseFont)}
+                  onClick={() => void embed(finding.baseFont)}
                 >
                   {t('Embed')}
                 </Button>

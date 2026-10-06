@@ -97,8 +97,10 @@ export function TopBar() {
         />
         <select
           value={currentLocale.value}
+          // setLocale never rejects: a dictionary that fails to load leaves the
+          // current locale in place.
           onChange={e =>
-            setLocale(
+            void setLocale(
               (e.currentTarget as HTMLSelectElement).value as Parameters<typeof setLocale>[0]
             )
           }

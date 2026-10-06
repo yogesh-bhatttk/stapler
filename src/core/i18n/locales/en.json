@@ -2374,5 +2374,7 @@
   "Already the first bookmark at this level.": "Already the first bookmark at this level.",
   "Already the last bookmark at this level.": "Already the last bookmark at this level.",
   "Indenting needs a bookmark above it at the same level.": "Indenting needs a bookmark above it at the same level.",
-  "Already at the top level.": "Already at the top level."
+  "Already at the top level.": "Already at the top level.",
+  "Saving {name}": "Saving {name}",
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk."
 }

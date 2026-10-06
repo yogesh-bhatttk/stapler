@@ -18,6 +18,7 @@ import { Modal } from '../../components/Modal';
 import { TextInput } from '../../components/Field';
 import { Tabs } from '../../components/Tabs';
 import styles from './SignatureModal.module.css';
+import { withErrorToast } from '../../asyncHandler';
 
 type Tab = 'draw' | 'type' | 'image';
 
@@ -222,7 +223,11 @@ function TypeTab({ onDone, isInitials }: { onDone: () => void; isInitials?: bool
         {t('The face is whatever script font your system provides — Stapler ships no webfonts.')}
       </p>
       <div className={styles.actions}>
-        <Button variant="primary" disabled={!text.trim()} onClick={save}>
+        <Button
+          variant="primary"
+          disabled={!text.trim()}
+          onClick={withErrorToast('signature.save', save)}
+        >
           {t('Save signature')}
         </Button>
       </div>
@@ -291,7 +296,7 @@ function ImageTab({ onDone, isInitials }: { onDone: () => void; isInitials?: boo
       )}
 
       <div className={styles.actions}>
-        <Button variant="primary" disabled={!file} onClick={save}>
+        <Button variant="primary" disabled={!file} onClick={withErrorToast('signature.save', save)}>
           {t('Save signature')}
         </Button>
       </div>

@@ -114,7 +114,7 @@ export function MetadataPanel() {
 
   return (
     <>
-      <Button variant="secondary" icon={ScanSearch} onClick={inspect}>
+      <Button variant="secondary" icon={ScanSearch} onClick={() => void inspect()}>
         {t('Inspect this document')}
       </Button>
 

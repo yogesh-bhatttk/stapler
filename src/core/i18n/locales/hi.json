@@ -2374,5 +2374,7 @@
   "Already the first bookmark at this level.": "यह पहले से ही इस स्तर का पहला बुकमार्क है।",
   "Already the last bookmark at this level.": "यह पहले से ही इस स्तर का अंतिम बुकमार्क है।",
   "Indenting needs a bookmark above it at the same level.": "इंडेंट करने के लिए उसी स्तर पर ऊपर एक बुकमार्क होना चाहिए।",
-  "Already at the top level.": "पहले से ही शीर्ष स्तर पर है।"
+  "Already at the top level.": "पहले से ही शीर्ष स्तर पर है।",
+  "Saving {name}": "{name} सहेजा जा रहा है",
+  "Retry the operation. If it fails again, reload the page — your open documents are held in this tab and nothing has been written to disk.": "कार्रवाई फिर से करें। अगर यह फिर विफल हो, तो पेज रीलोड करें — आपके खुले दस्तावेज़ इसी टैब में हैं और डिस्क पर कुछ भी नहीं लिखा गया है।"
 }

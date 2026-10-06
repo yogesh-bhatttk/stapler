@@ -174,7 +174,7 @@ async function importPdf(
   // Pending from before the bytes land until the caller has had its chance to
   // add the document (RT-5) — see `importFiles`.
   const id = crypto.randomUUID();
-  stage(0.5, `Saving ${file.name}`);
+  stage(0.5, translate('Saving {name}', { name: file.name }));
   markSourcePending(id);
   onPending(id);
   await writeSourceBytes(id, bytes);

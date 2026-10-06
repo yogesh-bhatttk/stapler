@@ -15,6 +15,7 @@ import { IconButton } from './IconButton';
 import { X } from 'lucide-preact';
 import styles from './Feedback.module.css';
 import { formatBytes } from '../../core/bytes';
+import { withErrorToast } from '../asyncHandler';
 
 const TONE_ICON: Record<ToastTone, typeof Info> = {
   info: Info,
@@ -49,7 +50,9 @@ function ToastCard({ toast }: { toast: Toast }) {
               <Button
                 size="compact"
                 variant="tertiary"
-                onClick={() => navigator.clipboard.writeText(toast.diagnostic ?? '')}
+                onClick={withErrorToast('toast.copy-diagnostic', () =>
+                  navigator.clipboard.writeText(toast.diagnostic ?? '')
+                )}
               >
                 {translate('Copy diagnostic')}
               </Button>

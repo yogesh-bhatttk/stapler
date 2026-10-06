@@ -578,13 +578,18 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         >
           {t('Next')}
         </Button>
-        <Button variant="secondary" icon={Check} onClick={apply} disabled={!ready || !previewReady}>
+        <Button
+          variant="secondary"
+          icon={Check}
+          onClick={() => void apply()}
+          disabled={!ready || !previewReady}
+        >
           {t('Apply to this page')}
         </Button>
         <Button
           variant="secondary"
           icon={Check}
-          onClick={applyToAll}
+          onClick={() => void applyToAll()}
           disabled={!ready || !previewReady}
         >
           {t('Apply to all pages')}

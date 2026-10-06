@@ -6,6 +6,11 @@
  * handler at all. This hook is the single place the lifecycle lives, so "cancellable
  * and reports determinate progress" (TICKETS definition of done) holds by
  * construction rather than per call site.
+ *
+ * `run` never rejects: a failure becomes a toast inside it and resolves
+ * `undefined`. A handler that only awaits `run` is therefore called as
+ * `() => void handler()` — the `void` satisfies `no-floating-promises` and
+ * `no-misused-promises` (HRD-60) without a second, redundant error path.
  */
 import { useCallback, useEffect, useRef } from 'preact/hooks';
 import { activeJob } from '../core/notify';

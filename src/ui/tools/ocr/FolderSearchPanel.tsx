@@ -189,6 +189,9 @@ export function FolderSearchPanel() {
       const res = await searchFolderIndex(val);
       if (seq !== searchSeq.current) return; // a newer search has since started
       setResults(res);
+    } catch (err) {
+      // Only the latest search reports: an older one failing is already superseded.
+      if (seq === searchSeq.current) notifyError('ocr.folder-search', err);
     } finally {
       if (seq === searchSeq.current) setSearching(false);
     }
@@ -260,7 +263,7 @@ export function FolderSearchPanel() {
       <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
         <button
           type="button"
-          onClick={handleSelectFolder}
+          onClick={() => void handleSelectFolder()}
           disabled={busy}
           style={{
             height: 'var(--control-h)',
@@ -279,7 +282,7 @@ export function FolderSearchPanel() {
         {dirHandle && (
           <button
             type="button"
-            onClick={handleStartIndexing}
+            onClick={() => void handleStartIndexing()}
             disabled={busy}
             style={{
               height: 'var(--control-h)',
@@ -376,7 +379,7 @@ export function FolderSearchPanel() {
             id={id}
             value={query}
             placeholder={t('Type search terms...')}
-            onInput={e => handleSearch((e.target as HTMLInputElement).value)}
+            onInput={e => void handleSearch((e.target as HTMLInputElement).value)}
           />
         )}
       </Field>

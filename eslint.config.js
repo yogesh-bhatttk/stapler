@@ -133,6 +133,20 @@ export default tseslint.config(
     }
   },
   {
+    // HRD-60 / AUDIT-2026-10-01 pattern 8: every async effect has an error state. A promise
+    // nobody awaits or catches turns a failure into an unhandled rejection the user never
+    // sees (UI-2, X-11, X-12). Type-aware, so it runs only on src/ (tsconfig.json); a
+    // deliberate fire-and-forget is spelled `void promise` with its errors handled inside.
+    files: ['src/**/*.{ts,tsx}'],
+    languageOptions: {
+      parserOptions: { projectService: true, tsconfigRootDir: import.meta.dirname }
+    },
+    rules: {
+      '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-misused-promises': 'error'
+    }
+  },
+  {
     files: ['tests/**/*.ts'],
     rules: {
       // Tests legitimately assert on loosely-typed page evaluation results.
