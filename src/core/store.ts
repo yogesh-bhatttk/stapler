@@ -20,7 +20,7 @@
  * OPFS (`opfs.ts`), keyed by source id, and already survive a reload on their
  * own; recovery only restores the pointers that say which OPFS files matter.
  */
-import { batch, computed, signal } from '@preact/signals';
+import { batch, computed, effect, signal } from '@preact/signals';
 import {
   commit,
   forgetDocumentInHistory,
@@ -31,6 +31,7 @@ import {
 import { normalizeRotation } from './rotation';
 import { checkOpenCapacity, knownSourceBytes, type OpenCapacity } from './workspace-limits';
 import { pruneRenderHandles } from './render-cache';
+import { setSourceLivenessCheck } from './source-liveness';
 import { deleteSourceBytes, readSourceBytes } from './opfs';
 import { logEvent } from './errors';
 import { notify } from './notify';
@@ -117,10 +118,104 @@ export interface StaplerDoc {
    * no annotations, so absent means `[]`.
    */
   baselineAnnotations?: Annotation[];
+  /**
+   * AUDIT-2026-10-10 H2 — the Crop and Annotate tools' per-page state
+   * (`cropBoxes`, `pageAnnotations`) for this document's pages as of the last
+   * successful save. Those two maps live outside `StaplerDoc`, so without an
+   * anchor of their own neither a crop nor an Annotate mark ever made the
+   * document dirty, and closing its tab lost them without a prompt. Absent
+   * until the first save: every open path starts with neither, so absent
+   * means "none".
+   */
+  baselinePageState?: PageState;
+}
+
+/** H2 — the per-page tool state an export bakes in, restricted to some page keys. */
+export interface PageState {
+  cropBoxes: Record<string, CropBox>;
+  pageAnnotations: Record<string, PageAnnotation[]>;
 }
 
 /** Workspace documents — what the file tabs show. */
 export const documents = signal<StaplerDoc[]>([]);
+
+/** H2 — `cropBoxes`/`pageAnnotations` entries for `keys` only. */
+export function pageStateFor(
+  keys: Iterable<string>,
+  crops: Record<string, CropBox> = cropBoxes.value,
+  notes: Record<string, PageAnnotation[]> = pageAnnotations.value
+): PageState {
+  const state: PageState = { cropBoxes: {}, pageAnnotations: {} };
+  for (const key of keys) {
+    if (crops[key]) state.cropBoxes[key] = crops[key];
+    if (notes[key]?.length) state.pageAnnotations[key] = notes[key];
+  }
+  return state;
+}
+
+/**
+ * H2 — true when `pages`' crop boxes and Annotate marks in `crops`/`notes`
+ * are exactly the ones `saved` recorded (absent: none at all). An empty mark
+ * list and no entry are the same thing — deleting the last mark on a page
+ * leaves `[]` behind, which is not an edit.
+ */
+export function pageStateMatches(
+  pages: readonly PageRef[],
+  crops: Record<string, CropBox>,
+  notes: Record<string, PageAnnotation[]>,
+  saved: PageState | undefined
+): boolean {
+  for (const { key } of pages) {
+    const crop = crops[key];
+    const savedCrop = saved?.cropBoxes[key];
+    if (crop !== savedCrop && JSON.stringify(crop) !== JSON.stringify(savedCrop)) return false;
+    const marks = notes[key]?.length ? notes[key] : undefined;
+    const savedMarks = saved?.pageAnnotations[key]?.length ? saved.pageAnnotations[key] : undefined;
+    if (marks !== savedMarks && JSON.stringify(marks) !== JSON.stringify(savedMarks)) return false;
+  }
+  return true;
+}
+
+/** Keys whose entry differs (by reference) between two keyed maps. */
+function changedKeys<T>(before: Record<string, T>, after: Record<string, T>, into: Set<string>) {
+  if (before === after) return;
+  for (const key of Object.keys(before)) if (before[key] !== after[key]) into.add(key);
+  for (const key of Object.keys(after)) if (!(key in before)) into.add(key);
+}
+
+/**
+ * H2 — a crop box or Annotate mark changed on a document's page: that
+ * document now has unsaved changes. Done here, once, rather than at each of
+ * the many places those two maps are written (the overlays, the panels, the
+ * text-search highlighter, auto-trim…), so a new writer cannot forget it.
+ *
+ * Only ever *sets* `dirty`. Clearing it is a save's job (`refreshBaseline`)
+ * or undo/redo's (`history.ts`'s `restoredDoc`, which compares against the
+ * same `baselinePageState`), and both have already written the document by
+ * the time this runs — an undo that lands back on the saved crop finds the
+ * state matching its baseline here and leaves the clean flag alone.
+ */
+let seenCropBoxes = cropBoxes.peek();
+let seenPageAnnotations = pageAnnotations.peek();
+effect(() => {
+  const crops = cropBoxes.value;
+  const notes = pageAnnotations.value;
+  const changed = new Set<string>();
+  changedKeys(seenCropBoxes, crops, changed);
+  changedKeys(seenPageAnnotations, notes, changed);
+  seenCropBoxes = crops;
+  seenPageAnnotations = notes;
+  if (changed.size === 0) return;
+  const docs = documents.peek();
+  let touched = false;
+  const next = docs.map(doc => {
+    if (doc.dirty || !doc.pages.some(page => changed.has(page.key))) return doc;
+    if (pageStateMatches(doc.pages, crops, notes, doc.baselinePageState)) return doc;
+    touched = true;
+    return { ...doc, dirty: true };
+  });
+  if (touched) documents.value = next;
+});
 
 /**
  * Drops `cropBoxes`/`pageAnnotations` entries for page keys that are no
@@ -232,6 +327,10 @@ export function documentRestrictions(doc: StaplerDoc): number | null {
   }
   return combined;
 }
+
+// AUDIT-2026-10-10 L9 — a render handle opened for a source that was closed
+// meanwhile is released instead of cached forever.
+setSourceLivenessCheck(sourceId => sourceId in sources.value);
 
 export function registerSource(source: SourceDocument, originalFiles?: File[]): void {
   sources.value = { ...sources.value, [source.id]: source };
@@ -449,7 +548,12 @@ export function refreshBaseline(
   docId: string,
   pages: PageRef[],
   /** The annotations that were written with `pages` — what is now on disk. */
-  annotations?: Annotation[]
+  annotations?: Annotation[],
+  /**
+   * H2 — the crop boxes and Annotate marks that were written with `pages`.
+   * Defaults to the live ones for those pages.
+   */
+  pageState?: PageState
 ): void {
   const doc = documents.value.find(d => d.id === docId);
   if (!doc) return;
@@ -458,6 +562,14 @@ export function refreshBaseline(
   // the one written; otherwise the previous anchor stays.
   const baselineAnnotations =
     annotations ?? (doc.pages === pages ? doc.annotations : doc.baselineAnnotations);
+  const baselinePageState = pageState ?? pageStateFor(pages.map(page => page.key));
+  // A crop or mark changed while the save was in flight is still unsaved.
+  const pageStateCurrent = pageStateMatches(
+    pages,
+    cropBoxes.value,
+    pageAnnotations.value,
+    baselinePageState
+  );
   // RT-1 (AUDIT-2026-10-01) — undo past this save must land dirty against
   // what is now on disk, so the whole history is re-anchored here too.
   rebaseHistory(docId, pages, baselineAnnotations);
@@ -467,6 +579,7 @@ export function refreshBaseline(
           ...d,
           baseline: pages,
           baselineAnnotations,
+          baselinePageState,
           // RT-17 — what was just written is the document as it stands, so it
           // no longer has unsaved changes. Before, `dirty` was never cleared:
           // the dot stayed after a save and closing the tab still asked to
@@ -475,7 +588,9 @@ export function refreshBaseline(
           // though — an edit made while the save was in flight (an annotation
           // added under the save dialog, say) is still unsaved.
           dirty:
-            d.pages === pages && (annotations === undefined || d.annotations === annotations)
+            d.pages === pages &&
+            (annotations === undefined || d.annotations === annotations) &&
+            pageStateCurrent
               ? false
               : d.dirty
         }
@@ -907,22 +1022,81 @@ function carryRestrictions(docId: string, source: SourceDocument): SourceDocumen
  * Replaces a document's pages with a single new source — used when an operation
  * rewrites the bytes (redaction, scan cleanup) rather than rearranging pages.
  */
-export function replaceWithSource(docId: string, source: SourceDocument): void {
+export function replaceWithSource(
+  docId: string,
+  source: SourceDocument,
+  options: {
+    /**
+     * True when the new bytes were built *without* the document's stamps
+     * (`doc.annotations`) — scan cleanup works on the source pages — so they
+     * must be kept rather than dropped. Default false: redaction and face
+     * blur bake them in, and keeping them would draw them twice.
+     */
+    keepStamps?: boolean;
+    /**
+     * True when page `i` of `source` is a rewrite of the document's page `i`
+     * — redaction, face blur and per-page scan cleanup build their bytes from
+     * `doc.pages` in order. The pages then keep their keys (see below).
+     * False (default) for anything else — a whole-source rewrite in source
+     * order, say — which gets fresh keys, since a kept key would land on a
+     * different page.
+     */
+    pageForPage?: boolean;
+    /**
+     * True when `source` is a page-preserving rewrite of the *one* source all
+     * of the document's pages come from — page `n` of it is that source's
+     * page `n`, unrotated (scan cleanup's whole-document flatten). Each page
+     * then keeps its key, its `sourceIndex` and its rotation; only the bytes
+     * it points at change.
+     */
+    sameSourceLayout?: boolean;
+  } = {}
+): void {
+  const before = documents.value.find(d => d.id === docId);
+  const onlySource = before?.pages[0]?.sourceDocId;
+  const layoutKept =
+    options.sameSourceLayout === true &&
+    onlySource !== undefined &&
+    before !== undefined &&
+    before.pages.every(page => page.sourceDocId === onlySource) &&
+    sources.value[onlySource]?.pageCount === source.pageCount;
   commit(docId);
   registerSource(carryRestrictions(docId, source));
   mutateDoc(docId, doc => {
-    const pages = makePageRefs(source.id, source.pageCount);
+    // AUDIT-2026-10-10 M2 — a page-for-page rewrite keeps the pages' keys,
+    // exactly as `repointPage` does. Everything else keyed by
+    // page — crop boxes, Annotate marks, the edited outline, the selection's
+    // meaning, alt text — then still refers to the same page. Minting fresh
+    // keys orphaned all of it: the Annotate marks a user had drawn vanished
+    // the moment a redaction was applied. The rebuilt page carries the old
+    // ref's rotation in its own `/Rotate` (it was composed with it), so the
+    // ref's rotation goes back to 0 and the page looks — and is keyed —
+    // exactly as before.
+    const pages = layoutKept
+      ? doc.pages.map(page => ({ ...page, sourceDocId: source.id }))
+      : options.pageForPage && source.pageCount === doc.pages.length
+        ? doc.pages.map((page, index) => ({
+            key: page.key,
+            sourceDocId: source.id,
+            sourceIndex: index,
+            rotation: 0
+          }))
+        : makePageRefs(source.id, source.pageCount);
     return {
       ...doc,
       pages,
       // Stamps were baked into the new bytes, so keeping them would draw them twice.
-      annotations: [],
-      // This document was just wholly rebuilt (redact/face-blur) with brand new
-      // page keys — already confirmed by the caller's own "verified and applied"
-      // notice. Re-anchoring here means the next export review diffs against
-      // *this*, not against a baseline whose keys no longer exist anywhere,
-      // which would otherwise show every page as removed-and-re-added.
-      baseline: pages
+      annotations: options.keepStamps ? doc.annotations : []
+      // AUDIT-2026-10-10 — `baseline` is deliberately *not* moved. It used to
+      // be set to the new pages here, which told every later dirty check
+      // (undo/redo's `restoredDoc`) that the rewrite was what is on disk:
+      // redact, then rotate, then undo the rotate, and the document read as
+      // clean — closing the tab dropped an unsaved redaction without a
+      // prompt. A rewrite is an edit like any other: the document is dirty
+      // (`mutateDoc`) until a save re-anchors the baseline. The pages keep
+      // their keys (above), so the export review's alignment still pairs
+      // each page with its pre-rewrite self and shows the rewrite as the
+      // change it is.
     };
   });
   clearPageSelection();

@@ -37,18 +37,19 @@ export function useJob() {
       // unconditionally here would wipe out a job owned by a different instance
       // (e.g. the action bar's commit) merely because some unrelated panel happened
       // to unmount, such as when the user switches tools while an export is running.
-      if (controllerRef.current) {
-        controllerRef.current.abort();
-        // Null it out (not just abort) so `run`'s own `finally` — which fires
-        // later, once the aborted task actually unwinds — sees its guard
-        // `controllerRef.current === controller` fail and leaves `activeJob`
-        // alone. Left set, that stale ref would still match `controller`
-        // when the finally runs, and null out `activeJob` a second time —
-        // wiping out a *new* job a different `useJob()` instance had since
-        // started, because `activeJob` is one signal shared by all of them.
-        controllerRef.current = null;
-        activeJob.value = null;
-      }
+      //
+      // AUDIT-2026-10-10 M1 — abort, and nothing more. Cancellation is
+      // cooperative: the task keeps running until its next checkpoint, and
+      // several (face blur, font embedding, scan cleanup) then write to the
+      // document. Clearing `activeJob` here, as this used to, told every other
+      // panel — and undo, and the tab bar — that nothing was running, so a new
+      // job could start and edit the same document while the old one was still
+      // on its way to `replaceWithSource`. The slot is released by `run`'s own
+      // `finally`, when the task has actually settled: `controllerRef` still
+      // holds this controller, so that guard matches and only this job's slot
+      // is cleared. No other instance can have started a job in between — its
+      // `run` refuses while `activeJob` is set.
+      controllerRef.current?.abort();
     },
     []
   );
@@ -88,7 +89,7 @@ export function useJob() {
         onProgress: (fraction, label) => {
           // Only update while this job owns the slot, so a late report from an
           // aborted job cannot resurrect the progress bar.
-          if (controllerRef.current !== controller) return;
+          if (controllerRef.current !== controller || controller.signal.aborted) return;
           activeJob.value = {
             label: label || options.label,
             progress: fraction,

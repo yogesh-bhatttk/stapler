@@ -2,12 +2,13 @@ import { translate } from '../../core/i18n';
 /**
  * DS-05 — the drop zone.
  */
-import { useRef, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { forwardRef } from 'preact/compat';
 import { UploadCloud } from 'lucide-preact';
 import { platform } from '../../platform/current';
 import { PDF_AND_IMAGES, acceptToInputAccept, type OpenedFile } from '../../platform/index';
-import { SUPPORTED_FORMATS } from '../../core/import';
+import { supportedFormats } from '../../core/import';
+import { classifyDragItems, isOpenableFile } from './dropAccept';
 import { importFilesAsDocuments, pickAndImportFiles } from '../../core/open-document';
 import { ProgressBar } from './Feedback';
 import { JobStatusRow } from './JobStatusRow';
@@ -28,11 +29,19 @@ export const DropZone = forwardRef<HTMLLabelElement, DropZoneProps>(function Dro
   const inputRef = useRef<HTMLInputElement>(null);
   const { requestOptions, node } = useImageImportOptions();
 
+  // A file with no MIME type (HEIC on macOS) counts as acceptable while
+  // dragging; the drop itself checks names (UI7).
   const accepts = (transfer: DataTransfer | null) =>
-    Array.from(transfer?.items ?? []).some(
-      item =>
-        item.kind === 'file' && (item.type === 'application/pdf' || item.type.startsWith('image/'))
-    );
+    classifyDragItems(Array.from(transfer?.items ?? [])) !== 'reject';
+
+  // A drop of nothing openable shows the reject state briefly, then settles back.
+  const rejectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (rejectTimer.current !== null) clearTimeout(rejectTimer.current);
+    },
+    []
+  );
 
   const process = async (files: File[], handles?: OpenedFile[]) => {
     if (files.length === 0) return;
@@ -109,6 +118,17 @@ export const DropZone = forwardRef<HTMLLabelElement, DropZoneProps>(function Dro
             setState('idle');
             return;
           }
+          // An item with no MIME type was let through while dragging; if nothing
+          // dropped is a PDF or image even by extension, say so here.
+          if (!files.some(isOpenableFile)) {
+            setState('reject');
+            if (rejectTimer.current !== null) clearTimeout(rejectTimer.current);
+            rejectTimer.current = setTimeout(() => {
+              rejectTimer.current = null;
+              setState(current => (current === 'reject' ? 'idle' : current));
+            }, 4000);
+            return;
+          }
           void process(files);
         }}
       >
@@ -138,7 +158,7 @@ export const DropZone = forwardRef<HTMLLabelElement, DropZoneProps>(function Dro
             </span>
             <span className={styles.hint}>
               {state === 'reject'
-                ? translate('{formats} are supported.', { formats: SUPPORTED_FORMATS })
+                ? translate('{formats} are supported.', { formats: supportedFormats() })
                 : translate('or choose files — nothing is uploaded')}
             </span>
           </>

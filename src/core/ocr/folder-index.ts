@@ -514,7 +514,9 @@ export async function indexDirectory(
             logEvent(
               'warn',
               'folder-index',
-              `${fileId} page ${page.pageIndex + 1}: ${page.reason}`
+              // S5: the diagnostic log carries no file names (errors.ts) —
+              // the file's position in this run identifies it.
+              `file ${i + 1} of ${pdfFiles.length}, page ${page.pageIndex + 1}: ${page.reason}`
             );
           }
         } catch (err) {
@@ -524,7 +526,11 @@ export async function indexDirectory(
           // run; these pages stay awaiting OCR so a later run tries again.
           ocrActive = false;
           ocrUnavailableReason = fromUnknown(err).message;
-          logEvent('warn', 'folder-index', `${fileId}: OCR unavailable: ${ocrUnavailableReason}`);
+          logEvent(
+            'warn',
+            'folder-index',
+            `file ${i + 1} of ${pdfFiles.length}: OCR unavailable: ${ocrUnavailableReason}`
+          );
           pagesAwaitingOcr = textless.length;
           scannedPagesSkipped += textless.length;
         }
@@ -597,7 +603,7 @@ export async function indexDirectory(
     const shown = names.slice(0, 3).join(', ');
     const files =
       names.length > 3
-        ? translate('{names}, and {count} more', { names: shown, count: names.length - 3 })
+        ? tPlural('{names}, and {count} more', names.length - 3, { names: shown })
         : shown;
     notify('warning', tPlural('{count} files could not be indexed', skipped.length), {
       detail: translate('{files} — {reason} These files will not appear in search results.', {
@@ -606,7 +612,9 @@ export async function indexDirectory(
       })
     });
     for (const entry of skipped) {
-      logEvent('warn', 'folder-index', `${entry.fileId}: ${entry.reason}`);
+      // S5: by position in the run, never by name or path.
+      const n = pdfFiles.findIndex(f => f.fileId === entry.fileId) + 1;
+      logEvent('warn', 'folder-index', `file ${n} of ${pdfFiles.length}: ${entry.reason}`);
     }
   }
 

@@ -1,4 +1,4 @@
-import { House, Menu, Moon, Search, ShieldCheck, Sun } from 'lucide-preact';
+import { House, Menu, Monitor, Moon, Search, ShieldCheck, Sun } from 'lucide-preact';
 import { useId, useState } from 'preact/hooks';
 import { Badge } from '../components/Badge';
 import { Button } from '../components/Button';
@@ -10,22 +10,18 @@ import { FileTabs } from './FileTabs';
 import { ToolsSheet } from './ToolsSheet';
 import { isCommandPaletteOpen } from '../../core/ui';
 import { disclosedDownloads } from '../../core/disclosedDownloads';
-import { resolvedTheme, toggleTheme } from '../theme';
 import {
-  useTranslation,
-  currentLocale,
-  setLocale,
-  locales,
-  tPlural,
-  translate
-} from '../../core/i18n';
+  cycleTheme,
+  nextThemePreference,
+  resolvedTheme,
+  systemTheme,
+  themePreference
+} from '../theme';
+import { useTranslation, currentLocale, locales, tPlural, translate } from '../../core/i18n';
+import { setLocale } from '../../core/i18n/load';
+import { ariaKeyShortcuts, getEffectiveBinding, shortcutLabel } from '../../core/shortcuts';
+import { LOCALE_AUTONYMS } from '../localeNames';
 import styles from './TopBar.module.css';
-
-/** ⌘ on Apple platforms, Ctrl everywhere else — the hint must match the key. */
-const MOD_LABEL =
-  typeof navigator !== 'undefined' && /mac|iphone|ipad/i.test(navigator.userAgent)
-    ? '⌘K'
-    : 'Ctrl K';
 
 export function TopBar() {
   const [showTrust, setShowTrust] = useState(false);
@@ -33,6 +29,7 @@ export function TopBar() {
   const trustTooltip = useTooltipTrigger();
   const trustTooltipId = useId();
   const isDark = resolvedTheme.value === 'dark';
+  const nextTheme = nextThemePreference(themePreference.value, systemTheme());
   const t = useTranslation();
   // PLT-16 — the chip counts this page's disclosed, consented model downloads
   // (the only request Stapler can ever make) instead of always claiming zero.
@@ -83,17 +80,28 @@ export function TopBar() {
           // The visible hint is only the key chord, and it is hidden on touch
           // screens (GAP-3), so the name has to come from here.
           aria-label={translate('Command palette')}
-          aria-keyshortcuts={MOD_LABEL === '⌘K' ? 'Meta+K' : 'Control+K'}
+          // The binding as it is now, remapped or not, in this platform's
+          // modifier names — ⌘ on Apple, Ctrl elsewhere (UI19).
+          aria-keyshortcuts={ariaKeyShortcuts(getEffectiveBinding('palette'))}
         >
           <span className={styles.shortcut} aria-hidden="true">
-            {MOD_LABEL}
+            {shortcutLabel('palette')}
           </span>
         </Button>
+        {/* Cycles light / dark / system (UI25); named, and drawn, by what
+            the click will do. `resolvedTheme` is read so an OS change while
+            on "system" re-labels it. */}
         <IconButton
-          icon={isDark ? Sun : Moon}
-          onClick={toggleTheme}
+          icon={nextTheme === 'system' ? Monitor : nextTheme === 'light' ? Sun : Moon}
+          onClick={cycleTheme}
           size="compact"
-          aria-label={isDark ? t('Switch to light theme') : t('Switch to dark theme')}
+          aria-label={
+            nextTheme === 'system'
+              ? t('Use system theme')
+              : nextTheme === 'light'
+                ? t('Switch to light theme')
+                : t('Switch to dark theme')
+          }
         />
         <select
           value={currentLocale.value}
@@ -129,8 +137,11 @@ export function TopBar() {
               // whatever background the popup falls back to is what made every
               // unselected row invisible white-on-white in the first place.
               style={{ backgroundColor: 'var(--surface-1)', color: 'var(--ink)' }}
+              // The name is in its own language, so it is marked as such (UI28).
+              lang={loc}
+              dir={loc === 'ar' ? 'rtl' : 'ltr'}
             >
-              {loc.toUpperCase()}
+              {LOCALE_AUTONYMS[loc]}
             </option>
           ))}
         </select>

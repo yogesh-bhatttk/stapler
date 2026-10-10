@@ -1,5 +1,9 @@
 import { expect, test, type Request } from '@playwright/test';
+import { PDFDocument } from 'pdf-lib';
+import { statSync } from 'node:fs';
 import {
+  contractV1Pdf,
+  contractV2Pdf,
   ensureFixture,
   excelToPdfXlsx,
   pdfToExcelPdf,
@@ -9,7 +13,10 @@ import {
   textPdf,
   wordToPdfDocx
 } from './fixtures';
-import { gotoTool, importFile, openApp } from './helpers';
+import { commitAndRead, dismissToasts, gotoTool, importFile, openApp } from './helpers';
+import { drawnText } from './pdf-bytes';
+import { openAppWithFakeFs, queuePick, writeFakeFiles } from './fake-fs';
+import { QR_TEXT, qrPdf } from './audit-2026-10-10-helpers';
 import { LANDING_PAGES } from '../../src/landing/pages';
 
 /**
@@ -29,26 +36,61 @@ function isLocal(url: string, origin: string): boolean {
   return url.startsWith(origin);
 }
 
+/**
+ * Audit 2026-10-10 T9(c) — CSP violations, recorded two ways, as the extension
+ * fixtures do (`extension/extension-fixtures.ts`): the `securitypolicyviolation`
+ * event (installed before any app script, in every document the page loads)
+ * and Chromium's `Refused to …` console error. A request the meta CSP blocks
+ * never reaches the request log at all, so without this a blocked attempt
+ * would pass the request watch silently.
+ */
+function recordCspViolations() {
+  const w = window as unknown as { __cspViolations: string[] };
+  w.__cspViolations = [];
+  document.addEventListener('securitypolicyviolation', event => {
+    w.__cspViolations.push(`${event.violatedDirective} blocked ${event.blockedURI}`);
+  });
+}
+
+const cspScriptInstalled = new WeakSet<import('@playwright/test').Page>();
+
 async function withNetworkWatch(
   page: import('@playwright/test').Page,
   origin: string,
   body: () => Promise<void>
 ) {
   const offending: string[] = [];
+  const cspConsole: string[] = [];
   const record = (request: Request) => {
     const url = request.url();
     if (!isLocal(url, origin)) offending.push(`${request.method()} ${url}`);
   };
+  const consoleRecord = (message: import('@playwright/test').ConsoleMessage) => {
+    if (message.type() !== 'error') return;
+    const text = message.text();
+    if (/Content Security Policy|Refused to/i.test(text)) cspConsole.push(text);
+  };
+  if (!cspScriptInstalled.has(page)) {
+    cspScriptInstalled.add(page);
+    await page.addInitScript(recordCspViolations);
+  }
   page.on('request', record);
+  page.on('console', consoleRecord);
+  let events: string[];
   try {
     await body();
   } finally {
     page.off('request', record);
+    page.off('console', consoleRecord);
+    events = await page
+      .evaluate(() => (window as unknown as { __cspViolations?: string[] }).__cspViolations ?? [])
+      .catch(() => [] as string[]);
   }
   expect(
     offending,
     `Stapler must make no external request. Observed:\n${offending.join('\n')}`
   ).toEqual([]);
+  expect([...cspConsole, ...events], 'CSP violations').toEqual([]);
 }
 
 test.describe('zero network', () => {
@@ -127,7 +169,15 @@ test.describe('zero network', () => {
         'table-extract',
         'acc',
         'contact-sheet',
-        'shortcuts'
+        'shortcuts',
+        // Audit 2026-10-10 T9(a) — these seven were missing from the sweep.
+        'grayscale',
+        'repair',
+        'image-to-size',
+        'read-aloud',
+        'reflow',
+        'history',
+        'side-by-side'
       ]) {
         await page.goto(`/#/tool/${tool}`);
         await expect(page.locator('header')).toBeVisible();
@@ -541,7 +591,16 @@ test.describe('zero network', () => {
     });
   });
 
-  test('ships no reference to a known remote host in the bundle', async ({ page, baseURL }) => {
+  /**
+   * Audit 2026-10-10 T9(e) — this used to be called "ships no reference to a
+   * known remote host in the bundle", but it only ever read the `src`/`href`
+   * attributes of the entry page's own `<script>`/`<link>` tags. That is what
+   * the name now says; the bundle-content claim is the next test's.
+   */
+  test("the entry page's own script and stylesheet tags all point at its own origin", async ({
+    page,
+    baseURL
+  }) => {
     const origin = new URL(baseURL!).origin;
     await page.goto('/');
     const scripts = await page.evaluate(() =>
@@ -549,8 +608,106 @@ test.describe('zero network', () => {
         element => element.getAttribute('src') ?? element.getAttribute('href') ?? ''
       )
     );
+    expect(scripts.length).toBeGreaterThan(0);
     for (const reference of scripts) {
-      expect(isLocal(new URL(reference, origin).href, origin)).toBe(true);
+      expect(isLocal(new URL(reference, origin).href, origin), reference).toBe(true);
+    }
+  });
+
+  /**
+   * Audit 2026-10-10 T9(e) — what "ships no reference to a remote host" should
+   * have meant: every script, stylesheet, page and JSON file the running app
+   * actually fetches — the entry chunks, every lazily-loaded chunk a tool
+   * pulls in, and the worker scripts — is scanned with the same inventory
+   * `scripts/check-bundle-network.mjs` applies to `dist/` after a build:
+   * every remote URL in it must be on that script's documented allowlist, and
+   * no remote URL may reach a loading sink. This measures the files as served,
+   * not as built, so a server-side rewrite or a chunk the build scan missed
+   * would show here.
+   */
+  test('no script, stylesheet or page the app fetches names a remote host outside the bundle allowlist', async ({
+    page,
+    baseURL
+  }) => {
+    test.setTimeout(180_000);
+    const origin = new URL(baseURL!).origin;
+    const { scanText } = await import('../../scripts/check-bundle-network.mjs');
+    const bodies = new Map<string, Promise<string | null>>();
+    page.on('response', response => {
+      const url = response.url();
+      if (!url.startsWith(origin) || bodies.has(url)) return;
+      const path = new URL(url).pathname;
+      if (!/\.(?:m?js|css|html?|json|webmanifest)$/i.test(path) && path !== '/') return;
+      bodies.set(
+        url,
+        response.text().catch(() => null)
+      );
+    });
+
+    const fixture = await ensureFixture('text-10.pdf', () => textPdf(10));
+    await openApp(page);
+    await importFile(page, fixture);
+    // Each tool lazily loads its own chunks; the conversions load the big
+    // third-party bundles (docx, mammoth, xlsx, pptxgenjs) only when run, so
+    // their previews are run too.
+    for (const tool of ['compress', 'redact', 'ocr', 'compare', 'metadata', 'batch', 'md-to-pdf']) {
+      await gotoTool(page, tool);
+      await expect(page.locator('header')).toBeVisible();
+    }
+    await gotoTool(page, 'organize');
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 30_000 });
+
+    const scanned: string[] = [];
+    const failures: string[] = [];
+    for (const [url, body] of bodies) {
+      const text = await body;
+      if (text === null) continue;
+      const rel = new URL(url).pathname.replace(/^\//, '') || 'index.html';
+      scanned.push(rel);
+      failures.push(
+        ...scanText(text, rel.endsWith('/') || rel === '' ? 'index.html' : rel).failures
+      );
+    }
+    // Non-vacuous: the entry chunk, worker scripts and pdf.js were all scanned.
+    expect(scanned.some(rel => /\.m?js$/.test(rel))).toBe(true);
+    expect(scanned.some(rel => /render\.worker/.test(rel))).toBe(true);
+    expect(failures, failures.join('\n')).toEqual([]);
+  });
+
+  /**
+   * Audit 2026-10-10 T9(d) — the website's landing pages and the privacy page
+   * are entry points of their own (they are what a search result opens), each
+   * with its own chunks; the sweep above only ever loaded the app shell.
+   */
+  test('every landing page and the privacy page load with no external request and no CSP violation', async ({
+    browser,
+    baseURL
+  }) => {
+    test.setTimeout(240_000);
+    const origin = new URL(baseURL!).origin;
+    const paths = [...LANDING_PAGES.map(({ slug }) => `/${slug}.html`), '/privacy.html'];
+    expect(paths.length).toBeGreaterThan(10);
+    for (const path of paths) {
+      // A fresh context per page, as in the CSP-tag test below: nineteen app
+      // boots in one tab exhaust a low-memory runner.
+      const context = await browser.newContext();
+      try {
+        const page = await context.newPage();
+        await withNetworkWatch(page, origin, async () => {
+          const response = await page.goto(path);
+          expect(response?.status(), path).toBe(200);
+          await page.waitForLoadState('load');
+          await expect(page.locator('body')).not.toBeEmpty();
+          // Whatever the page mounts (the landing pages embed the drop zone)
+          // has had its frame to request anything it was going to.
+          await page.evaluate(
+            () =>
+              new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+          );
+        });
+      } finally {
+        await context.close();
+      }
     }
   });
 
@@ -586,5 +743,163 @@ test.describe('zero network', () => {
         await context.close();
       }
     }
+  });
+});
+
+/**
+ * Audit 2026-10-10 T9(b) — the sweep above opens each panel; the code that
+ * could reach the network runs when the operation does. These run the
+ * operation itself, end to end, under the request and CSP watch, and each
+ * asserts the operation's real output so a no-op click cannot pass by
+ * observing nothing.
+ */
+test.describe('zero network — running the operations', () => {
+  test('compress: a raster re-encode of a scan', async ({ page, baseURL }) => {
+    test.setTimeout(180_000);
+    const origin = new URL(baseURL!).origin;
+    const scan = 'tests/fixtures/scanned_skewed.pdf';
+    await withNetworkWatch(page, origin, async () => {
+      await openApp(page);
+      await importFile(page, scan);
+      await gotoTool(page, 'compress');
+      await page.getByRole('button', { name: /Analyse without changing/ }).click();
+      await expect(page.getByText(/Re-rendered as images/i)).toBeVisible({ timeout: 90_000 });
+      const bytes = await commitAndRead(page, 'Compress & export');
+      expect(bytes.byteLength).toBeLessThan(statSync(scan).size);
+    });
+  });
+
+  test('sign: a text stamp drawn into the page', async ({ page, baseURL }) => {
+    const origin = new URL(baseURL!).origin;
+    const file = await ensureFixture('text-6.pdf', () => textPdf(6));
+    await withNetworkWatch(page, origin, async () => {
+      await openApp(page);
+      await importFile(page, file);
+      await gotoTool(page, 'sign');
+      await page.getByRole('button', { name: 'Text', exact: true }).click();
+      await page.getByRole('group', { name: /Stamp placement area/ }).focus();
+      await page.keyboard.press('Enter');
+      await page.getByLabel('Stamp text').fill('Signed offline');
+      const bytes = await commitAndRead(page, 'Export signed PDF');
+      expect(await drawnText(bytes)).toContain('Signed offline');
+    });
+  });
+
+  test('redact: a verified redaction', async ({ page, baseURL }) => {
+    const origin = new URL(baseURL!).origin;
+    const file = await ensureFixture('text-6.pdf', () => textPdf(6));
+    await withNetworkWatch(page, origin, async () => {
+      await openApp(page);
+      await importFile(page, file);
+      await gotoTool(page, 'redact');
+      await page.getByLabel('Find and mark text').fill('Line 1 of body text on page 1.');
+      await page.getByRole('button', { name: 'Mark every occurrence' }).click();
+      await expect(page.getByText('Marks (1)')).toBeVisible();
+      await page.getByRole('button', { name: 'Verify & apply' }).click();
+      await expect(page.getByText('Redaction verified and applied')).toBeVisible({
+        timeout: 60_000
+      });
+      await dismissToasts(page);
+      await gotoTool(page, 'organize');
+      const bytes = await commitAndRead(page, 'View changes');
+      expect(await drawnText(bytes)).not.toContain('Line 1 of body text on page 1.');
+    });
+  });
+
+  test('barcode scan: the bundled zxing engine decodes a QR code', async ({ page, baseURL }) => {
+    test.setTimeout(120_000);
+    const origin = new URL(baseURL!).origin;
+    const file = await ensureFixture('audit-qr.pdf', qrPdf);
+    // zxing-wasm defaults to fetching its engine from a CDN (barcode.ts);
+    // the engine must come from this origin, and nothing else may be asked for.
+    const seen: string[] = [];
+    page.on('request', request => seen.push(request.url()));
+    await withNetworkWatch(page, origin, async () => {
+      await openApp(page);
+      await importFile(page, file);
+      await gotoTool(page, 'metadata');
+      await page.getByRole('button', { name: 'Scan for barcodes' }).click();
+      await expect(page.getByText(new RegExp(`Page 1 — .+: ${QR_TEXT}`))).toBeVisible({
+        timeout: 90_000
+      });
+    });
+    expect(seen.some(url => url.startsWith(origin) && /zxing_reader\.wasm/.test(url))).toBe(true);
+  });
+
+  test('markdown to PDF', async ({ page, baseURL }) => {
+    const origin = new URL(baseURL!).origin;
+    await withNetworkWatch(page, origin, async () => {
+      await openApp(page);
+      await gotoTool(page, 'md-to-pdf');
+      await page
+        .getByLabel('Markdown Content')
+        .fill(
+          '# Offline heading\n\nA paragraph with **bold** text and a [link](https://example.com).'
+        );
+      const bytes = await commitAndRead(page, 'Export PDF');
+      expect((await PDFDocument.load(bytes)).getPageCount()).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  test('cleanup: the B&W preset applied and exported', async ({ page, baseURL }) => {
+    test.setTimeout(120_000);
+    const origin = new URL(baseURL!).origin;
+    const file = await ensureFixture('text-6.pdf', () => textPdf(6));
+    await withNetworkWatch(page, origin, async () => {
+      await openApp(page);
+      await importFile(page, file);
+      await gotoTool(page, 'cleanup');
+      await page.getByRole('radio', { name: 'B&W document' }).check();
+      await page.getByRole('button', { name: 'Apply to this page' }).click();
+      await expect(page.getByText('Page cleaned.')).toBeVisible({ timeout: 60_000 });
+      const bytes = await commitAndRead(page, 'Apply & export');
+      expect((await PDFDocument.load(bytes)).getPageCount()).toBe(6);
+    });
+  });
+
+  test('compare: a text diff of two documents, exported', async ({ page, baseURL }) => {
+    test.setTimeout(120_000);
+    const origin = new URL(baseURL!).origin;
+    const v1 = await ensureFixture('contract-v1.pdf', contractV1Pdf);
+    const v2 = await ensureFixture('contract-v2.pdf', contractV2Pdf);
+    await withNetworkWatch(page, origin, async () => {
+      await openApp(page);
+      await importFile(page, v1);
+      await gotoTool(page, 'compare');
+      const chooser = page.waitForEvent('filechooser');
+      await page.getByRole('button', { name: 'Open file to compare...' }).click();
+      await (await chooser).setFiles(v2);
+      await expect(page.locator('canvas').first()).toBeAttached({ timeout: 30_000 });
+      await page.getByRole('radio', { name: 'Text Diff' }).check();
+      const bytes = await commitAndRead(page, 'Export Diff PDF');
+      expect((await PDFDocument.load(bytes)).getPageCount()).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  test('batch: the default recipe over a folder', async ({ page, baseURL }) => {
+    test.setTimeout(120_000);
+    const origin = new URL(baseURL!).origin;
+    const [two, three] = await Promise.all([
+      ensureFixture('text-2.pdf', () => textPdf(2)),
+      ensureFixture('text-3.pdf', () => textPdf(3))
+    ]);
+    await withNetworkWatch(page, origin, async () => {
+      await openAppWithFakeFs(page);
+      await writeFakeFiles(page, { 'in/two.pdf': two, 'in/three.pdf': three });
+      await gotoTool(page, 'batch');
+      await queuePick(page, 'in');
+      await page.getByRole('button', { name: 'Select Input Folder' }).click();
+      await queuePick(page, 'out');
+      await page.getByRole('button', { name: 'Select Output Folder' }).click();
+      await expect(page.getByRole('button', { name: 'Output: out/' })).toBeVisible();
+      await page
+        .getByLabel('Batch process options')
+        .getByRole('button', { name: 'Run Batch' })
+        .click();
+      await expect(page.getByText('Batch Processing Complete').first()).toBeVisible({
+        timeout: 90_000
+      });
+      await expect(page.getByText(/Successfully processed 2 files/)).toBeVisible();
+    });
   });
 });

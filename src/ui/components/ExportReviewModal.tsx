@@ -12,7 +12,8 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { forwardRef } from 'preact/compat';
-import { unzipSync } from 'fflate';
+import { listZip, type ZipMemberInfo } from '../../core/zip-archive';
+import { unzipMemberInWorker } from '../../core/zip';
 import { ChevronLeft, ChevronRight } from 'lucide-preact';
 import { exportReviewRequest } from '../../core/notify';
 import {
@@ -32,7 +33,7 @@ import { IconButton } from './IconButton';
 import { CompareSlider } from './CompareSlider';
 import { formatBytes } from './Feedback';
 import { Checkbox } from './Field';
-import { useTranslation } from '../../core/i18n';
+import { tPlural, useTranslation } from '../../core/i18n';
 import {
   fastWebViewExport,
   loadExportSettings,
@@ -170,10 +171,10 @@ function AlignmentSummary({
   const removedCount = alignment.removedBeforeIndices.length;
 
   const parts: string[] = [];
-  if (rotatedCount > 0) parts.push(t('{count} rotated', { count: rotatedCount }));
-  if (movedCount > 0) parts.push(t('{count} reordered', { count: movedCount }));
-  if (removedCount > 0) parts.push(t('{count} removed', { count: removedCount }));
-  if (addedCount > 0) parts.push(t('{count} added', { count: addedCount }));
+  if (rotatedCount > 0) parts.push(tPlural('{count} rotated', rotatedCount));
+  if (movedCount > 0) parts.push(tPlural('{count} reordered', movedCount));
+  if (removedCount > 0) parts.push(tPlural('{count} removed', removedCount));
+  if (addedCount > 0) parts.push(tPlural('{count} added', addedCount));
   if (parts.length === 0) return null;
 
   return (
@@ -306,8 +307,12 @@ function SinglePageReview({
           <IconButton
             icon={ChevronLeft}
             title={t('Previous page')}
-            disabled={!canPrev}
-            onClick={() => setPageIndex(i => Math.max(0, i - 1))}
+            // Focusable when unavailable, so stepping to the first page with
+            // this button focused keeps focus in the dialog (UI23).
+            aria-disabled={canPrev ? undefined : 'true'}
+            onClick={() => {
+              if (canPrev) setPageIndex(i => Math.max(0, i - 1));
+            }}
           />
           <span className={styles.pageLabel}>
             {pageCount
@@ -317,8 +322,10 @@ function SinglePageReview({
           <IconButton
             icon={ChevronRight}
             title={t('Next page')}
-            disabled={!canNext}
-            onClick={() => setPageIndex(i => i + 1)}
+            aria-disabled={canNext ? undefined : 'true'}
+            onClick={() => {
+              if (canNext) setPageIndex(i => i + 1);
+            }}
           />
           {align && align.beforeIndex === null && (
             <span className={styles.badge}>{t('New page')}</span>
@@ -428,16 +435,26 @@ function SinglePageReview({
   );
 }
 
-interface ZipEntry {
-  name: string;
-  bytes: Uint8Array;
+/**
+ * AUDIT-2026-10-10 M6 — the member list comes from the archive's central
+ * directory alone (names and sizes; nothing inflated), and only the member on
+ * screen is inflated, in the zip worker. This used to `unzipSync` the whole
+ * archive on the main thread in a `useState` initializer, every review.
+ */
+function readZipListing(bytes: Uint8Array): ZipMemberInfo[] | null {
+  try {
+    return listZip(bytes).filter(entry => !entry.name.endsWith('/'));
+  } catch {
+    return null;
+  }
 }
 
 function ZipReview({ session, resultBytes }: { session: PreviewSession; resultBytes: Uint8Array }) {
   const t = useTranslation();
-  const [entries] = useState<ZipEntry[]>(() =>
-    Object.entries(unzipSync(resultBytes)).map(([name, bytes]) => ({ name, bytes }))
-  );
+  const entries = useMemo(() => readZipListing(resultBytes) ?? [], [resultBytes]);
+  // One inflated copy per member, so a preview released on deselect is the
+  // same buffer the next selection renders (the preview cache keys on it).
+  const inflated = useRef(new Map<string, Promise<Uint8Array | null>>());
   const [selected, setSelected] = useState(0);
   const [preview, setPreview] = useState<
     | { kind: 'image'; url: string }
@@ -449,29 +466,43 @@ function ZipReview({ session, resultBytes }: { session: PreviewSession; resultBy
   useEffect(() => {
     const entry = entries[selected];
     if (!entry) return;
-    if (IMAGE_EXT.test(entry.name)) {
-      const url = URL.createObjectURL(new Blob([entry.bytes]));
-      setPreview({ kind: 'image', url });
-      return () => URL.revokeObjectURL(url);
+    const isImage = IMAGE_EXT.test(entry.name);
+    const isPdf = entry.name.toLowerCase().endsWith('.pdf');
+    if (!isImage && !isPdf) {
+      setPreview(null);
+      return undefined;
     }
-    if (entry.name.toLowerCase().endsWith('.pdf')) {
-      let cancelled = false;
-      renderPage(session, entry.bytes, 0)
-        .then(image => {
-          if (!cancelled) setPreview({ kind: 'pdf', image });
-        })
-        .catch(() => {
-          if (!cancelled) setPreview({ kind: 'error' });
-        });
-      return () => {
-        cancelled = true;
-        // Only the member on screen stays loaded in the render worker.
-        void releasePreviewDocument(session, entry.bytes);
-      };
+    let cancelled = false;
+    let url: string | null = null;
+    let loaded: Uint8Array | null = null;
+    let pending = inflated.current.get(entry.name);
+    if (!pending) {
+      pending = unzipMemberInWorker(resultBytes, entry.name);
+      inflated.current.set(entry.name, pending);
     }
-    setPreview(null);
-    return undefined;
-  }, [session, entries, selected]);
+    pending
+      .then(async bytes => {
+        if (cancelled) return;
+        if (!bytes) throw new Error('missing member');
+        loaded = bytes;
+        if (isImage) {
+          url = URL.createObjectURL(new Blob([bytes as BlobPart]));
+          setPreview({ kind: 'image', url });
+          return;
+        }
+        const image = await renderPage(session, bytes, 0);
+        if (!cancelled) setPreview({ kind: 'pdf', image });
+      })
+      .catch(() => {
+        if (!cancelled) setPreview({ kind: 'error' });
+      });
+    return () => {
+      cancelled = true;
+      if (url) URL.revokeObjectURL(url);
+      // Only the member on screen stays loaded in the render worker.
+      if (isPdf && loaded) void releasePreviewDocument(session, loaded);
+    };
+  }, [session, entries, selected, resultBytes]);
 
   return (
     <div className={styles.zipLayout}>
@@ -487,7 +518,7 @@ function ZipReview({ session, resultBytes }: { session: PreviewSession; resultBy
               <span className={styles.fileRowName} title={entry.name}>
                 {entry.name}
               </span>
-              <span className={styles.fileRowSize}>{formatBytes(entry.bytes.byteLength)}</span>
+              <span className={styles.fileRowSize}>{formatBytes(entry.size)}</span>
             </button>
           </li>
         ))}

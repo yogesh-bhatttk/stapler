@@ -53,10 +53,11 @@ describe('ocr/model', () => {
   });
 
   it('discloses a size for every language it offers', async () => {
-    const { OCR_LANGUAGES } = await import('../../src/core/ocr/model');
+    const { OCR_LANGUAGES, modelDownloadBytes } = await import('../../src/core/ocr/model');
     expect(OCR_LANGUAGES.length).toBeGreaterThan(0);
     for (const language of OCR_LANGUAGES) {
-      expect(language.approxSizeMb).toBeGreaterThan(0);
+      // Audit 2026-10-10 CV11: the size disclosed is the pinned byte count.
+      expect(modelDownloadBytes(language.code)).toBeGreaterThan(0);
       expect(language.label.length).toBeGreaterThan(0);
     }
   });
@@ -578,8 +579,9 @@ describe('ocr/runOcr — the confirmation gate', () => {
     const { modelConsentCopy } = await import('../../src/core/ocr/runOcr');
     const { title, body } = modelConsentCopy(['eng', 'hin']);
     expect(title).toContain('English + Hindi');
-    // 12 MB (eng) + 2 MB (hin), from the OCR_LANGUAGES catalogue.
-    expect(body).toMatch(/14 MB/);
+    // Audit 2026-10-10 CV11: 2,952,873 B (eng) + 1,389,692 B (hin), the pinned
+    // MODEL_BYTES — the old catalogue claimed 12 + 2 MB.
+    expect(body).toMatch(/4\.34 MB/);
   });
 });
 
@@ -700,12 +702,19 @@ describe('ocr/runOcr — a failing page does not lose the rest of the run (§2.3
       )
     );
 
+    // Audit 2026-10-10 CV9: the process worker is now asked (read-only) which
+    // pages already carry text; what must not happen is the text-layer write.
+    const addOcrTextLayer = vi.fn();
+    processLease.mockImplementation(async (fn: (api: unknown) => unknown) =>
+      fn({ ocrPagesWithText: async () => [], addOcrTextLayer })
+    );
+
     const { runOcr } = await import('../../src/core/ocr/runOcr');
     await expect(runOcr(new Uint8Array([1]), 3)).rejects.toThrow(/OCR stopped/);
     // Stopped at the first page — pages 2 and 3 were never attempted, so
     // nothing could have fallen into tesseract's CDN fallback.
     expect(ocrLease).toHaveBeenCalledTimes(1);
-    expect(processLease).not.toHaveBeenCalled();
+    expect(addOcrTextLayer).not.toHaveBeenCalled();
     // The uploaded copy is gone from OPFS and from tesseract's cache, so the
     // next run asks again instead of re-seeding it.
     expect(await hasModelBytes('eng')).toBe(false);

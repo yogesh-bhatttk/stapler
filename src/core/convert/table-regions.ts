@@ -17,7 +17,7 @@
  */
 
 import { extractTableFromPage, type TableTextItem } from '../ocr/table-extract';
-import type { LaidOutLine, TextRun } from '../text-layout';
+import { runGap, runTypeSize, type LaidOutLine, type TextRun } from '../text-layout';
 
 /**
  * A cell boundary is a horizontal gap this many times the body type size.
@@ -64,7 +64,8 @@ function splitLineCells(line: LaidOutLine, bodySize: number): TextRun[][] {
     // gap. It carries the gap's own width, so counting it as content would make
     // the gap look like a filled cell.
     if (run.str.trim().length === 0) continue;
-    const gap = previous ? run.transform[4] - (previous.transform[4] + previous.width) : 0;
+    // Direction-agnostic: a right-to-left line arrives right to left (CV5).
+    const gap = previous ? runGap(previous, run) : 0;
     if (!previous || gap > minGap) groups.push([run]);
     else groups[groups.length - 1].push(run);
     previous = run;
@@ -75,7 +76,7 @@ function splitLineCells(line: LaidOutLine, bodySize: number): TextRun[][] {
 
 /** pdf.js run → the y-down shape OCR-03's clustering expects. */
 function toTableItem(run: TextRun, pageHeight: number): TableTextItem {
-  const height = Math.abs(run.transform[3]) || run.height || 10;
+  const height = runTypeSize(run) || run.height || 10;
   return {
     text: run.str,
     x: run.transform[4],

@@ -11,6 +11,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { ensureFixture, imageOnLastPagePdf, mixedTextImagePdf } from './fixtures';
 import { gotoTool, openApp } from './helpers';
+import { waitForJobsIdle } from './audit-2026-10-10-helpers';
 
 const PREVIEW = '[data-preview-status]';
 
@@ -295,7 +296,10 @@ test.describe('DOC-07 compress to a target size', () => {
     // The floor answers it outright — degrading further is not on offer.
     expect(attempts).toBe(1);
 
-    await page.waitForTimeout(500);
+    // Audit 2026-10-10 T10: was a fixed 500 ms sleep. The export runs as the
+    // app's one job; once no job has run for a run of frames after "Keep the
+    // original", any save it was going to make has been made.
+    await waitForJobsIdle(page);
     expect(downloaded).toBe(false);
   });
 });

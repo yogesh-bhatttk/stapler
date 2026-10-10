@@ -279,18 +279,48 @@ function boxFromRun(
   from: number,
   to: number
 ): PatternBox {
+  return { ...textRunSliceBox(run, viewport, from, to), text: run.str.slice(from, to) };
+}
+
+/**
+ * The normalised viewport box (0..1, origin top-left) of characters
+ * `from`..`to` of one pdf.js text run, under the same even-spacing model.
+ *
+ * The run is laid out along its own text direction, not along +x: `transform`
+ * is the text rendering matrix, whose first column is the baseline direction
+ * and whose second is "up" for the glyphs. All four corners of the slice
+ * (baseline to baseline + `height`) are mapped through it and the viewport, and
+ * their bounds taken. Laying every run out from `transform[4..5]` along +x —
+ * which this used to do — put a run drawn at 90° (`Tm`/`cm` rotation) in a
+ * horizontal strip it never occupied, so a mark drawn from it missed the text
+ * and the verifier checked the wrong place (AUDIT-2026-10-10 P8). For an
+ * unrotated run the two are identical.
+ *
+ * Shared by `findText`, `checkRegionText` and the signature/pattern
+ * suggestions, so a mark and its verification use the same arithmetic.
+ */
+export function textRunSliceBox(
+  run: { str: string; width: number; height: number; transform: number[] },
+  viewport: PatternViewport,
+  from: number,
+  to: number
+): { x: number; y: number; width: number; height: number } {
+  const [a, b, c, d, e, f] = run.transform;
   const perChar = run.width / Math.max(1, run.str.length);
-  const height = run.height || run.transform[3] || 12;
-  const x0 = run.transform[4] + from * perChar;
-  const x1 = run.transform[4] + to * perChar;
-  const y0 = run.transform[5];
-  const y1 = run.transform[5] + height;
-  const corners = [
-    viewport.convertToViewportPoint(x0, y0),
-    viewport.convertToViewportPoint(x1, y0),
-    viewport.convertToViewportPoint(x1, y1),
-    viewport.convertToViewportPoint(x0, y1)
-  ];
+  const height = run.height || Math.hypot(c, d) || 12;
+  // Unit baseline direction, and unit "up" — perpendicular to the baseline
+  // when the matrix gives no usable second column.
+  const along = Math.hypot(a, b);
+  const ux = along > 1e-9 ? a / along : 1;
+  const uy = along > 1e-9 ? b / along : 0;
+  const up = Math.hypot(c, d);
+  const vx = up > 1e-9 ? c / up : -uy;
+  const vy = up > 1e-9 ? d / up : ux;
+  const s0 = from * perChar;
+  const s1 = to * perChar;
+  const at = (s: number, t: number) =>
+    viewport.convertToViewportPoint(e + s * ux + t * vx, f + s * uy + t * vy);
+  const corners = [at(s0, 0), at(s1, 0), at(s1, height), at(s0, height)];
   const xs = corners.map(([x]) => x);
   const ys = corners.map(([, y]) => y);
   const left = Math.min(...xs) / viewport.width;
@@ -301,8 +331,7 @@ function boxFromRun(
     x: left,
     y: top,
     width: Math.max(0, right - left),
-    height: Math.max(0, bottom - top),
-    text: run.str.slice(from, to)
+    height: Math.max(0, bottom - top)
   };
 }
 

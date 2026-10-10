@@ -13,7 +13,12 @@
  *      fixed timestamps so the same tree always produces the same bytes;
  *   4. writes a `<zip>.sha256` next to each zip (audit 2026-10-01 DIST-07 —
  *      `sha256sum --check <zip>.sha256` verifies one download on its own) and
- *      `dist/release/SHA256SUMS` covering all of them.
+ *      `dist/release/SHA256SUMS` covering all of them;
+ *   5. writes `dist/release/BUILD_INFO.txt` — the Node and pnpm versions,
+ *      platform and commit that produced the zips (audit 2026-10-10).
+ *
+ * It refuses to zip a build containing the e2e test hook, and holds both
+ * extension manifests to `manifest-invariants.mjs`.
  *
  * Node built-ins plus `fflate` (already a dependency) only.
  *
@@ -32,6 +37,7 @@ import {
 } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { zipSync } from 'fflate';
+import { manifestFindings } from './manifest-invariants.mjs';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const DIST = join(ROOT, 'dist');
@@ -79,10 +85,11 @@ function checkManifest(dir, label) {
   if (manifest.version !== version) {
     fail(`${label}: manifest version ${manifest.version} ≠ package.json ${version}`);
   }
-  for (const key of ['permissions', 'optional_permissions', 'host_permissions']) {
-    if ((manifest[key] ?? []).length > 0) fail(`${label}: manifest.${key} is not empty`);
-  }
-  if (manifest.content_scripts) fail(`${label}: manifest declares content_scripts`);
+  // Audit 2026-10-10: the shared check, which also rejects
+  // optional_host_permissions, web_accessible_resources, externally_connectable
+  // and a missing or loosened CSP.
+  const problems = manifestFindings(manifest, `${label}/manifest.json`);
+  if (problems.length) fail(problems.join('\n  '));
   if (!existsSync(join(dir, 'THIRD_PARTY_LICENSES.txt'))) {
     fail(`${label}: THIRD_PARTY_LICENSES.txt is missing`);
   }
@@ -114,8 +121,29 @@ for (const dir of ['ext', 'firefox', 'web']) {
   if (!existsSync(join(DIST, dir))) fail(`dist/${dir} does not exist (drop --skip-build?)`);
 }
 
+// The e2e build's service-worker opt-in key (src/ui/pwa.ts) is compiled out
+// of a build without VITE_E2E_TEST_HOOKS. Checked here rather than only in
+// release.yml (audit 2026-10-10), so `--skip-build` cannot zip an instrumented
+// dist/ left behind by an e2e run.
+const E2E_HOOK = Buffer.from('stapler:e2e-service-worker');
+for (const dir of ['ext', 'firefox', 'web']) {
+  for (const file of listFiles(join(DIST, dir))) {
+    if (file.endsWith('.map')) continue;
+    if (readFileSync(join(DIST, dir, file)).includes(E2E_HOOK)) {
+      fail(
+        `dist/${dir}/${file} contains the e2e test hook (${E2E_HOOK}) — this is an ` +
+          'instrumented build; rebuild without --skip-build'
+      );
+    }
+  }
+}
+
 console.log('\n▶ validate builds');
-execFileSync(process.execPath, [join(ROOT, 'scripts/validate-builds.mjs')], { stdio: 'inherit' });
+try {
+  execFileSync(process.execPath, [join(ROOT, 'scripts/validate-builds.mjs')], { stdio: 'inherit' });
+} catch {
+  fail('validate-builds.mjs failed (see the ❌ lines above)');
+}
 checkManifest(join(DIST, 'ext'), 'dist/ext');
 checkManifest(join(DIST, 'firefox'), 'dist/firefox');
 if (existsSync(join(DIST, 'web', 'manifest.json'))) {
@@ -150,10 +178,36 @@ const zips = [
 const sumLine = file =>
   `${createHash('sha256').update(readFileSync(file)).digest('hex')}  ${relative(RELEASE, file)}`;
 
+/** Best effort: the tool's own answer, or `unknown` — never a reason to fail. */
+function toolVersion(command, args) {
+  try {
+    return execFileSync(command, args, {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+  } catch {
+    return 'unknown';
+  }
+}
+
+// Audit 2026-10-10: the environment that produced these zips, so a reviewer
+// rebuilding from source (docs/AMO_SOURCE_BUILD.md) can use the same Node and
+// pnpm. Written beside the zips, not into them: the zips' contents stay
+// exactly what the build emitted.
+const pnpmFromAgent = /\bpnpm\/(\S+)/.exec(process.env.npm_config_user_agent ?? '')?.[1];
+const buildInfo = [
+  `Stapler ${version}`,
+  `node ${process.version}`,
+  `pnpm ${pnpmFromAgent ?? toolVersion('pnpm', ['--version'])}`,
+  `platform ${process.platform}-${process.arch}`,
+  `commit ${process.env.GITHUB_SHA ?? toolVersion('git', ['rev-parse', 'HEAD'])}`
+].join('\n');
+writeFileSync(join(RELEASE, 'BUILD_INFO.txt'), `${buildInfo}\n`);
+
 const lines = zips.map(sumLine);
 zips.forEach((file, i) => writeFileSync(`${file}.sha256`, `${lines[i]}\n`));
 const sums = lines.join('\n');
 writeFileSync(join(RELEASE, 'SHA256SUMS'), `${sums}\n`);
 console.log(
-  `\n▶ dist/release/SHA256SUMS (+ one .sha256 per zip)\n${sums}\n\n✓ packaged Stapler ${version}`
+  `\n▶ dist/release/SHA256SUMS (+ one .sha256 per zip)\n${sums}\n\n▶ dist/release/BUILD_INFO.txt\n${buildInfo}\n\n✓ packaged Stapler ${version}`
 );

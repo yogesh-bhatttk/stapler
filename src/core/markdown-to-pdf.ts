@@ -281,6 +281,8 @@ export function droppedLinksNote(count: number): string | null {
 
 const MARGIN = 50;
 const PAGE_WIDTH = 595.28; // A4
+/** Columns between tab stops in a code block (CV8). */
+const CODE_TAB_WIDTH = 4;
 const PAGE_HEIGHT = 841.89;
 
 interface DrawState {
@@ -435,14 +437,52 @@ function runsToWords(runs: InlineRun[], tally: SubstitutionTally): Word[] {
   return words;
 }
 
-/** Greedy word-wrap over `Word`s (link-aware), same line-breaking rule as before. */
+/**
+ * Splits a word too long for its own line, so it wraps instead of overflowing.
+ * Shared with `convert/pdf-block-layout.ts` (CV8: a long URL here ran off the page).
+ */
+export function splitOversizedWord(
+  text: string,
+  font: PDFFont,
+  size: number,
+  maxWidth: number
+): string[] {
+  const parts: string[] = [];
+  let current = '';
+  for (const char of text) {
+    const candidate = current + char;
+    if (current.length > 0 && font.widthOfTextAtSize(candidate, size) > maxWidth) {
+      parts.push(current);
+      current = char;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current.length > 0) parts.push(current);
+  return parts;
+}
+
+/**
+ * Greedy word-wrap over `Word`s (link-aware), same line-breaking rule as
+ * before — except that a word wider than the whole line (a long URL) is split
+ * across lines instead of being drawn past the margin (CV8).
+ */
 function wrapWords(words: Word[], font: PDFFont, size: number, maxWidth: number): Word[][] {
   const lines: Word[][] = [];
   let currentLine: Word[] = [];
   let currentWidth = 0;
   const spaceWidth = font.widthOfTextAtSize(' ', size);
 
-  for (const word of words) {
+  for (const whole of words) {
+    let word = whole;
+    if (font.widthOfTextAtSize(word.text, size) > maxWidth) {
+      const pieces = splitOversizedWord(word.text, font, size, maxWidth);
+      if (currentLine.length > 0) lines.push(currentLine);
+      for (const piece of pieces.slice(0, -1)) lines.push([{ ...word, text: piece }]);
+      currentLine = [];
+      currentWidth = 0;
+      word = { ...word, text: pieces[pieces.length - 1] };
+    }
     const wordWidth = font.widthOfTextAtSize(word.text, size);
     const addedWidth = currentLine.length > 0 ? spaceWidth + wordWidth : wordWidth;
     if (currentWidth + addedWidth > maxWidth && currentLine.length > 0) {
@@ -636,6 +676,45 @@ async function renderMarkdown(
     drawInlineWrapped([{ text }], font, size, indent);
   };
 
+  /**
+   * CV8 — a code block, verbatim: every space of indentation kept (tabs
+   * expanded to 4-column stops), never re-flowed as prose. A line wider than
+   * the column breaks by characters, continuing at the block's left edge.
+   * Courier is monospaced, so a column is one glyph advance.
+   */
+  const drawCodeBlock = (code: string) => {
+    const size = 10;
+    const indent = 15;
+    const font = state.fontMono;
+    const charWidth = font.widthOfTextAtSize(' ', size);
+    const columns = Math.max(1, Math.floor((PAGE_WIDTH - MARGIN * 2 - indent) / charWidth));
+    for (const raw of code.replace(/\r/g, '').split('\n')) {
+      let line = '';
+      for (const char of raw) {
+        line += char === '\t' ? ' '.repeat(CODE_TAB_WIDTH - (line.length % CODE_TAB_WIDTH)) : char;
+      }
+      line = sanitizeWinAnsiText(line, tally);
+      if (line.trim().length === 0) {
+        advanceY(size * 1.5);
+        continue;
+      }
+      for (let start = 0; start < line.length; start += columns) {
+        const chunk = line.slice(start, start + columns);
+        // Leading spaces become an x offset rather than drawn blanks, so the
+        // indentation is where a text extractor (and a reader) sees it.
+        const lead = chunk.length - chunk.trimStart().length;
+        advanceY(size * 1.5);
+        if (lead === chunk.length) continue;
+        page.drawText(chunk.slice(lead), {
+          x: state.x + indent + lead * charWidth,
+          y: state.y,
+          size,
+          font
+        });
+      }
+    }
+  };
+
   /** Word-wraps a table cell into as many lines as it needs, instead of truncating it. */
   const wrapCellLines = (text: string, font: PDFFont, size: number, maxWidth: number): string[] => {
     const clean = sanitizeWinAnsiText(text, tally);
@@ -690,10 +769,7 @@ async function renderMarkdown(
       advanceY(8);
     } else if (token.type === 'code') {
       advanceY(5);
-      const lines = (token.text ?? '').split('\n');
-      for (const line of lines) {
-        drawTextWrapped(line, state.fontMono, 10, 15);
-      }
+      drawCodeBlock(token.text ?? '');
       advanceY(10);
     } else if (token.type === 'table') {
       // Simplistic table rendering: each cell wraps to fit its column rather
@@ -794,9 +870,19 @@ async function renderMarkdown(
   return { bytes, hadUnsupportedCharacters: tally.substituted, notes };
 }
 
-/** The original flat-string word-wrap, kept for table cells and code lines. */
+/**
+ * The original flat-string word-wrap, kept for table cells. A word wider than
+ * the cell (a long URL, an unbroken identifier) is split across lines rather
+ * than drawn over the next column (CV8).
+ */
 function wordWrapPlain(text: string, font: PDFFont, size: number, maxWidth: number): string[] {
-  const words = text.split(' ');
+  const words = text
+    .split(' ')
+    .flatMap(word =>
+      font.widthOfTextAtSize(word, size) > maxWidth
+        ? splitOversizedWord(word, font, size, maxWidth)
+        : [word]
+    );
   const lines: string[] = [];
   let currentLine = '';
 

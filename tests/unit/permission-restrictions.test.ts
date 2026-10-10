@@ -63,6 +63,7 @@ vi.mock('../../src/platform/current', () => ({
  */
 vi.mock('../../src/core/workers', async () => {
   const { processWorkerImpl } = await import('../../src/core/workers/process.worker');
+  const { zipWorkerImpl } = await import('../../src/core/workers/zip.worker');
   // `any` here is deliberate: the pool hands callers a `Comlink.Remote<T>`,
   // which is exactly the wrapper being stubbed out, and re-deriving that type
   // would only describe the stub in terms of the thing it replaces.
@@ -83,7 +84,9 @@ vi.mock('../../src/core/workers', async () => {
     renderWorker: client(unavailable),
     cvWorker: client(unavailable),
     ocrWorker: client(unavailable),
-    convertWorker: client(unavailable)
+    convertWorker: client(unavailable),
+    // AUDIT-2026-10-10 M6 — split's re-zip runs in the zip worker.
+    zipWorker: client(zipWorkerImpl)
   };
 });
 

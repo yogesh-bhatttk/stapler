@@ -9,7 +9,48 @@ export interface WatermarkOverlayProps {
   height: number;
 }
 
-/** Object URL for the current watermark image, revoked whenever it changes. */
+/**
+ * One object URL per watermark image, shared by every tile that shows it
+ * (AUDIT-2026-10-10 UI15). Each overlay used to copy the bytes into its own Blob
+ * and URL, so a grid of 40 thumbnails held 40 copies of the image. Entries are
+ * ref-counted and the URL is revoked when the last overlay using it lets go —
+ * which is when the image is changed or cleared.
+ */
+const sharedUrls = new Map<Uint8Array, Map<string, { url: string; users: number }>>();
+
+function mimeFor(format: string | undefined): string {
+  return format === 'jpeg' ? 'image/jpeg' : 'image/png';
+}
+
+export function acquireWatermarkUrl(bytes: Uint8Array, format: string | undefined): string {
+  const mime = mimeFor(format);
+  let byMime = sharedUrls.get(bytes);
+  if (!byMime) {
+    byMime = new Map();
+    sharedUrls.set(bytes, byMime);
+  }
+  let entry = byMime.get(mime);
+  if (!entry) {
+    entry = { url: URL.createObjectURL(new Blob([bytes.slice()], { type: mime })), users: 0 };
+    byMime.set(mime, entry);
+  }
+  entry.users += 1;
+  return entry.url;
+}
+
+export function releaseWatermarkUrl(bytes: Uint8Array, format: string | undefined): void {
+  const mime = mimeFor(format);
+  const byMime = sharedUrls.get(bytes);
+  const entry = byMime?.get(mime);
+  if (!byMime || !entry) return;
+  entry.users -= 1;
+  if (entry.users > 0) return;
+  URL.revokeObjectURL(entry.url);
+  byMime.delete(mime);
+  if (byMime.size === 0) sharedUrls.delete(bytes);
+}
+
+/** The shared object URL for the current watermark image. */
 function useWatermarkImageUrl(bytes: Uint8Array | undefined, format: string | undefined) {
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
@@ -17,11 +58,8 @@ function useWatermarkImageUrl(bytes: Uint8Array | undefined, format: string | un
       setUrl(null);
       return;
     }
-    const objectUrl = URL.createObjectURL(
-      new Blob([bytes.slice()], { type: format === 'jpeg' ? 'image/jpeg' : 'image/png' })
-    );
-    setUrl(objectUrl);
-    return () => URL.revokeObjectURL(objectUrl);
+    setUrl(acquireWatermarkUrl(bytes, format));
+    return () => releaseWatermarkUrl(bytes, format);
   }, [bytes, format]);
   return url;
 }

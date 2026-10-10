@@ -11,6 +11,7 @@ import {
   openApp
 } from './helpers';
 import { HeapProbe, emptyPeak, mb, type HeapPeak } from './worker-heap';
+import { LARGE_PDF_PAGES, ensureLargePdf } from './audit-2026-10-10-helpers';
 
 /**
  * NFR-02 — the wall-clock budgets from PLAN §5.1.
@@ -618,6 +619,244 @@ test.describe('performance budgets (PLAN §5.1)', () => {
         `${latencies.map(Math.round).join(', ')} ms`
     });
     expectWithinBudget('Cancel to job settled', Math.max(...latencies), 200);
+  });
+  /**
+   * Audit 2026-10-10 T12 — NFR-03 on a ~100 MB document, every P0 operation.
+   *
+   * The test above measures *opening* heavy documents. This runs merge,
+   * rotate/delete + export, split and compress on a generated ~100 MB file
+   * (`ensureLargePdf`: twenty distinct uncompressed 5 MB images, generated
+   * into tests/fixtures/.generated/, never committed), sampling every realm's
+   * heap throughout, and holds the whole run to the same ceilings.
+   *
+   * What this measures and what it cannot: `HeapProbe` reads each realm's V8
+   * heap plus ArrayBuffer backing stores and Blink's heap over CDP. Canvas and
+   * ImageBitmap *pixel* memory lives in Skia/GPU memory, which none of the
+   * page-visible or CDP heap APIs report; `performance.measureUserAgentSpecificMemory`
+   * would, but it needs cross-origin isolation (COOP/COEP), which neither
+   * build sets (see worker-heap.ts). So a leak of decoded pixels shows up here
+   * only through the objects that own them — which is what the heap-snapshot
+   * test below counts.
+   */
+  test('NFR-03: every P0 operation on a ~100 MB document stays within memory limits', async ({
+    page
+  }) => {
+    test.setTimeout(900_000);
+    const [large, small] = await Promise.all([
+      ensureLargePdf(),
+      ensureFixture('text-4.pdf', () => textPdf(4))
+    ]);
+    const largeBytes = statSync(large).size;
+    expect(largeBytes).toBeGreaterThan(95 * 1024 * 1024);
+
+    const probe = await HeapProbe.attach(page);
+    const peak = emptyPeak();
+    const step = async <T>(label: string, operation: () => Promise<T>): Promise<T> => {
+      const { result } = await probe.sampleWhile(operation, peak);
+      test.info().annotations.push({
+        type: 'memory',
+        description: `${label}: peak so far — all realms incl. buffers ${mb(peak.total)}`
+      });
+      return result;
+    };
+
+    await openApp(page);
+    await step('open', async () => {
+      await importFile(page, large);
+      await gotoTool(page, 'organize');
+      await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({
+        timeout: 120_000
+      });
+    });
+
+    // Merge: a second document appended, exported as one.
+    await step('merge', async () => {
+      await gotoTool(page, 'merge');
+      const chooser = page.waitForEvent('filechooser');
+      await page.getByRole('button', { name: 'Add PDFs or images' }).click();
+      await (await chooser).setFiles(small);
+      const grid = page.getByRole('listbox', { name: /Pages of/ });
+      await expect(
+        grid.getByRole('option', { name: new RegExp(`^Page 1 of ${LARGE_PDF_PAGES + 4}\\b`) })
+      ).toHaveCount(1, {
+        timeout: 120_000
+      });
+      const bytes = await commitAndRead(page, 'View changes');
+      expect((await PDFDocument.load(bytes)).getPageCount()).toBe(LARGE_PDF_PAGES + 4);
+    });
+
+    // Rotate and delete, then export.
+    await step('rotate/delete + export', async () => {
+      await gotoTool(page, 'organize');
+      const grid = page.getByRole('listbox', { name: /Pages of/ });
+      await grid.getByRole('option', { name: /^Page 1 of/ }).focus();
+      await page.keyboard.press('r');
+      await page.keyboard.press('ArrowRight');
+      await page.keyboard.press('Delete');
+      await expect(
+        grid.getByRole('option', { name: new RegExp(`^Page 1 of ${LARGE_PDF_PAGES + 3}\\b`) })
+      ).toHaveCount(1);
+      const bytes = await commitAndRead(page, 'View changes');
+      const out = await PDFDocument.load(bytes);
+      expect(out.getPageCount()).toBe(LARGE_PDF_PAGES + 3);
+      expect(out.getPage(0).getRotation().angle).toBe(90);
+    });
+
+    // Split into parts of six.
+    await step('split', async () => {
+      await gotoTool(page, 'split');
+      await page.getByRole('radio', { name: 'Split every N pages' }).check();
+      await page.getByLabel('Pages per file').fill('6');
+      const zip = unzipSync(await commitAndRead(page, 'Split / extract'));
+      const counts = await Promise.all(
+        Object.values(zip).map(async part => (await PDFDocument.load(part)).getPageCount())
+      );
+      expect(counts.reduce((a, b) => a + b, 0)).toBe(LARGE_PDF_PAGES + 3);
+    });
+
+    // Compress: every large image is over-sampled at the default 150 DPI.
+    await step('compress', async () => {
+      await gotoTool(page, 'compress');
+      await page.getByRole('button', { name: /Analyse without changing/ }).click();
+      // A one-line page may route either way (CMP-01); either is real work.
+      await expect(
+        page.getByText(/Images re-encoded, text kept|Re-rendered as images/i).first()
+      ).toBeVisible({ timeout: 300_000 });
+      const bytes = await commitAndRead(page, 'Compress & export');
+      expect(bytes.byteLength).toBeLessThan(largeBytes);
+    });
+    await probe.detach();
+
+    expectMemoryWithinCeilings('100 MB document, merge/rotate/delete/split/compress/export', peak);
+  });
+
+  /**
+   * Audit 2026-10-10 T12 — after three large files are opened and closed, the
+   * main realm retains no decoded pages: a V8 heap snapshot (CDP
+   * `HeapProfiler.takeHeapSnapshot`, after a forced GC) is counted for
+   * `ImageBitmap` and `OffscreenCanvas` objects, detached `<canvas>` elements,
+   * and ArrayBuffer backing-store bytes.
+   *
+   * Self-checking: before the snapshot the page parks one known probe of each
+   * (an 8 MB ArrayBuffer, a 1×1 ImageBitmap, a 1×1 OffscreenCanvas) on
+   * `window`, and the counts must include them — so a snapshot format this
+   * parser does not understand fails loudly instead of counting zero.
+   *
+   * Limitations, stated rather than hidden: this snapshots the main realm
+   * only — worker heaps are covered by the probe's sampled peaks, not by a
+   * snapshot — and a bitmap's pixels are Skia/GPU memory a heap snapshot does
+   * not size; what it does see is every JS object that keeps them alive. The
+   * thresholds are first estimates from the code (closing a document prunes
+   * its render handle and invalidates its thumbnails, render-cache.ts), not
+   * measurements: tune them on the first real run.
+   */
+  test('NFR-03: after three large files, the main heap retains no bitmaps, canvases or file buffers', async ({
+    page
+  }) => {
+    test.setTimeout(600_000);
+    const [large, heavy, long] = await Promise.all([
+      ensureLargePdf(),
+      ensureFixture('heavy.pdf', heavyPdf),
+      ensureFixture('text-300.pdf', () => textPdf(300))
+    ]);
+    await openApp(page);
+
+    for (const file of [large, heavy, long]) {
+      const name = file.replace(/^.*[\\/]/, '');
+      // Back to Home (in-app, no reload — the heap must keep its history) for its file input.
+      await page.getByRole('link', { name: 'Stapler' }).click();
+      await importFile(page, file);
+      await gotoTool(page, 'organize');
+      await page.waitForFunction(
+        () => {
+          const canvases = Array.from(document.querySelectorAll('[role="listbox"] canvas'));
+          return canvases.length > 0 && canvases.every(c => (c as HTMLCanvasElement).width > 1);
+        },
+        undefined,
+        { timeout: 120_000 }
+      );
+      await page.getByRole('button', { name: `Close ${name}` }).click();
+      await expect(page.getByRole('button', { name: `Close ${name}` })).toHaveCount(0);
+    }
+    await page.getByRole('link', { name: 'Stapler' }).click();
+    await expect(page.locator('header')).toBeVisible();
+
+    const PROBE_BUFFER = 8 * 1024 * 1024;
+    await page.evaluate(async size => {
+      const w = window as unknown as Record<string, unknown>;
+      w.__probeBuffer = new ArrayBuffer(size);
+      w.__probeBitmap = await createImageBitmap(new ImageData(1, 1));
+      w.__probeCanvas = new OffscreenCanvas(1, 1);
+    }, PROBE_BUFFER);
+
+    const cdp = await page.context().newCDPSession(page);
+    const chunks: string[] = [];
+    cdp.on('HeapProfiler.addHeapSnapshotChunk', ({ chunk }) => chunks.push(chunk));
+    await cdp.send('HeapProfiler.enable');
+    await cdp.send('HeapProfiler.collectGarbage');
+    await cdp.send('HeapProfiler.takeHeapSnapshot', { reportProgress: false });
+    const counters = await cdp.send('Memory.getDOMCounters').catch(() => null);
+    const uaMemory = await page.evaluate(async () => {
+      const perf = performance as unknown as {
+        measureUserAgentSpecificMemory?: () => Promise<{ bytes: number }>;
+      };
+      if (!globalThis.crossOriginIsolated || !perf.measureUserAgentSpecificMemory) {
+        return 'unavailable (needs cross-origin isolation)';
+      }
+      return (await perf.measureUserAgentSpecificMemory()).bytes;
+    });
+    await cdp.detach();
+
+    const snapshot = JSON.parse(chunks.join('')) as {
+      snapshot: { meta: { node_fields: string[]; node_types: (string[] | string)[] } };
+      nodes: number[];
+      strings: string[];
+    };
+    const fields = snapshot.snapshot.meta.node_fields;
+    const width = fields.length;
+    const NAME = fields.indexOf('name');
+    const SIZE = fields.indexOf('self_size');
+    const DETACHED = fields.indexOf('detachedness');
+    let bitmaps = 0;
+    let offscreen = 0;
+    let detachedCanvases = 0;
+    let bufferBytes = 0;
+    for (let i = 0; i < snapshot.nodes.length; i += width) {
+      const name = snapshot.strings[snapshot.nodes[i + NAME]];
+      if (name === 'ImageBitmap') bitmaps++;
+      else if (name === 'OffscreenCanvas') offscreen++;
+      else if (name === 'system / JSArrayBufferData') bufferBytes += snapshot.nodes[i + SIZE];
+      else if (
+        name.startsWith('Detached HTMLCanvasElement') ||
+        (name === 'HTMLCanvasElement' && DETACHED >= 0 && snapshot.nodes[i + DETACHED] === 2)
+      ) {
+        detachedCanvases++;
+      }
+    }
+
+    test.info().annotations.push({
+      type: 'memory',
+      description:
+        `after three large files: ${bitmaps} ImageBitmap, ${offscreen} OffscreenCanvas, ` +
+        `${detachedCanvases} detached canvases, ${mb(bufferBytes)} ArrayBuffer data ` +
+        `(probes included); DOM counters ${JSON.stringify(counters)}; ` +
+        `measureUserAgentSpecificMemory: ${String(uaMemory)}`
+    });
+
+    // The probes prove the parser sees each kind of object at all.
+    expect(bitmaps, 'snapshot parser sees ImageBitmap').toBeGreaterThanOrEqual(1);
+    expect(offscreen, 'snapshot parser sees OffscreenCanvas').toBeGreaterThanOrEqual(1);
+    expect(bufferBytes, 'snapshot parser sizes ArrayBuffer data').toBeGreaterThanOrEqual(
+      PROBE_BUFFER
+    );
+
+    // With every document closed, nothing decoded should be left behind.
+    expect(bitmaps - 1, 'retained ImageBitmaps').toBeLessThanOrEqual(4);
+    expect(offscreen - 1, 'retained OffscreenCanvases').toBeLessThanOrEqual(4);
+    expect(detachedCanvases, 'detached <canvas> elements').toBeLessThanOrEqual(4);
+    // Smaller than any one of the three files (heavy.pdf is ~5.4 MB), so a
+    // retained copy of any of them fails.
+    expect(bufferBytes - PROBE_BUFFER, 'retained ArrayBuffer bytes').toBeLessThan(5 * 1024 * 1024);
   });
 });
 

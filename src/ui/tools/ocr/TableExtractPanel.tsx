@@ -249,6 +249,10 @@ export function TableExtractPanel() {
                         <input
                           type="text"
                           value={cell}
+                          aria-label={t('Row {row}, column {column}', {
+                            row: rIdx + 1,
+                            column: cIdx + 1
+                          })}
                           onChange={e =>
                             handleCellChange(rIdx, cIdx, (e.target as HTMLInputElement).value)
                           }

@@ -13,12 +13,46 @@
  * `nodebuffer`, which does not exist in a worker.
  */
 
-import { internal } from '../errors';
+import { unsupported } from '../errors';
 import { translate } from '../i18n';
+import { tKey } from '../i18n/key';
 import { checkpoint, type JobHandle } from '../workers/protocol';
 import type { DocxModel, DocxRun } from './blocks';
 import { isRtlRunGroup, isRtlText } from './text-direction';
 import { stripInvalidXmlChars as xmlSafe } from './xml-chars';
+
+/**
+ * CV13 — why a PDF that would produce an empty Word document is refused: no
+ * selectable text, and no embedded image (or images switched off). A scan is
+ * the usual case, so OCR is named — the same policy as `EMPTY_DECK_MESSAGE`.
+ */
+export const EMPTY_DOCX_MESSAGE = tKey(
+  'Nothing could be written to the Word document: this PDF has no selectable text and no ' +
+    'embedded image Word can hold. If it is a scan, run the OCR tool on it first and convert the ' +
+    'result; if you switched images off, turn them back on.'
+);
+
+/**
+ * CV13 — said when the document has pictures but no text at all: a scan
+ * converted without OCR becomes a Word file of page images that cannot be
+ * edited as text, which is not what "PDF to Word" promises.
+ */
+export const PICTURE_ONLY_DOCX_NOTE = tKey(
+  'This PDF has no selectable text, so the Word document holds only its pictures — none of it ' +
+    'can be edited as text. If it is a scan, run the OCR tool on it first and convert the result.'
+);
+
+/** True when `model` has pictures but not one heading, paragraph or table. */
+export function isPictureOnly(model: Pick<DocxModel, 'pages'>): boolean {
+  let pictures = 0;
+  for (const page of model.pages) {
+    for (const block of page.blocks) {
+      if (block.kind === 'image') pictures += 1;
+      else return false;
+    }
+  }
+  return pictures > 0;
+}
 
 /**
  * Tables fill the text column. Given `WidthType.PERCENTAGE`, `docx` turns a plain
@@ -219,8 +253,11 @@ export async function buildDocx(model: DocxModel, job?: JobHandle): Promise<Uint
   // An empty body is not a valid `.docx` body in every reader, and handing the
   // user a file that will not open is worse than telling them the conversion
   // found nothing.
+  // CV13: the scanned-PDF case lands here with images switched off — named,
+  // with OCR as the way forward, the way the Excel and PowerPoint exports do,
+  // rather than as an internal error.
   if (children.length === 0) {
-    throw internal(translate('This PDF produced no text or images to convert.'));
+    throw unsupported(translate(EMPTY_DOCX_MESSAGE));
   }
 
   const doc = new Document({

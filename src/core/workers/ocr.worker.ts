@@ -242,15 +242,96 @@ async function startEngine(
   }
 }
 
+/**
+ * CV12 — one engine per run, not one per page.
+ *
+ * Starting an engine loads the WASM core and the language model (seconds, tens
+ * of megabytes); doing it for every page of a 50-page scan was most of the
+ * run. The engine is kept between pages of the same language and torn down:
+ *  - {@link ENGINE_IDLE_MS} after the last page finished, when no next page has
+ *    arrived — the end of a run (`runOcr` leases this worker page by page and
+ *    renders the next page in between, well inside this window). The pool's
+ *    own idle shutdown of this worker would also end it, later;
+ *  - at once on cancellation (the only way to stop an in-flight `recognize`),
+ *    and on any failure, since an engine that threw may be in any state;
+ *  - when a page asks for a different language.
+ */
+export const ENGINE_IDLE_MS = 5_000;
+
+interface WarmEngine {
+  lang: string;
+  engine: Tesseract.Worker;
+  /** Where the engine's progress logger reports: the page in flight. */
+  job: { current: JobHandle | undefined };
+}
+
+let warm: WarmEngine | null = null;
+let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearIdle(): void {
+  if (idleTimer !== null) clearTimeout(idleTimer);
+  idleTimer = null;
+}
+
+/** Terminates the kept engine, if any. Never throws. */
+async function disposeEngine(): Promise<void> {
+  clearIdle();
+  const engine = warm?.engine;
+  warm = null;
+  await engine?.terminate().catch(() => {});
+}
+
+/** The kept engine for `lang`, or a new one — raced against cancellation. */
+async function engineFor(
+  tess: Tess,
+  lang: string,
+  job: JobHandle | undefined,
+  cancel: Promise<never>
+): Promise<WarmEngine> {
+  clearIdle();
+  if (warm && warm.lang === lang) {
+    warm.job.current = job;
+    return warm;
+  }
+  await disposeEngine();
+  const target: WarmEngine['job'] = { current: job };
+  const starting = startEngine(tess, lang, message => {
+    // `progress` is 0..1 per phase, not across the whole run; the caller
+    // scales it into the document-wide fraction it is reporting.
+    void target.current?.progress(
+      typeof message.progress === 'number' ? message.progress : null,
+      progressLabel(message.status ?? '')
+    );
+  });
+  try {
+    const engine = await Promise.race([starting, cancel]);
+    warm = { lang, engine, job: target };
+    return warm;
+  } catch (err) {
+    // Cancelled while the engine was still starting: it must not leak once it
+    // does start, and its own failure must not surface as an unhandled
+    // rejection after this call has already settled.
+    starting.then(
+      engine => void engine.terminate().catch(() => {}),
+      () => {}
+    );
+    throw err;
+  }
+}
+
 const api: OCRJob = {
   setLocale: loadLocale,
   async validateModel(lang) {
+    // A trial init must not reuse (or leave behind) a kept engine: it is the
+    // check that a freshly uploaded model loads at all.
+    await disposeEngine();
     const tess = await import('tesseract.js');
     const engine = await startEngine(tess, lang);
     await engine.terminate().catch(() => {});
   },
 
   async recognizePage(bitmap, options, job) {
+    clearIdle();
     await checkpoint(job, 0, translate('Starting the OCR engine'));
 
     // tesseract's browser `loadImage` accepts an OffscreenCanvas natively; an
@@ -265,7 +346,10 @@ const api: OCRJob = {
     const tess = await import('tesseract.js');
 
     const watch = cancellationWatch(job);
-    let engine: Tesseract.Worker | null = null;
+    // The watch's rejection is only ever observed through a race; this keeps
+    // it from being reported as unhandled when nothing is racing it.
+    watch.promise.catch(() => {});
+    let ok = false;
 
     try {
       // Always a plain string — see the header comment for why an array of
@@ -274,28 +358,29 @@ const api: OCRJob = {
       // the time this worker is spawned (`runOcr.ts` seeds it, from a verified
       // download or a validated upload, before ever leasing this worker); a
       // miss fails closed (`NO_NETWORK_LANG_PATH`), it never fetches.
-      engine = await startEngine(tess, options.lang, message => {
-        // `progress` is 0..1 per phase, not across the whole run; the caller
-        // scales it into the document-wide fraction it is reporting.
-        void job?.progress(
-          typeof message.progress === 'number' ? message.progress : null,
-          progressLabel(message.status ?? '')
-        );
-      });
+      const { engine } = await engineFor(tess, options.lang, job, watch.promise);
 
       const recognition = engine.recognize(canvas, {}, { blocks: true, text: true });
+      recognition.catch(() => {}); // settled after a cancellation: not unhandled
       const result = await Promise.race([recognition, watch.promise]);
-
+      ok = true;
       return { words: collectWords(result.data), text: result.data.text ?? '' };
     } finally {
       watch.stop();
-      // Always terminated: each engine holds the WASM heap plus the loaded model,
-      // tens of megabytes, and the pool is capped at one instance precisely
-      // because keeping several alive is not affordable. On the cancellation path
-      // this is also what actually stops the in-flight recognition.
-      await engine?.terminate().catch(() => {});
+      if (warm) warm.job.current = undefined;
+      if (ok) {
+        // Kept for the next page; ended if none comes (see ENGINE_IDLE_MS).
+        idleTimer = setTimeout(() => void disposeEngine(), ENGINE_IDLE_MS);
+      } else {
+        // Cancelled or failed. On the cancellation path terminating is also
+        // what actually stops the in-flight recognition.
+        await disposeEngine();
+      }
     }
   }
 };
+
+/** Test seam: ends any kept engine now. */
+export const __ocrWorkerForTests = { api, disposeEngine, hasWarmEngine: () => warm !== null };
 
 Comlink.expose(releaseJobHandlesAfterCall(api));

@@ -19,6 +19,19 @@ vi.mock('../../src/core/workers', async () => {
 const { exportAnnotationSummary, exportAnnotationSummaryText } =
   await import('../../src/core/annotation-summary');
 
+/** Every text run of every page, joined with single spaces (pdf.js wraps lines). */
+async function extractText(bytes: Uint8Array): Promise<string> {
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const doc = await pdfjs.getDocument({ data: bytes.slice(), disableFontFace: true, verbosity: 0 })
+    .promise;
+  const parts: string[] = [];
+  for (let i = 1; i <= doc.numPages; i++) {
+    const content = await (await doc.getPage(i)).getTextContent();
+    for (const item of content.items) if ('str' in item) parts.push(item.str);
+  }
+  return parts.join(' ').replace(/\s+/g, ' ');
+}
+
 describe('ANN-04: Export annotation summary', () => {
   const dummyPages = [
     { key: 'page-key-1', sourceDocId: 'src-1', sourceIndex: 0, rotation: 0 },
@@ -90,6 +103,24 @@ describe('ANN-04: Export annotation summary', () => {
 
     const pdf = await PDFDocument.load(pdfBytes);
     expect(pdf.getPageCount()).toBeGreaterThanOrEqual(1);
+
+    // The PDF itself carries every note, its author and its page — read back
+    // through pdf.js text extraction, not inferred from the text export below.
+    const pdfText = await extractText(pdfBytes);
+    // Each note is attributed to its own page and author, in that order, and
+    // followed by its own text — not merely somewhere in the file.
+    const pageOf = { 'page-key-1': 1, 'page-key-2': 2, 'page-key-3': 3 } as const;
+    for (const note of annotations) {
+      const page = pageOf[note.pageKey as keyof typeof pageOf];
+      const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      expect(pdfText).toMatch(
+        new RegExp(
+          `Page: ${page} \\| Author: ${escape(note.author!)} \\| Date: ${note.date}[^#]*${escape(note.text ?? '')}`
+        )
+      );
+    }
+    expect(pdfText).toContain('Total Notes: 5');
+    expect(pdfText).toContain('test-contract.pdf');
 
     // 2. Text Summary Export Test
     const textSummary = exportAnnotationSummaryText(dummyDoc, annotations);

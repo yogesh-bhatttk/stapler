@@ -168,6 +168,12 @@ export interface CanvasImageItem extends CanvasBox {
    * id is an identity claim, so it must never be reused for different bytes.
    */
   id?: string;
+  /**
+   * CV4 — the fraction of the source image cut away at each edge (a
+   * PowerPoint picture crop). The engine draws the whole image scaled so the
+   * kept part fills the box, clipped to the box. Negative values pad.
+   */
+  crop?: { left: number; top: number; right: number; bottom: number };
 }
 
 /** A positioned grid. Column widths and row heights are in canvas points. */

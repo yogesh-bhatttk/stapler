@@ -38,3 +38,10 @@ tests/fixtures/*
 
 # Merge leftovers (AUDIT-2026-10-01 RT-10)
 *.orig
+
+# Local environment and tool output (audit 2026-10-10)
+.env*
+coverage/
+*.log
+.DS_Store
+.vite/

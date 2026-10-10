@@ -35,11 +35,16 @@ import {
 import { encrypted, internal } from '../errors';
 import { translate } from '../i18n';
 import { checkpoint, type JobHandle } from '../workers/protocol';
+import { assertReadablePageTree } from './load';
 
 export interface ProtectionSettings {
   /** Required to open the file. Empty means "no open password", which we refuse. */
   userPassword: string;
-  /** Grants full rights. Empty means "same as the user password". */
+  /**
+   * Grants full rights. Empty means "same as the user password" only when
+   * every permission is granted; with any permission withheld it means a random
+   * owner password nobody keeps — see {@link ownerPasswordFor}.
+   */
   ownerPassword: string;
   allowPrinting: boolean;
   allowCopying: boolean;
@@ -302,10 +307,30 @@ interface EncryptionKeys {
   p: number;
 }
 
+/**
+ * The owner password actually written for `plan`.
+ *
+ * An empty owner password used to fall back to the user password whatever
+ * `/P` said (AUDIT-2026-10-10 S1/P7). In revision 6 the owner password is
+ * checked first, so whoever typed the *open* password was also the owner, and
+ * every compliant viewer granted them printing, copying and editing — the
+ * unticked permission boxes restricted nobody at all. So when any permission is
+ * withheld and no owner password was given, a random one nobody holds is used,
+ * exactly as {@link permissionOnlyPlan} does: the restrictions then bind
+ * everyone, and lifting them means re-exporting from the unprotected original.
+ * Only when every permission is granted is reusing the open password harmless
+ * — there is nothing for owner rights to add.
+ */
+export function ownerPasswordFor(plan: EncryptionPlan): string {
+  if (plan.ownerPassword) return plan.ownerPassword;
+  const restricts = (plan.permissions & PERMISSION_BITS) !== PERMISSION_BITS;
+  return restricts ? randomPassword() : plan.userPassword;
+}
+
 async function deriveKeys(plan: EncryptionPlan): Promise<EncryptionKeys> {
   const fileKey = randomBytes(32);
   const user = passwordBytes(plan.userPassword);
-  const owner = passwordBytes(plan.ownerPassword || plan.userPassword);
+  const owner = passwordBytes(ownerPasswordFor(plan));
   const empty = new Uint8Array(0);
   const zeroIv = new Uint8Array(16);
 
@@ -443,8 +468,8 @@ export async function encryptPdf(
  * being weakened for the Protect feature, where an empty user password means
  * the user meant to type one and didn't.
  *
- * Nothing outside this module should call this with an empty *owner* password
- * as well: a file with neither password restricts nobody.
+ * An empty owner password is never written as such while `/P` withholds
+ * anything: {@link ownerPasswordFor} substitutes a random one.
  */
 export async function encryptWithPlan(
   bytes: Uint8Array,
@@ -463,6 +488,9 @@ export async function encryptWithPlan(
     }
     throw err;
   }
+  // A truncated file loads with no catalog and only fails at `save()`, as a bare
+  // TypeError; refuse it up front the way every other load does.
+  assertReadablePageTree(doc);
 
   const keys = await deriveKeys(plan);
   const context = doc.context;

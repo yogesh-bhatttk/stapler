@@ -134,10 +134,35 @@ export function tokenizeContentStream(bytes: Uint8Array): Token[] {
       continue;
     }
 
+    if (ch === 0x7b || ch === 0x7d) {
+      // `{` / `}` — PostScript calculator braces, never legal in a content
+      // stream. Kept as one-byte operator tokens (as pdf.js lexes them) so a
+      // re-serialised stream still carries them byte for byte.
+      tokens.push({ type: 'operator', bytes: bytes.slice(i, i + 1) });
+      i++;
+      continue;
+    }
+
+    if (ch === 0x29) {
+      // A `)` with no `(` before it. Viewers drop it as a syntax error; so does
+      // this. It used to fall through to the regular-token branch below, which
+      // consumed nothing — an empty operator pushed forever without `i` ever
+      // moving (AUDIT-2026-10-10 P1).
+      i++;
+      continue;
+    }
+
     // Regular token (number, boolean, null, or operator)
     const start = i;
     while (i < bytes.length && !isWhitespace(bytes[i]) && !isDelimiter(bytes[i])) {
       i++;
+    }
+    if (i === start) {
+      // Every delimiter has a branch above, so this cannot happen — but a byte
+      // that no branch consumes is an infinite loop, not a parse error, so the
+      // loop is made to advance regardless of what the branches above cover.
+      i++;
+      continue;
     }
     const chunk = bytes.slice(start, i);
     const str = String.fromCharCode(...chunk);
@@ -150,10 +175,89 @@ export function tokenizeContentStream(bytes: Uint8Array): Token[] {
       tokens.push({ type: 'number', bytes: chunk });
     } else {
       tokens.push({ type: 'operator', bytes: chunk });
+      if (str === 'ID') {
+        // Inline image data is binary, not syntax: `(`, `)`, `{`, `}`, `%`, `<`
+        // are all ordinary sample values there. Tokenising it as syntax read
+        // garbage at best and, before the branches above, never terminated.
+        // The data is skipped to its `EI`; the `ID` token stays, so
+        // `parseContentStream` still refuses the stream exactly as before.
+        i = inlineImageDataEnd(bytes, i, tokens);
+      }
     }
   }
 
   return tokens;
+}
+
+/** Bytes after `EI` checked for plausibility (see {@link inlineImageDataEnd}). */
+const EI_LOOKAHEAD = 16;
+
+/**
+ * Where the `EI` that ends an inline image's data starts, given `afterId` —
+ * the index just past the `ID` operator — and the tokens so far (whose tail is
+ * the image dictionary, from `BI` to `ID`).
+ *
+ * A declared `/L` or `/Length` (PDF 2.0) is used when the bytes it points at
+ * really are an `EI`. Otherwise the data is scanned for the first `EI` that is
+ * preceded by whitespace, followed by whitespace, a delimiter or the end of the
+ * stream, and followed by plausible content-stream text rather than more
+ * binary (the heuristic pdf.js uses: a `EI` that happens to occur inside the
+ * samples is usually followed by more binary). Failing all of that, the first
+ * delimited `EI`; failing that, the end of the stream — the data is
+ * unterminated, and nothing after `ID` is read as operators.
+ */
+function inlineImageDataEnd(bytes: Uint8Array, afterId: number, tokens: Token[]): number {
+  // Exactly one whitespace byte separates `ID` from the data.
+  const start = afterId < bytes.length && isWhitespace(bytes[afterId]) ? afterId + 1 : afterId;
+
+  const isEIAt = (p: number): boolean =>
+    p >= 0 &&
+    p + 1 < bytes.length &&
+    bytes[p] === 0x45 && // E
+    bytes[p + 1] === 0x49 && // I
+    (p + 2 >= bytes.length || isWhitespace(bytes[p + 2]) || isDelimiter(bytes[p + 2]));
+
+  const declared = declaredInlineImageLength(tokens);
+  if (declared !== undefined) {
+    let p = start + declared;
+    while (p < bytes.length && isWhitespace(bytes[p])) p++;
+    if (isEIAt(p)) return p;
+  }
+
+  const plausibleAfter = (p: number): boolean => {
+    const end = Math.min(bytes.length, p + 2 + EI_LOOKAHEAD);
+    for (let k = p + 2; k < end; k++) {
+      const b = bytes[k];
+      if (!isWhitespace(b) && (b < 0x20 || b > 0x7e)) return false;
+    }
+    return true;
+  };
+
+  let firstCandidate = -1;
+  for (let p = start; p + 1 < bytes.length; p++) {
+    if (bytes[p] !== 0x45 || !isEIAt(p)) continue;
+    if (p > 0 && !isWhitespace(bytes[p - 1])) continue;
+    if (plausibleAfter(p)) return p;
+    if (firstCandidate < 0) firstCandidate = p;
+  }
+  return firstCandidate >= 0 ? firstCandidate : bytes.length;
+}
+
+/** `/L n` or `/Length n` in the inline image dictionary just tokenised, if any. */
+function declaredInlineImageLength(tokens: Token[]): number | undefined {
+  // tokens[tokens.length - 1] is the `ID` itself; walk back to the `BI`.
+  for (let k = tokens.length - 2; k >= 0; k--) {
+    const token = tokens[k];
+    if (token.type === 'operator') return undefined; // `BI`, or no dictionary at all
+    if (token.type !== 'name') continue;
+    const key = String.fromCharCode(...token.bytes);
+    if (key !== '/L' && key !== '/Length') continue;
+    const value = tokens[k + 1];
+    if (value?.type !== 'number') continue;
+    const n = Number(String.fromCharCode(...value.bytes));
+    if (Number.isInteger(n) && n >= 0) return n;
+  }
+  return undefined;
 }
 
 export function parseContentStream(tokens: Token[]): Statement[] {
@@ -167,9 +271,10 @@ export function parseContentStream(tokens: Token[]): Statement[] {
       statements.push({ operands: currentOperands, operator: token });
       currentOperands = [];
 
-      // Inline images: the binary payload between ID and EI is not text-safe and
-      // the tokenizer has already consumed it as garbage tokens. There is no way
-      // to filter inline-image content without a full binary parser, so we refuse
+      // Inline images: the binary payload between ID and EI is not text-safe, so
+      // the tokenizer skips it and keeps no token for it — a statement list with
+      // an `ID` in it cannot be re-serialised without losing the samples. There
+      // is no way to filter inline-image content without a full binary parser, so we refuse
       // rather than silently leaving the image bytes in the output stream — which
       // would produce a "verified" redaction that actually removed nothing.
       if (op === 'ID') {
@@ -208,6 +313,7 @@ export interface SavedState {
   lineJoin: number;
   miterLimit: number;
   textRenderMode: number;
+  clipBox: Rect | null;
 }
 
 /**
@@ -260,6 +366,15 @@ export class GraphicsState {
    * stroked path's does. Graphics state, not reset by `BT`/`ET`.
    */
   textRenderMode: number = 0;
+  /**
+   * AUDIT-2026-10-10 P9 — device-space bounds of the current clipping path,
+   * or `null` while nothing has clipped (the whole page). Only ever an
+   * over-approximation: a non-rectangular clip is taken as its bounding box and
+   * text clipping (`Tr` 4–7) is not applied, so the area a paint can reach is
+   * never measured smaller than it is. Used for `sh`, which has no path of its
+   * own and paints the entire clip region.
+   */
+  clipBox: Rect | null = null;
 
   clone(): GraphicsState {
     const next = new GraphicsState();
@@ -284,7 +399,8 @@ export class GraphicsState {
       lineCap: this.lineCap,
       lineJoin: this.lineJoin,
       miterLimit: this.miterLimit,
-      textRenderMode: this.textRenderMode
+      textRenderMode: this.textRenderMode,
+      clipBox: this.clipBox ? { ...this.clipBox } : null
     };
   }
 
@@ -305,6 +421,7 @@ export class GraphicsState {
     this.lineJoin = s.lineJoin;
     this.miterLimit = s.miterLimit;
     this.textRenderMode = s.textRenderMode;
+    this.clipBox = s.clipBox ? { ...s.clipBox } : null;
   }
 }
 
@@ -1078,6 +1195,15 @@ function statementOf(operands: Token[], operator: string): Statement {
   return { operands, operator: asciiToken('operator', operator) };
 }
 
+/** The overlap of two boxes; zero-sized (never negative) when they do not meet. */
+function intersectRects(a: Rect, b: Rect): Rect {
+  const x0 = Math.max(a.x, b.x);
+  const y0 = Math.max(a.y, b.y);
+  const x1 = Math.min(a.x + a.width, b.x + b.width);
+  const y1 = Math.min(a.y + a.height, b.y + b.height);
+  return { x: x0, y: y0, width: Math.max(0, x1 - x0), height: Math.max(0, y1 - y0) };
+}
+
 /** A Form XObject's `/BBox`, in device space, under the matrix that places it. */
 function formBoxOf(formCtm: Matrix, bbox: [number, number, number, number]): Rect {
   const [llx, lly, urx, ury] = bbox;
@@ -1228,6 +1354,12 @@ export function filterContentStream(
   let subpathSegments = 0;
   /** The path has a join other than `re`'s right angles (see `strokeOutset`). */
   let pathHasFreeJoin = false;
+  /**
+   * A `W`/`W*` seen in the current path object: the device-space bounds of the
+   * path it clips to. Per the spec it takes effect once the path is ended by
+   * its painting operator (usually `n`), which is when it is applied.
+   */
+  let pendingClip: Rect | null = null;
 
   /**
    * How far, in device space, a stroke's ink reaches past its path's points:
@@ -1307,6 +1439,13 @@ export function filterContentStream(
       if (paintOpStmt) filtered.push(paintOpStmt);
     }
 
+    // The `W` statement itself is always kept (it is pushed as an ordinary
+    // operator), so the clip it sets holds in the output exactly as here.
+    if (paintOpStmt && pendingClip) {
+      state.clipBox = state.clipBox ? intersectRects(state.clipBox, pendingClip) : pendingClip;
+      pendingClip = null;
+    }
+
     currentPathStmts = [];
     currentPathPoints = [];
     subpathSegments = 0;
@@ -1356,7 +1495,38 @@ export function filterContentStream(
       continue;
     }
 
-    // Path painting operators: S s f F f* B B* b b* n sh
+    if ((op === 'W' || op === 'W*') && currentPathPoints.length > 0) {
+      const xs = currentPathPoints.map(p => p.x);
+      const ys = currentPathPoints.map(p => p.y);
+      const box = {
+        x: Math.min(...xs),
+        y: Math.min(...ys),
+        width: Math.max(...xs) - Math.min(...xs),
+        height: Math.max(...ys) - Math.min(...ys)
+      };
+      if ([box.x, box.y, box.width, box.height].every(Number.isFinite)) {
+        pendingClip = pendingClip ? intersectRects(pendingClip, box) : box;
+      }
+    }
+
+    // `sh` paints a shading over the whole current clip region: it has no path,
+    // so the path test below never saw it and every `sh` was kept, however much
+    // of a mark it painted under (AUDIT-2026-10-10 P9). Its extent is taken to
+    // be the clip's bounds — the page itself while nothing has clipped — and a
+    // shading reaching any mark is dropped like any other paint that does. The
+    // shading's own `/BBox` would only narrow that further, so ignoring it
+    // over-removes at worst.
+    if (op === 'sh') {
+      if (currentPathStmts.length > 0) flushPath(null, false);
+      const area = state.clipBox;
+      const paintsSomething = !area || (area.width > 0 && area.height > 0);
+      const reachesMark =
+        paintsSomething && redactionBoxes.some(r => !area || areaTouches(r, area));
+      if (!reachesMark) filtered.push(stmt);
+      continue;
+    }
+
+    // Path painting operators: S s f F f* B B* b b* n
     if (
       op === 'S' ||
       op === 's' ||
@@ -1367,8 +1537,7 @@ export function filterContentStream(
       op === 'B*' ||
       op === 'b' ||
       op === 'b*' ||
-      op === 'n' ||
-      op === 'sh'
+      op === 'n'
     ) {
       flushPath(stmt, op !== 'n');
       continue;

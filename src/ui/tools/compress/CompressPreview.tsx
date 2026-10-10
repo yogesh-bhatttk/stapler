@@ -31,7 +31,6 @@ import {
   composeDocument,
   compressDocument,
   planCompression,
-  currentDocumentBytes,
   type CompressionReport
 } from '../../../core/operations';
 import { representativePageIndex } from '../../../core/compress-plan';
@@ -42,6 +41,8 @@ import { IconButton } from '../../components/IconButton';
 import { EmptyState, SizeDelta } from '../../components/Feedback';
 import { isCancellation, logEvent, fromUnknown } from '../../../core/errors';
 import styles from './CompressPreview.module.css';
+import { analyseActiveDocument } from './analysis';
+import { createSharedJob } from '../../../core/shared-job';
 
 export interface CompressPreviewProps {
   pages: PageRef[];
@@ -136,6 +137,12 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
   const pageKey = page?.key;
 
   const composedCache = useRef(new Map<string, Uint8Array>());
+  /**
+   * NFR-03 — the "before" and "after" halves both start by composing the same
+   * page, at the same moment, and each compose copies the page's whole source
+   * file into a worker. They share one compose instead of racing two.
+   */
+  const composing = useRef(createSharedJob<Uint8Array>());
   const planCache = useRef(new Map<string, CompressionReport>());
   const compressedCache = useRef(
     new Map<string, { bytes: Uint8Array; actionableBytes: number; targetPixels: number }>()
@@ -160,13 +167,15 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
       const cached = composedCache.current.get(target.key);
       if (cached) return cached;
       const annotations = pageAnnotations.value[target.key] || [];
-      const bytes = await composeDocument(
-        {
-          pages: [target],
-          annotations: [],
-          layerAnnotations: annotations.map(ann => ({ ...ann, pageKey: target.key }))
-        },
-        { signal }
+      const bytes = await composing.current.run(target.key, target, { signal }, job =>
+        composeDocument(
+          {
+            pages: [target],
+            annotations: [],
+            layerAnnotations: annotations.map(ann => ({ ...ann, pageKey: target.key }))
+          },
+          job
+        )
       );
       composedCache.current.set(target.key, bytes);
       return bytes;
@@ -206,8 +215,7 @@ export function CompressPreview({ pages }: CompressPreviewProps) {
     // Errors are caught inside and shown as the preview's failed state.
     void (async () => {
       try {
-        const bytes = await currentDocumentBytes({ signal: controller.signal });
-        const analysed = await planCompression(bytes, compressSettings.value, {
+        const analysed = await analyseActiveDocument(compressSettings.value, {
           signal: controller.signal
         });
         if (!controller.signal.aborted) compressReport.value = analysed;

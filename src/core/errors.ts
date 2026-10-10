@@ -176,9 +176,48 @@ export function logError(scope: string, value: unknown): StaplerError {
   return err;
 }
 
+/** Extensions of the files Stapler opens or writes — what a leaked file name ends in. */
+const FILE_EXTENSIONS =
+  'pdf|png|jpe?g|gif|webp|avif|heic|heif|tiff?|bmp|svg|docx?|xlsx?|pptx?|odt|ods|odp|rtf|txt|md|markdown|csv|tsv|html?|zip|jp2|j2k|traineddata(?:\\.gz)?';
+
+/** A network URL (kept: the model URL is what a download diagnostic is about). */
+const URL_PATTERN = /\b(?!file:)[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
+const PATH_RULES: [RegExp, string][] = [
+  // file:///…, C:\Users\…, C:/…, \\server\share\…
+  [/(?:file:\/\/)?(?:(?<![A-Za-z])[A-Za-z]:[\\/]|\\\\)[^\s"'<>|]*/g, '[path]'],
+  // /home/…, /Users/… — any absolute POSIX path with two or more segments.
+  [/(?<![\w.])\/(?:[^\s/"'<>]+\/)+[^\s/"'<>]*/g, '[path]'],
+  // folder/sub/name.pdf, up to its extension even across spaces in the name.
+  [new RegExp(`[^\\s"'<>]*[/\\\\][^"'<>\\n]*?\\.(?:${FILE_EXTENSIONS})\\b`, 'gi'), '[path]'],
+  // A bare name.pdf. (A name with spaces keeps its leading words: there is no
+  // telling where it starts. Callers must not log names in the first place.)
+  [new RegExp(`[^\\s"'<>/\\\\:]+\\.(?:${FILE_EXTENSIONS})\\b`, 'gi'), '[file]']
+];
+
+/**
+ * Audit 2026-10-10 S5 — defence in depth for "no file names": whatever a
+ * caller put in a log line or an error message, anything path- or
+ * file-name-shaped is replaced before it reaches the diagnostic — absolute
+ * paths (Windows drive or UNC, POSIX, `file:` URLs), relative paths with a
+ * separator, and names ending in a document or image extension. Network URLs
+ * are left as they are.
+ */
+export function scrubPaths(text: string): string {
+  const scrub = (part: string) =>
+    PATH_RULES.reduce((out, [pattern, label]) => out.replace(pattern, label), part);
+  let out = '';
+  let at = 0;
+  for (const match of text.matchAll(URL_PATTERN)) {
+    out += scrub(text.slice(at, match.index)) + match[0];
+    at = match.index + match[0].length;
+  }
+  return out + scrub(text.slice(at));
+}
+
 /**
  * A plain-text diagnostic the user can paste into an issue. Contains the log,
- * the error, and the environment — no file names, no document content.
+ * the error, and the environment — no file names, no document content. File
+ * names and paths that reached a message anyway are scrubbed ({@link scrubPaths}).
  */
 export function buildDiagnostic(err?: StaplerError): string {
   const lines = [
@@ -189,14 +228,18 @@ export function buildDiagnostic(err?: StaplerError): string {
     ''
   ];
   if (err) {
-    lines.push(`error: ${err.kind}`, `detail: ${err.message}`);
+    lines.push(`error: ${err.kind}`, `detail: ${scrubPaths(err.message)}`);
     const ctx = Object.entries(err.context);
-    if (ctx.length) lines.push(`context: ${ctx.map(([k, v]) => `${k}=${v}`).join(' ')}`);
+    if (ctx.length) {
+      lines.push(`context: ${scrubPaths(ctx.map(([k, v]) => `${k}=${v}`).join(' '))}`);
+    }
     lines.push('');
   }
   lines.push(`log (${log.length} most recent events):`);
   for (const e of log) {
-    lines.push(`  ${new Date(e.at).toISOString()} ${e.level.padEnd(5)} ${e.scope}: ${e.message}`);
+    lines.push(
+      `  ${new Date(e.at).toISOString()} ${e.level.padEnd(5)} ${e.scope}: ${scrubPaths(e.message)}`
+    );
   }
   return lines.join('\n');
 }

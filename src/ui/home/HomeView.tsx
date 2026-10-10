@@ -138,7 +138,7 @@ export function HomeView() {
         <div>
           <h1 className={styles.title}>{t('Offline PDF tools')}</h1>
           <p className={styles.subtitle}>
-            {t('Everything runs on this device. No upload, no account, no limits.')}
+            {t('Everything runs on this device. No upload, no account, no daily limit.')}
           </p>
         </div>
 

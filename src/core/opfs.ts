@@ -82,6 +82,21 @@ export function __resetOpfsProbeForTests(): void {
 }
 
 /**
+ * AUDIT-2026-10-10 S7 — names this tab is writing right now. Chrome stages a
+ * `createWritable` in `<name>.crswap` until `close()`; that swap file must
+ * survive a sweep or clear that runs meanwhile.
+ */
+const writesInProgress = new Set<string>();
+
+/** S7 — Chrome's swap-file suffix for an unfinished `createWritable`. */
+export const SWAP_SUFFIX = '.crswap';
+
+/** True for a swap file of a write this tab still has open. */
+function isOwnSwapInProgress(name: string): boolean {
+  return name.endsWith(SWAP_SUFFIX) && writesInProgress.has(name.slice(0, -SWAP_SUFFIX.length));
+}
+
+/**
  * Writes one file into the OPFS root, turning quota exhaustion into the same
  * clear, actionable message `core/db.ts`'s IndexedDB guard already gives for the
  * identical failure, instead of an uncaught `QuotaExceededError` that surfaces as
@@ -94,13 +109,42 @@ async function writeOpfsFile(
   name: string,
   bytes: Uint8Array
 ): Promise<void> {
-  const fileHandle = await root.getFileHandle(name, { create: true });
-  const writable = await fileHandle.createWritable();
+  writesInProgress.add(name);
   try {
+    await writeOpfsFileNow(root, name, bytes);
+  } finally {
+    writesInProgress.delete(name);
+  }
+}
+
+async function writeOpfsFileNow(
+  root: FileSystemDirectoryHandle,
+  name: string,
+  bytes: Uint8Array
+): Promise<void> {
+  // AUDIT-2026-10-10 L6 — `create: true` makes an empty file before a byte is
+  // written, so a failed write (quota, above all) left a 0-byte `<id>.pdf`
+  // behind. A file this call created is removed again on failure; one that
+  // already existed is left as it was (the aborted writable kept its bytes).
+  const existed = await root.getFileHandle(name).then(
+    () => true,
+    () => false
+  );
+  const fileHandle = await root.getFileHandle(name, { create: true });
+  let writable: Awaited<ReturnType<FileSystemFileHandle['createWritable']>> | null = null;
+  try {
+    writable = await fileHandle.createWritable();
     await writable.write(bytes);
     await writable.close();
   } catch (err) {
-    await (writable as unknown as { abort(): Promise<void> }).abort().catch(() => {});
+    if (writable) {
+      await (writable as unknown as { abort(): Promise<void> }).abort().catch(() => {});
+    }
+    if (!existed) {
+      await Promise.resolve()
+        .then(() => root.removeEntry(name))
+        .catch(() => {});
+    }
     if (isQuotaError(err)) {
       throw internal(
         'Local storage is full. Stapler could not save this document to browser storage — ' +
@@ -283,11 +327,16 @@ export async function sweepOrphanedSourceBytes(isLive: (id: string) => boolean):
     const candidates: string[] = [];
     for await (const [name, handle] of dir.entries()) {
       if (handle.kind !== 'file') continue;
-      if (!name.endsWith(SOURCE_SUFFIX) || isModelFile(name)) continue;
+      // S7 — a `<id>.pdf.crswap` is a partial copy of that document (a write
+      // a crash or closed tab never finished); it is swept with its source.
+      const base = name.endsWith(SWAP_SUFFIX) ? name.slice(0, -SWAP_SUFFIX.length) : name;
+      if (!base.endsWith(SOURCE_SUFFIX) || isModelFile(base)) continue;
       candidates.push(name);
     }
     for (const name of candidates) {
-      const id = name.slice(0, -SOURCE_SUFFIX.length);
+      if (isOwnSwapInProgress(name)) continue;
+      const base = name.endsWith(SWAP_SUFFIX) ? name.slice(0, -SWAP_SUFFIX.length) : name;
+      const id = base.slice(0, -SOURCE_SUFFIX.length);
       if (isLive(id)) continue;
       try {
         await root.removeEntry(name);
@@ -429,6 +478,13 @@ export interface StoredFile {
  * deleted as Stapler's.
  */
 export function classifyStoredFile(name: string): StoredFileKind | null {
+  // AUDIT-2026-10-10 S7 — Chrome's swap file for an unfinished write to one of
+  // Stapler's files is that file's kind: a `<id>.pdf.crswap` is a partial copy
+  // of a document, and "Clear all" has to remove it like the document itself.
+  if (name.endsWith(SWAP_SUFFIX)) {
+    const base = name.slice(0, -SWAP_SUFFIX.length);
+    return base.endsWith(SWAP_SUFFIX) ? null : classifyStoredFile(base);
+  }
   // Probe leftovers, and face-detector weights an older build cached here
   // before they were bundled (CONV-6).
   if (name.startsWith('.stapler-opfs-probe-') || name.startsWith('faceblur-')) return 'scratch';
@@ -520,7 +576,8 @@ export async function clearStaplerFiles(
     for await (const [name, handle] of dir.entries()) {
       if (handle.kind !== 'file') continue;
       const kind = classifyStoredFile(name);
-      if (kind && wanted(kind)) names.push(name);
+      // S7 — never a swap file of a write this tab still has open.
+      if (kind && wanted(kind) && !isOwnSwapInProgress(name)) names.push(name);
     }
     for (const name of names) {
       try {

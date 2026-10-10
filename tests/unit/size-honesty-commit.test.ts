@@ -93,6 +93,12 @@ vi.mock('../../src/core/operations', async importOriginal => {
     repairDocument: vi.fn()
   };
 });
+// AUDIT-2026-10-10 M3 — every PDF export now reads its input through the one
+// canonical `exportDocumentBytes`, not `currentDocumentBytes`.
+vi.mock('../../src/ui/tools/export-compose', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/ui/tools/export-compose')>();
+  return { ...actual, exportDocumentBytes: vi.fn(actual.exportDocumentBytes) };
+});
 vi.mock('../../src/core/image', async importOriginal => {
   const actual = await importOriginal<typeof import('../../src/core/image')>();
   return { ...actual, resizeImageFile: vi.fn() };
@@ -268,7 +274,8 @@ describe('Compress — IMG-5 and IMG-12', () => {
       userPassword: 'pw',
       confirmPassword: 'pw'
     };
-    vi.mocked(ops.currentDocumentBytes).mockResolvedValueOnce(new Uint8Array(50_000));
+    const { exportDocumentBytes } = await import('../../src/ui/tools/export-compose');
+    vi.mocked(exportDocumentBytes).mockResolvedValueOnce(new Uint8Array(50_000));
     const compressed = new Uint8Array(19_900);
     vi.mocked(ops.compressToTargetSize).mockResolvedValueOnce({
       bytes: compressed,

@@ -114,12 +114,24 @@ export const test = base.extend<Fixtures & { context: BrowserContext }>({
   }
 });
 
-/** Asserts the page stayed clean: no request out, no CSP violation, no uncaught error. */
-export async function expectClean(page: Page, diagnostics: Diagnostics) {
+/**
+ * Asserts the page stayed clean: no request out, no CSP violation, no uncaught error.
+ *
+ * `allowExternal` exempts URLs a test deliberately serves itself — only ever the
+ * pinned OCR model (OCR-01), routed to a local copy; everything else still fails.
+ */
+export async function expectClean(
+  page: Page,
+  diagnostics: Diagnostics,
+  allowExternal: (url: string) => boolean = () => false
+) {
   const fromPage = await page
     .evaluate(() => (window as unknown as { __cspViolations?: string[] }).__cspViolations ?? [])
     .catch(() => [] as string[]);
-  expect(diagnostics.external, 'network requests').toEqual([]);
+  expect(
+    diagnostics.external.filter(url => !allowExternal(url)),
+    'network requests'
+  ).toEqual([]);
   expect([...diagnostics.cspViolations, ...fromPage], 'CSP violations').toEqual([]);
   expect(diagnostics.pageErrors, 'page errors').toEqual([]);
 }

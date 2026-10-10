@@ -13,8 +13,14 @@
  *     assignment to `.src`/`.href`, `setAttribute`, `open()`, CSS `url()` /
  *     `@import`, an HTML resource attribute. Any hit fails, unless listed in
  *     SINK_ALLOWLIST (currently empty: nothing in the bundle needs it).
- *  2. Inventory (text): every absolute http(s)/ws(s)/ftp URL anywhere in those
- *     files, comments and strings alike, must match an entry in URL_ALLOWLIST
+ *     In bundle mode a remote URL passed straight to `fetch()`,
+ *     `importScripts()`, `sendBeacon()`, `xhr.open()` or `new WebSocket()` /
+ *     `EventSource()` is a sink too (audit 2026-10-10 S4) — whatever its host:
+ *     the documentation hosts below are allowed as text, never as a request.
+ *  2. Inventory (text): every absolute http(s)/ws(s)/ftp URL — and every
+ *     protocol-relative `//host/…` that starts a string or attribute value —
+ *     anywhere in those files (JS, CSS, HTML, JSON, `.webmanifest`, `.txt`),
+ *     comments and strings alike, must match an entry in URL_ALLOWLIST
  *     below, each of which says why that URL is inert. A new dependency that
  *     talks to a new host — or a new hard-coded URL of ours — fails the build
  *     until someone looks at it and documents it here.
@@ -125,6 +131,18 @@ export const URL_ALLOWLIST = [
   }
 ];
 
+// Appended last so the specific entries above are what a URL in a code file
+// is matched against.
+URL_ALLOWLIST.push({
+  pattern: /^https?:\/\/[^\s]+$/,
+  file: /(?:^|\/)(?:THIRD_PARTY_LICENSES\.txt|[\w.-]*-OFL\.txt|LICENSE[\w.-]*\.txt)$/,
+  reason:
+    'Licence texts shipped beside the bundle (THIRD_PARTY_LICENSES.txt from ' +
+    'scripts/third-party-licenses.mjs, vendored font licences): author, project and licence ' +
+    'links in plain text no code reads. Scanned since audit 2026-10-10 S4; confined to those ' +
+    'files by `file`, so the same URL in a script or page still has to be listed above.'
+});
+
 /**
  * Remote URLs allowed in a *sink* position (see header). Each entry:
  * `{ file: RegExp, message: RegExp, reason }`. Empty — keep it that way.
@@ -134,7 +152,54 @@ export const SINK_ALLOWLIST = [];
 // Template placeholders are kept (`https://${host}/npm/…`) so an entry can
 // match a templated URL by its shape.
 const URL_RE = /\b(?:https?|wss?|ftp):\/\/(?:\$\{[^}\n]{0,80}\}|[^\s"'`<>()\\,;{}[\]|^])+/gi;
-const SCANNED = /\.(?:m?js|css|html?|json)$/i;
+/**
+ * Audit 2026-10-10 S4: a protocol-relative URL (`//cdn.example.com/x.js`)
+ * loads over the page's scheme just like `https://…`, and URL_RE never saw
+ * it. Only one that *starts* a string, `url(`, or an attribute value counts —
+ * a `// comment` or a `//` inside a path is not one — and the host must look
+ * like a real hostname (a dotted name ending in letters, or `localhost`).
+ */
+const PROTOCOL_RELATIVE_RE =
+  /(?<=["'`(=]\s{0,4})\/\/(?:(?:[a-z0-9-]+\.)+[a-z]{2,}|localhost|\$\{[^}\n]{0,80}\})(?::\d+)?(?:[/?#][^\s"'`<>()\\,;{}[\]|^]*)?(?![\w.-])/gi;
+// `.webmanifest` (icons, start_url) and `.txt` (robots.txt, licence texts)
+// were skipped before audit 2026-10-10 S4.
+const SCANNED = /\.(?:m?js|css|html?|json|webmanifest|txt)$/i;
+
+/** Every absolute or protocol-relative remote URL in `text`, with its offset. */
+export function* remoteUrls(text) {
+  for (const m of text.matchAll(URL_RE)) yield { url: m[0].replace(/[.:]+$/, ''), index: m.index };
+  for (const m of text.matchAll(PROTOCOL_RELATIVE_RE))
+    yield { url: m[0].replace(/[.:]+$/, ''), index: m.index, protocolRelative: true };
+}
+
+/**
+ * Findings for one shipped file: sinks (bundle-mode AST analysis, scripts and
+ * HTML only) and the URL inventory. `used` collects the URL_ALLOWLIST indexes
+ * that matched. Exported so tests can feed it synthetic bundle snippets.
+ */
+export function scanText(text, rel, used = new Set()) {
+  const failures = [];
+  let urls = 0;
+  if (!/\.(?:json|webmanifest|txt)$/i.test(rel)) {
+    for (const f of analyzeNetwork(text, rel, { mode: 'bundle' })) {
+      const allowed = SINK_ALLOWLIST.find(e => e.file.test(rel) && e.message.test(f.message));
+      if (!allowed) failures.push(`${rel}:${f.line} — ${f.message}`);
+    }
+  }
+  for (const { url, index, protocolRelative } of remoteUrls(text)) {
+    urls++;
+    // A protocol-relative URL is matched as the https URL it would load.
+    const asAbsolute = protocolRelative ? `https:${url}` : url;
+    const i = URL_ALLOWLIST.findIndex(
+      e => e.pattern.test(asAbsolute) && (!e.file || e.file.test(rel))
+    );
+    if (i === -1) {
+      const line = text.slice(0, index).split('\n').length;
+      failures.push(`${rel}:${line} — remote URL not in the bundle allowlist: ${url}`);
+    } else used.add(i);
+  }
+  return { failures, urls };
+}
 
 function walk(dir, out = []) {
   for (const name of readdirSync(dir)) {
@@ -155,26 +220,9 @@ export function scanBundle(dirs, { root = process.cwd() } = {}) {
       if (!SCANNED.test(file) || file.endsWith('.map')) continue;
       files++;
       const rel = path.relative(root, file).split(path.sep).join('/');
-      const text = readFileSync(file, 'utf8');
-
-      if (!rel.endsWith('.json')) {
-        for (const f of analyzeNetwork(text, rel, { mode: 'bundle' })) {
-          const allowed = SINK_ALLOWLIST.find(e => e.file.test(rel) && e.message.test(f.message));
-          if (!allowed) failures.push(`${rel}:${f.line} — ${f.message}`);
-        }
-      }
-
-      for (const m of text.matchAll(URL_RE)) {
-        urls++;
-        const url = m[0].replace(/[.:]+$/, '');
-        const i = URL_ALLOWLIST.findIndex(
-          e => e.pattern.test(url) && (!e.file || e.file.test(rel))
-        );
-        if (i === -1) {
-          const line = text.slice(0, m.index).split('\n').length;
-          failures.push(`${rel}:${line} — remote URL not in the bundle allowlist: ${url}`);
-        } else used.add(i);
-      }
+      const result = scanText(readFileSync(file, 'utf8'), rel, used);
+      failures.push(...result.failures);
+      urls += result.urls;
     }
   }
   const unused = URL_ALLOWLIST.filter((_, i) => !used.has(i));

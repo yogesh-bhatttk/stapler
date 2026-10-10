@@ -14,8 +14,9 @@
 import { useState } from 'preact/hooks';
 import { ScanFace } from 'lucide-preact';
 import { activeDoc } from '../../../core/store';
-import { currentDocumentBytes } from '../../../core/operations';
-import { registerSource, replaceWithSource } from '../../../core/store';
+import { documents, registerSource, replaceWithSource } from '../../../core/store';
+import { cancelled } from '../../../core/errors';
+import { documentContentBytes } from '../export-compose';
 import { writeSourceBytes } from '../../../core/opfs';
 import { renderWorker } from '../../../core/workers';
 import { notify } from '../../../core/notify';
@@ -26,7 +27,7 @@ import { Button } from '../../components/Button';
 import { Checkbox, Field, Select } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
 import { useJob } from '../../useJob';
-import { pendingRedactions } from './state';
+import { pendingRedactions, resolveRedactionMarks, toWorkerRegion } from './state';
 import { faceBlurReport, faceBlurSettings } from './faceblur-state';
 
 const STRENGTHS: { value: BlurStrength; label: string }[] = [
@@ -62,15 +63,31 @@ export function FaceBlurSection() {
     setBusy(true);
     try {
       await run({ label: translate('Blurring faces'), scope: 'redact.faceblur' }, async job => {
-        const original = await currentDocumentBytes(job);
-        const result = await runFaceBlur(original, doc.pages.length, {
+        // AUDIT-2026-10-10 M2 — the page content and stamps, never the
+        // exported bytes: those carried the watermark and header/footer,
+        // which were then baked into the blurred source *and* still switched
+        // on, so the next export drew them twice. Crop and Annotate marks stay
+        // live on the same page keys (`replaceWithSource` keeps them).
+        const pages = doc.pages;
+        // H1 — the logo mark at its page's current index.
+        const logo = logoEnabled ? resolveRedactionMarks(marks, pages).kept[0] : undefined;
+        const original = await documentContentBytes(job, { stamps: true, pages });
+        const result = await runFaceBlur(original, pages.length, {
           ...job,
           detectFaces: facesEnabled,
           strength: settings.strength,
-          logoRegion: logoEnabled ? marks[0] : undefined
+          logoRegion: logo ? toWorkerRegion(logo) : undefined
         });
 
-        faceBlurReport.value = result;
+        // L2 — the counts, not a second copy of the document.
+        faceBlurReport.value = {
+          facesBlurred: result.facesBlurred,
+          logosBlurred: result.logosBlurred,
+          imagesChanged: result.imagesChanged,
+          imagesInspected: result.imagesInspected,
+          pagesTouched: result.pagesTouched,
+          skipped: result.skipped
+        };
 
         if (result.imagesChanged === 0) {
           notify('warning', translate('Nothing was blurred.'), {
@@ -109,9 +126,23 @@ export function FaceBlurSection() {
         } finally {
           client.release();
         }
+        // AUDIT-2026-10-10 M1 — the job is cancelled cooperatively: leaving the
+        // panel aborts it, but the work above keeps running to its next
+        // checkpoint. Nothing past this line may touch the document then — nor
+        // when its pages changed meanwhile, since these bytes are a rebuild of
+        // exactly `pages`.
+        if (job.signal?.aborted) throw cancelled();
+        if (documents.value.find(d => d.id === doc.id)?.pages !== pages) {
+          notify('warning', translate('The pages changed while blurring — nothing was applied.'), {
+            detail: translate('Run it again on the document as it is now.'),
+            timeout: 0
+          });
+          return;
+        }
         await writeSourceBytes(source.id, result.bytes);
+        if (job.signal?.aborted) throw cancelled();
         registerSource(source);
-        replaceWithSource(doc.id, source);
+        replaceWithSource(doc.id, source, { pageForPage: true });
 
         notify(
           'success',

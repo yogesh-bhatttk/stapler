@@ -47,7 +47,7 @@ export function FileTabs() {
     // a `tablist`'s required-children rule forbids as a sibling of `tab` — so
     // this is a plain labelled group of buttons, with `aria-current` marking
     // the active document instead of `aria-selected`.
-    <div className={styles.tabs} aria-label={translate('Open documents')}>
+    <div className={styles.tabs} role="group" aria-label={translate('Open documents')}>
       {docs.map(doc => {
         const active = doc.id === activeId;
         // Switching *away* from the active tab is what actually moves
@@ -58,6 +58,12 @@ export function FileTabs() {
         // `closeDocument` falls back to), the same risk as switching — a
         // non-active tab can still be closed freely.
         const closeBlocked = busy && active;
+        // A blocked control stays focusable (`aria-disabled`, not `disabled`)
+        // and is described by its reason, so a keyboard or screen-reader user
+        // can reach the explanation a mouse user gets from the tooltip
+        // (AUDIT-2026-10-10 UI16).
+        const switchReasonId = `filetab-${doc.id}-switch-blocked`;
+        const closeReasonId = `filetab-${doc.id}-close-blocked`;
         return (
           <div
             key={doc.id}
@@ -67,26 +73,42 @@ export function FileTabs() {
             <button
               type="button"
               aria-current={active ? 'true' : undefined}
-              className={styles.tabTrigger}
-              disabled={switchBlocked}
+              className={`${styles.tabTrigger} ${switchBlocked ? styles.tabBlocked : ''}`}
+              aria-disabled={switchBlocked ? 'true' : undefined}
+              aria-describedby={switchBlocked ? switchReasonId : undefined}
               title={
                 switchBlocked
                   ? translate('Finish the current operation before switching documents.')
                   : undefined
               }
-              onClick={() => switchDocument(doc.id)}
+              onClick={() => {
+                if (switchBlocked) return;
+                switchDocument(doc.id);
+              }}
             >
-              {doc.dirty && (
-                <span className={styles.dirtyDot} aria-label={translate('Unsaved changes')} />
-              )}
+              {/* The dot is colour only; the state is spoken through the
+                  visually-hidden text, part of the button's name (UI16). */}
+              {doc.dirty && <span className="srOnly">{translate('Unsaved changes')}</span>}
+              {doc.dirty && <span className={styles.dirtyDot} aria-hidden="true" />}
               <span className={styles.tabName}>{doc.name}</span>
             </button>
+            {switchBlocked && (
+              <span id={switchReasonId} className="srOnly">
+                {translate('Finish the current operation before switching documents.')}
+              </span>
+            )}
+            {closeBlocked && (
+              <span id={closeReasonId} className="srOnly">
+                {translate('Finish the current operation before closing this document.')}
+              </span>
+            )}
             <span
               // A nested <button> is invalid HTML, so the close affordance is a
               // span with its own keyboard handling.
               role="button"
               aria-disabled={closeBlocked ? 'true' : undefined}
-              tabIndex={closeBlocked ? -1 : 0}
+              aria-describedby={closeBlocked ? closeReasonId : undefined}
+              tabIndex={0}
               aria-label={translate('Close {name}', { name: doc.name })}
               title={
                 closeBlocked

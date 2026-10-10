@@ -78,6 +78,12 @@ export function OcrPanel() {
         onChange={selectedPagesOnly => update({ selectedPagesOnly })}
       />
 
+      <Checkbox
+        label={t('Also OCR pages that already have text')}
+        checked={settings.includePagesWithText}
+        onChange={includePagesWithText => update({ includePagesWithText })}
+      />
+
       {settings.selectedPagesOnly && selected === 0 && (
         <p className={panelStyles.note + ' ' + panelStyles.noteInfo}>
           {t('No pages are selected. Tick pages in the grid, or turn this option off.')}
@@ -112,27 +118,34 @@ export function OcrPanel() {
 
       {report && (
         <p className={panelStyles.note + ' ' + panelStyles.noteInfo}>
-          {report.wordsAdded === 0
-            ? t('The last run found no text on those pages.')
-            : [
-                tPlural('{count} words added across {pages}.', report.wordsAdded, {
-                  pages: tPlural('{count} pages', report.pages)
-                }),
-                report.wordsSkipped > 0 &&
-                  tPlural('{count} could not be encoded and were left out.', report.wordsSkipped),
-                report.pagesReplaced > 0 &&
-                  tPlural(
-                    'Replaced an existing, broken text layer on {count} pages.',
-                    report.pagesReplaced
-                  ),
-                report.pagesSkipped > 0 &&
-                  tPlural(
-                    '{count} pages could not be scanned and were left as-is.',
-                    report.pagesSkipped
-                  )
-              ]
-                .filter(Boolean)
-                .join(' ')}
+          {report.wordsAdded === 0 && report.pagesWithText > 0
+            ? tPlural('{count} pages already had text and were left as-is.', report.pagesWithText)
+            : report.wordsAdded === 0
+              ? t('The last run found no text on those pages.')
+              : [
+                  tPlural('{count} words added across {pages}.', report.wordsAdded, {
+                    pages: tPlural('{count} pages', report.pages)
+                  }),
+                  report.wordsSkipped > 0 &&
+                    tPlural('{count} could not be encoded and were left out.', report.wordsSkipped),
+                  report.pagesReplaced > 0 &&
+                    tPlural(
+                      'Replaced an existing, broken text layer on {count} pages.',
+                      report.pagesReplaced
+                    ),
+                  report.pagesSkipped > 0 &&
+                    tPlural(
+                      '{count} pages could not be scanned and were left as-is.',
+                      report.pagesSkipped
+                    ),
+                  report.pagesWithText > 0 &&
+                    tPlural(
+                      '{count} pages already had text and were left as-is.',
+                      report.pagesWithText
+                    )
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
         </p>
       )}
 

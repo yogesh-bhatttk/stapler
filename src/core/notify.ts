@@ -168,6 +168,19 @@ export interface ConfirmRequest {
   tone: 'default' | 'danger';
   /** Optional bullet list under the body, e.g. exactly what will be deleted. */
   details?: string[];
+  /**
+   * False for a question where *both* answers act — the session-restore prompt's
+   * "Start fresh" deletes the saved session — so Escape, the scrim and a close
+   * button must not quietly pick one (AUDIT-2026-10-10 UI2). Defaults to true:
+   * dismissing an ordinary confirmation is a harmless "no".
+   */
+  dismissible: boolean;
+  /**
+   * Which footer button takes focus when the dialog opens. Defaults to the cancel
+   * button — the non-destructive answer — so a stray Enter never confirms; a
+   * prompt whose cancel is the destructive answer passes 'confirm'.
+   */
+  initialFocus: 'cancel' | 'confirm';
   resolve: (ok: boolean) => void;
 }
 
@@ -187,6 +200,8 @@ export function confirmAction(options: {
   cancelLabel?: string;
   tone?: 'default' | 'danger';
   details?: string[];
+  dismissible?: boolean;
+  initialFocus?: 'cancel' | 'confirm';
 }): Promise<boolean> {
   return confirmQueue.enqueue(resolve => ({
     title: options.title,
@@ -195,6 +210,8 @@ export function confirmAction(options: {
     confirmLabel: options.confirmLabel ?? translate('Continue'),
     cancelLabel: options.cancelLabel ?? translate('Cancel'),
     tone: options.tone ?? 'default',
+    dismissible: options.dismissible ?? true,
+    initialFocus: options.initialFocus ?? 'cancel',
     resolve
   }));
 }

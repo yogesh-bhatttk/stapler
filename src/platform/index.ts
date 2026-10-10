@@ -24,7 +24,11 @@ export interface OpenedFile {
 
 export interface OutputDirectory {
   name: string;
-  write: (fileName: string, bytes: Uint8Array) => Promise<void>;
+  /**
+   * Writes one file. Never replaces an existing one (AUDIT-2026-10-10 L4): a
+   * taken name gets ` (n)` before its extension. Resolves with the name used.
+   */
+  write: (fileName: string, bytes: Uint8Array) => Promise<string>;
 }
 
 export interface OpenOptions {

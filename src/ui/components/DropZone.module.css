@@ -20,9 +20,20 @@
   background: var(--surface-2);
 }
 
-.dropzone:focus-visible {
+/* Focus lands on the visually-hidden file input inside the label, never on the
+   label itself, so the ring is drawn on the label when its input has keyboard
+   focus (AUDIT-2026-10-10 UI8). `:has(:focus-visible)` keeps a mouse click from
+   showing it; the `:focus-within` rule is the fallback for an engine without
+   `:has`, where the ring then shows for every focus rather than for none. */
+.dropzone:focus-within {
   outline: 2px solid var(--primary-focus);
   outline-offset: 2px;
+}
+
+@supports selector(:has(*)) {
+  .dropzone:focus-within:not(:has(:focus-visible)) {
+    outline: none;
+  }
 }
 
 /* Distinct active and reject states, which DS-05 asks for by name. */

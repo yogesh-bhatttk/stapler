@@ -85,6 +85,10 @@ Toolbar icon click
             ├─ UI thread     Preact + signals, design-token CSS
             ├─ render.worker    pdf.js  → page bitmaps, text layers
             ├─ process.worker   pdf-lib → page ops, compression, redaction
+            ├─ cv.worker        scan-cleanup pixel work (edge detection, de-warp, threshold)
+            ├─ convert.worker   docx / xlsx / pptx writers (Office conversions)
+            ├─ image.worker     libheif + UTIF → HEIC and TIFF decoding
+            ├─ zip.worker       fflate → ZIP build/open (batch, split, export review)
             └─ ocr.worker       tesseract.js (lazy)
 ```
 
@@ -147,7 +151,7 @@ stapler/
 | UI         | **Preact + TypeScript (strict)**                         | ~4KB runtime; bundle size matters when everything ships locally               |
 | State      | **`@preact/signals`**                                    | Fine-grained updates; a 300-thumbnail grid must not re-render wholesale       |
 | Styling    | **CSS Modules + CSS custom properties**                  | Design tokens map 1:1 to `:root` vars; theming is a class swap, no build step |
-| PDF write  | **pdf-lib** (MIT)                                        | Merge, split, rotate, draw, AcroForms                                         |
+| PDF write  | **pdf-lib** (MIT) — the `@cantoo/pdf-lib` fork           | Merge, split, rotate, draw, AcroForms (installed under the `pdf-lib` alias)   |
 | PDF read   | **pdfjs-dist** (Apache-2.0)                              | Rendering, text layer, image XObject extraction                               |
 | Worker RPC | **Comlink**                                              | Removes postMessage boilerplate; transferable ArrayBuffers                    |
 | Zip        | **fflate**                                               | Smallest, fastest, streaming                                                  |
@@ -335,7 +339,9 @@ CJK text, RTL text, rotated pages, mixed page sizes.
 4. **i18n** — 10 locales of JSON strings is the largest single install multiplier
    available; store search is per-locale and most competitors are English-only.
 
-Listing must state: no upload, no account, no file-size limit, no watermark, open source.
+Listing must state: no upload, no account, no quota or daily limit, no watermark, open source.
+(Audit 2026-10-10: "no file-size limit" was not true — there are per-tool caps, such as 20 open
+documents, 256 MB per Office file and 500 slides — so the listing names those caps instead.)
 
 ---
 
@@ -346,7 +352,7 @@ Listing must state: no upload, no account, no file-size limit, no watermark, ope
 | Compression underdelivers vs. incumbents      | High     | Auto-routing analyzer; honest reporting; never ship a bigger file    |
 | Store discovery failure                       | High     | Keyword-bearing title, website-twin SEO, i18n, hero screenshot       |
 | Memory blowups on large files                 | Medium   | Page-at-a-time, virtualized grid, explicit release, warn >100MB      |
-| pdf.js / pdf-lib API churn                    | Medium   | Pin versions; wrap both behind `core/render` and `core/doc` adapters |
+| pdf.js / pdf-lib API churn                    | Medium   | Lockfile pins exact versions (`package.json` uses caret ranges; `pnpm install --frozen-lockfile` in CI); wrap both behind `core/render` and `core/doc` adapters |
 | Redaction claim proves false in one edge case | High     | Verifier gate + refuse to save when verification fails               |
 | Scope creep sinking v1.0                      | High     | Cut lines in §3 are contracts; new ideas land in v1.2+               |
 | Feature parity race with a funded rival       | Low      | Our moat is architectural, not featural                              |

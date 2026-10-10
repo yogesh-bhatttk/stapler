@@ -16,9 +16,17 @@ import { openDocument, pdfjsLib } from './pdfjs-setup';
 import { checkpoint, releaseJobHandlesAfterCall, type JobHandle } from './protocol';
 import { corrupt, encrypted, internal } from '../errors';
 import { DOC_PAGE_WHITE, DOC_REDACT_RGB } from '../doc-colors';
-import { blankCoverageLimit, inkCoverage, layoutText, toRgba, type TextRun } from '../text-layout';
+import { layoutText, toRgba, type TextRun } from '../text-layout';
+import {
+  blankRenderScale,
+  isBlankPage,
+  measureInk,
+  onPageTextLength,
+  visibleGlyphCount,
+  type TextOpCodes
+} from '../blank-page';
 import type { RedactionRegion } from './process.worker';
-import { locatePatterns, type PatternCategory } from '../patterns';
+import { locatePatterns, textRunSliceBox, type PatternCategory } from '../patterns';
 import {
   measureRectsBlacked,
   paintRectsBlack,
@@ -747,30 +755,9 @@ function textRunViewportBox(
   from = 0,
   to = run.str.length
 ): { x: number; y: number; width: number; height: number } {
-  const perChar = run.width / Math.max(1, run.str.length);
-  const height = run.height || run.transform[3] || 12;
-  const x0 = run.transform[4] + from * perChar;
-  const x1 = run.transform[4] + to * perChar;
-  const y0 = run.transform[5];
-  const y1 = run.transform[5] + height;
-  const corners = [
-    viewport.convertToViewportPoint(x0, y0),
-    viewport.convertToViewportPoint(x1, y0),
-    viewport.convertToViewportPoint(x1, y1),
-    viewport.convertToViewportPoint(x0, y1)
-  ];
-  const xs = corners.map(([x]) => x / viewport.width);
-  const ys = corners.map(([, y]) => y / viewport.height);
-  const left = Math.min(...xs);
-  const top = Math.min(...ys);
-  const right = Math.max(...xs);
-  const bottom = Math.max(...ys);
-  return {
-    x: left,
-    y: top,
-    width: Math.max(0, right - left),
-    height: Math.max(0, bottom - top)
-  };
+  // Laid out along the run's own text direction (AUDIT-2026-10-10 P8); see
+  // `textRunSliceBox`, which the pattern suggestions share.
+  return textRunSliceBox(run, viewport, from, to);
 }
 
 /**
@@ -1271,7 +1258,14 @@ const api: RenderJob = {
   async pageToImageBytes(handle, pageIndex, format, dpi, quality) {
     const page = await entry(handle).doc.getPage(pageIndex + 1);
     try {
-      const viewport = page.getViewport({ scale: dpi / 72 });
+      // AUDIT-2026-10-10 M9 — clamped like `renderPage`/`pageToSizedImage`:
+      // past the canvas ceiling the render came back blank with no error. The
+      // caller predicts the reduction from the same page size
+      // (`clampRenderScale` over `DocumentInfo.pageSizes`) and says so.
+      const unit = page.getViewport({ scale: 1 });
+      const viewport = page.getViewport({
+        scale: clampRenderScale(unit.width, unit.height, dpi / 72).scale
+      });
       const { canvas, ctx } = offscreen(viewport.width, viewport.height);
       await page.render(renderParams(ctx, viewport)).promise;
       const blob = await canvas.convertToBlob({
@@ -1804,10 +1798,6 @@ const api: RenderJob = {
   async detectBlankPages(handle, threshold, job) {
     const { doc } = entry(handle);
     const blank: number[] = [];
-    // A tenth-scale render is enough to measure ink coverage and keeps a
-    // 300-page scan inside the memory budget.
-    const scale = 0.1;
-    const limit = blankCoverageLimit(threshold);
 
     for (let i = 1; i <= doc.numPages; i++) {
       await checkpoint(
@@ -1817,13 +1807,39 @@ const api: RenderJob = {
       );
       const page = await doc.getPage(i);
       try {
+        // An 18 dpi render (one pixel ≈ 4pt) separates scanner dust from a
+        // word of text, and at ~30k pixels per A4 page a 300-page scan still
+        // fits the memory budget. See `blank-page.ts` for the verdict.
+        const unit = page.getViewport({ scale: 1 });
+        const scale = blankRenderScale(unit.width, unit.height);
         const viewport = page.getViewport({ scale });
         const { canvas, ctx } = offscreen(viewport.width, viewport.height);
         await page.render(renderParams(ctx, viewport)).promise;
         const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        if (inkCoverage(data) <= limit) blank.push(i - 1);
+        const ink = measureInk(data, canvas.width, canvas.height);
         canvas.width = 0;
         canvas.height = 0;
+        const verdict = await isBlankPage(
+          {
+            ink,
+            pt2PerPixel: 1 / (scale * scale),
+            // Only for pages the ink calls blank: visible glyphs (not an OCR
+            // layer in render mode 3) that also sit on the page.
+            textLength: async () => {
+              const ops = await page.getOperatorList();
+              const painted = visibleGlyphCount(
+                ops.fnArray,
+                ops.argsArray,
+                pdfjsLib.OPS as unknown as TextOpCodes
+              );
+              if (painted === 0) return 0;
+              const content = await page.getTextContent();
+              return Math.min(painted, onPageTextLength(content.items, page.view));
+            }
+          },
+          threshold
+        );
+        if (verdict) blank.push(i - 1);
       } finally {
         page.cleanup();
       }

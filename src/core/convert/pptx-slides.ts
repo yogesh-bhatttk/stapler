@@ -724,8 +724,12 @@ function pictureItem(shape: PptxShape, slide: PptxSlide, tally: Tally): CanvasIt
     tally.unsupportedImages.push(describeFormat(media.part));
     return null;
   }
+  const crop = shape.crop;
+  // CV4: a crop that keeps nothing shows nothing in PowerPoint either.
+  if (crop && (crop.left + crop.right >= 1 || crop.top + crop.bottom >= 1)) return null;
   return {
     kind: 'image',
+    ...(crop ? { crop } : {}),
     x: toPoints(shape.x),
     y: toPoints(shape.y),
     width: toPoints(shape.cx),

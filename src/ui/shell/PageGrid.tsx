@@ -26,7 +26,6 @@ import {
   type PageRef,
   type StaplerDoc
 } from '../../core/store';
-import { beginTransaction } from '../../core/history';
 import {
   dropGapIndex,
   isRightToLeft,
@@ -68,6 +67,18 @@ export function windowRows(
     Math.max(0, Math.ceil((scrolled + viewportHeight) / rowHeight) + OVERSCAN_ROWS)
   );
   return { first, last };
+}
+
+/**
+ * The index holding the grid's single roving tab stop. Normally the focused
+ * index; when that tile's row has been virtualised away, the first mounted tile
+ * instead — otherwise no tile had `tabIndex=0` and Tab skipped the whole grid
+ * (AUDIT-2026-10-10 UI10).
+ */
+export function rovingTabStop(focusIndex: number, firstIndex: number, mounted: number): number {
+  if (mounted <= 0) return focusIndex;
+  if (focusIndex >= firstIndex && focusIndex < firstIndex + mounted) return focusIndex;
+  return firstIndex;
 }
 
 export interface PageGridProps {
@@ -177,18 +188,38 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
   };
   const firstIndex = firstRow * metrics.columns;
   const visible = doc.pages.slice(firstIndex, lastRow * metrics.columns);
+  const tabStop = rovingTabStop(focusIndex, firstIndex, visible.length);
 
   // Watermark and crop are global signals another tool may have staged — not yet
   // in `doc.pages`, so nothing here shows them without this. Gated on whether
   // anything is actually configured so idle tiles mount no extra overlay at all.
   const showWatermarkPreview = hasWatermarkContent(watermarkSettings.value);
 
+  /**
+   * Set when a scroll is about to unmount the tile that has DOM focus. Removing a
+   * focused element drops focus to `<body>`, so the next Tab started from the top
+   * of the page; the layout effect below hands focus to the new tab stop instead
+   * (AUDIT-2026-10-10 UI10).
+   */
+  const restoreFocusRef = useRef(false);
+  /** The column count, for `onScroll`'s stable callback. */
+  const metricsRef = useRef(metrics.columns);
+  metricsRef.current = metrics.columns;
+
   const onScroll = useCallback(() => {
     const top = scrollerRef.current?.scrollTop ?? 0;
     scrollTopRef.current = top;
     const w = windowRef.current;
     const next = windowRows(top - w.offsetTop, w.rowHeight, w.viewportHeight, w.rowCount);
-    if (next.first !== w.firstRow || next.last !== w.lastRow) bumpWindow(n => n + 1);
+    if (next.first !== w.firstRow || next.last !== w.lastRow) {
+      const active = document.activeElement;
+      const viewport = viewportRef.current;
+      if (active instanceof HTMLElement && viewport?.contains(active) && active.dataset.index) {
+        const row = Math.floor(Number(active.dataset.index) / Math.max(1, metricsRef.current));
+        if (row < next.first || row >= next.last) restoreFocusRef.current = true;
+      }
+      bumpWindow(n => n + 1);
+    }
   }, []);
 
   const clickPage = (index: number, page: PageRef, event: MouseEvent) => {
@@ -351,6 +382,14 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
   // virtualisation window is the one that gets to focus it. No dependency array on
   // purpose — the row can appear on any subsequent render.
   useLayoutEffect(() => {
+    if (restoreFocusRef.current) {
+      restoreFocusRef.current = false;
+      const viewport = viewportRef.current;
+      const active = document.activeElement;
+      if (viewport && pendingFocusRef.current === null && !(active && viewport.contains(active))) {
+        viewport.querySelector<HTMLElement>('[tabindex="0"]')?.focus({ preventScroll: true });
+      }
+    }
     const want = pendingFocusRef.current;
     if (want === null) return;
     if (want > doc.pages.length - 1) {
@@ -455,7 +494,7 @@ export function PageGrid({ doc, selection, selectable }: PageGridProps) {
                 total={doc.pages.length}
                 docId={doc.id}
                 isSelected={selection.has(page.key)}
-                focusable={index === focusIndex}
+                focusable={index === tabStop}
                 dragging={dragKey === page.key}
                 dropBefore={dropIndex === index}
                 dropAfter={dropIndex === index + 1 && index === doc.pages.length - 1}
@@ -588,13 +627,3 @@ const PageCell = memo(function PageCell({
     </div>
   );
 });
-
-/** Exported so the transaction helper is used where a drag spans many mutations. */
-export function withReorderTransaction<T>(fn: () => T): T {
-  const tx = beginTransaction('reorder');
-  try {
-    return fn();
-  } finally {
-    tx.end();
-  }
-}

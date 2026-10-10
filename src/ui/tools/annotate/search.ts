@@ -68,6 +68,9 @@ export async function searchAndHighlightMatches(
     return { applied: false, matches: 0, unplaced: 0 };
   }
 
+  // AUDIT-2026-10-10 M1 — a search cancelled (leaving the panel aborts it,
+  // cooperatively) adds nothing.
+  if (job.signal?.aborted) return { applied: false, matches: 0, unplaced: 0 };
   commit(docId);
   addAnnotations(highlights);
   notify('info', tPlural('Highlighted {count} matches.', highlights.length), {

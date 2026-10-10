@@ -15,6 +15,7 @@ import { refuseEditWhileBusy } from '../../busy';
 import { Button } from '../../components/Button';
 import { Checkbox, Field, NumberStepper } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
+import { shortcutLabel } from '../../../core/shortcuts';
 
 export function DuplexSection() {
   const t = useTranslation();
@@ -45,7 +46,9 @@ export function DuplexSection() {
     if (reorderPages(doc.id, order)) {
       setProduced({ docId: doc.id, order: order.join('\n') });
       notify('success', translate('Pages interleaved.'), {
-        detail: translate('Front 1, back 1, front 2, back 2… Undo with Ctrl+Z.')
+        detail: translate('Front 1, back 1, front 2, back 2… Undo with {shortcut}.', {
+          shortcut: shortcutLabel('undo')
+        })
       });
     }
   };

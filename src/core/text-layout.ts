@@ -5,6 +5,7 @@
  * pulling in pdf.js and `Comlink.expose` — the reading-order heuristics and the
  * 1-bit unpacking are where the actual bugs hide, not in the pdf.js call.
  */
+import { isRtlText } from './convert/text-direction';
 
 /** A pdf.js text run, narrowed to the fields we depend on. */
 export interface TextRun {
@@ -43,7 +44,11 @@ export const IMAGE_KIND = {
  * the heuristics would drift from this one on the first tuning change.
  */
 export interface LaidOutLine {
-  /** The line's own runs, sorted left to right. Blank runs are kept. */
+  /**
+   * The line's own runs in reading order: left to right, or right to left on a
+   * right-to-left line. Blank runs are kept. On a page whose text is set at an
+   * angle these are upright copies of the runs (see `layoutLines`).
+   */
   runs: TextRun[];
   /** Reading-order text, whitespace collapsed and trimmed. Never empty. */
   text: string;
@@ -69,15 +74,111 @@ export interface PageTextLayout {
 }
 
 /**
+ * A run's type size whichever way it is turned: the length of its transformed
+ * up-vector. `|d|` alone is the size only for upright text — a run turned 90°
+ * has `d = 0` (CV3).
+ */
+export function runTypeSize(run: TextRun): number {
+  const size = Math.hypot(run.transform[2], run.transform[3]);
+  return Number.isFinite(size) ? size : 0;
+}
+
+/**
+ * The horizontal gap between two runs of one line, whichever order they are
+ * read in: positive when they are apart, negative when they overlap. A
+ * right-to-left line is ordered right to left (CV5), so "the next run starts
+ * after the previous one ends" is not the test there.
+ */
+export function runGap(previous: TextRun, run: TextRun): number {
+  return Math.max(
+    run.transform[4] - (previous.transform[4] + previous.width),
+    previous.transform[4] - (run.transform[4] + run.width)
+  );
+}
+
+/**
+ * The baseline angle most of a page's text is set at, in whole degrees
+ * (counter-clockwise), weighted by character count. 0 for an ordinary page.
+ */
+function dominantTextAngle(items: readonly TextRun[]): number {
+  const weight = new Map<number, number>();
+  for (const item of items) {
+    const [a, b] = item.transform;
+    if (!(Number.isFinite(a) && Number.isFinite(b)) || (a === 0 && b === 0)) continue;
+    const degrees = Math.round((Math.atan2(b, a) * 180) / Math.PI);
+    const angle = degrees === -180 ? 180 : degrees;
+    weight.set(angle, (weight.get(angle) ?? 0) + Math.max(1, item.str.trim().length));
+  }
+  let best = 0;
+  let bestWeight = -1;
+  for (const [angle, total] of weight) {
+    if (total > bestWeight || (total === bestWeight && angle === 0)) {
+      bestWeight = total;
+      best = angle;
+    }
+  }
+  return best;
+}
+
+/**
+ * CV3 — the runs of a page whose text is set at an angle (a sideways page
+ * drawn upright under `/Rotate`, a landscape table turned on a portrait page),
+ * turned by the inverse of that angle so their baselines run left to right
+ * again. Each run is a copy (every other field kept) whose transform is the
+ * original pre-multiplied by the inverse rotation, shifted so no coordinate is
+ * negative. Grouping by raw `transform[5]` would otherwise put every word of
+ * one line on its own "line" and read the page column by column.
+ */
+function uprightRuns(items: TextRun[], angle: number): TextRun[] {
+  const radians = (angle * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  // Rotation by −angle: [x', y'] = [x cos + y sin, −x sin + y cos].
+  const turned = items.map(item => {
+    const [a, b, c, d, e, f] = item.transform;
+    return {
+      ...item,
+      transform: [
+        a * cos + b * sin,
+        -a * sin + b * cos,
+        c * cos + d * sin,
+        -c * sin + d * cos,
+        e * cos + f * sin,
+        -e * sin + f * cos
+      ]
+    };
+  });
+  let minX = 0;
+  let minY = 0;
+  for (const item of turned) {
+    minX = Math.min(minX, item.transform[4]);
+    minY = Math.min(minY, item.transform[5]);
+  }
+  for (const item of turned) {
+    item.transform[4] -= minX;
+    item.transform[5] -= minY;
+  }
+  return turned;
+}
+
+/**
  * Groups runs into lines and lines into paragraphs, deciding for each line
  * whether a paragraph break precedes it and whether it reads as a heading.
  *
  * Pure geometry: no text is dropped, reordered beyond reading order, or
  * rewritten beyond collapsing runs of whitespace.
+ *
+ * When most of the page's text is set at an angle, the runs are first turned
+ * upright ({@link uprightRuns}); the returned lines then carry those turned
+ * copies, so every consumer measures gaps and columns along the text's own
+ * baseline. A line that reads right to left (Hebrew, Arabic) is ordered right
+ * to left (CV5).
  */
-export function layoutLines(items: TextRun[]): PageTextLayout {
-  if (items.length === 0) return { lines: [], bodySize: 12 };
+export function layoutLines(input: TextRun[]): PageTextLayout {
+  if (input.length === 0) return { lines: [], bodySize: 12 };
 
+  const angle = dominantTextAngle(input);
+  const items = angle === 0 ? input : uprightRuns(input, angle);
   const bodySize = dominantSize(items);
   // Runs on one line share a baseline but not exactly — subscripts and mixed font
   // sizes shift it. Scale the tolerance to the type size rather than using a fixed
@@ -110,19 +211,19 @@ export function layoutLines(items: TextRun[]): PageTextLayout {
 
   for (const line of lines) {
     line.sort((a, b) => a.transform[4] - b.transform[4]);
+    // CV5: a right-to-left line's first word is its rightmost run. pdf.js
+    // already puts each run's own characters in logical order.
+    if (isRtlText(line.map(run => run.str).join(''))) line.reverse();
 
     let text = '';
     let maxSize = 0;
     for (let i = 0; i < line.length; i++) {
       const item = line[i];
-      maxSize = Math.max(maxSize, Math.abs(item.transform[3]));
-      if (i > 0) {
-        const prev = line[i - 1];
-        const gap = item.transform[4] - (prev.transform[4] + prev.width);
-        // A gap wider than roughly a space means the producer split the run instead
-        // of emitting a space character.
-        if (gap > Math.abs(item.transform[3]) * 0.25) text += ' ';
-      }
+      const size = runTypeSize(item);
+      maxSize = Math.max(maxSize, size);
+      // A gap wider than roughly a space means the producer split the run instead
+      // of emitting a space character.
+      if (i > 0 && runGap(line[i - 1], item) > size * 0.25) text += ' ';
       text += item.str;
     }
 
@@ -178,7 +279,7 @@ function dominantSize(items: TextRun[]): number {
   const weight = new Map<number, number>();
   for (const item of items) {
     // Round to the nearest point: the same font is often emitted at 11.999998.
-    const size = Math.round(Math.abs(item.transform[3]));
+    const size = Math.round(runTypeSize(item));
     if (size <= 0) continue;
     weight.set(size, (weight.get(size) ?? 0) + Math.max(1, item.str.trim().length));
   }

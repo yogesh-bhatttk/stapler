@@ -12,6 +12,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { contractV1Pdf, ensureFixture, textPdf } from './fixtures';
 import { gotoTool } from './helpers';
+import { trackIndexedDbReads, waitForIndexedDbIdle } from './audit-2026-10-10-helpers';
 import { openAppWithFakeFs, queuePick, removeFakeFile, writeFakeFiles } from './fake-fs';
 
 /** Opens a fake-disk file through Home's drop zone, i.e. through `showOpenFilePicker`. */
@@ -74,6 +75,8 @@ test('HRD-37 §3 #9 — folder search shows the latest query, not a slower earli
     ensureFixture('text-2.pdf', () => textPdf(2)),
     ensureFixture('contract-v1.pdf', contractV1Pdf)
   ]);
+  // Before any app script: counts IndexedDB reads in flight (see the wait below).
+  await trackIndexedDbReads(page);
   await openAppWithFakeFs(page);
   await writeFakeFiles(page, { 'folder/body.pdf': text, 'folder/contract.pdf': contract });
   // The OCR panel, which hosts folder search, needs an open document.
@@ -110,8 +113,11 @@ test('HRD-37 §3 #9 — folder search shows the latest query, not a slower earli
   });
   await expect(box).toHaveValue('agreement');
   await expect(results.first()).toContainText('contract.pdf');
-  // Long enough for the slower, older lookup to have landed if it were allowed to.
-  await page.waitForTimeout(1500);
+  // Audit 2026-10-10 T10: was a fixed 1.5 s sleep. Both lookups are chains of
+  // IndexedDB reads with only synchronous work after the last one, so "no read
+  // in flight for a run of frames" means the older lookup has landed — or been
+  // discarded — and the results below are final.
+  await waitForIndexedDbIdle(page);
   await expect(results.filter({ hasText: 'body.pdf' })).toHaveCount(0);
   await expect(results.filter({ hasText: 'contract.pdf' })).not.toHaveCount(0);
 });

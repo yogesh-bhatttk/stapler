@@ -1,5 +1,6 @@
 import { formFields, formValues, formulas } from './state';
 import { applyFormulas } from '../../../core/formula';
+import type { FormFieldData } from '../../../core/workers/process.worker';
 
 import styles from './AcroFormOverlay.module.css';
 import { useTranslation } from '../../../core/i18n';
@@ -8,6 +9,11 @@ export interface AcroFormOverlayProps {
   pageIndex: number;
   width: number;
   height: number;
+}
+
+/** The on-page control's accessible name: the field's `/TU` tooltip, else its name. */
+export function fieldAccessibleName(field: Pick<FormFieldData, 'name' | 'tooltip'>): string {
+  return field.tooltip?.trim() || field.name;
 }
 
 export function AcroFormOverlay({ pageIndex, width, height }: AcroFormOverlayProps) {
@@ -51,6 +57,10 @@ export function AcroFormOverlay({ pageIndex, width, height }: AcroFormOverlayPro
           height: `${rect.height * 100}%`
         };
 
+        // Every control needs an accessible name: the form's own tooltip
+        // (`/TU`) when it has one, else the field name (AUDIT-2026-10-10 UI9).
+        const accessibleName = fieldAccessibleName(field);
+
         const onChange = (newValue: string | string[] | boolean) => {
           formValues.value = { ...formValues.value, [field.name]: newValue };
         };
@@ -60,6 +70,7 @@ export function AcroFormOverlay({ pageIndex, width, height }: AcroFormOverlayPro
           input = (
             <textarea
               className={styles.input}
+              aria-label={accessibleName}
               value={value as string}
               readOnly={field.isReadOnly || isCalculated}
               title={isCalculated ? calculatedErrors[field.name] : undefined}
@@ -74,6 +85,7 @@ export function AcroFormOverlay({ pageIndex, width, height }: AcroFormOverlayPro
             <input
               type="checkbox"
               className={styles.checkbox}
+              aria-label={accessibleName}
               checked={value as boolean}
               disabled={field.isReadOnly}
               onChange={e => onChange((e.target as HTMLInputElement).checked)}
@@ -95,13 +107,14 @@ export function AcroFormOverlay({ pageIndex, width, height }: AcroFormOverlayPro
               checked={value === optionValue}
               disabled={field.isReadOnly}
               onChange={() => onChange(optionValue)}
-              aria-label={optionValue || field.name}
+              aria-label={optionValue ? `${accessibleName}: ${optionValue}` : accessibleName}
             />
           );
         } else if (field.type === 'Dropdown' || field.type === 'OptionList') {
           input = (
             <select
               className={styles.select}
+              aria-label={accessibleName}
               // X-15 — typed instead of `as any`. A single-choice list takes its
               // one value here; a multi-select (`string[]`) marks each option
               // `selected` below, since a `<select>`'s `value` is one string.

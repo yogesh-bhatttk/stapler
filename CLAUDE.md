@@ -5,7 +5,7 @@ Everything runs client-side in one extension page. No server, no accounts, no up
 ## Read before non-trivial work
 
 - [docs/PLAN.md](docs/PLAN.md) — architecture, stack decisions, roadmap cut lines, NFRs
-- [docs/TICKETS.md](docs/TICKETS.md) — 72 tickets with acceptance criteria; work is tracked here
+- [docs/TICKETS.md](docs/TICKETS.md) — every ticket with its acceptance criteria; work is tracked here
 - [docs/DESIGN-ADAPTATION.md](docs/DESIGN-ADAPTATION.md) — tokens, layout, component specs
 - [DESIGN.md](DESIGN.md) — upstream `linear.app` design system. **Read-only. Never edit.**
 

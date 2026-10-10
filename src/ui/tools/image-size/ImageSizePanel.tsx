@@ -291,10 +291,12 @@ export function ImageSizePanel() {
             )}
           {shown.sourceFrames > 1 && (
             <p className={panelStyles.note}>
-              {/* Only shown for two or more frames, so no singular form is needed. */}
-              {t('This GIF is animated ({count} frames); only the first frame was used.', {
-                count: shown.sourceFrames
-              })}
+              {/* Two or more frames — but Russian and Arabic still have several
+                  forms above one, so this is a plural string (UI20). */}
+              {tPlural(
+                'This GIF is animated ({count} frames); only the first frame was used.',
+                shown.sourceFrames
+              )}
             </p>
           )}
           {shown.sourcePages > 1 && (

@@ -19,9 +19,11 @@ import { render } from 'preact';
 import { App } from './AppRoot';
 import { installErrorHooks } from './errorHooks';
 import { initTheme } from './theme';
-import { initLocale } from '../core/i18n';
+import { initLocale, setLocaleRoot } from '../core/i18n/load';
 import { toolRoute, type ToolId } from '../core/tools';
 import { startWebApp } from './pwa';
+import { keepInitialTitleFor } from './documentTitle';
+import { renderBootBlock } from './bootGuard';
 import './styles/tokens.css';
 import './styles/marketing.css';
 
@@ -59,6 +61,8 @@ export function mountLanding(toolId: ToolId, query?: string): void {
 
   const root = document.getElementById('app');
   if (!root) throw new Error('The #app mount point is missing from the landing page');
+  // This page's static <title> names its tool; keep it on that route (UI24).
+  keepInitialTitleFor(toolId);
 
   initTheme();
   installErrorHooks();
@@ -66,8 +70,14 @@ export function mountLanding(toolId: ToolId, query?: string): void {
   // non-English visitor's first paint is English/raw keys until the
   // dictionary (a bundled asset, not a network fetch) resolves and forces a
   // re-render.
+  // The hero above is static English; only the app follows the chosen
+  // language and direction (UI14).
+  setLocaleRoot(root);
   void (async () => {
     await initLocale();
+    // Landing pages are web-only: the same frame and browser-floor gate as the
+    // editor (bootGuard.tsx). The static hero above stays readable either way.
+    if (renderBootBlock(root, window)) return;
     render(<App />, root);
     startWebApp(); // GAP-2: offline service worker, "Open with", share target
   })();

@@ -42,6 +42,8 @@ import {
   activeDocId,
   activePageIndex,
   documents,
+  pageStateMatches,
+  releaseSourceIfUnused,
   selectedPageKeys,
   type Annotation as DocAnnotation,
   type PageRef,
@@ -196,8 +198,40 @@ function totalSnapshots(): number {
   return total;
 }
 
+/**
+ * AUDIT-2026-10-10 L1 — frees the sources only `dropped` snapshots could reach.
+ *
+ * A snapshot that falls off the end of a stack (the depth cap, the total cap,
+ * or a new edit clearing redo) can be the last holder of a source — typically
+ * the pre-redaction original, which then sat in OPFS and memory until the
+ * document closed. `releaseSourceIfUnused` keeps any source something else
+ * still reaches. Deferred a microtask: `commit()` snapshots *before* the
+ * mutation it records, so the caller's own edit lands first.
+ */
+function releaseDroppedSources(dropped: readonly DocSnapshot[]): void {
+  if (dropped.length === 0) return;
+  const ids = new Set<string>();
+  for (const state of dropped) {
+    for (const page of state.doc.pages) ids.add(page.sourceDocId);
+    for (const page of state.doc.baseline ?? []) ids.add(page.sourceDocId);
+  }
+  queueMicrotask(() => {
+    // `releaseSourceIfUnused` counts live *pages* and history *pages*; a live
+    // document's baseline (the export-review diff, "Discard all changes") or
+    // a remaining snapshot's baseline can still need the bytes — the same
+    // liveness `closeDocument`'s GC uses.
+    const reachable = historySourceIds();
+    for (const doc of documents.value) {
+      for (const page of doc.baseline ?? []) reachable.add(page.sourceDocId);
+    }
+    for (const id of ids) {
+      if (!reachable.has(id)) releaseSourceIfUnused(id);
+    }
+  });
+}
+
 /** Drops the oldest undo step of another document until the total cap holds. */
-function enforceTotalCap(exceptDocId: string): void {
+function enforceTotalCap(exceptDocId: string, dropped: DocSnapshot[] = []): void {
   while (totalSnapshots() > MAX_TOTAL_SNAPSHOTS) {
     let oldest: DocHistory | null = null;
     for (const [id, history] of histories) {
@@ -205,7 +239,8 @@ function enforceTotalCap(exceptDocId: string): void {
       if (!oldest || history.undoLog[0].timestamp < oldest.undoLog[0].timestamp) oldest = history;
     }
     if (oldest) {
-      oldest.undoStack.shift();
+      const gone = oldest.undoStack.shift();
+      if (gone) dropped.push(gone);
       oldest.undoLog.shift();
       continue;
     }
@@ -218,7 +253,8 @@ function enforceTotalCap(exceptDocId: string): void {
       if (!deepest || history.redoStack.length > deepest.redoStack.length) deepest = history;
     }
     if (!deepest) return;
-    deepest.redoStack.shift();
+    const gone = deepest.redoStack.shift();
+    if (gone) dropped.push(gone);
     deepest.redoLog.shift();
   }
 }
@@ -229,14 +265,18 @@ function push(docId: string, label?: string): boolean {
   const history = historyFor(docId);
   history.undoStack.push(snapshotOf(doc));
   history.undoLog.push({ label: label ?? currentOperationLabel(), timestamp: Date.now() });
+  const dropped: DocSnapshot[] = [];
   if (history.undoStack.length > MAX_DEPTH) {
-    history.undoStack.shift();
+    const gone = history.undoStack.shift();
+    if (gone) dropped.push(gone);
     history.undoLog.shift();
   }
+  dropped.push(...history.redoStack);
   history.redoStack = [];
   history.redoLog = [];
-  enforceTotalCap(docId);
+  enforceTotalCap(docId, dropped);
   historyVersion.value++;
+  releaseDroppedSources(dropped);
   return true;
 }
 
@@ -269,8 +309,9 @@ function sameAnnotations(a: readonly DocAnnotation[], b: readonly DocAnnotation[
  *  • `baseline`/`baselineAnnotations` — every snapshot of this document is
  *    re-anchored to the saved state by {@link rebaseHistory} whenever a save
  *    lands (`refreshBaseline`), so the snapshot's own anchor *is* the live
- *    one after a save. It still differs when the step being undone moved the
- *    baseline itself (`replaceWithSource`), and undoing that must move it back.
+ *    one after a save. It can still differ in a snapshot recorded before
+ *    an older build moved the baseline outside a save, and restoring it then
+ *    restores that baseline too.
  *  • `sourceHandle` — always the live document's.
  *  • `dirty` — recomputed: the restored pages or annotations differ from what
  *    was last saved. It used to be copied from the snapshot, so rotate → Save
@@ -285,9 +326,15 @@ function restoredDoc(current: StaplerDoc, state: DocSnapshot): StaplerDoc {
   // an older build that had been saved with annotations errs towards dirty —
   // an extra prompt, never a lost edit.
   const savedAnnotations = doc.baselineAnnotations ?? [];
+  // AUDIT-2026-10-10 H2 — crop boxes and Annotate marks are edits too. Their
+  // saved anchor is the live document's (a save re-anchors it; nothing else
+  // moves it), compared with the per-page state this snapshot restores.
+  const baselinePageState = current.baselinePageState;
   const dirty =
-    !samePages(doc.pages, baseline) || !sameAnnotations(doc.annotations, savedAnnotations);
-  return { ...doc, baseline, sourceHandle: current.sourceHandle, dirty };
+    !samePages(doc.pages, baseline) ||
+    !sameAnnotations(doc.annotations, savedAnnotations) ||
+    !pageStateMatches(doc.pages, state.cropBoxes, state.pageAnnotations, baselinePageState);
+  return { ...doc, baseline, baselinePageState, sourceHandle: current.sourceHandle, dirty };
 }
 
 function restore(docId: string, state: DocSnapshot): void {

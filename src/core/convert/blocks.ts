@@ -24,7 +24,7 @@
  *    where an image block goes and how big to draw it.
  */
 
-import { layoutLines, type TextRun } from '../text-layout';
+import { layoutLines, runGap, runTypeSize, type TextRun } from '../text-layout';
 import { findTableRegions } from './table-regions';
 import { tPlural, translate } from '../i18n';
 // Type-only: `process.worker.ts` calls `Comlink.expose` at import time, so this
@@ -133,8 +133,8 @@ export function lineRuns(runs: readonly FormattedRun[]): DocxRun[] {
     // text export never disagree about word boundaries.
     let separator = '';
     if (previous) {
-      const gap = run.transform[4] - (previous.transform[4] + previous.width);
-      if (gap > Math.abs(run.transform[3]) * 0.25) separator = ' ';
+      // Direction-agnostic: a right-to-left line arrives right to left (CV5).
+      if (runGap(previous, run) > runTypeSize(run) * 0.25) separator = ' ';
     }
 
     if (last && last.bold === bold && last.italic === italic) {

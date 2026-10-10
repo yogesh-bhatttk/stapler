@@ -12,12 +12,14 @@ import { activeDoc } from '../../../core/store';
 import { platform } from '../../../platform/current';
 import { Button } from '../../components/Button';
 import { panelStyles } from '../../shell/panelStyles';
-import { translate, useTranslation } from '../../../core/i18n';
+import { currentLocale, translate, useTranslation } from '../../../core/i18n';
 import { withErrorToast } from '../../asyncHandler';
 
 function formatEntry(entry: { label: string; timestamp: number }): string {
   // `label` is a tool title stored as its English key (`tKey`), translated here.
-  return `${new Date(entry.timestamp).toLocaleString()}  —  ${translate(entry.label)}`;
+  // The app's locale, not the browser's: a German UI on an English browser
+  // used to print English dates (AUDIT-2026-10-10 UI21).
+  return `${new Date(entry.timestamp).toLocaleString(currentLocale.value)}  —  ${translate(entry.label)}`;
 }
 
 export function HistoryPanel() {
@@ -60,7 +62,7 @@ export function HistoryPanel() {
             {log.map((entry, i) => (
               <li key={i} className={panelStyles.listRow}>
                 <span className={panelStyles.listRowText}>{t(entry.label)}</span>
-                <span>{new Date(entry.timestamp).toLocaleTimeString()}</span>
+                <span>{new Date(entry.timestamp).toLocaleTimeString(currentLocale.value)}</span>
               </li>
             ))}
           </ol>

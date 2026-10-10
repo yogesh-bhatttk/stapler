@@ -23,12 +23,14 @@ vi.mock('comlink', () => ({
   proxy: vi.fn(value => value)
 }));
 const lease = vi.fn();
+/** When set, the worker the pool hands out instead of the real implementation. */
+const workerStandIn: { current: unknown } = { current: null };
 vi.mock('../../src/core/workers', async () => {
   const { processWorkerImpl } = await import('../../src/core/workers/process.worker');
   // `any`: stands in for the pool's `Comlink.Remote<T>` wrapper.
   const run = (fn: (api: any) => unknown) => {
     lease();
-    return fn(processWorkerImpl);
+    return fn(workerStandIn.current ?? processWorkerImpl);
   };
   return { processWorker: { lease: run, pin: () => ({ lease: run, release: () => {} }) } };
 });
@@ -118,19 +120,38 @@ describe('annotation summary export as a job (HRD-24 §12.11)', () => {
     expect(lease).toHaveBeenCalledTimes(1);
     expect((await PDFDocument.load(bytes)).getPageCount()).toBe(1);
 
-    // The main-thread module carries no PDF building of its own.
-    const main = readFileSync(
-      new URL('../../src/core/annotation-summary.ts', import.meta.url),
-      'utf8'
-    );
-    expect(main).not.toMatch(/from 'pdf-lib'/);
-    const worker = readFileSync(
-      new URL('../../src/core/workers/process.worker.ts', import.meta.url),
-      'utf8'
-    );
-    expect(worker).toMatch(/\.\.\.annotationSummaryApi/);
+    // Behavioural, not a source grep: with the worker replaced by a stand-in,
+    // what the main thread returns is exactly — byte for byte, same object —
+    // what the worker produced, and the worker received the notes and a job.
+    // Had any layout or PDF building stayed on the main thread, the result
+    // would be a PDF instead of these four marker bytes.
+    const marker = new Uint8Array([1, 2, 3, 4]);
+    const buildAnnotationSummary = vi.fn(async () => marker);
+    workerStandIn.current = { buildAnnotationSummary };
+    try {
+      const out = await exportAnnotationSummary(doc, notes.slice(0, 3));
+      expect(out).toBe(marker);
+      expect(buildAnnotationSummary).toHaveBeenCalledTimes(1);
+      const [input, plain, job] = buildAnnotationSummary.mock.calls[0] as unknown as [
+        { name?: string },
+        { text?: string }[],
+        unknown
+      ];
+      expect(input.name).toBe('contract.pdf');
+      expect(plain.map(n => n.text)).toEqual(notes.slice(0, 3).map(n => n.text));
+      expect(job).toBeTruthy();
+    } finally {
+      workerStandIn.current = null;
+    }
   });
 
+  /**
+   * Still a source check: grading `useJob` behaviourally needs the panel
+   * rendered, and this suite has no DOM. The end-to-end behaviour — the button
+   * really exports a summary PDF carrying the notes — is covered by
+   * `tests/e2e/audit-2026-10-10-tools.spec.ts` ("annotate: Export annotation
+   * summary …").
+   */
   it('AnnotatePanel runs it through useJob, passing the job on', () => {
     const source = readFileSync(
       new URL('../../src/ui/tools/annotate/AnnotatePanel.tsx', import.meta.url),

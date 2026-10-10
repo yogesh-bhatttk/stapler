@@ -10,11 +10,17 @@ export interface OcrSettings {
    * cheap one.
    */
   selectedPagesOnly: boolean;
+  /**
+   * CV9 — also OCR pages that already draw real text. Off by default: their
+   * text would be added a second time, and search and copy would return it twice.
+   */
+  includePagesWithText: boolean;
 }
 
 export const ocrSettings = signal<OcrSettings>({
   lang: DEFAULT_OCR_LANGUAGE,
-  selectedPagesOnly: false
+  selectedPagesOnly: false,
+  includePagesWithText: false
 });
 
 /**
@@ -28,4 +34,6 @@ export const ocrReport = signal<{
   pagesReplaced: number;
   /** §2.3 — pages recognition could not run on at all (see `runOcr`'s per-page try/catch). */
   pagesSkipped: number;
+  /** CV9 — pages left out because they already had real text. */
+  pagesWithText: number;
 } | null>(null);

@@ -98,20 +98,26 @@ export function ShortcutsPanel() {
           {t('Click a shortcut row to record a new key combination.')}
         </p>
 
-        {conflictMsg && (
-          <div
-            style={{
-              padding: '8px 12px',
-              marginBottom: '12px',
-              borderRadius: 'var(--radius-sm)',
-              background: 'var(--danger-bg)',
-              color: 'var(--danger)',
-              fontSize: '0.85em'
-            }}
-          >
-            {conflictMsg}
-          </div>
-        )}
+        {/* Always mounted, so the live region exists before its text arrives
+            and a screen reader announces the conflict (AUDIT-2026-10-10 UI18). */}
+        <div
+          role="alert"
+          aria-atomic="true"
+          style={
+            conflictMsg
+              ? {
+                  padding: '8px 12px',
+                  marginBottom: '12px',
+                  borderRadius: 'var(--radius-sm)',
+                  background: 'var(--danger-bg)',
+                  color: 'var(--danger)',
+                  fontSize: '0.85em'
+                }
+              : undefined
+          }
+        >
+          {conflictMsg}
+        </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
           {SHORTCUT_DEFINITIONS.map(def => {

@@ -27,8 +27,9 @@
  * `encrypt.ts`'s `permissionOnlyPlan`.
  */
 import { PDFDict, PDFDocument, PDFName, PDFNumber, PDFRef } from 'pdf-lib';
-import { corrupt, encrypted } from '../errors';
+import { StaplerError, corrupt, encrypted } from '../errors';
 import { translate } from '../i18n';
+import { tKey } from '../i18n/key';
 
 /**
  * The `/P` bits (Table 22) that actually deny a user something, as a mask.
@@ -174,6 +175,45 @@ async function opensWithEmptyPassword(bytes: Uint8Array): Promise<boolean> {
  */
 const LOAD_OPTIONS = { updateMetadata: false, preserveXFA: true } as const;
 
+/**
+ * Audit 2026-10-10 F2 — what pdf-lib will happily "load".
+ *
+ * A file cut off before its trailer (or whose trailer names no `/Root`) still
+ * parses: pdf-lib collects whatever objects it finds and hands back a document
+ * whose `catalog` is `undefined`. Nothing fails until the first operation
+ * touches the page tree, and then it fails as a bare `TypeError` ("reading
+ * 'Pages'") deep inside whichever tool the user picked — compress, grayscale,
+ * protect, metadata — with no hint at what is wrong or what to do.
+ *
+ * Checked here, once, so every load refuses the same way: a typed
+ * `CorruptDocument` that points at Repair, which rebuilds the structure from
+ * the objects the file still contains. Walking the page tree is cheap (no
+ * content is parsed) and pdf-lib caches the result for the caller.
+ */
+export const BROKEN_PAGE_TREE_MESSAGE = tKey(
+  'This PDF has no readable page tree — its catalog or page list is missing or damaged, often because the file was cut off. Nothing was changed. Try Repair, which rebuilds the structure from what the file still contains.'
+);
+
+export function assertReadablePageTree(doc: PDFDocument): void {
+  let reason: string;
+  try {
+    // `catalog` is typed as always present, but it is `context.lookup(Root)`,
+    // which is `undefined` when the trailer has no usable `/Root`.
+    const catalog: unknown = doc.catalog;
+    if (!(catalog instanceof PDFDict)) {
+      reason = 'missing-catalog';
+    } else if (!(catalog.lookup(PDFName.of('Pages')) instanceof PDFDict)) {
+      reason = 'missing-pages';
+    } else {
+      doc.getPageCount();
+      return;
+    }
+  } catch {
+    reason = 'unreadable-page-tree';
+  }
+  throw corrupt(translate(BROKEN_PAGE_TREE_MESSAGE), { reason });
+}
+
 async function loadInternal(
   bytes: Uint8Array,
   allowEncrypted: boolean,
@@ -192,11 +232,13 @@ async function loadInternal(
         const decrypted = await PDFDocument.load(bytes, { password: '', ...LOAD_OPTIONS });
         // The empty password opened it, so this is a permission-only file and
         // its `/P` is exactly what an export of it must carry back.
+        assertReadablePageTree(decrypted);
         const probe = wantRestrictions
           ? await restrictionsInBytes(bytes)
           : { flags: null, unknown: false };
         return { doc: decrypted, restrictions: probe.flags, restrictionsUnknown: probe.unknown };
-      } catch {
+      } catch (retryErr) {
+        if (retryErr instanceof StaplerError) throw retryErr;
         // The empty password didn't open it either — a real password is required.
         throw encrypted(
           translate('The document is encrypted, so its contents cannot be rewritten.')
@@ -205,6 +247,7 @@ async function loadInternal(
     }
     throw corrupt(translate('The PDF could not be parsed: {message}', { message }));
   }
+  assertReadablePageTree(doc);
   if (doc.isEncrypted && !allowEncrypted) {
     throw encrypted(translate('The document is encrypted, so its contents cannot be rewritten.'));
   }

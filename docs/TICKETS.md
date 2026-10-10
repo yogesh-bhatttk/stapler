@@ -1040,7 +1040,7 @@ worker heaps measured (HRD-08, HRD-12).
 
 ### NFR-03 · Memory safety on large documents — `M` `P0`
 
-**Status: Partly done (2026-10-05)** — Worker heaps are measured now. `tests/e2e/perf.spec.ts` › "NFR-03: processes heavy documents within memory limits" opens three large files in sequence (heavy, 300-page, heavy again), and `tests/e2e/worker-heap.ts` reads every realm over CDP (`Runtime.getHeapUsage`, no COOP/COEP needed); the test asserts 200 MB per realm (main and each worker) and 1.5 GB across all realms including buffers (AUDIT-FINDINGS §2.5, HRD-12). CNV-02's 300 DPI export is held to the same ceilings. Measured 2026-10-05: main heap about 10 MB, largest worker heap about 10.6 MB, all realms about 107 MB. **Open:** the AC's heap snapshot is not taken, so retention is bounded only by the ceilings; a bitmap leak smaller than the headroom would pass.
+**Status: Done (2026-10-10, HRD-72)** — The AC is now measured as written. `tests/e2e/perf.spec.ts` › "NFR-03: every P0 operation on a ~100 MB document stays within memory limits" runs merge, rotate/delete + export, split and compress on a generated 101 MB fixture (`ensureLargePdf`, 20 distinct ~5 MB images) under `HeapProbe`, and "…after three large files, the main heap retains no bitmaps, canvases or file buffers" takes a CDP heap snapshot after a forced GC and counts ImageBitmap/OffscreenCanvas/detached canvases and ArrayBuffer bytes, self-checked with known probes. The first measurement failed the 1.5 GiB ceiling (1,687 MB peak, 9 workers): idle workers kept each large job's garbage, because V8 does not collect a realm that stopped allocating, and the Compress panel ran its analysis and preview composes twice in parallel. Fixed by retiring a pool worker once a call moved ≥ 32 MB and its last lease ends (`client.ts` `retireAfterBytes`; render, process, convert, zip pools) and sharing in-flight analysis runs (`src/core/shared-job.ts`). Measured 2026-10-10: peak 840–875 MB, at most 5 workers, main heap 13 MB. Limit: the heap snapshot sees the JS objects that keep bitmaps alive, not their GPU/Skia pixel memory, and covers the main realm only (workers are covered by the sampled peaks).
 
 - **AC:** 300-page and 100MB fixtures complete every P0 operation within the memory ceiling.
   A heap snapshot after processing three large files in sequence shows no bitmap retention.
@@ -8113,6 +8113,148 @@ A review of the round that closed EPIC-19's open items.
 - **AC:** The named tests pass repeatedly.
 
 ---
+
+### HRD-72 · End-to-end audit fixes (AUDIT-2026-10-10) — `XL` `P0`
+
+**Status: Done (2026-10-10)** — every finding fixed with a test, except the deliberate
+decisions and limits listed under **Open** below.
+
+A six-area end-to-end audit (security and invariants, PDF internals, state and
+persistence, UI/accessibility/i18n, conversion/OCR/images, tests/release/docs) found about
+95 issues the earlier audits had not. Regression tests live in
+`tests/unit/audit-2026-10-10-*.test.ts`, `tests/e2e/audit-2026-10-10-*.spec.ts` and
+`tests/e2e/extension/audit-2026-10-10-extension.spec.ts`.
+
+- **Requirements (crash and data-safety):**
+  - **Content-stream tokenizer** — a stray `)`, `{` or `}` (common in inline-image data)
+    no longer loops forever; inline-image data is skipped to its `EI`. Tests:
+    `audit-2026-10-10-tokenizer.test.ts` (fuzz + `scanResidualText` end to end).
+  - **TIFF** — a self-referencing IFD chain (26 bytes) no longer OOMs the tab; IFD chains,
+    field counts and offsets are validated, and a per-frame decode budget applies.
+    Tests: `audit-2026-10-10-raster.test.ts`.
+  - **Session restore** — the restore prompt cannot be dismissed by Escape, the X or the
+    scrim, and focus starts on Restore. Tests: `audit-2026-10-10-ui*.test.ts`,
+    `audit-2026-10-10-ui.spec.ts` › "UI2".
+  - **Unsaved work** — crop boxes and Annotate marks mark the document dirty; undo back
+    to the saved state clears it; a content rewrite (redact, face blur, cleanup) no longer
+    moves the save baseline. Tests: `audit-2026-10-10-docstate.test.ts`.
+  - **Insert** — inserting an image no longer hangs (the options dialog is rendered);
+    Merge and Insert honour Cancel and the import gates. Tests:
+    `audit-2026-10-10-merge-insert.test.ts`, `audit-2026-10-10-insert.spec.ts`.
+- **Requirements (privacy and redaction):**
+  - **Marks follow their page** — redaction marks and suggestions are keyed by page;
+    delete/move/reorder/undo re-index them, deleted or re-rotated pages withdraw them out
+    loud, and apply refuses if the pages changed mid-job. Tests:
+    `audit-2026-10-10-docstate.test.ts` › "H1".
+  - **Rotated text** — find-and-mark and the verifier build run boxes from the full text
+    matrix. **Shadings** (`sh`) under a mark are removed. **Popups/replies** of a removed
+    annotation go with it. Tests: `audit-2026-10-10-redaction-geometry.test.ts`.
+  - **Protect** — with Owner password empty and any permission withheld, a random owner
+    password is used, so the restrictions bind. Tests:
+    `audit-2026-10-10-protect-owner.test.ts`.
+  - **Flatten** — Stapler's own widget flatten: Hidden/NoView fields are dropped undrawn,
+    widgets are placed with the Matrix/BBox→Rect fit, and a value that cannot be drawn
+    refuses the whole operation. Tests: `audit-2026-10-10-pdf-structure.test.ts`.
+  - **OCR model cache** — re-hashed on every use, in a Stapler-specific IndexedDB
+    database; the download sends no credentials or referrer and refuses redirects.
+    **Diagnostics** no longer carry file names or paths. Tests: `ocr.test.ts`,
+    `audit-2026-10-10-diagnostic-names.test.ts`.
+  - **Worker network guard** — checks and forwards the same normalised URL; XHR prototype,
+    nested `Worker`, `Cache.add/addAll` and `FontFace` sources are guarded. **Bundle scan**
+    treats network-call arguments as sinks, scans `.webmanifest`/`.txt`, and catches
+    `//host` URLs. Tests: `audit-2026-10-10-network-guard.test.ts`,
+    `audit-2026-10-10-bundle-scan.test.ts`.
+  - **Web twin** refuses to render inside a frame and shows an "update your browser"
+    message when pdf.js's required built-ins are missing.
+- **Requirements (document fidelity):**
+  - **Merge** renames same-named form fields from different files instead of fusing them,
+    and says so. **Attachments, portfolios, layers and named destinations** survive page
+    edits and merges; anything still dropped is disclosed. **Info, XMP, PageMode,
+    PageLayout** survive compose and compress. **Normalize** scales from the visible box,
+    keeps cropped content hidden, and moves annotations with the content. Tests:
+    `audit-2026-10-10-pdf-structure.test.ts`, `audit-2026-10-10-notices-*.test.ts`.
+  - **One export input** — every PDF export bakes the same edits (crop, watermark,
+    header/footer, marks, outline, Bates, barcode); watermarks are no longer doubled after
+    redact/face blur/font embed; derived exports (N-up, split, images) never offer
+    "Save over original" or mark the document clean. Tests: `audit-2026-10-10-docstate.test.ts`.
+  - **Extraction** — PNG/TIFF predictors are undone; a non-identity `/Decode` on DCT/JPX
+    is refused; raw J2K codestreams are saved as `.j2k`. **Text layout** handles rotated
+    text on `/Rotate` pages and right-to-left run order. **PPT→PDF** applies picture crops.
+    **OCR** text lands correctly when the CropBox exceeds the MediaBox, pages that already
+    have text are skipped by default, and one engine serves a whole run. **Markdown→PDF**
+    keeps code indentation and breaks overlong words. Tests:
+    `audit-2026-10-10-predictor.test.ts`, `-text-layout`, `-pptx-crop`, `-ocr*`, `-md*`.
+  - **Compress routing (CMP-01)** judged over-sampling as if every image filled its page,
+    so an image drawn smaller than the page read as "already at the target resolution",
+    and raw (unfiltered) samples were never re-encoded. Over-sampling is now judged at
+    each image's largest drawn size, raw samples get a lossless Flate path (kept only when
+    smaller), and the estimate counts both. Found by the NFR-03 100 MB e2e, whose compress
+    step reported "already optimized" on 100 MB of raw pixels. Tests:
+    `audit-2026-10-10-compress-routing.test.ts`.
+  - **Test harness** — the Node canvas shim (and six per-file copies) passed the web API's
+    0–1 JPEG quality to `@napi-rs/canvas`, which takes 0–100, so every unit-test JPEG was
+    encoded at the lowest quality; JPEG fixtures built the same way were degraded too.
+    Fixed, and `ops19-compress-gray.test.ts`'s scan fixture re-based on a quality-70 source
+    so its premises still hold.
+  - **NFR-03 memory** — the new 100 MB test measured a 1,687 MB peak against the 1.5 GiB
+    ceiling: idle workers kept each large job's garbage and Compress ran its analysis twice.
+    Pool workers are now retired after a ≥ 32 MB call once released, and in-flight analysis
+    is shared; the peak is 840–875 MB. Tests: `audit-2026-10-10-worker-retire.test.ts`,
+    `audit-2026-10-10-shared-job.test.ts`, `perf.spec.ts` › "NFR-03: every P0 operation…".
+  - **Remove blank pages** no longer flags a page holding one short line of text at the
+    default sensitivity. **Corrupt input** — a missing catalog or page tree is refused
+    as a typed `CorruptDocument` pointing at Repair, in 17 process-worker entry points.
+    Tests: `audit-2026-10-10-blank-*.test.ts`, `audit-2026-10-10-corrupt-load.test.ts`.
+- **Requirements (jobs, storage, files):**
+  - Closing a panel keeps the job lock until the task settles; content rewrites check the
+    signal before mutating. The save/folder pickers and permission prompts ask for a fresh
+    click when the user activation has expired. ZIP build/open runs in a new `zip.worker`;
+    a cancelled batch writes nothing. Directory output never overwrites (" (n)"), file
+    names handle Windows reserved names and length, Recents dedupe and cap at 50, failed
+    OPFS writes leave no empty file, `.crswap` files are cleared, trimmed undo history
+    frees its sources, a closed source's render handle is not cached, and the Clear-all
+    warning survives the reload. Tests: `audit-2026-10-10-{activation-job,zip,files,clear,render-history}.test.ts`.
+- **Requirements (UI, accessibility, i18n):** view-only tools show no Done button; Split's
+  number fields keep what is typed; HEIC drags are accepted; keyboard focus rings on the
+  drop zone; accessible names on form-fill controls and table cells; the page grid keeps a
+  Tab stop; paste is ignored behind dialogs; the command palette traps Tab; landing pages
+  scope `lang`/`dir` to the app; one shared watermark preview URL; announced unsaved state
+  on file tabs; field hints linked with `aria-describedby`; platform- and remap-aware
+  shortcut hints; plural forms for every count string; locale-aware sizes, dates and
+  lists; RTL-mirrored direction icons; pagers keep focus at the ends; translated per-tool
+  page titles; a way back to the system theme; native language names; 62+ unused keys
+  removed (guarded by `audit-2026-10-10-i18n-unused.test.ts`).
+- **Requirements (release and docs):** CI and release actions pinned by commit SHA with
+  `permissions: contents: read`; exact Node (`.nvmrc`) and pnpm versions; Firefox built and
+  checked in CI by the shared `scripts/manifest-invariants.mjs`; a release dry-run
+  workflow; addons-linter in the release job; `BUILD_INFO.txt` beside the release zips;
+  `package.mjs` refuses an instrumented `dist/web`. The privacy policy and store listing
+  disclose the consented OCR download and what is stored locally, state the real per-tool
+  caps instead of "no limits", and no longer claim unverified RTL/keyboard coverage. The
+  Noto Sans Devanagari OFL and an LGPL notice for libheif ship in the licence file.
+  Unused dev dependencies are removed, `npm-run-all` → `npm-run-all2`, and `pnpm audit`
+  is clean (one documented ignore: sprintf-js has no patched release). Each locale is
+  emitted once (workers receive dictionaries from the page) and the never-loaded
+  `tesseract-core-simd-lstm.wasm` is no longer shipped: `dist/ext` 29.7 MB → 22.9 MB.
+- **Requirements (tests added):** Insert, Reflow, Side-by-side and annotation-summary e2e
+  flows; extension e2e for barcode, OCR, Word↔PDF, Markdown→PDF and Compare under the CSP
+  and network recorders; the OCR e2e served from a local SHA-verified model with a host
+  assertion; a zero-network sweep that runs operations, records CSP violations and loads
+  every landing page; a 300-page split; a 20-undo/20-redo round trip over 7 operation
+  types; a compress never-larger sweep over every fixture × preset; fixed sleeps replaced
+  by positive signals; a 100 MB fixture and a heap-snapshot test for NFR-03 (now Done).
+- **Open (deliberate):**
+  - The Chrome 147 / Firefox 144 floor is unchanged. It comes only from pdf.js 6's modern
+    build; lowering it means switching to `pdfjs-dist/legacy` and testing on the older
+    browsers, which could not be done here. `scripts/browser-floors.mjs` now says so.
+  - `style-src 'unsafe-inline'` stays until a browser check confirms nothing but
+    `privacy.html` needs it (`scripts/csp.mjs`).
+  - Word→PDF still shows cropped pictures uncropped (mammoth drops the crop); the
+    conversion says so.
+  - The web twin should be deployed on a dedicated origin (a shared GitHub Pages user-site
+    origin shares storage with every project on it).
+- **AC:** The named tests pass; `pnpm check`, `pnpm test`, `pnpm test:e2e`,
+  `pnpm check:bundle-network` and `pnpm validate:builds` are green.
 
 ## Critical path to v1.0
 

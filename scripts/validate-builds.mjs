@@ -6,11 +6,17 @@
  * structurally correct after a build. Run after `pnpm build:ext` and
  * `pnpm build:ext:firefox`.
  *
+ * Both manifests are also held to the zero-permission / CSP invariant
+ * (`manifest-invariants.mjs`, audit 2026-10-10): no permissions of any kind,
+ * no content scripts, web-accessible resources or `externally_connectable`,
+ * and a CSP inside the `scripts/csp.mjs` allowlist.
+ *
  * Exit 0 = all checks pass. Exit 1 = at least one failure.
  */
 
 import { readFileSync, existsSync, readdirSync } from 'fs';
 import { resolve, join } from 'path';
+import { manifestFindings } from './manifest-invariants.mjs';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const EXT_DIR = join(ROOT, 'dist', 'ext');
@@ -35,6 +41,16 @@ function loadJson(path) {
   }
 }
 
+/** One ✅/❌ line for the whole zero-permission invariant, plus each problem. */
+function checkInvariants(manifest, label) {
+  const problems = manifest ? manifestFindings(manifest, label) : [`${label} — unreadable`];
+  check(
+    `${label}: zero permissions, no page-reachable surface, CSP within the allowlist`,
+    problems.length === 0
+  );
+  for (const problem of problems) console.log(`     ${problem}`);
+}
+
 function hasEditorHtml(dir) {
   const files = existsSync(dir) ? readdirSync(dir) : [];
   return files.some(f => f === 'editor.html' || f.startsWith('editor-'));
@@ -53,10 +69,7 @@ check(
 check('dist/ext manifest.manifest_version is 3 (MV3)', extManifest?.manifest_version === 3);
 check('dist/ext/background.js exists', existsSync(join(EXT_DIR, 'background.js')));
 check('dist/ext contains editor.html or editor-*.html', hasEditorHtml(EXT_DIR));
-check(
-  'dist/ext manifest has no unexpected host_permissions',
-  !extManifest?.host_permissions || extManifest.host_permissions.length === 0
-);
+checkInvariants(extManifest, 'dist/ext/manifest.json');
 
 // ── Firefox build ────────────────────────────────────────────────────────────
 console.log('\n🔍 Checking dist/firefox (Firefox build)...');
@@ -83,6 +96,7 @@ check(
   !ffManifest?.background?.service_worker
 );
 check('dist/firefox contains editor.html or editor-*.html', hasEditorHtml(FF_DIR));
+checkInvariants(ffManifest, 'dist/firefox/manifest.json');
 
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log('');

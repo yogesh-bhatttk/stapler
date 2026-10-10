@@ -63,7 +63,9 @@ export function ProtectSection() {
           </Field>
           <Field
             label={t('Owner password (optional)')}
-            hint={t('Grants full rights. Leave empty to reuse the password above.')}
+            hint={t(
+              'Grants full rights. If you leave it empty and untick any permission below, Stapler uses a random owner password it does not keep, so those restrictions apply to everyone, you included. With every permission allowed, the password above is reused.'
+            )}
           >
             {id => (
               <TextInput

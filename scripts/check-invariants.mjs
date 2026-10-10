@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { cspFindings } from './csp.mjs';
+import { manifestFindings } from './manifest-invariants.mjs';
 import { analyzeNetwork } from './network-guard.mjs';
 import { LANDING_PAGES } from '../src/landing/pages.ts';
 import { renderLandingPage } from '../src/landing/template.ts';
@@ -154,34 +154,23 @@ for (const file of files) {
 
 try {
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-  for (const key of ['permissions', 'host_permissions', 'optional_permissions']) {
-    if (Array.isArray(manifest[key]) && manifest[key].length > 0) {
-      findings.push(
-        `public/manifest.json — "${key}" is non-empty (${manifest[key].join(', ')}). v1.0 ships ` +
-          `with zero permissions so Chrome shows no install warning. See PLAN §5.4 item 3.`
-      );
-    }
-  }
-  if (manifest.content_scripts) {
-    findings.push(
-      'public/manifest.json — content_scripts declared; the architecture has none (PLAN §2.1)'
-    );
-  }
-  const csp = manifest.content_security_policy?.extension_pages;
-  if (typeof csp === 'string') {
-    for (const msg of cspFindings(csp)) findings.push(`public/manifest.json — ${msg}`);
-  }
+  findings.push(...manifestFindings(manifest, 'public/manifest.json'));
 } catch {
   findings.push('public/manifest.json — invalid JSON');
 }
 
-const firefoxManifestPath = path.join(root, 'dist', 'firefox', 'manifest.json');
-if (statSync(firefoxManifestPath, { throwIfNoEntry: false })) {
+// Audit 2026-10-10: the *built* manifests get the same check whenever they
+// exist (CI builds dist/firefox before running this, see ci.yml). The Firefox
+// one is written by a transform (`scripts/firefox-manifest.mjs`), so checking
+// only the source manifest would miss a transform that adds a key.
+for (const target of ['ext', 'firefox']) {
+  const builtPath = path.join(root, 'dist', target, 'manifest.json');
+  if (!statSync(builtPath, { throwIfNoEntry: false })) continue;
   try {
-    JSON.parse(readFileSync(firefoxManifestPath, 'utf8'));
+    const built = JSON.parse(readFileSync(builtPath, 'utf8'));
+    findings.push(...manifestFindings(built, `dist/${target}/manifest.json`));
   } catch {
-    console.error('❌ dist/firefox/manifest.json is not valid JSON.');
-    process.exit(1);
+    findings.push(`dist/${target}/manifest.json — invalid JSON`);
   }
 }
 

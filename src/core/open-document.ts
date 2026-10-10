@@ -76,9 +76,16 @@ export function notifyDocumentCeiling(openCount: number): void {
  * (with a message saying to close tabs) an open that would pass the document
  * ceiling, and asks first when it would take the workspace past the
  * memory-aware soft limit. Nothing is imported unless this returns true.
+ *
+ * `incoming` overrides how many documents the open adds: Merge and Insert
+ * (AUDIT-2026-10-10 M7) put pages into an open document, so their files count
+ * toward the memory limit but add no document (or one, for Merge with nothing
+ * open).
  */
-export async function ensureRoomToOpen(files: readonly File[]): Promise<boolean> {
-  const incoming = expectedDocumentCount(files);
+export async function ensureRoomToOpen(
+  files: readonly File[],
+  incoming: number = expectedDocumentCount(files)
+): Promise<boolean> {
   const bytes = files.reduce((sum, file) => sum + file.size, 0);
   const capacity = workspaceOpenCapacity(incoming, bytes);
   if (!capacity.ok) {

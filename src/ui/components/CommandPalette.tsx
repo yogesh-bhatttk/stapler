@@ -10,13 +10,20 @@ import { translate } from '../../core/i18n';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { forwardRef } from 'preact/compat';
 import { useLocation } from 'wouter-preact';
-import { Home, Moon, Search, Sun } from 'lucide-preact';
+import { Home, Monitor, Moon, Search, Sun } from 'lucide-preact';
 import { TOOLS, toolGroupLabel, toolRoute } from '../../core/tools';
 import { isCommandPaletteOpen, isShortcutSheetOpen } from '../../core/ui';
 import { activeDoc, selectAllPages } from '../../core/store';
 import { canRedo, canUndo, redo, undo } from '../../core/history';
-import { resolvedTheme, toggleTheme } from '../theme';
+import { resolvedTheme, setTheme, themePreference, toggleTheme } from '../theme';
 import { fuzzyRank } from '../../core/fuzzy';
+import {
+  customShortcuts,
+  eventMatchesShortcut,
+  getEffectiveBinding,
+  shortcutLabel
+} from '../../core/shortcuts';
+import { registerModal } from './Modal';
 import { toolIconComponent } from './ToolIcon';
 import styles from './CommandPalette.module.css';
 import { useTranslation } from '../../core/i18n';
@@ -67,7 +74,7 @@ export const CommandPalette = forwardRef<HTMLDivElement, Record<string, never>>(
           id: 'select-all',
           title: t('Select all pages'),
           group: t('Document'),
-          hint: '⌘A',
+          hint: shortcutLabel('selectAll'),
           hintIsShortcut: true,
           icon: toolIconComponent('LayoutGrid'),
           enabled: () => activeDoc.value !== null,
@@ -80,7 +87,7 @@ export const CommandPalette = forwardRef<HTMLDivElement, Record<string, never>>(
           id: 'undo',
           title: t('Undo'),
           group: t('Document'),
-          hint: '⌘Z',
+          hint: shortcutLabel('undo'),
           hintIsShortcut: true,
           icon: toolIconComponent('Eraser'),
           enabled: canUndo,
@@ -90,7 +97,7 @@ export const CommandPalette = forwardRef<HTMLDivElement, Record<string, never>>(
           id: 'redo',
           title: t('Redo'),
           group: t('Document'),
-          hint: '⇧⌘Z',
+          hint: shortcutLabel('redo'),
           hintIsShortcut: true,
           icon: toolIconComponent('Eraser'),
           enabled: canRedo,
@@ -105,17 +112,27 @@ export const CommandPalette = forwardRef<HTMLDivElement, Record<string, never>>(
           icon: resolvedTheme.value === 'dark' ? Sun : Moon,
           run: toggleTheme
         },
+        // The way back to following the OS (UI25).
+        {
+          id: 'theme-system',
+          title: t('Use system theme'),
+          group: t('Settings'),
+          icon: Monitor,
+          enabled: () => themePreference.value !== 'system',
+          run: () => setTheme('system')
+        },
         {
           id: 'shortcuts',
           title: t('Keyboard shortcuts'),
           group: t('Settings'),
-          hint: '?',
+          hint: shortcutLabel('shortcuts'),
           hintIsShortcut: true,
           icon: toolIconComponent('FileText'),
           run: () => (isShortcutSheetOpen.value = true)
         }
       ],
-      [setLocation, location, resolvedTheme.value, t]
+      // `customShortcuts` so a remapped binding's hint updates (DS-09, UI19).
+      [setLocation, location, resolvedTheme.value, themePreference.value, customShortcuts.value, t]
     );
 
     const results = useMemo(
@@ -161,9 +178,40 @@ export const CommandPalette = forwardRef<HTMLDivElement, Record<string, never>>(
      * palette, the handler only fired while focus was inside it, so a stray click on the
      * scrim — or any moment before focus landed — silently dropped Enter and Escape.
      */
+    // On the shared dialog stack (UI13): global shortcuts and paste stand down
+    // while the palette is open, and a dialog opened over it gets the keys.
+    // Layout effect, so the entry exists before the first keystroke can land.
+    const stackEntry = useRef<ReturnType<typeof registerModal> | null>(null);
+    useLayoutEffect(() => {
+      if (!open) return;
+      const entry = registerModal();
+      stackEntry.current = entry;
+      return () => {
+        entry.release();
+        if (stackEntry.current === entry) stackEntry.current = null;
+      };
+    }, [open]);
+
     useEffect(() => {
       if (!open) return;
       const onKeyDown = (event: KeyboardEvent) => {
+        if (stackEntry.current && !stackEntry.current.isTop()) return;
+        if (event.key === 'Tab') {
+          // The search field is the palette's only focusable control (results
+          // are reached with the arrows), so Tab stays on it rather than
+          // wandering into the page behind the scrim.
+          event.preventDefault();
+          inputRef.current?.focus();
+          return;
+        }
+        // The palette shortcut closes it again: the shell's own handler stands
+        // down while a dialog is open, so it is answered here.
+        if (eventMatchesShortcut(event, getEffectiveBinding('palette'))) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          close();
+          return;
+        }
         if (event.key === 'Escape') {
           event.preventDefault();
           close();

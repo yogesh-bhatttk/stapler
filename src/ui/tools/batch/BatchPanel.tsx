@@ -4,6 +4,7 @@ import { Button } from '../../components/Button';
 import { IconButton } from '../../components/IconButton';
 import { Checkbox, Field, Select } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
+import { groupBatchNotes } from './noteGroups';
 import {
   inputDirHandle,
   outputDirHandle,
@@ -42,6 +43,7 @@ import {
 } from '../../../platform/fsa';
 import { notify } from '../../../core/notify';
 import { withErrorToast } from '../../asyncHandler';
+import { downloadRecipesJson } from './recipe-export';
 
 /** The only tools a recipe can chain, in the order they'd normally run. */
 const RECIPE_TOOL_CHOICES: { id: Recipe['tools'][number]; label: string }[] = [
@@ -200,15 +202,7 @@ export function BatchPanel() {
   };
 
   const handleExportRecipes = () => {
-    const blob = new Blob([JSON.stringify(savedRecipes.value, null, 2)], {
-      type: 'application/json'
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'stapler-recipes.json';
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadRecipesJson(savedRecipes.value);
   };
 
   const handleImportRecipes = () => {
@@ -432,16 +426,22 @@ export function BatchPanel() {
               </>
             )}
           </p>
-          <ul style={{ margin: 0, paddingInlineStart: '20px', fontSize: '0.85em' }}>
-            {batchProgress.value.notes.map(note => (
-              <li
-                key={`${note.file}-${note.detail}`}
-                style={note.kind === 'failed' ? { color: 'var(--danger)' } : {}}
-              >
-                {note.file} — {note.detail}
-              </li>
-            ))}
-          </ul>
+          {/* Grouped by outcome, each under its own heading (see noteGroups.ts). */}
+          {groupBatchNotes(batchProgress.value.notes).map(group => (
+            <div key={group.kind}>
+              <h3 className={panelStyles.title}>{t(group.heading)}</h3>
+              <ul style={{ margin: 0, paddingInlineStart: '20px', fontSize: '0.85em' }}>
+                {group.notes.map(note => (
+                  <li
+                    key={`${note.file}-${note.detail}`}
+                    style={note.kind === 'failed' ? { color: 'var(--danger)' } : {}}
+                  >
+                    {note.file} — {note.detail}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
         </div>
       )}
 

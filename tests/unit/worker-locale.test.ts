@@ -43,6 +43,11 @@ function dictionary(locale: string): Record<string, string> {
   >;
 }
 
+/** What the page sends a worker for `locale`: its dictionary and English's. */
+function sent(locale: string): Record<string, Record<string, string>> {
+  return { [locale]: dictionary(locale), en: dictionary('en') };
+}
+
 async function rejection(promise: Promise<unknown>): Promise<Error> {
   try {
     await promise;
@@ -53,25 +58,26 @@ async function rejection(promise: Promise<unknown>): Promise<Error> {
 }
 
 afterEach(async () => {
-  await convertWorkerImpl.setLocale('en');
+  await convertWorkerImpl.setLocale('en', sent('en'));
   currentLocale.value = 'en';
 });
 
 describe('worker-side translation (UI-8)', () => {
   it('throws its error detail in German after setLocale("de"), and follows a later change', async () => {
-    expect(await convertWorkerImpl.setLocale('de')).toBe(true);
+    expect(await convertWorkerImpl.setLocale('de', sent('de'))).toBe(true);
     const german = await rejection(convertWorkerImpl.xlsxToBlocks(new Uint8Array()));
     const de = dictionary('de')[XLSX_EMPTY_MESSAGE];
     expect(de).toBeTruthy();
     expect(de).not.toBe(XLSX_EMPTY_MESSAGE);
     expect(german.message).toBe(de);
 
-    await convertWorkerImpl.setLocale('fr');
+    await convertWorkerImpl.setLocale('fr', sent('fr'));
     const french = await rejection(convertWorkerImpl.xlsxToBlocks(new Uint8Array()));
     expect(french.message).toBe(dictionary('fr')[XLSX_EMPTY_MESSAGE]);
     expect(french.message).not.toBe(german.message);
 
-    await convertWorkerImpl.setLocale('en');
+    // English was sent with German; a dictionary sent once stays installed.
+    await convertWorkerImpl.setLocale('en', {});
     const english = await rejection(convertWorkerImpl.xlsxToBlocks(new Uint8Array()));
     expect(english.message).toBe(XLSX_EMPTY_MESSAGE);
   });
@@ -80,23 +86,23 @@ describe('worker-side translation (UI-8)', () => {
     const key =
       '{count} hidden rows in sheet "{sheet}" were left out, the same way Excel itself does ' +
       'not print them.';
-    await convertWorkerImpl.setLocale('ru');
+    await convertWorkerImpl.setLocale('ru', sent('ru'));
     expect(hiddenRowsNote('Q1', 3)).toBe(
       dictionary('ru')[`${key}_few`].replace('{count}', '3').replace('{sheet}', 'Q1')
     );
-    await convertWorkerImpl.setLocale('ar');
+    await convertWorkerImpl.setLocale('ar', sent('ar'));
     expect(hiddenRowsNote('Q1', 2)).toBe(
       dictionary('ar')[`${key}_two`].replace('{count}', '2').replace('{sheet}', 'Q1')
     );
-    await convertWorkerImpl.setLocale('en');
+    await convertWorkerImpl.setLocale('en', {});
     expect(hiddenRowsNote('Q1', 1)).toBe(
       '1 hidden row in sheet "Q1" was left out, the same way Excel itself does not print them.'
     );
   });
 
   it('refuses an unknown locale and keeps the one in effect', async () => {
-    await convertWorkerImpl.setLocale('de');
-    expect(await convertWorkerImpl.setLocale('xx' as Locale)).toBe(false);
+    await convertWorkerImpl.setLocale('de', sent('de'));
+    expect(await convertWorkerImpl.setLocale('xx' as Locale, {})).toBe(false);
     const err = await rejection(convertWorkerImpl.xlsxToBlocks(new Uint8Array()));
     expect(err.message).toBe(dictionary('de')[XLSX_EMPTY_MESSAGE]);
   });

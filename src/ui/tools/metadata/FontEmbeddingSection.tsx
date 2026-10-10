@@ -10,14 +10,12 @@
  */
 import { useState } from 'preact/hooks';
 import { ScanSearch } from 'lucide-preact';
-import { activeDoc, repointPage } from '../../../core/store';
+import { activeDoc, documents, repointPage } from '../../../core/store';
+import { cancelled } from '../../../core/errors';
+import { documentContentBytes } from '../export-compose';
 import { registerSourceFromBytes } from '../../../core/import';
 import { beginTransaction } from '../../../core/history';
-import {
-  checkFontEmbedding,
-  currentDocumentBytes,
-  embedMissingFont
-} from '../../../core/operations';
+import { checkFontEmbedding, embedMissingFont } from '../../../core/operations';
 import type { FontEmbeddingFinding } from '../../../core/workers/process.worker';
 import { notify } from '../../../core/notify';
 import { Button } from '../../components/Button';
@@ -46,8 +44,12 @@ export function FontEmbeddingSection() {
       await run(
         { label: translate('Checking font embedding'), scope: 'fonts.check' },
         async job => {
-          const bytes = await currentDocumentBytes(job);
+          // M2 — the pages' own fonts: the exported bytes added the
+          // watermark's and header/footer's standard fonts, which are never
+          // embedded, so every watermarked document "needed" a font fix.
+          const bytes = await documentContentBytes(job, { stamps: false });
           const report = await checkFontEmbedding(bytes);
+          if (job.signal?.aborted) return;
           setFindings(report.findings);
         }
       );
@@ -62,15 +64,32 @@ export function FontEmbeddingSection() {
       await run(
         { label: translate('Embedding {font}', { font: baseFont }), scope: 'fonts.embed' },
         async job => {
-          const bytes = await currentDocumentBytes(job);
+          // AUDIT-2026-10-10 M2 — the page content alone. `repointPage`
+          // keeps each page's key, rotation-free, and its stamps, so the
+          // exported bytes used here before (crop box, stamps, watermark,
+          // header/footer baked in) had all of those applied a second time
+          // at the next export: a crop cropped twice, every stamp and
+          // watermark drawn twice. The pages composed are the ones read in
+          // this same tick, so index `i` of the result is `pages[i]`.
+          const pages = doc.pages;
+          const bytes = await documentContentBytes(job, { stamps: false, pages });
           const fixed = await embedMissingFont(bytes, baseFont);
 
           // RT-22 — parsed, stored and registered with the load and the close
           // on one pinned render-worker instance (see `registerSourceFromBytes`).
           const newSource = await registerSourceFromBytes(fixed, doc.name);
-          const tx = beginTransaction('embed-font');
-          doc.pages.forEach((page, index) => {
-            repointPage(doc.id, page.key, newSource.id, index);
+          // M1 — cancelled (leaving the panel aborts the job, cooperatively):
+          // the document is not touched.
+          if (job.signal?.aborted) throw cancelled();
+          // Repointed by key, so a page moved meanwhile still gets its own
+          // rebuilt page; a page deleted meanwhile is simply not there.
+          const live = documents.value.find(d => d.id === doc.id);
+          if (!live) return;
+          const tx = beginTransaction('embed-font', undefined, doc.id);
+          pages.forEach((page, index) => {
+            if (live.pages.some(p => p.key === page.key)) {
+              repointPage(doc.id, page.key, newSource.id, index);
+            }
           });
           tx.end();
 

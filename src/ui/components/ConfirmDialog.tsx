@@ -20,15 +20,26 @@ export const ConfirmDialog = forwardRef<HTMLDivElement, Record<string, never>>(
         title={request.title}
         size="sm"
         // A confirmation must be answered: dismissing it would leave the caller's
-        // promise unresolved, so Escape and the scrim resolve it as "no".
-        onClose={() => request.resolve(false)}
+        // promise unresolved, so Escape and the scrim resolve it as "no" — unless
+        // "no" itself acts (session restore's "Start fresh" deletes the saved
+        // session), in which case the dialog is not dismissible at all and only
+        // an explicit button answers it (AUDIT-2026-10-10 UI2).
+        dismissible={request.dismissible}
+        onClose={() => {
+          if (request.dismissible) request.resolve(false);
+        }}
         footer={
           <>
-            <Button variant="tertiary" onClick={() => request.resolve(false)}>
+            <Button
+              variant="tertiary"
+              data-autofocus={request.initialFocus === 'cancel' ? '' : undefined}
+              onClick={() => request.resolve(false)}
+            >
               {request.cancelLabel}
             </Button>
             <Button
               variant={request.tone === 'danger' ? 'danger' : 'primary'}
+              data-autofocus={request.initialFocus === 'confirm' ? '' : undefined}
               onClick={() => request.resolve(true)}
             >
               {request.confirmLabel}

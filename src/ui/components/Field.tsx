@@ -8,9 +8,9 @@ import { translate } from '../../core/i18n';
  * by `htmlFor`. These carry the label association, the 3:1 boundary, the focus ring,
  * and the 32px target height once.
  */
-import type { ComponentChildren, JSX, Ref } from 'preact';
+import { createContext, type ComponentChildren, type JSX, type Ref } from 'preact';
 import { forwardRef } from 'preact/compat';
-import { useEffect, useId, useRef, useState } from 'preact/hooks';
+import { useContext, useEffect, useId, useRef, useState } from 'preact/hooks';
 import { Minus, Plus } from 'lucide-preact';
 import { IconButton } from './IconButton';
 import { mergeRefs } from './mergeRefs';
@@ -24,12 +24,35 @@ export interface FieldProps {
   children: (id: string) => ComponentChildren;
 }
 
+/**
+ * The enclosing Field's control id and hint id. A primitive whose `id` is the
+ * Field's adds the hint to its `aria-describedby`, so a screen reader announces
+ * the hint with the control rather than never (AUDIT-2026-10-10 UI17).
+ */
+const FieldContext = createContext<{ id: string; hintId: string | undefined } | null>(null);
+
+/**
+ * `own` (the control's own `aria-describedby`, e.g. an inline error) plus the
+ * enclosing Field's hint when this control is that Field's labelled control.
+ */
+function useFieldDescribedBy(
+  id: string | undefined,
+  own: string | JSX.SignalLike<string | undefined> | undefined
+): string | undefined {
+  const field = useContext(FieldContext);
+  const ownValue = typeof own === 'string' ? own : own?.value;
+  const hint = field && id !== undefined && id === field.id ? field.hintId : undefined;
+  const ids = [ownValue, hint].filter(Boolean).join(' ');
+  return ids === '' ? undefined : ids;
+}
+
 /** Label + hint + control, with the `for`/`id` pairing done for you. */
 export const Field = forwardRef<HTMLDivElement, FieldProps>(function Field(
   { label, hint, value, children },
   ref
 ) {
   const id = useId();
+  const hintId = `${id}-hint`;
   return (
     <div ref={ref} className={styles.field}>
       <div className={styles.row}>
@@ -38,8 +61,14 @@ export const Field = forwardRef<HTMLDivElement, FieldProps>(function Field(
         </label>
         {value !== undefined && <span className={styles.value}>{value}</span>}
       </div>
-      {children(id)}
-      {hint && <span className={styles.hint}>{hint}</span>}
+      <FieldContext.Provider value={{ id, hintId: hint ? hintId : undefined }}>
+        {children(id)}
+      </FieldContext.Provider>
+      {hint && (
+        <span id={hintId} className={styles.hint}>
+          {hint}
+        </span>
+      )}
     </div>
   );
 });
@@ -47,25 +76,54 @@ export const Field = forwardRef<HTMLDivElement, FieldProps>(function Field(
 export const TextInput = forwardRef<HTMLInputElement, JSX.IntrinsicElements['input']>(
   function TextInput(props, ref) {
     const { className = '', ...rest } = props;
-    return <input ref={ref} type="text" className={`${styles.control} ${className}`} {...rest} />;
+    const describedBy = useFieldDescribedBy(
+      typeof rest.id === 'string' ? rest.id : undefined,
+      rest['aria-describedby']
+    );
+    return (
+      <input
+        ref={ref}
+        type="text"
+        className={`${styles.control} ${className}`}
+        {...rest}
+        aria-describedby={describedBy}
+      />
+    );
   }
 );
 
 export const NumberInput = forwardRef<HTMLInputElement, JSX.IntrinsicElements['input']>(
   function NumberInput(props, ref) {
     const { className = '', ...rest } = props;
-    return <input ref={ref} type="number" className={`${styles.control} ${className}`} {...rest} />;
+    const describedBy = useFieldDescribedBy(
+      typeof rest.id === 'string' ? rest.id : undefined,
+      rest['aria-describedby']
+    );
+    return (
+      <input
+        ref={ref}
+        type="number"
+        className={`${styles.control} ${className}`}
+        {...rest}
+        aria-describedby={describedBy}
+      />
+    );
   }
 );
 
 export const TextArea = forwardRef<HTMLTextAreaElement, JSX.IntrinsicElements['textarea']>(
   function TextArea(props, ref) {
     const { className = '', ...rest } = props;
+    const describedBy = useFieldDescribedBy(
+      typeof rest.id === 'string' ? rest.id : undefined,
+      rest['aria-describedby']
+    );
     return (
       <textarea
         ref={ref}
         className={`${styles.control} ${styles.textarea} ${className}`}
         {...rest}
+        aria-describedby={describedBy}
       />
     );
   }
@@ -105,6 +163,7 @@ export const Select = forwardRefGeneric(function Select<T extends string | numbe
   { id, value, options, onChange, disabled, ariaLabel }: SelectProps<T>,
   ref: Ref<HTMLSelectElement>
 ) {
+  const describedBy = useFieldDescribedBy(id, undefined);
   return (
     <select
       ref={ref}
@@ -113,6 +172,7 @@ export const Select = forwardRefGeneric(function Select<T extends string | numbe
       value={String(value)}
       disabled={disabled}
       aria-label={ariaLabel}
+      aria-describedby={describedBy}
       onChange={event => {
         const raw = (event.target as HTMLSelectElement).value;
         // Numeric options round-trip through the DOM as strings; restore the type
@@ -230,11 +290,13 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(function Slider(
   { id, min, max, step = 1, value, onChange, disabled, scale, ariaLabel },
   ref
 ) {
+  const describedBy = useFieldDescribedBy(id, undefined);
   return (
     <div>
       <input
         ref={ref}
         id={id}
+        aria-describedby={describedBy}
         className={styles.slider}
         type="range"
         min={min}
@@ -315,6 +377,7 @@ export const NumberStepper = forwardRef<HTMLInputElement, NumberStepperProps>(
     useEffect(() => {
       if (!focused.current) setText(String(value));
     }, [value]);
+    const describedBy = useFieldDescribedBy(id, undefined);
 
     const commit = (next: number) => {
       const clamped = clampStep(next, min, max);
@@ -339,6 +402,7 @@ export const NumberStepper = forwardRef<HTMLInputElement, NumberStepperProps>(
           inputMode="decimal"
           role="spinbutton"
           aria-label={ariaLabel}
+          aria-describedby={describedBy}
           aria-valuemin={min === -Infinity ? undefined : min}
           aria-valuemax={max === -Infinity ? undefined : max}
           aria-valuenow={value}

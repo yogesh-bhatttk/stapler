@@ -162,7 +162,7 @@ export const LANDING_PAGES: readonly LandingPage[] = [
     slug: 'merge-pdf',
     name: 'Merge PDF',
     description:
-      'Combine several PDFs and images into one document, entirely in your browser. No upload, no account, no file-size limit — and no extension required to try it.',
+      'Combine several PDFs and images into one document, entirely in your browser. No upload, no account, no daily limit — and no extension required to try it.',
     ogDescription:
       'Combine several PDFs and images into one document. Nothing is uploaded — try it right on this page.',
     skipLabel: 'merge',
@@ -181,8 +181,8 @@ export const LANDING_PAGES: readonly LandingPage[] = [
         body: 'Drop in PDFs, PNGs, and JPEGs together — Stapler brings them into one document in the order you choose.'
       },
       {
-        title: 'No file-size cap, no watermark',
-        body: 'Merge as many pages as your device can hold. What you export is exactly what you made.'
+        title: 'No quota, no watermark',
+        body: 'Merge as many pages as your device can hold, from up to 20 open documents at a time. What you export is exactly what you made.'
       }
     ],
     appHeading: 'Try merge right here',

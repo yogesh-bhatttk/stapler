@@ -93,13 +93,13 @@ describe('installNetworkGuard', () => {
     const guarded = scope.fetch as (input: unknown, init?: unknown) => Promise<unknown>;
 
     await expect(guarded('/pdfjs/cmaps/x.bcmap')).resolves.toMatchObject({ ok: true });
-    await expect(guarded({ url: 'blob:https://stapler.app/1' })).resolves.toMatchObject({
+    await expect(guarded(new Request('https://stapler.app/pdfjs/x'))).resolves.toMatchObject({
       ok: true
     });
     expect(fetch).toHaveBeenCalledTimes(2);
 
     await expect(guarded('https://example.com/from-worker')).rejects.toThrow(TypeError);
-    await expect(guarded({ url: 'https://example.com/req' })).rejects.toThrow(/blocked/);
+    await expect(guarded(new Request('https://example.com/req'))).rejects.toThrow(/blocked/);
     await expect(guarded(resolveModelUrl('eng'))).rejects.toThrow(TypeError);
     expect(fetch).toHaveBeenCalledTimes(2);
   });

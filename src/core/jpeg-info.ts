@@ -96,6 +96,38 @@ export function readJpegInfo(bytes: Uint8Array): JpegInfo | null {
   return null;
 }
 
+/**
+ * Whether a JPEG carries Adobe's APP14 segment ("Adobe" + version, flags and
+ * colour transform) before its first scan — the marker by which Photoshop's
+ * inverted CMYK JPEGs are recognised. Bounds-checked; false for anything that
+ * is not a well-formed JPEG up to that point.
+ */
+export function jpegHasAdobeMarker(bytes: Uint8Array): boolean {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return false;
+  let p = 2;
+  while (p + 4 <= bytes.length) {
+    if (bytes[p] !== 0xff) return false;
+    const marker = bytes[p + 1];
+    if (marker === 0xff) {
+      p += 1;
+      continue;
+    }
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      p += 2;
+      continue;
+    }
+    if (marker === 0xda || marker === 0xd9) return false;
+    const length = (bytes[p + 2] << 8) | bytes[p + 3];
+    if (length < 2 || p + 2 + length > bytes.length) return false;
+    if (marker === 0xee && length >= 2 + 12) {
+      const seg = p + 4;
+      if (String.fromCharCode(...bytes.subarray(seg, seg + 5)) === 'Adobe') return true;
+    }
+    p += 2 + length;
+  }
+  return false;
+}
+
 /** Joins APP2 ICC chunks in sequence order; see {@link JpegInfo.iccProfile}. */
 function assembleIcc(
   chunks: { seq: number; count: number; data: Uint8Array }[]

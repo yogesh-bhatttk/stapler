@@ -11,7 +11,7 @@
  * recognises in `ocr`, pdf-lib writes the text layer in `process`. This module is
  * only the sequencing, and it yields to the event loop between pages.
  */
-import { wholeKilobytes } from '../bytes';
+import { formatBytes, wholeKilobytes } from '../bytes';
 import * as Comlink from 'comlink';
 import { renderWorker, cvWorker, ocrWorker, processWorker } from '../workers';
 import { createJobHandle, type JobOptions } from '../workers/protocol';
@@ -23,7 +23,14 @@ import { noteModelStored } from '../storage-persistence';
 import { hasModelBytes, readModelBytes } from '../opfs';
 import { fetchVerifiedModel } from './download';
 import { hasCachedModel, writeCachedModel } from './tesseractCache';
-import { DEFAULT_OCR_LANGUAGE, MODEL_HOST, findLanguage, splitLangCodes } from './model';
+import {
+  DEFAULT_OCR_LANGUAGE,
+  MODEL_HOST,
+  findLanguage,
+  maxModelDownloadBytes,
+  modelDownloadBytes,
+  splitLangCodes
+} from './model';
 import {
   OCR_ENGINE_INIT_FAILED,
   isEngineInitFailure,
@@ -44,6 +51,11 @@ export interface RunOcrOptions extends JobOptions {
   /** Defaults to every page. */
   pageIndices?: number[];
   lang?: string;
+  /**
+   * CV9 — OCR pages that already draw real text too. Off by default: their
+   * text would be added a second time under the first.
+   */
+  includePagesWithText?: boolean;
 }
 
 export interface OcrRunResult extends OcrLayerReport {
@@ -58,6 +70,11 @@ export interface OcrRunResult extends OcrLayerReport {
    * see `runOcr`'s per-page try/catch.
    */
   skippedPages: { pageIndex: number; reason: string }[];
+  /**
+   * CV9 — pages left out because they already draw real text (only when
+   * `includePagesWithText` was not set). Empty otherwise.
+   */
+  pagesWithText: number[];
 }
 
 /**
@@ -73,17 +90,20 @@ export function modelConsentCopy(missingCodes: string[]): { title: string; body:
     const language = findLanguage(code);
     return {
       label: language ? translate(language.label) : code,
-      size: language?.approxSizeMb ?? 12
+      // CV11: the pinned byte length `download.ts` enforces, not an estimate.
+      // A code with no pinned size cannot be downloaded at all (no hash), so
+      // the cap `download.ts` would apply stands in.
+      bytes: modelDownloadBytes(code) ?? maxModelDownloadBytes(code)
     };
   });
   const label = languages.map(l => l.label).join(' + ');
-  const size = languages.reduce((total, l) => total + l.size, 0);
+  const size = formatBytes(languages.reduce((total, l) => total + l.bytes, 0));
   const count = languages.length;
   return {
     title: tPlural('Download the {label} OCR language models?', count, { label }),
     body:
       tPlural(
-        'Stapler works entirely offline except for this one file. To read text in a scan it needs the {label} recognition models — about {size} MB — which are downloaded from {host}, the public npm mirror the OCR engine publishes it on.',
+        'Stapler works entirely offline except for this one file. To read text in a scan it needs the {label} recognition models — about {size} — which are downloaded from {host}, the public npm mirror the OCR engine publishes it on.',
         count,
         { label, size, host: MODEL_HOST }
       ) +
@@ -519,11 +539,39 @@ export async function runOcr(
   const lang = options.lang ?? DEFAULT_OCR_LANGUAGE;
   if (!findLanguage(lang)) throw internal(`Unknown OCR language: ${lang}`);
 
-  const pages = normalisePages(options.pageIndices, pageCount);
-  if (pages.length === 0) throw internal(translate('No pages were selected for OCR.'));
+  const requested = normalisePages(options.pageIndices, pageCount);
+  if (requested.length === 0) throw internal(translate('No pages were selected for OCR.'));
 
   const missing = await missingModels(lang);
   if (missing.length > 0 && !(await acquireModels(missing, options))) return null;
+
+  // CV9: a page that already draws real text would get a second copy of it.
+  // Checked after the consent gate, which must stay the first thing a run
+  // does (no worker before the user answers). A check that fails says
+  // nothing about the pages, so they are all OCR'd as before.
+  let pagesWithText: number[] = [];
+  if (!options.includePagesWithText) {
+    try {
+      const found = await processWorker.lease(api => api.ocrPagesWithText(bytes, requested));
+      if (Array.isArray(found)) pagesWithText = found;
+    } catch (err) {
+      if (isCancellation(err)) throw err;
+    }
+  }
+  const withText = new Set(pagesWithText);
+  const pages = requested.filter(index => !withText.has(index));
+  if (pages.length === 0) {
+    return {
+      bytes,
+      wordsAdded: 0,
+      wordsSkipped: 0,
+      pagesTouched: 0,
+      pagesReplaced: 0,
+      downloadedModel: missing.length > 0,
+      skippedPages: [],
+      pagesWithText
+    };
+  }
 
   const { layers, skippedPages } = await recognizePages(bytes, pages, pageCount, lang, options);
 
@@ -551,7 +599,7 @@ export async function runOcr(
   await recordAcquired(missing);
 
   options.onProgress?.(1, translate('Done'));
-  return { ...written, downloadedModel: missing.length > 0, skippedPages };
+  return { ...written, downloadedModel: missing.length > 0, skippedPages, pagesWithText };
 }
 
 export interface RecognizedPageText {

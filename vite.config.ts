@@ -101,6 +101,14 @@ function firefoxManifest(): Plugin {
  * detection entirely. SIMD + LSTM-only is the correct single choice for this
  * project's evergreen-Chrome target and for the `OEM.LSTM_ONLY` the worker asks
  * for.
+ *
+ * Only the `.wasm.js` file of that variant ships, not the sibling `.wasm`: the
+ * `.wasm.js` build embeds the binary as base64 (`wa ??= Ga("AGFzbQ…")`) and
+ * instantiates from those bytes, and tesseract.js passes the core no
+ * `locateFile` / `wasmBinary` / `instantiateWasm` that could redirect it to a
+ * separate file — so the raw `.wasm` was 2.9 MB nothing ever loaded
+ * (AUDIT-2026-10-10; `tests/unit/audit-2026-10-10-bundle.test.ts` re-checks
+ * both facts against the installed packages).
  */
 function copyTesseractAssets(): Plugin {
   return {
@@ -116,10 +124,6 @@ function copyTesseractAssets(): Plugin {
         [
           'node_modules/tesseract.js-core/tesseract-core-simd-lstm.wasm.js',
           'tesseract-core-simd-lstm.wasm.js'
-        ],
-        [
-          'node_modules/tesseract.js-core/tesseract-core-simd-lstm.wasm',
-          'tesseract-core-simd-lstm.wasm'
         ]
       ];
 

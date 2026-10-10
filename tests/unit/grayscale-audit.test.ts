@@ -81,7 +81,7 @@ function colourJpeg(seed: number, size = 32): Uint8Array {
   ctx.fillRect(0, 0, size, size);
   ctx.fillStyle = 'rgb(255, 0, 0)';
   ctx.fillRect(4, 4, size / 2, size / 2);
-  return new Uint8Array(canvas.toBuffer('image/jpeg', 0.9));
+  return new Uint8Array(canvas.toBuffer('image/jpeg', 90)); // @napi-rs/canvas takes 0–100
 }
 
 /** A page whose only colour is an annotation appearance that cannot be converted. */

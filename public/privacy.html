@@ -86,37 +86,92 @@
   <body>
     <main class="container">
       <h1>Privacy Policy</h1>
-      <p><strong>Effective Date:</strong> August 6, 2026</p>
+      <p><strong>Last updated:</strong> October 10, 2026</p>
 
       <div class="highlight">
-        <strong>TL;DR:</strong> Stapler is a completely offline, client-side application. We do not
-        collect, store, transmit, or have access to any of your files or personal data.
+        <strong>TL;DR:</strong> Stapler processes your files on your own device. It never uploads
+        them, has no accounts, and collects no analytics or telemetry. It makes no network requests
+        while you work, with one exception you have to approve first: downloading an OCR language
+        model (section 3). What it keeps on your device, and how to delete it, is listed in section
+        2.
       </div>
 
-      <h2>1. Data Collection and Usage</h2>
+      <h2>1. Your files and personal data</h2>
       <p>
-        Stapler operates entirely within your web browser. All PDF processing (merging, splitting,
-        compressing, signing, redacting, etc.) is done locally on your device using WebAssembly
-        (Wasm) and JavaScript technologies.
+        Stapler runs entirely in your web browser. All PDF processing (merging, splitting,
+        compressing, signing, redacting, converting, OCR, etc.) is done locally on your device using
+        WebAssembly (Wasm) and JavaScript.
       </p>
       <ul>
-        <li><strong>We do not</strong> upload your files to any server.</li>
-        <li><strong>We do not</strong> collect analytics, telemetry, or usage data.</li>
-        <li><strong>We do not</strong> track your personal information.</li>
+        <li><strong>We do not</strong> upload your files to any server, ours or anyone else's.</li>
+        <li>
+          <strong>We do not</strong> collect analytics, telemetry, crash reports or usage data.
+        </li>
+        <li>
+          <strong>We do not</strong> have accounts, so we hold no personal information about you.
+        </li>
       </ul>
 
-      <h2>2. Local Storage</h2>
+      <h2>2. What is stored on your device</h2>
       <p>
-        Stapler may use your browser's local storage mechanisms (such as IndexedDB or LocalStorage)
-        temporarily to facilitate the processing of large files or to remember your preferences
-        (like theme settings). This data never leaves your device and can be cleared at any time
-        through your browser's settings.
+        To work across sessions, Stapler keeps some data in your browser's own storage (the Origin
+        Private File System, IndexedDB, Cache Storage and localStorage). It stays on this device and
+        is never sent anywhere:
+      </p>
+      <ul>
+        <li>
+          <strong>Copies of the documents you open</strong>, so an interrupted session can be
+          recovered after a crash or a closed tab.
+        </li>
+        <li><strong>Signatures</strong> you choose to save.</li>
+        <li>
+          <strong>Recent files</strong> (a handle to the file you picked, not a copy), presets and
+          saved <strong>recipes</strong>.
+        </li>
+        <li>
+          <strong>A folder-search index</strong>: the text of the PDFs in a folder you chose to
+          index, so it can be searched.
+        </li>
+        <li><strong>OCR language models</strong> you downloaded or loaded from a file.</li>
+        <li>
+          <strong>Files shared to the installed web app</strong>, held only until the page opens
+          them.
+        </li>
+        <li>
+          <strong>Preferences</strong>: theme, language, keyboard shortcuts, your OCR download
+          consent and similar settings.
+        </li>
+      </ul>
+      <p>
+        <strong>To delete it:</strong> click the <em>Offline</em> badge at the top of the Stapler
+        window, then <em>Clear all local data…</em> under <em>Stored on this device</em>, which also
+        lists what is stored and how much space it takes. Removing the extension, or clearing the
+        site's data in your browser's settings, deletes it as well.
       </p>
 
-      <h2>3. Third-Party Services</h2>
+      <h2>3. The one network request: OCR language models</h2>
       <p>
-        Stapler does not integrate with any external third-party tracking, advertising, or analytics
-        services. It is a standalone tool designed to respect your privacy.
+        Text recognition (OCR) needs a language model of about 12 MB that is not bundled with
+        Stapler. The first time you run OCR in a language, Stapler asks before downloading it. Only
+        if you agree is it downloaded, once, from a fixed, pinned address on the public jsDelivr CDN
+        (<code>cdn.jsdelivr.net</code>); its SHA-256 hash is checked before use and the model is
+        then kept on your device (section 2). Like any web request, this download reveals your IP
+        address, your browser's user agent and which language model you asked for to jsDelivr and
+        the networks that serve it. It sends nothing about your documents. You can avoid the
+        download entirely by loading the model from a file instead.
+      </p>
+      <p>
+        Apart from that, Stapler's own code makes no requests. Two things outside its control are
+        worth knowing: your browser may check its extension store for updates, and if you use the
+        website version, your browser downloads the app itself from its web host (GitHub Pages),
+        which, like any web host, receives your IP address when it does.
+      </p>
+
+      <h2>4. Third-party services</h2>
+      <p>
+        Stapler does not integrate any third-party tracking, advertising or analytics service. The
+        only third party it ever contacts is the jsDelivr CDN, for the OCR model download described
+        in section 3, and only after you approve it.
       </p>
       <p>
         Stapler is built on open-source libraries, all bundled into the extension and run on your
@@ -126,14 +181,14 @@
         >.
       </p>
 
-      <h2>4. Changes to This Privacy Policy</h2>
+      <h2>5. Changes to This Privacy Policy</h2>
       <p>
         We may update this Privacy Policy from time to time. Any changes will be reflected in the
-        extension updates. However, our core commitment to keeping your files local and offline will
-        never change.
+        extension updates. Our core commitment, that your files are processed on your device and
+        never uploaded, will not change.
       </p>
 
-      <h2>5. Contact</h2>
+      <h2>6. Contact</h2>
       <p>
         If you have any questions or concerns about this Privacy Policy, please open an issue on our
         <a

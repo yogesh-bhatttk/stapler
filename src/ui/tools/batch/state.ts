@@ -100,7 +100,9 @@ export const outputFormat = signal<'directory' | 'zip'>('directory');
  */
 export interface BatchNote {
   file: string;
-  kind: 'kept-original' | 'failed' | 'metadata-scrubbed';
+  /** `changed`: a rebuild reported something it changed or left out (audit P4/P6). */
+  /** `renamed`: the output name was taken in the folder, so " (n)" was added (L4). */
+  kind: 'kept-original' | 'failed' | 'metadata-scrubbed' | 'changed' | 'renamed';
   detail: string;
 }
 

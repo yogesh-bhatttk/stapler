@@ -8,9 +8,15 @@
 import { useState } from 'preact/hooks';
 import { Check, ScanSearch, Search, Trash2, X } from 'lucide-preact';
 import { activeDoc } from '../../../core/store';
-import { currentDocumentBytes, scanForPatterns, findTextRegions } from '../../../core/operations';
+
+/** The active document's pages now, or null once another document is active. */
+function livePages(docId: string) {
+  const doc = activeDoc.value;
+  return doc?.id === docId ? doc.pages : null;
+}
+import { scanForPatterns, findTextRegions } from '../../../core/operations';
+import { documentContentBytes } from '../export-compose';
 import { PATTERN_LABELS, type PatternCategory } from '../../../core/patterns';
-import type { PatternSuggestion } from '../../../core/workers/render.worker';
 import { notify } from '../../../core/notify';
 import { Button } from '../../components/Button';
 import { IconButton } from '../../components/IconButton';
@@ -19,11 +25,15 @@ import { panelStyles } from '../../shell/panelStyles';
 import { VerificationReport } from './VerificationReport';
 import { FaceBlurSection } from './FaceBlurSection';
 import {
+  marksForPages,
+  mergeMarks,
+  resolveRedactionMarks,
   patternScanRan,
   patternSuggestions,
   pendingRedactions,
   redactShapeMode,
-  redactionReport
+  redactionReport,
+  type PendingSuggestion
 } from './state';
 import { useJob } from '../../useJob';
 import { tPlural, translate, useTranslation } from '../../../core/i18n';
@@ -40,8 +50,25 @@ export function RedactPanel() {
 
   const scan = () =>
     run({ label: translate('Scanning for sensitive data'), scope: 'redact.scan' }, async job => {
-      const bytes = await currentDocumentBytes(job);
-      const found = await scanForPatterns(bytes, job);
+      // H1/M2 — the page content the marks will be applied to (the same
+      // bytes `Verify & apply` redacts), and the page list it was built from,
+      // read in the same tick, so each suggestion is tied to its page.
+      const pages = doc.pages;
+      const bytes = await documentContentBytes(job, { stamps: true, pages });
+      const scanned = await scanForPatterns(bytes, job);
+      const tied: PendingSuggestion[] = scanned.flatMap(suggestion => {
+        const page = pages[suggestion.pageIndex];
+        return page ? [{ ...suggestion, pageKey: page.key, pageRotation: page.rotation }] : [];
+      });
+      // M1 — a scan cancelled by leaving the panel publishes nothing.
+      if (job.signal?.aborted) return;
+      // Pages edited while it ran: re-indexed (or dropped) against them now.
+      const live = livePages(doc.id);
+      if (!live) return;
+      const found = resolveRedactionMarks(tied, live).kept.map(suggestion => ({
+        ...suggestion,
+        regions: suggestion.regions.map(region => ({ ...region, pageIndex: suggestion.pageIndex }))
+      }));
       patternSuggestions.value = found;
       patternScanRan.value = true;
       if (found.length === 0) {
@@ -57,15 +84,23 @@ export function RedactPanel() {
     });
 
   /** Accepting is the only path from a suggestion to a mark. */
-  const accept = (accepted: PatternSuggestion[]) => {
+  const accept = (accepted: PendingSuggestion[]) => {
     if (accepted.length === 0) return;
     const ids = new Set(accepted.map(s => s.id));
-    pendingRedactions.value = [...pendingRedactions.value, ...accepted.flatMap(s => s.regions)];
-    patternSuggestions.value = suggestions.filter(s => !ids.has(s.id));
+    const marks = accepted.flatMap(s =>
+      s.regions.map(region => ({
+        ...region,
+        pageIndex: s.pageIndex,
+        pageKey: s.pageKey,
+        pageRotation: s.pageRotation
+      }))
+    );
+    pendingRedactions.value = mergeMarks(pendingRedactions.value, marks).marks;
+    patternSuggestions.value = patternSuggestions.value.filter(s => !ids.has(s.id));
   };
 
   const dismiss = (id: string) => {
-    patternSuggestions.value = suggestions.filter(s => s.id !== id);
+    patternSuggestions.value = patternSuggestions.value.filter(s => s.id !== id);
   };
 
   const byCategory = (Object.keys(PATTERN_LABELS) as PatternCategory[])
@@ -76,16 +111,34 @@ export function RedactPanel() {
     run(
       { label: translate('Searching for "{query}"', { query }), scope: 'redact.search' },
       async job => {
-        const bytes = await currentDocumentBytes(job);
-        const found = await findTextRegions(bytes, query.trim(), matchCase, job);
+        // H1/M2 — the bytes `Verify & apply` will redact, and the page list
+        // they were built from, so each match is tied to its page.
+        const pages = doc.pages;
+        const bytes = await documentContentBytes(job, { stamps: true, pages });
+        const tied = marksForPages(
+          await findTextRegions(bytes, query.trim(), matchCase, job),
+          pages
+        );
+        if (job.signal?.aborted) return;
+        // Pages edited while it ran: re-indexed (or dropped) against them now.
+        const live = livePages(doc.id);
+        if (!live) return;
+        const found = resolveRedactionMarks(tied, live).kept;
         if (found.length === 0) {
           notify('warning', translate('No matches for "{query}".', { query: query.trim() }));
           return;
         }
-        // Existing marks are kept: searching twice for different terms should add to
-        // the list, not replace it.
-        pendingRedactions.value = [...regions, ...found];
-        notify('info', tPlural('Marked {count} occurrences.', found.length), {
+        // UI#29 — merged into the marks as they are *now* (not as they were
+        // when the search started, which dropped every mark drawn meanwhile),
+        // and without repeating a mark already there: searching twice for the
+        // same term used to list every occurrence twice.
+        const { marks, added } = mergeMarks(pendingRedactions.value, found);
+        pendingRedactions.value = marks;
+        if (added === 0) {
+          notify('info', translate('Every occurrence is already marked.'));
+          return;
+        }
+        notify('info', tPlural('Marked {count} occurrences.', added), {
           detail: translate('Review the list, then use Verify & apply.')
         });
       }
@@ -194,8 +247,7 @@ export function RedactPanel() {
               size="compact"
               icon={Check}
               onClick={() => accept(items)}
-              aria-label={t('Accept all {count} {category} suggestions', {
-                count: items.length,
+              aria-label={tPlural('Accept all {count} {category} suggestions', items.length, {
                 category: t(PATTERN_LABELS[category])
               })}
             >

@@ -7,13 +7,19 @@ exactly, per Mozilla's source-code-submission requirement.
 ## Environment
 
 - **OS:** any of Linux, macOS, or Windows — the build has no OS-specific steps.
-- **Node.js:** v20 or later. Released packages are built by the GitHub release
-  workflow on Ubuntu with **Node v22.23.3** and **pnpm 11.28.5** (0.3.1); use the same
-  versions to reproduce the submitted package most closely.
-  Download: https://nodejs.org/en/download
-- **Package manager:** `pnpm` v11.20.0 or later.
-  Install: `npm i -g pnpm` (or `corepack enable` on Node ≥16.10, then `corepack prepare pnpm@latest --activate`).
+- **Node.js:** **v22.23.3**, the exact version the GitHub workflows use (it is pinned in
+  the repository's `.nvmrc`, which both `.github/workflows/ci.yml` and `release.yml`
+  read). Older versions do not work at all below 20.19.0 / 22.13.0: Vite 8 requires
+  `^20.19.0 || >=22.12.0` and ESLint 10 `^20.19.0 || ^22.13.0 || >=24`. Another
+  supported version can change the minified output by a few bytes.
+  Download: https://nodejs.org/dist/v22.23.3/
+- **Package manager:** **pnpm 11.28.5**, the exact version the workflows install
+  (`package.json`'s `devEngines` accepts `^11.20.0`).
+  Install: `npm i -g pnpm@11.28.5` (or `corepack enable`, then
+  `corepack prepare pnpm@11.28.5 --activate`).
   Download/docs: https://pnpm.io/installation
+- Each release also carries a `BUILD_INFO.txt` (written by `scripts/package.mjs`) that
+  records the Node and pnpm versions and the commit its zips were built from.
 
 No other system dependencies (no native toolchain, no Python, no Rust) are required —
 every WASM binary the extension uses (`pdf.js`, `tesseract.js`'s OCR engine, the
@@ -135,6 +141,9 @@ patched (the three `pdfjs-dist` rows in the table above). To reproduce the lint,
 
 ```bash
 pnpm package
-pnpm dlx addons-linter dist/release/stapler-<version>-firefox.zip
+pnpm dlx addons-linter@10.13.0 dist/release/stapler-<version>-firefox.zip
 ```
+
+The release workflow runs the same pinned `addons-linter` on every release's Firefox zip
+and fails on any error.
 

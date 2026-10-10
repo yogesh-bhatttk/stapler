@@ -413,8 +413,9 @@ describe('CNV-08 — unsupported input is refused, not half-converted', () => {
   }, 60_000);
 
   it('refuses to write an empty document rather than one that will not open', async () => {
+    // Audit 2026-10-10 CV13: an actionable refusal naming OCR, not an internal error.
     await expect(buildDocx({ title: 'empty.pdf', pages: [], skipped: [] })).rejects.toThrow(
-      /no text or images/
+      /no selectable text and no embedded image/
     );
   });
 

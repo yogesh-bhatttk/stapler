@@ -1,4 +1,5 @@
-import { currentLocale, translate, type Locale } from '../i18n';
+import { currentLocale, translate, type Locale, type LocaleDictionaries } from '../i18n';
+import { localeDictionaries } from '../i18n/load';
 /**
  * One typed Comlink client factory, replacing five near-identical modules
  * (`process.ts`, `render.ts`, `redact.ts`, `verify.ts`, `cv.ts`) that differed
@@ -65,12 +66,58 @@ export interface WorkerClientOptions {
    * spawned instance before its dictionary has loaded.
    */
   syncLocale?: boolean;
+  /**
+   * NFR-03 — an instance that has been handed (or has returned) at least this
+   * many bytes of buffer data in one call is **retired**: terminated as soon
+   * as its last lease ends, instead of idling for `idleMs`. Off (0) by default.
+   *
+   * Why: a worker that has just parsed a 100 MB document is left holding
+   * several times that in dead ArrayBuffers — the cloned input, pdf-lib's
+   * per-stream copies, pdf.js's stream — and V8 does not collect a worker
+   * that has stopped allocating. Measured on the ~100 MB NFR-03 run, those
+   * idle realms held 1.2 GB of garbage between them, every realm's next job
+   * stacking its own working set on top. Terminating the realm is the only
+   * deterministic way to hand that memory back, and a fresh instance boots in
+   * ~100 ms, which is nothing next to a job that size. Small documents never
+   * reach the threshold, so they keep the warm pool.
+   */
+  retireAfterBytes?: number;
+}
+
+/**
+ * Bytes of ArrayBuffer data reachable from `value`, looking through arrays and
+ * plain objects a few levels deep — `compose(pages, bytes, …)`, a split's
+ * `{ name: bytes }` parts, a `{ bytes, … }` result. Bounded in depth and in
+ * entries visited, since it runs on every call: it only has to notice a large
+ * payload, not size every one exactly.
+ */
+export function payloadBytes(value: unknown, depth = 3, budget = { left: 4096 }): number {
+  if (value === null || typeof value !== 'object' || budget.left <= 0) return 0;
+  budget.left -= 1;
+  if (ArrayBuffer.isView(value)) return value.byteLength;
+  if (value instanceof ArrayBuffer) return value.byteLength;
+  if (depth <= 0) return 0;
+  let total = 0;
+  if (Array.isArray(value)) {
+    for (const item of value) total += payloadBytes(item, depth - 1, budget);
+    return total;
+  }
+  const proto = Object.getPrototypeOf(value) as unknown;
+  if (proto !== Object.prototype && proto !== null) return 0;
+  for (const item of Object.values(value as Record<string, unknown>)) {
+    total += payloadBytes(item, depth - 1, budget);
+  }
+  return total;
 }
 
 /** What a worker API exposes to take part in {@link WorkerClientOptions.syncLocale}. */
 export interface LocaleAware {
-  /** Loads `locale`'s dictionary in the worker realm and makes it current. */
-  setLocale(locale: Locale): Promise<boolean>;
+  /**
+   * Installs `dictionaries` (the ones this instance has not been sent yet) in
+   * the worker realm and makes `locale` current. Workers bundle no
+   * translations of their own (`i18n/load.ts`).
+   */
+  setLocale(locale: Locale, dictionaries: LocaleDictionaries): Promise<boolean>;
 }
 
 function defaultPoolSize(): number {
@@ -114,6 +161,20 @@ interface Instance<T> {
    * language. Null without `syncLocale`.
    */
   ready: Promise<void> | null;
+  /** Locales whose dictionary this instance has already been sent. */
+  sentDictionaries: Set<Locale>;
+  /**
+   * {@link WorkerClientOptions.retireAfterBytes}: set once a call on this
+   * instance moved a large payload. Never cleared — the garbage it left is
+   * there until the realm goes.
+   */
+  retire: boolean;
+  /**
+   * The API handed to lease callbacks: `proxy`, with each method call's
+   * arguments and result measured for `retire`. `proxy` itself when
+   * retirement is off.
+   */
+  api: Comlink.Remote<T>;
 }
 
 /** The error every call on a dead instance rejects with. */
@@ -134,9 +195,7 @@ function raceDeath<T, R>(
   fn: (api: Comlink.Remote<T>) => Promise<R>
 ): Promise<R> {
   if (inst.dead) return Promise.reject(workerCrashed(name));
-  return untilDeath(inst, () =>
-    inst.ready ? inst.ready.then(() => fn(inst.proxy)) : fn(inst.proxy)
-  );
+  return untilDeath(inst, () => (inst.ready ? inst.ready.then(() => fn(inst.api)) : fn(inst.api)));
 }
 
 /**
@@ -165,16 +224,65 @@ function sendLocale<T>(inst: Instance<T>, locale: Locale): void {
   const proxy = inst.proxy as unknown as Comlink.Remote<LocaleAware>;
   const previous = inst.ready ?? Promise.resolve();
   inst.ready = previous
-    .then(() => (inst.dead ? undefined : untilDeath(inst, () => proxy.setLocale(locale))))
+    .then(async () => {
+      if (inst.dead) return;
+      const all = await localeDictionaries(locale);
+      // The page could not load the dictionary either: the worker stays on
+      // its previous locale, as `setLocale` does on the page.
+      if (!all || inst.dead) return;
+      const fresh: LocaleDictionaries = {};
+      for (const [name, dict] of Object.entries(all) as [Locale, Record<string, string>][]) {
+        if (!inst.sentDictionaries.has(name)) fresh[name] = dict;
+      }
+      const applied = await untilDeath(inst, () => proxy.setLocale(locale, fresh));
+      if (applied) for (const name of Object.keys(fresh)) inst.sentDictionaries.add(name as Locale);
+    })
     .then(
       () => undefined,
       () => undefined
     );
 }
 
+/**
+ * `inst.proxy`, with every top-level method call's arguments and result
+ * measured: a call that moves `threshold` bytes or more marks the instance
+ * for retirement. Everything that is not a method call — `then`, the Comlink
+ * symbols, nested paths — passes straight through, so arguments wrapped in
+ * `Comlink.transfer` keep their transfer list (it is keyed by the very object
+ * passed on here).
+ */
+function measured<T>(inst: Instance<T>, threshold: number): Comlink.Remote<T> {
+  const note = (value: unknown) => {
+    if (!inst.retire && payloadBytes(value) >= threshold) inst.retire = true;
+  };
+  return new Proxy(inst.proxy as unknown as object, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop) as unknown;
+      if (typeof prop === 'symbol' || typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        note(args);
+        const result = Reflect.apply(value as (...a: unknown[]) => unknown, target, args);
+        if (result instanceof Promise) {
+          return result.then(out => {
+            note(out);
+            return out;
+          });
+        }
+        return result;
+      };
+    }
+  }) as Comlink.Remote<T>;
+}
+
 export function createWorkerClient<T>(
   spawn: () => Worker,
-  { idleMs = 30_000, name = 'worker', maxSize, syncLocale = false }: WorkerClientOptions = {}
+  {
+    idleMs = 30_000,
+    name = 'worker',
+    maxSize,
+    syncLocale = false,
+    retireAfterBytes = 0
+  }: WorkerClientOptions = {}
 ): WorkerClient<T> {
   const poolMax = Math.max(1, maxSize ?? defaultPoolSize());
   const pool: Instance<T>[] = [];
@@ -211,7 +319,13 @@ export function createWorkerClient<T>(
   };
 
   const scheduleIdle = (inst: Instance<T>) => {
-    if (inst.leases > 0 || idleMs <= 0 || !pool.includes(inst)) return;
+    if (inst.leases > 0 || !pool.includes(inst)) return;
+    // NFR-03 — a realm full of a large job's garbage goes now, not after idling.
+    if (inst.retire) {
+      terminateInstance(inst);
+      return;
+    }
+    if (idleMs <= 0) return;
     clearIdle(inst);
     inst.idleTimer = setTimeout(() => terminateInstance(inst), idleMs);
   };
@@ -233,7 +347,10 @@ export function createWorkerClient<T>(
       dead: false,
       pending,
       kill,
-      ready: null
+      ready: null,
+      sentDictionaries: new Set(),
+      retire: false,
+      api: null as unknown as Comlink.Remote<T>
     };
     worker.addEventListener('error', event => {
       if (inst.dead) return;
@@ -264,6 +381,7 @@ export function createWorkerClient<T>(
       });
     });
     inst.proxy = Comlink.wrap<T>(worker);
+    inst.api = retireAfterBytes > 0 ? measured(inst, retireAfterBytes) : inst.proxy;
     if (syncLocale) sendLocale(inst, currentLocale.value);
     pool.push(inst);
     return inst;
@@ -271,6 +389,9 @@ export function createWorkerClient<T>(
 
   /** Prefers an idle instance, then grows the pool, then shares the least-busy one. */
   const acquire = (): Instance<T> => {
+    // A call that never awaited its reply can mark an instance for retirement
+    // after its lease ended; it goes here rather than taking new work.
+    for (const inst of [...pool]) if (inst.retire && inst.leases === 0) terminateInstance(inst);
     const idle = pool.find(inst => inst.leases === 0);
     if (idle) {
       clearIdle(idle);

@@ -11,7 +11,7 @@ import {
   type CompressionResultStats
 } from '../../../core/compress-report';
 import { activeDoc } from '../../../core/store';
-import { currentDocumentBytes, planCompression } from '../../../core/operations';
+import { analyseActiveDocument } from './analysis';
 import { Button } from '../../components/Button';
 import { Field, RadioGroup, Select, Slider } from '../../components/Field';
 import { SizeDelta, formatBytes, formatTargetMiss } from '../../components/Feedback';
@@ -84,12 +84,10 @@ export function CompressPanel() {
   const settings = compressSettings.value;
   const report = compressReport.value;
   const { run } = useJob();
-  if (!doc) return null;
 
   const analyse = () =>
     run({ label: translate('Analysing document'), scope: 'compress.plan' }, async job => {
-      const bytes = await currentDocumentBytes(job);
-      compressReport.value = await planCompression(bytes, settings, job);
+      compressReport.value = await analyseActiveDocument(settings, job);
     });
 
   useEffect(() => {
@@ -103,8 +101,7 @@ export function CompressPanel() {
       // pages changed meanwhile; and never an unhandled rejection (UI-11).
       void (async () => {
         try {
-          const bytes = await currentDocumentBytes({ signal: controller.signal });
-          const newReport = await planCompression(bytes, settings, { signal: controller.signal });
+          const newReport = await analyseActiveDocument(settings, { signal: controller.signal });
           const now = activeDoc.value;
           if (controller.signal.aborted || now?.id !== planned?.id || now?.pages !== planned?.pages)
             return;
@@ -120,6 +117,10 @@ export function CompressPanel() {
       controller.abort();
     };
   }, [settings.dpi, settings.quality]);
+
+  // After every hook: returning before `useEffect` made the hook count change
+  // between renders with and without a document (AUDIT-2026-10-10 UI30).
+  if (!doc) return null;
 
   // CMP-05: once the preview has re-encoded the representative page for real,
   // the projection is re-anchored on those measured bytes instead of the

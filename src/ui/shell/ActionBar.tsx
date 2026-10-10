@@ -88,19 +88,24 @@ export function ActionBar() {
             {t('Cancel')}
           </Button>
         )}
-        <Button
-          variant="primary"
-          disabled={(!doc && !tool.worksWithoutDocument) || busy || gate !== null}
-          title={gate ?? undefined}
-          aria-describedby={gate ? `commit-gate-${tool.id}` : undefined}
-          onClick={() =>
-            void run({ label: t(tool.commitLabel), scope: `commit.${tool.id}` }, jobOptions =>
-              commitTool(tool.id, jobOptions)
-            )
-          }
-        >
-          {busy ? t('Working…') : t(tool.commitLabel)}
-        </Button>
+        {/* A view-only tool (compare, read aloud, reflow…) produces no file, so
+            it has no primary action — a "Done" that did nothing was a dead
+            control that also briefly took the job slot (AUDIT-2026-10-10 UI4). */}
+        {!tool.viewOnly && (
+          <Button
+            variant="primary"
+            disabled={(!doc && !tool.worksWithoutDocument) || busy || gate !== null}
+            title={gate ?? undefined}
+            aria-describedby={gate ? `commit-gate-${tool.id}` : undefined}
+            onClick={() =>
+              void run({ label: t(tool.commitLabel), scope: `commit.${tool.id}` }, jobOptions =>
+                commitTool(tool.id, jobOptions)
+              )
+            }
+          >
+            {busy ? t('Working…') : t(tool.commitLabel)}
+          </Button>
+        )}
       </div>
     </div>
   );

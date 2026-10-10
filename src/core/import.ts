@@ -30,14 +30,30 @@ import {
   type PdfImageSource
 } from './image';
 import { hasXfaMarker, XFA_MESSAGE } from './pdf/xfa';
-import { tPlural, translate } from './i18n';
+import { currentLocale, tPlural, translate } from './i18n';
 import { wholeMegabytes } from './bytes';
 
 /** Warn rather than refuse — the plan has no size limit, only a warning (§5.1). */
 export const LARGE_FILE_BYTES = 100_000_000; // decimal, as the warning's "100MB" says (X-10)
 
-/** The formats `importFiles` accepts, named once so every message agrees. */
+const FORMAT_NAMES = ['PDF', 'PNG', 'JPEG', 'WebP', 'GIF', 'TIFF', 'HEIC'];
+
+/** The formats `importFiles` accepts, named once so every message agrees. English list. */
 export const SUPPORTED_FORMATS = 'PDF, PNG, JPEG, WebP, GIF, TIFF, and HEIC';
+
+/**
+ * The same list joined for the app's locale ("…, TIFF und HEIC"), for insertion
+ * into a translated sentence — the English constant put a literal "and" into
+ * every language (AUDIT-2026-10-10 UI21). Identical to `SUPPORTED_FORMATS` in
+ * English.
+ */
+export function supportedFormats(): string {
+  try {
+    return new Intl.ListFormat(currentLocale.value, { type: 'conjunction' }).format(FORMAT_NAMES);
+  } catch {
+    return SUPPORTED_FORMATS;
+  }
+}
 
 /**
  * The oversized warning, or `null` below the threshold.
@@ -177,10 +193,12 @@ async function importPdf(
   stage(0.5, translate('Saving {name}', { name: file.name }));
   markSourcePending(id);
   onPending(id);
-  await writeSourceBytes(id, bytes);
 
   let facts: DocumentFacts;
   try {
+    // AUDIT-2026-10-10 L6 — inside the cleanup: a write that fails part-way
+    // (quota) must not leave its file, or its size record, behind.
+    await writeSourceBytes(id, bytes);
     stage(0.7, translate('Inspecting {name}', { name: file.name }));
     // RT-16 — with the bytes safely in OPFS, this thread's copy has no reader
     // left, so it is *transferred* to the process worker rather than cloned.
@@ -278,9 +296,9 @@ export async function imagesToPdfBytes(
       warnings.push(
         translate('{name}: {warning}', {
           name: files[i].name,
-          warning: translate(
+          warning: tPlural(
             'This GIF is animated ({count} frames); only the first frame was used.',
-            { count: frames }
+            frames
           )
         })
       );
@@ -392,7 +410,7 @@ export async function importFiles(
     message: unsupported(
       translate('{type} cannot be imported. Stapler accepts {formats}.', {
         type: file.type || translate('This file type'),
-        formats: SUPPORTED_FORMATS
+        formats: supportedFormats()
       })
     ).message
   }));

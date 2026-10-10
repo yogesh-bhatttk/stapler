@@ -51,7 +51,10 @@
  *
  * Mode 'bundle' (third-party code in dist/) keeps only the remote-URL sink
  * rules: bundled libraries legitimately reference `fetch` for code paths the
- * app never takes (the CSP and the extension e2e project cover those).
+ * app never takes (the CSP and the extension e2e project cover those). It
+ * adds one rule source mode does not need (audit 2026-10-10 S4): a remote
+ * URL passed straight to `fetch()`, `importScripts()`, `sendBeacon()`,
+ * `xhr.open(method, url)` or `new WebSocket/EventSource/WebTransport()`.
  *
  * Allowed without analysis: `src/core/ocr/model.ts` and
  * `src/core/ocr/download.ts`, the one consented, pinned, hash-verified model
@@ -67,8 +70,9 @@ export const NETWORK_ALLOWED_FILES = new Set([
   'src/core/ocr/model.ts',
   'src/core/ocr/download.ts',
   // Audit 2026-10-01 PLT-2: the worker-side backstop. It names `fetch`,
-  // `XMLHttpRequest` and `importScripts` only to *replace* them with versions
-  // that refuse remote URLs; the URL rule it applies lives in the analysed
+  // `XMLHttpRequest`, `importScripts`, `Worker`, `Cache` and `FontFace` only
+  // to *replace* them with versions that refuse remote URLs (audit 2026-10-10
+  // S3 added the last three); the URL rule it applies lives in the analysed
   // `src/core/workers/network-policy.ts`.
   'src/core/workers/network-guard.ts',
   // Audit 2026-10-01 PLT-4 follow-up: the web service worker's passthrough.
@@ -897,6 +901,30 @@ export function analyzeScript(text, fileName = 'file.ts', options = {}) {
       ? 'importScripts — MV3 forbids remote code; bundle it instead'
       : `${name} — no runtime network requests are permitted (CLAUDE.md invariant #1)`;
 
+  // Audit 2026-10-10 S4 — in 'bundle' mode the network APIs themselves are
+  // not flagged (libraries carry code paths Stapler never takes), so a remote
+  // URL handed *directly* to one is checked here instead. Source mode already
+  // flags every reference to these APIs, so this runs for bundles only. The
+  // bundle scan's documentation-host allowlist does not apply to these
+  // findings: a docs host is inert in a comment or a plain string, not as
+  // the argument of `fetch()`.
+  const checkRequestCall = (node, callee, args) => {
+    let name;
+    if (ts.isIdentifier(callee))
+      name = ['fetch', 'importScripts'].find(n => memberOfGlobal(callee, n));
+    else if (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee))
+      name = keyOf(callee);
+    if (!name) return;
+    if (name === 'fetch' || name === 'sendBeacon' || name === 'importScripts') {
+      const targets = name === 'importScripts' ? args : args.slice(0, 1);
+      for (const a of targets)
+        if (urlInfo(a) === 'remote') flag(node, `${name}() of a remote URL (${describe(a)})`);
+    }
+    // `xhr.open(method, url)` — the URL is the second argument.
+    if (name === 'open' && args.length >= 2 && urlInfo(args[1]) === 'remote')
+      flag(node, `XMLHttpRequest open() of a remote URL (${describe(args[1])})`);
+  };
+
   const allowedSameOriginFetch = node => {
     // `fetch(x)` / `self.fetch(x)` with x provably same-origin, in a file that may do so.
     if (!sameOriginFetch) return false;
@@ -1114,6 +1142,7 @@ export function analyzeScript(text, fileName = 'file.ts', options = {}) {
     if (ts.isCallExpression(node)) {
       const callee = skipOuter(node.expression);
       const args = node.arguments;
+      if (!source) checkRequestCall(node, callee, args);
       if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
         if (args[0]) checkSpecifier(node, args[0], 'dynamic import()');
       } else if (ts.isIdentifier(callee) && isGlobalRef(callee)) {
@@ -1211,6 +1240,14 @@ export function analyzeScript(text, fileName = 'file.ts', options = {}) {
           );
       }
       if ((ctor === 'Audio' || ctor === 'Request') && arg && urlInfo(arg) === 'remote')
+        flag(node, `new ${ctor}() of a remote URL (${describe(arg)})`);
+      // Audit 2026-10-10 S4: bundle mode only, see checkRequestCall.
+      if (
+        !source &&
+        (ctor === 'WebSocket' || ctor === 'EventSource' || ctor === 'WebTransport') &&
+        arg &&
+        urlInfo(arg) === 'remote'
+      )
         flag(node, `new ${ctor}() of a remote URL (${describe(arg)})`);
       if (source && ctor === 'Function')
         flag(node, 'new Function() — dynamic code cannot be checked for network access');

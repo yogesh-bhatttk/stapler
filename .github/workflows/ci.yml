@@ -15,19 +15,26 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Audit 2026-10-10: read-only token for every job; nothing here writes.
+# Third-party actions are pinned by full commit SHA (the tag in the comment),
+# Node by .nvmrc and pnpm by exact version.
+permissions:
+  contents: read
+
 jobs:
   check:
     name: Lint, types, tokens, invariants
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
-          # package.json pins pnpm via devEngines, which action-setup doesn't read.
-          version: 11
-      - uses: actions/setup-node@v4
+          # Exact; satisfies package.json devEngines (^11.20.0), which action-setup
+          # doesn't read. Same version docs/AMO_SOURCE_BUILD.md cites.
+          version: 11.28.5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
@@ -36,33 +43,45 @@ jobs:
     # Audit 2026-09-25 PLT-6: the source guards only see Stapler's own code.
     # This scans what ships — both builds, third-party code included — for a
     # remote URL in a sink, or any remote URL not in the documented allowlist.
-    name: Bundle zero-network scan
+    # Audit 2026-10-10: also the bundle-size budget, and the Firefox build,
+    # which the zero-permission invariant and validate-builds now check too
+    # (scripts/manifest-invariants.mjs) — before this, CI never built it.
+    name: Bundle scans, size budget, Firefox build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
-          version: 11
-      - uses: actions/setup-node@v4
+          version: 11.28.5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: pnpm check:bundle-network
+      - run: pnpm build:ext:firefox
+      # Zero permissions / CSP on public/manifest.json and the built
+      # dist/ext and dist/firefox manifests (present now, so checked).
+      - run: node scripts/check-invariants.mjs
+      - run: pnpm validate:builds
+      - run: node scripts/check-bundle-network.mjs dist/ext dist/web dist/firefox
+      # `pnpm check:bundle` is `build:web` + this; the build above already ran.
+      - name: Bundle size budget
+        run: node scripts/check-bundle-size.js
 
   unit:
     name: Unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
-          # package.json pins pnpm via devEngines, which action-setup doesn't read.
-          version: 11
-      - uses: actions/setup-node@v4
+          # Exact; satisfies package.json devEngines (^11.20.0), which action-setup
+          # doesn't read. Same version docs/AMO_SOURCE_BUILD.md cites.
+          version: 11.28.5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
@@ -71,21 +90,22 @@ jobs:
     name: E2E (zero-network, a11y, tool flows)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
-          # package.json pins pnpm via devEngines, which action-setup doesn't read.
-          version: 11
-      - uses: actions/setup-node@v4
+          # Exact; satisfies package.json devEngines (^11.20.0), which action-setup
+          # doesn't read. Same version docs/AMO_SOURCE_BUILD.md cites.
+          version: 11.28.5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
       # The web-preview functional suite. One retry, and a test that only
       # passes on it fails the run (`failOnFlakyTests`) — audit PLT-18.
       - run: pnpm test:e2e:web
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
           name: playwright-report
@@ -98,13 +118,13 @@ jobs:
     name: E2E (packaged extension)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
-          version: 11
-      - uses: actions/setup-node@v4
+          version: 11.28.5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
@@ -113,7 +133,7 @@ jobs:
       - run: pnpm test:e2e:ext
         env:
           STAPLER_EXT_PREBUILT: '1'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
           name: playwright-report-extension
@@ -126,13 +146,13 @@ jobs:
     name: Performance budgets
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
-          version: 11
-      - uses: actions/setup-node@v4
+          version: 11.28.5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
@@ -141,7 +161,7 @@ jobs:
           # Headless-runner allowance over PLAN §5.1's numbers; every run
           # records measured vs budget as a test annotation.
           STAPLER_PERF_SLACK: '1.5'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: playwright-report-perf

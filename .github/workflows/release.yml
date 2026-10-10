@@ -6,9 +6,11 @@ name: Release
 #
 #   build    `pnpm package` (scripts/package.mjs): all three targets, the
 #            zero-permission and version invariants re-checked on the built
-#            manifests, no sourcemaps, reproducible timestamps; uploads
+#            manifests, no e2e test hook, no sourcemaps, reproducible
+#            timestamps; `addons-linter` on the Firefox zip; uploads
 #            dist/release (chrome, firefox and web zips, one `.sha256` per zip,
-#            SHA256SUMS) as the `release` artifact. Nothing later rebuilds it.
+#            SHA256SUMS, BUILD_INFO.txt) as the `release` artifact. Nothing
+#            later rebuilds it.
 #   check    lint, types, tokens, invariants, unit tests (source-level).
 #   bundle-network, e2e-extension, e2e-web-shipped
 #            unpack the artifact's zips and test *those*: the bundle scan runs
@@ -47,14 +49,15 @@ jobs:
     name: Build and package (once)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
-          # package.json pins pnpm via devEngines, which action-setup doesn't read.
-          version: 11
-      - uses: actions/setup-node@v4
+          # Exact; satisfies package.json devEngines (^11.20.0), which action-setup
+          # doesn't read. Same version docs/AMO_SOURCE_BUILD.md cites.
+          version: 11.28.5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Tag matches package.json version
@@ -70,7 +73,12 @@ jobs:
         run: |
           sha256sum --check SHA256SUMS
           for sum in *.zip.sha256; do sha256sum --check "$sum"; done
-      - uses: actions/upload-artifact@v4
+      # Audit 2026-10-10: Mozilla's own linter on the exact Firefox zip, pinned.
+      # Errors fail the release; warnings are printed for the reviewer.
+      - name: addons-linter (Firefox zip)
+        run: pnpm dlx addons-linter@10.13.0 dist/release/stapler-*-firefox.zip
+      - run: cat dist/release/BUILD_INFO.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release
           path: dist/release/
@@ -81,13 +89,13 @@ jobs:
     name: Lint, types, tokens, invariants, unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
-          version: 11
-      - uses: actions/setup-node@v4
+          version: 11.28.5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
@@ -98,16 +106,16 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
-          version: 11
-      - uses: actions/setup-node@v4
+          version: 11.28.5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release
           path: release
@@ -125,17 +133,17 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
-          version: 11
-      - uses: actions/setup-node@v4
+          version: 11.28.5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release
           path: release
@@ -144,7 +152,7 @@ jobs:
       - run: pnpm test:e2e:ext
         env:
           STAPLER_EXT_PREBUILT: '1'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
           name: playwright-report-release-extension
@@ -159,17 +167,17 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
-          version: 11
-      - uses: actions/setup-node@v4
+          version: 11.28.5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release
           path: release
@@ -178,7 +186,9 @@ jobs:
       - name: Confirm it is the shipped build (no test hooks)
         run: |
           # The e2e build's service-worker opt-in key (src/ui/pwa.ts) is
-          # compiled out of a build without VITE_E2E_TEST_HOOKS.
+          # compiled out of a build without VITE_E2E_TEST_HOOKS. package.mjs
+          # already refuses to zip a build containing it (audit 2026-10-10);
+          # this re-checks the bytes that were actually uploaded.
           if grep -rlq --exclude='*.map' 'stapler:e2e-service-worker' shipped/web; then
             echo "::error::The shipped web zip contains the e2e opt-in hook"
             exit 1
@@ -186,7 +196,7 @@ jobs:
       - run: pnpm exec playwright test -c tests/e2e/pwa-shipped.config.ts
         env:
           STAPLER_SHIPPED_WEB: shipped/web
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
           name: playwright-report-release-web-shipped
@@ -197,18 +207,18 @@ jobs:
     name: E2E (web preview, instrumented build)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
-          version: 11
-      - uses: actions/setup-node@v4
+          version: 11.28.5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:e2e:web
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
           name: playwright-report-release-web
@@ -220,20 +230,20 @@ jobs:
     name: Performance budgets
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
-          version: 11
-      - uses: actions/setup-node@v4
+          version: 11.28.5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:perf
         env:
           STAPLER_PERF_SLACK: '1.5'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: playwright-report-release-perf
@@ -249,8 +259,8 @@ jobs:
       contents: write
     steps:
       # Checked out only so `gh` knows the repository; nothing is built here.
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release
           path: release
@@ -267,7 +277,7 @@ jobs:
           # v1.2.3-beta.1 and the like are marked as pre-releases.
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then flags+=(--prerelease); fi
           gh release create "$GITHUB_REF_NAME" \
-            release/*.zip release/*.zip.sha256 release/SHA256SUMS \
+            release/*.zip release/*.zip.sha256 release/SHA256SUMS release/BUILD_INFO.txt \
             --draft \
             --verify-tag \
             --title "Stapler ${GITHUB_REF_NAME#v}" \

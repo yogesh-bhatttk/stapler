@@ -164,6 +164,13 @@
   cursor: pointer;
 }
 
+/* A tab that can't be switched to while a job runs: still focusable, so its
+   reason can be read, but visibly unavailable. */
+.tabBlocked {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .tabName {
   overflow: hidden;
   text-overflow: ellipsis;

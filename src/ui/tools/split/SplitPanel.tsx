@@ -10,6 +10,7 @@ import { outlineDocId, outlineLoading, outlineTree, topLevelSlices } from '../ou
 import { useDocumentOutline } from '../outline/useOutline';
 import { tPlural, useTranslation } from '../../../core/i18n';
 import { hasDirectoryPicker } from '../../../platform/fsa';
+import { everyNError, parseTypedNumber, targetSizeKbError } from './validate';
 
 export function SplitPanel() {
   const t = useTranslation();
@@ -64,19 +65,33 @@ export function SplitPanel() {
 
       {settings.mode === 'every_n' && (
         <Field label={t('Pages per file')}>
-          {id => (
-            <NumberInput
-              id={id}
-              min={1}
-              max={Math.max(1, doc.pages.length)}
-              value={settings.everyN}
-              onInput={event =>
-                update({
-                  everyN: Math.max(1, Number((event.target as HTMLInputElement).value) || 1)
-                })
-              }
-            />
-          )}
+          {id => {
+            // Stored as typed (UI6): an invalid value gets an inline error and
+            // the split refuses it, rather than being clamped mid-keystroke.
+            const error = everyNError(settings.everyN);
+            const errorId = `${id}-error`;
+            return (
+              <>
+                <NumberInput
+                  id={id}
+                  min={1}
+                  max={Math.max(1, doc.pages.length)}
+                  step={1}
+                  value={Number.isNaN(settings.everyN) ? '' : settings.everyN}
+                  aria-invalid={error ? true : undefined}
+                  aria-describedby={error ? errorId : undefined}
+                  onInput={event =>
+                    update({ everyN: parseTypedNumber((event.target as HTMLInputElement).value) })
+                  }
+                />
+                {error && (
+                  <p id={errorId} className={panelStyles.note} role="alert">
+                    {error}
+                  </p>
+                )}
+              </>
+            );
+          }}
         </Field>
       )}
 
@@ -117,18 +132,31 @@ export function SplitPanel() {
 
       {settings.mode === 'size' && (
         <Field label={t('Target size per file (KB)')}>
-          {id => (
-            <NumberInput
-              id={id}
-              min={1}
-              value={settings.targetSizeKb}
-              onInput={event =>
-                update({
-                  targetSizeKb: Math.max(1, Number((event.target as HTMLInputElement).value) || 1)
-                })
-              }
-            />
-          )}
+          {id => {
+            const error = targetSizeKbError(settings.targetSizeKb);
+            const errorId = `${id}-error`;
+            return (
+              <>
+                <NumberInput
+                  id={id}
+                  min={1}
+                  value={Number.isNaN(settings.targetSizeKb) ? '' : settings.targetSizeKb}
+                  aria-invalid={error ? true : undefined}
+                  aria-describedby={error ? errorId : undefined}
+                  onInput={event =>
+                    update({
+                      targetSizeKb: parseTypedNumber((event.target as HTMLInputElement).value)
+                    })
+                  }
+                />
+                {error && (
+                  <p id={errorId} className={panelStyles.note} role="alert">
+                    {error}
+                  </p>
+                )}
+              </>
+            );
+          }}
         </Field>
       )}
 
@@ -151,10 +179,12 @@ export function SplitPanel() {
             ? t(
                 'File count is determined when you run the split, from each page’s actual composed size.'
               )
-            : tPlural('Produces {count} files.', boundaries.length + 1) +
-              (boundaries.length > 0 && settings.outputFormat === 'zip'
-                ? ' ' + t('Multiple files are delivered as a ZIP.')
-                : '')}
+            : settings.mode === 'every_n' && everyNError(settings.everyN)
+              ? null
+              : tPlural('Produces {count} files.', boundaries.length + 1) +
+                (boundaries.length > 0 && settings.outputFormat === 'zip'
+                  ? ' ' + t('Multiple files are delivered as a ZIP.')
+                  : '')}
       </p>
 
       {settings.mode !== 'extract' && hasDirectoryPicker() && (

@@ -1,4 +1,4 @@
-import { tPlural, translate, useTranslation } from '../../../core/i18n';
+import { translate, useTranslation } from '../../../core/i18n';
 /**
  * OPS-04 — insert pages from another document at a chosen position.
  *
@@ -8,18 +8,20 @@ import { tPlural, translate, useTranslation } from '../../../core/i18n';
  * no way to choose where the pages landed short of appending, then dragging
  * them into place in the grid by hand.
  */
-import { tryToRepairAction } from '../repair/state';
 import { useState } from 'preact/hooks';
 import { FilePlus } from 'lucide-preact';
 import { platform } from '../../../platform/current';
 import { PDF_AND_IMAGES } from '../../../platform/index';
-import { importFiles } from '../../../core/import';
-import { activeDoc, insertPages, selectedPageKeys, setPageSelection } from '../../../core/store';
-import { notify, notifyError } from '../../../core/notify';
+import { activeDoc, selectedPageKeys } from '../../../core/store';
+import { notifyError } from '../../../core/notify';
 import { Button } from '../../components/Button';
 import { useImageImportOptions } from '../../useImageImportOptions';
-import { isPdfFile } from '../../../core/import';
-import { isSupportedImage } from '../../../core/image';
+import {
+  importIntoDocument,
+  mayPickFilesToAdd,
+  notifyInserted,
+  prepareFilesToAdd
+} from './import-into-document';
 import { Field, NumberStepper } from '../../components/Field';
 import { panelStyles } from '../../shell/panelStyles';
 import { useJob } from '../../useJob';
@@ -38,7 +40,9 @@ export function InsertPanel() {
   const doc = activeDoc.value;
   const { run } = useJob();
   const [busy, setBusy] = useState(false);
-  const { requestOptions } = useImageImportOptions();
+  // M7 / UI#5 — `node` is the image options dialog; without rendering it,
+  // `requestOptions` waited for an answer no one could give.
+  const { requestOptions, node } = useImageImportOptions();
   // `null` follows the current grid selection; a number is an explicit override
   // once the user has touched the stepper. Cleared after each insert so the next
   // one goes back to following whatever is selected.
@@ -50,52 +54,29 @@ export function InsertPanel() {
   const clampedIndex = Math.min(manualIndex ?? liveDefault, pageCount);
 
   const addFiles = async () => {
+    // M7 — the same pre-checks as Merge: no picker while a job runs or the
+    // restore prompt is up (UI-20, RT-14).
     setBusy(true);
     try {
+      if (!(await mayPickFilesToAdd())) return;
       const opened = await platform.openFiles({ multiple: true, accept: PDF_AND_IMAGES });
       if (opened.length === 0) return;
       const files = await Promise.all(opened.map(handle => handle.getFile()));
-      let imageOptions = undefined;
-      if (files.some(f => !isPdfFile(f) && isSupportedImage(f))) {
-        const opts = await requestOptions(files);
-        if (!opts) {
-          setBusy(false);
-          return;
-        }
-        imageOptions = opts;
-      }
+      // M7 — pages go into this document: no new document, but the memory
+      // soft limit still applies.
+      const prepared = await prepareFilesToAdd(files, 0, requestOptions);
+      if (!prepared) return;
 
+      const position = clampedIndex;
       await run({ label: translate('Importing'), scope: 'insert.add' }, async job => {
-        const outcome = await importFiles(files, job, imageOptions);
-        let at = clampedIndex;
-        const insertedKeys: string[] = [];
-        for (const imported of outcome.imported) {
-          insertPages(doc.id, imported.pages, at);
-          insertedKeys.push(...imported.pages.map(p => p.key));
-          at += imported.pages.length;
-          for (const warning of imported.warnings) {
-            notify('warning', imported.source.name, { detail: warning });
-          }
-        }
-        // A failure on one file never stops the others, and each says why.
-        for (const failure of outcome.failures) {
-          notify('danger', translate('Could not add {name}', { name: failure.name }), {
-            detail: failure.message,
-            ...(failure.repairable ? { action: tryToRepairAction(failure.repairable) } : {})
-          });
-        }
-        if (insertedKeys.length > 0) {
-          // Selecting the newly-inserted pages is the "visible insertion
-          // indicator" for a non-drag insert: the grid highlights exactly
-          // where the pages landed, the same way a drag's drop line does.
-          setPageSelection(insertedKeys);
+        const added = await importIntoDocument(files, job, prepared.imageOptions, {
+          docId: doc.id,
+          at: position,
+          createIfMissing: false
+        });
+        if (added && added.keys.length > 0) {
           setManualIndex(null);
-          notify(
-            'success',
-            tPlural('Inserted {count} pages at position {position}.', insertedKeys.length, {
-              position: clampedIndex + 1
-            })
-          );
+          notifyInserted(added.keys, position);
         }
       });
     } catch (err) {
@@ -126,6 +107,7 @@ export function InsertPanel() {
       <Button variant="secondary" icon={FilePlus} onClick={() => void addFiles()} disabled={busy}>
         {t('Choose PDFs or images to insert')}
       </Button>
+      {node}
 
       {pageCount === 0 && (
         <p className={panelStyles.description}>{t('This document has no pages yet.')}</p>

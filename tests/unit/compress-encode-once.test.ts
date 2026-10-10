@@ -118,7 +118,7 @@ function sourceJpeg(size = 400): Uint8Array {
       ctx.fillRect(x, y, 8, 8);
     }
   }
-  return new Uint8Array(canvas.toBuffer('image/jpeg', 0.9));
+  return new Uint8Array(canvas.toBuffer('image/jpeg', 90)); // @napi-rs/canvas takes 0–100
 }
 
 /**

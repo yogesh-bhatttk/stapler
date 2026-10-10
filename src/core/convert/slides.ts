@@ -47,7 +47,7 @@
 
 import { normalizeRotation } from '../rotation';
 import { tKey, tPlural, translate } from '../i18n';
-import { layoutLines, type TextRun } from '../text-layout';
+import { layoutLines, runGap, runTypeSize, type TextRun } from '../text-layout';
 
 /** A run of text with the two attributes a PowerPoint run can carry from a PDF. */
 export interface SlideRun {
@@ -466,17 +466,22 @@ export function pageTextLines(
     }
     const built = lineToRuns(line.runs);
     if (built.runs.length === 0) continue;
-    const first = line.runs[0];
-    const last = line.runs[line.runs.length - 1];
-    const right = last.transform[4] + last.width;
+    // The extent over every run, not first-to-last: a right-to-left line's
+    // runs are in reading order, rightmost first (CV5).
+    let left = Infinity;
+    let right = -Infinity;
+    for (const run of line.runs) {
+      left = Math.min(left, run.transform[4]);
+      right = Math.max(right, run.transform[4] + run.width);
+    }
     const size = line.maxSize > 0 ? line.maxSize : FALLBACK_TYPE_SIZE;
     out.push({
       runs: built.runs,
-      x: first.transform[4],
+      x: left,
       baseline: line.baseline,
       // A run's reported `width` is the advance pdf.js measured, so the line's
       // extent is measured rather than estimated from a character count.
-      width: Math.max(right - first.transform[4], size * 0.5),
+      width: Math.max(right - left, size * 0.5),
       size,
       angle: 0,
       truncated: built.truncated
@@ -532,8 +537,8 @@ function lineToRuns(runs: readonly FormattedTextRun[]): { runs: SlideRun[]; trun
     const italic = run.italic === true;
     let separator = '';
     if (previous) {
-      const gap = run.transform[4] - (previous.transform[4] + previous.width);
-      if (gap > Math.abs(run.transform[3]) * 0.25) separator = ' ';
+      // Direction-agnostic: a right-to-left line arrives right to left (CV5).
+      if (runGap(previous, run) > runTypeSize(run) * 0.25) separator = ' ';
     }
     const last = out[out.length - 1];
     if (last && last.bold === bold && last.italic === italic) {

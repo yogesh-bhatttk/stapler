@@ -1,5 +1,6 @@
 import { panelStyles } from '../../shell/panelStyles';
 import { inputDirHandle, outputDirHandle, batchProgress } from './state';
+import { groupBatchNotes } from './noteGroups';
 import { EmptyState } from '../../components/Feedback';
 import { tPlural, useTranslation } from '../../../core/i18n';
 
@@ -75,18 +76,19 @@ export function BatchView() {
         </div>
       )}
 
-      {batchProgress.value.notes.length > 0 && (
-        <div className={panelStyles.section}>
-          <h2>{t('Files written unchanged')}</h2>
+      {/* One heading per outcome: a changed or renamed file is not "unchanged". */}
+      {groupBatchNotes(batchProgress.value.notes).map(group => (
+        <div key={group.kind} className={panelStyles.section}>
+          <h2>{t(group.heading)}</h2>
           <ul style={{ margin: 0, paddingInlineStart: '20px' }}>
-            {batchProgress.value.notes.map(note => (
+            {group.notes.map(note => (
               <li key={`${note.file}-${note.detail}`}>
                 <strong>{note.file}</strong> — {note.detail}
               </li>
             ))}
           </ul>
         </div>
-      )}
+      ))}
     </div>
   );
 }

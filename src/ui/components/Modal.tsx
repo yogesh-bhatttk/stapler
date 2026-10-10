@@ -62,6 +62,23 @@ export function isModalOpen(): boolean {
   return openModals.length > 0;
 }
 
+/**
+ * Puts a dialog that does not use `<Modal>` (the command palette) on the same
+ * stack, so global shortcuts and paste stand down behind it and only the top
+ * dialog answers keys (AUDIT-2026-10-10 UI13).
+ */
+export function registerModal(): { isTop: () => boolean; release: () => void } {
+  const token = Symbol('modal');
+  openModals.push(token);
+  return {
+    isTop: () => openModals[openModals.length - 1] === token,
+    release: () => {
+      const index = openModals.indexOf(token);
+      if (index !== -1) openModals.splice(index, 1);
+    }
+  };
+}
+
 const FOCUSABLE =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -85,15 +102,18 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(function Modal(
   useLayoutEffect(() => {
     const previouslyFocused = document.activeElement as HTMLElement | null;
     const dialog = dialogRef.current;
-    const token = Symbol('modal');
-    openModals.push(token);
+    const entry = registerModal();
 
-    // Move focus into the dialog so the first Tab stays inside it.
+    // Move focus into the dialog so the first Tab stays inside it. A control
+    // marked `data-autofocus` wins over the first focusable one — otherwise that
+    // is the header's close button, and on a confirmation Enter would dismiss
+    // (answer "no") rather than land on a footer action (AUDIT-2026-10-10 UI2).
+    const preferred = dialog?.querySelector<HTMLElement>('[data-autofocus]:not([disabled])');
     const first = dialog?.querySelector<HTMLElement>(FOCUSABLE);
-    (first ?? dialog)?.focus();
+    (preferred ?? first ?? dialog)?.focus();
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (openModals[openModals.length - 1] !== token) return;
+      if (!entry.isTop()) return;
       if (event.key === 'Escape') {
         // Swallowed even when not dismissible, so it can't reach a handler
         // behind a dialog that must be answered.
@@ -121,8 +141,7 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(function Modal(
     document.addEventListener('keydown', onKeyDown, true);
     return () => {
       document.removeEventListener('keydown', onKeyDown, true);
-      const index = openModals.indexOf(token);
-      if (index !== -1) openModals.splice(index, 1);
+      entry.release();
       // Returning focus to where it came from is what makes the dialog feel
       // keyboard-native rather than a dead end.
       previouslyFocused?.focus?.();

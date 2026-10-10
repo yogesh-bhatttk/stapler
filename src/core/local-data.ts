@@ -11,8 +11,10 @@
  *    recipes, the folder-search index, and settings (theme, shortcuts, welcome
  *    flag, the session-recovery record, OCR consent flags, the persistence
  *    outcome) (`db.ts`).
- *  • IndexedDB `keyval-store` — tesseract's own language-model cache
- *    (`ocr/tesseractCache.ts`).
+ *  • IndexedDB `stapler-ocr-models` — the verified language models with their
+ *    hashes, and `keyval-store` — tesseract's own cache, a staging copy
+ *    re-seeded from those before each run (`ocr/tesseractCache.ts`, S6b).
+ *    `clearCachedModels` empties both.
  *  • IndexedDB `stapler-meta` — the version "What's new" was last shown for
  *    (`background/whats-new-store.ts`). Deleted whole by Clear-all (RT-8): it
  *    only stops the same version's page opening twice, and "What's new" is
@@ -23,6 +25,11 @@
  *    Deleted by Clear-all (PLT-5).
  *  • localStorage — the language, a mirror of the custom shortcuts, and the
  *    batch tool's filename pattern and scrub toggle.
+ *  • sessionStorage — this tab's "persistence already asked" flag
+ *    (`storage-persistence.ts`). Cleared too (AUDIT-2026-10-10 L8): after a
+ *    clear the stored outcome is gone, so the flag would otherwise claim an
+ *    answer nothing records. There are no per-device preferences Stapler keeps
+ *    on purpose through a clear — every `stapler.*` / `stapler:*` key goes.
  *
  * Only Stapler's own entries are touched: the web twin's origin can be shared
  * (a GitHub Pages user site), so nothing is wiped by origin.
@@ -64,9 +71,25 @@ function localStorageLike(): Storage | null {
   }
 }
 
+function sessionStorageLike(): Storage | null {
+  try {
+    return typeof sessionStorage === 'undefined' ? null : sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
 /** Stapler's own localStorage keys that are currently set. */
 export function staplerLocalStorageKeys(): string[] {
-  const storage = localStorageLike();
+  return staplerKeysIn(localStorageLike());
+}
+
+/** L8 — Stapler's own sessionStorage keys (same naming rule as localStorage). */
+export function staplerSessionStorageKeys(): string[] {
+  return staplerKeysIn(sessionStorageLike());
+}
+
+function staplerKeysIn(storage: Storage | null): string[] {
   if (!storage) return [];
   const keys: string[] = [];
   try {
@@ -248,6 +271,15 @@ export async function clearAllLocalData(): Promise<ClearResult> {
       localStorageKeys += 1;
     } catch {
       // Left behind; harmless conveniences (language, batch pattern).
+    }
+  }
+  // L8 — the per-tab flags too (the "persistence asked" answer).
+  const session = sessionStorageLike();
+  for (const key of staplerSessionStorageKeys()) {
+    try {
+      session?.removeItem(key);
+    } catch {
+      // Gone with the tab anyway.
     }
   }
   logEvent(

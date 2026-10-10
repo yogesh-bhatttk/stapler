@@ -49,6 +49,28 @@ export const DOCX_NO_DOCUMENT_MESSAGE = tKey(
     'convert. The original file is untouched.'
 );
 
+/**
+ * CV4 — `mammoth` ignores a picture's `<a:srcRect>` crop and emits the whole
+ * source image, so a cropped picture comes out uncropped. Said, not hidden.
+ */
+export const DOCX_CROPPED_PICTURES_MESSAGE = tKey(
+  'Some pictures are cropped in the Word document. This converter cannot apply Word picture ' +
+    'crops, so they appear uncropped (showing the whole original image) in the PDF.'
+);
+
+/** Whether any part of the document crops a picture (a nonzero `l`/`t`/`r`/`b` on `<a:srcRect>`). */
+function hasCroppedPicture(files: Record<string, Uint8Array>): boolean {
+  const decoder = new TextDecoder();
+  for (const [name, data] of Object.entries(files)) {
+    if (!/^word\/[^/]+\.xml$/.test(name)) continue;
+    const xml = decoder.decode(data);
+    for (const match of xml.matchAll(/<a:srcRect\b([^<>]*)>/g)) {
+      if (/\b[ltrb]="-?[1-9]/.test(match[1])) return true;
+    }
+  }
+  return false;
+}
+
 function startsWith(bytes: Uint8Array, magic: readonly number[]): boolean {
   if (bytes.length < magic.length) return false;
   return magic.every((byte, index) => bytes[index] === byte);
@@ -109,10 +131,9 @@ export async function readDocxAsHtml(bytes: Uint8Array, job?: JobHandle): Promis
     throw translateMammothError(err);
   }
 
-  return {
-    html: result.value ?? '',
-    messages: (result.messages ?? []).map(message => describeMammothMessage(message.message))
-  };
+  const messages = (result.messages ?? []).map(message => describeMammothMessage(message.message));
+  if (hasCroppedPicture(vetted)) messages.push(translate(DOCX_CROPPED_PICTURES_MESSAGE));
+  return { html: result.value ?? '', messages };
 }
 
 /**

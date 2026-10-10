@@ -7,9 +7,12 @@
  * display would read the same target back as "8.58 MB" in the very message
  * meant to confirm it.
  *
- * Pure and dependency-free, so `core/` (which must not import from `ui/`) and
- * the UI share it.
+ * Pure, so `core/` (which must not import from `ui/`) and the UI share it. The
+ * number is written the app locale's way ("1,5 MB" in German — AUDIT-2026-10-10
+ * UI21); the unit stays the international KB/MB/GB the size inputs use, and the
+ * English output is unchanged.
  */
+import { currentLocale } from './i18n';
 
 const KB = 1_000;
 const MB = 1_000_000;
@@ -21,9 +24,44 @@ const UNITS = [
   { scale: GB, label: 'GB', decimals: 2 }
 ] as const;
 
-/** Drops a trailing ".00"/"0" so "9.00 MB" reads "9 MB" and "1.50 MB" reads "1.5 MB". */
+const numberFormats = new Map<string, Map<number, Intl.NumberFormat>>();
+
+/**
+ * An already-rounded decimal string ("1.5", "999") in the app locale's digits
+ * and separator. Rounding stays with `toFixed` above, so every locale shows the
+ * same figure; grouping is off so "2500 GB" never becomes "2,500 GB".
+ */
+function localize(fixed: string): string {
+  const locale = currentLocale.value;
+  if (locale === 'en') return fixed;
+  const decimals = fixed.includes('.') ? fixed.length - fixed.indexOf('.') - 1 : 0;
+  let byDecimals = numberFormats.get(locale);
+  if (!byDecimals) {
+    byDecimals = new Map();
+    numberFormats.set(locale, byDecimals);
+  }
+  let format = byDecimals.get(decimals);
+  if (!format) {
+    try {
+      format = new Intl.NumberFormat(locale, {
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: decimals,
+        useGrouping: false,
+        // Latin digits, like every other number the app interpolates; only the
+        // decimal separator follows the locale.
+        numberingSystem: 'latn'
+      });
+    } catch {
+      return fixed;
+    }
+    byDecimals.set(decimals, format);
+  }
+  return format.format(Number(fixed));
+}
+
+/** Drops a trailing ".00"/"0" so "9.00 MB" reads "9 MB" and "1.50 MB" reads "1.5 MB", then localises. */
 function trim(fixed: string): string {
-  return fixed.includes('.') ? fixed.replace(/\.?0+$/, '') : fixed;
+  return localize(fixed.includes('.') ? fixed.replace(/\.?0+$/, '') : fixed);
 }
 
 /**
@@ -42,7 +80,7 @@ function unitFor(bytes: number): { scale: number; label: string; decimals: numbe
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes)) return `${bytes} B`;
   const { scale, label, decimals } = unitFor(Math.abs(bytes));
-  if (scale === 1) return `${Math.round(bytes)} B`;
+  if (scale === 1) return `${localize(String(Math.round(bytes)))} B`;
   return `${trim((bytes / scale).toFixed(decimals))} ${label}`;
 }
 
@@ -69,7 +107,7 @@ function roundFixed(bytes: number, scale: number, decimals: number): string {
 export function formatBytesUp(bytes: number): string {
   if (!Number.isFinite(bytes)) return `${bytes} B`;
   const start = unitFor(bytes);
-  if (start.scale === 1) return `${Math.ceil(bytes)} B`;
+  if (start.scale === 1) return `${localize(String(Math.ceil(bytes)))} B`;
   // Rounding up can itself reach the next unit (999,001 B → "1000 KB").
   const order = UNITS.findIndex(unit => unit.scale === start.scale);
   for (let i = order; i < UNITS.length; i++) {
@@ -118,7 +156,8 @@ export function formatTargetMisses(
       }
     }
   }
-  const exact = (bytes: number) => `${Math.round(bytes).toLocaleString('en-US')} B`;
+  const exact = (bytes: number) =>
+    `${Math.round(bytes).toLocaleString(currentLocale.value === 'en' ? 'en-US' : currentLocale.value)} B`;
   return {
     target: exact(targetBytes),
     achieved: achieved.map(bytes => (bytes > targetBytes ? exact(bytes) : formatBytes(bytes)))

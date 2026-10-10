@@ -3,8 +3,10 @@ import { useTranslation } from '../../../core/i18n';
  * Drawing redaction marks on a page — rectangles (RED-01) and freehand shapes
  * (RED-07).
  *
- * Marks are keyed by the page's index in the *workspace*, not by `sourceIndex` as
- * before: after a reorder or a merge those differ, so marks landed on the wrong pages.
+ * Marks are tied to the page's *key* (AUDIT-2026-10-10 H1), and carry its current
+ * index in the workspace — never `sourceIndex`, which after a reorder or a merge
+ * differs, so marks landed on the wrong pages. The key is what keeps a mark on its
+ * page when Organize deletes or moves the pages before it.
  *
  * A freehand mark is stored as its traced outline *plus* the bounding box every
  * rectangle mark already carries, so the commit path, the verifier, and the list
@@ -13,7 +15,7 @@ import { useTranslation } from '../../../core/i18n';
 import { useRef, useState } from 'preact/hooks';
 import { X } from 'lucide-preact';
 import type { PageRef } from '../../../core/store';
-import { pendingRedactions, redactShapeMode } from './state';
+import { markOnPage, pendingRedactions, redactShapeMode } from './state';
 import styles from './RedactOverlay.module.css';
 import { displayFrame, displayPointToNormalizedPage } from '../../../core/rotation';
 import { polygonBounds, type Point } from '../../../core/geometry';
@@ -64,7 +66,7 @@ function thinTrace(points: Point[]): Point[] {
   return kept;
 }
 
-export function RedactOverlay({ pageIndex, width, height, rotation }: RedactOverlayProps) {
+export function RedactOverlay({ page, pageIndex, width, height, rotation }: RedactOverlayProps) {
   const t = useTranslation();
   const layerRef = useRef<HTMLDivElement>(null);
   const pendingFocusIndex = useRef<number | null>(null);
@@ -111,13 +113,16 @@ export function RedactOverlay({ pageIndex, width, height, rotation }: RedactOver
    * rectangle does that, and a decorative polygon would not do it better.
    */
   const addMarkViaKeyboard = () => {
-    const region = {
-      pageIndex,
-      x: (1 - DEFAULT_MARK.width) / 2,
-      y: (1 - DEFAULT_MARK.height) / 2,
-      width: DEFAULT_MARK.width,
-      height: DEFAULT_MARK.height
-    };
+    const region = markOnPage(
+      {
+        pageIndex,
+        x: (1 - DEFAULT_MARK.width) / 2,
+        y: (1 - DEFAULT_MARK.height) / 2,
+        width: DEFAULT_MARK.width,
+        height: DEFAULT_MARK.height
+      },
+      page
+    );
     pendingRedactions.value = [...marks, region];
     // Focus lands on the new mark once it renders — see the ref callback below.
     pendingFocusIndex.current = marks.length;
@@ -198,14 +203,17 @@ export function RedactOverlay({ pageIndex, width, height, rotation }: RedactOver
     if (Math.max(bounds.width, bounds.height) < MIN_SIZE) return;
     pendingRedactions.value = [
       ...marks,
-      {
-        pageIndex,
-        x: bounds.x,
-        y: bounds.y,
-        width: bounds.width,
-        height: bounds.height,
-        points: thinned
-      }
+      markOnPage(
+        {
+          pageIndex,
+          x: bounds.x,
+          y: bounds.y,
+          width: bounds.width,
+          height: bounds.height,
+          points: thinned
+        },
+        page
+      )
     ];
   };
 
@@ -255,7 +263,10 @@ export function RedactOverlay({ pageIndex, width, height, rotation }: RedactOver
         if (rect.width < MIN_SIZE || rect.height < MIN_SIZE) return;
         pendingRedactions.value = [
           ...marks,
-          { pageIndex, x: rect.left, y: rect.top, width: rect.width, height: rect.height }
+          markOnPage(
+            { pageIndex, x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+            page
+          )
         ];
       }}
       onPointerCancel={() => {
@@ -277,7 +288,8 @@ export function RedactOverlay({ pageIndex, width, height, rotation }: RedactOver
       }}
     >
       {marks.map((mark, index) => {
-        if (mark.pageIndex !== pageIndex) return null;
+        // H1 — by page identity: the index is a position, and positions move.
+        if (mark.pageKey !== page.key) return null;
         return (
           <div
             // Stable across a move: keying on position (as before) remounted

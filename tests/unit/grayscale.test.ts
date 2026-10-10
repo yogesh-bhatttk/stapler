@@ -85,7 +85,7 @@ function colourJpeg(size = 64): Uint8Array {
       ctx.fillRect(x, y, 8, 8);
     }
   }
-  return new Uint8Array(canvas.toBuffer('image/jpeg', 0.9));
+  return new Uint8Array(canvas.toBuffer('image/jpeg', 90)); // @napi-rs/canvas takes 0–100
 }
 
 function colourPngWithAlpha(size = 32): Uint8Array {

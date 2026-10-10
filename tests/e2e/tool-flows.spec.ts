@@ -39,6 +39,14 @@ import {
   contractV2Pdf
 } from './fixtures';
 import {
+  ENG_MODEL_URL,
+  cachedOcrModel,
+  isLocalUrl,
+  isPinnedOcrModelUrl,
+  recordOcrModel,
+  serveOcrModelLocally
+} from './audit-2026-10-10-helpers';
+import {
   commitAndRead,
   confirmExportReviewIfShown,
   dismissToasts,
@@ -407,6 +415,40 @@ async function settledBox(locator: import('@playwright/test').Locator) {
     .toBe(true);
   if (!box) throw new Error('no box');
   return box;
+}
+
+/**
+ * OCR-01's user path: Run OCR → the consent dialog naming the host → download
+ * and run → the review → the saved file's text, as pdf.js extracts it.
+ */
+async function runOcrAndRead(page: import('@playwright/test').Page): Promise<string> {
+  await importFixture(page, 'tests/fixtures/scanned_skewed.pdf');
+  await gotoTool(page, 'ocr');
+  await page.getByRole('button', { name: 'Run OCR & export' }).click();
+
+  const dialog = page.getByRole('dialog', { name: /Download the English OCR language model/ });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText('cdn.jsdelivr.net');
+
+  const download = page.waitForEvent('download', { timeout: 150_000 });
+  await dialog.getByRole('button', { name: 'Download and run OCR' }).click();
+  // OCR is in TOOLS_WITH_EXPORT_REVIEW, so the save waits behind the review.
+  await confirmExportReviewIfShown(page, download);
+  const saved = await download;
+  const location = await saved.path();
+  expect(location).toBeTruthy();
+
+  // The fixture's image reads "Scanned\nDocument" (scripts/generate-static-
+  // fixtures.mjs) — real tesseract output on real pixels.
+  await expect(page.getByText(/words added/i)).toBeVisible();
+  const bytes = new Uint8Array(readFileSync(location!));
+  const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const pdf = await pdfjsLib.getDocument({ data: bytes.slice(), useSystemFonts: false }).promise;
+  const content = await (await pdf.getPage(1)).getTextContent();
+  return content.items
+    .map(item => ('str' in item ? item.str : ''))
+    .join(' ')
+    .toLowerCase();
 }
 
 test.describe('tool flows', () => {
@@ -2094,48 +2136,76 @@ test.describe('tool flows', () => {
     expect(external, `face blur must fetch nothing. Observed:\n${external.join('\n')}`).toEqual([]);
   });
 
-  test('ocr: the one disclosed network exception actually downloads the real model and recognizes text (OCR-01)', async ({
-    page
+  /**
+   * OCR-01, the one disclosed network exception. Audit 2026-10-10 T8: this used
+   * to depend on the live jsDelivr CDN, so it failed offline and passed or
+   * failed with someone else's uptime. It now serves the pinned model URL from
+   * a local, pin-verified copy (`OCR_MODEL_FILE`), and skips — saying exactly
+   * how to provide one — when there is none: the app checks every downloaded
+   * byte against `MODEL_SHA256`, and neither build has a seam to change that,
+   * so only the real file will do. The opt-in live run below records it.
+   *
+   * Everything else is as before: consent dialog → the download (now routed)
+   * → real tesseract on real pixels → an invisible text layer in the export.
+   * A request watcher asserts the only non-local URL the page asked for lies
+   * inside the CSP's `connect-src` OCR allowance (`OCR_MODEL_CONNECT_SOURCES`).
+   */
+  test('ocr: the consented model download runs and recognizes real text (OCR-01, model served locally)', async ({
+    page,
+    baseURL
   }) => {
-    // Every other e2e test — and the zero-network sweep itself — treats network
-    // access as forbidden. This is deliberately the one exception: the audit's
-    // own honest disclaimer was that a sandbox with no network access couldn't
-    // test the real download, only the URL-construction unit tests around it.
-    // This environment has real internet access, so this proves the actual
-    // flow: consent dialog → real fetch from the named host → tesseract
-    // recognizes real text → an invisible text layer lands in the export.
     test.setTimeout(180_000);
+    const model = cachedOcrModel();
+    test.skip('missing' in model, 'missing' in model ? model.missing : '');
+    if ('missing' in model) return;
 
-    await importFixture(page, 'tests/fixtures/scanned_skewed.pdf');
-    await gotoTool(page, 'ocr');
+    const origin = new URL(baseURL!).origin;
+    const requested = await serveOcrModelLocally(page, model.bytes);
+    const external: string[] = [];
+    page.on('request', request => {
+      const url = request.url();
+      if (!isLocalUrl(url, origin)) external.push(url);
+    });
 
-    await page.getByRole('button', { name: 'Run OCR & export' }).click();
-
-    const dialog = page.getByRole('dialog', { name: /Download the English OCR language model/ });
-    await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText('cdn.jsdelivr.net');
-
-    const download = page.waitForEvent('download', { timeout: 150_000 });
-    await dialog.getByRole('button', { name: 'Download and run OCR' }).click();
-    // OCR is in TOOLS_WITH_EXPORT_REVIEW, so the save waits behind the review
-    // dialog; this test never clicked through it and timed out waiting.
-    await confirmExportReviewIfShown(page, download);
-    const saved = await download;
-    const location = await saved.path();
-    expect(location).toBeTruthy();
-
-    // The fixture's image reads "Scanned\nDocument" (scripts/generate-static-
-    // fixtures.mjs) — real tesseract output on real pixels, not a fixture with
-    // canned text already in it.
-    await expect(page.getByText(/words added/i)).toBeVisible();
-    const bytes = new Uint8Array(readFileSync(location!));
-    const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
-    const pdf = await pdfjsLib.getDocument({ data: bytes.slice(), useSystemFonts: false }).promise;
-    const content = await (await pdf.getPage(1)).getTextContent();
-    const text = content.items
-      .map(item => ('str' in item ? item.str : ''))
-      .join(' ')
-      .toLowerCase();
+    const text = await runOcrAndRead(page);
     expect(text).toMatch(/scan|document/);
+
+    // Exactly one model request, to the pinned URL, and nothing else left the page.
+    expect(requested).toEqual([ENG_MODEL_URL]);
+    expect(
+      external.filter(url => !isPinnedOcrModelUrl(url)),
+      `only the pinned OCR model may be requested; saw:\n${external.join('\n')}`
+    ).toEqual([]);
+  });
+
+  /**
+   * The same flow against the real CDN — opt-in (`STAPLER_LIVE_OCR=1`), since
+   * it needs the internet and a third party's uptime. It also records the
+   * downloaded model, once it matches the pin, as the offline copy the test
+   * above serves.
+   */
+  test('ocr: live — the real pinned CDN download (opt-in, STAPLER_LIVE_OCR=1)', async ({
+    page,
+    baseURL
+  }) => {
+    test.skip(process.env.STAPLER_LIVE_OCR !== '1', 'Set STAPLER_LIVE_OCR=1 to hit the real CDN.');
+    test.setTimeout(240_000);
+    const origin = new URL(baseURL!).origin;
+    const external: string[] = [];
+    page.on('request', request => {
+      const url = request.url();
+      if (!isLocalUrl(url, origin)) external.push(url);
+    });
+    await page.route(ENG_MODEL_URL, async route => {
+      const response = await route.fetch();
+      const body = new Uint8Array(await response.body());
+      recordOcrModel(body);
+      await route.fulfill({ response, body: Buffer.from(body) });
+    });
+
+    const text = await runOcrAndRead(page);
+    expect(text).toMatch(/scan|document/);
+    expect(external.filter(url => !isPinnedOcrModelUrl(url))).toEqual([]);
+    expect(external).toContain(ENG_MODEL_URL);
   });
 });

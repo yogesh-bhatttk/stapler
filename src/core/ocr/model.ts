@@ -108,18 +108,6 @@ export interface OcrLanguage {
   code: string;
   /** Shown in the panel and in the confirmation dialog. */
   label: string;
-  /**
-   * Approximate download size in MB, for the disclosure copy.
-   *
-   * This is an **estimate**, not a measurement: the file is not vendored, so there
-   * is nothing local to stat, and measuring it would require the very network
-   * request the dialog exists to ask permission for. ~12 MB is the published size
-   * of `eng.traineddata` in the `4.0.0_best_int` set (gzipped in transit, and it is
-   * the gzipped file that is fetched — so the real transfer is smaller than the
-   * number shown). Erring high is deliberate: a disclosure that under-states a
-   * download is worse than one that over-states it.
-   */
-  approxSizeMb: number;
 }
 
 /**
@@ -131,10 +119,27 @@ export interface OcrLanguage {
  * library's own convention never disagree.
  */
 export const OCR_LANGUAGES: readonly OcrLanguage[] = [
-  { code: 'eng', label: tKey('English'), approxSizeMb: 12 },
-  { code: 'hin', label: tKey('Hindi'), approxSizeMb: 2 },
-  { code: 'eng+hin', label: tKey('English + Hindi (mixed)'), approxSizeMb: 14 }
+  { code: 'eng', label: tKey('English') },
+  { code: 'hin', label: tKey('Hindi') },
+  { code: 'eng+hin', label: tKey('English + Hindi (mixed)') }
 ];
+
+/**
+ * CV11 — the exact number of bytes a download of `code` (a plain or `+`-joined
+ * code) transfers: the sum of its components' pinned {@link MODEL_BYTES}, the
+ * same figure `download.ts` enforces. The disclosure dialog states this rather
+ * than a hand-kept estimate (which said ~12 MB for a 2.95 MB file). Undefined
+ * when a component has no pinned size.
+ */
+export function modelDownloadBytes(code: string): number | undefined {
+  let total = 0;
+  for (const part of splitLangCodes(code)) {
+    const bytes = MODEL_BYTES[part];
+    if (bytes === undefined) return undefined;
+    total += bytes;
+  }
+  return total;
+}
 
 export const DEFAULT_OCR_LANGUAGE = 'eng';
 

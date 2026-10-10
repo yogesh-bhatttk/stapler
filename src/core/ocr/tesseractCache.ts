@@ -25,15 +25,58 @@
  *    (see `src/core/workers/ocr.worker.ts`). `writeCachedModel` is how both a
  *    verified download (`download.ts`) and a manual upload (`runOcr.ts`, from
  *    the bytes `OcrConsentDialog` already wrote to OPFS) land there.
+ *
+ * Audit 2026-10-10 S6b — that store is idb-keyval's *default* database, which
+ * any same-origin script (on the web twin, any page of a shared origin) can
+ * read and rewrite, and a presence check never noticed bytes that changed
+ * after the download's hash check. So:
+ *  - the canonical copy lives in Stapler's own database, {@link MODEL_DB_NAME},
+ *    with the SHA-256 it was verified at;
+ *  - before every use (`hasCachedModel`, which `runOcr` calls before each run)
+ *    the stored bytes are **hashed again** — against the pinned
+ *    `MODEL_SHA256` for a downloaded model, or the hash recorded at upload for
+ *    an uploaded one (whose OPFS copy must still exist). A mismatch discards
+ *    the copy, so the run asks for consent again instead of using it;
+ *  - only then are those verified bytes written into tesseract's
+ *    `keyval-store` — which tesseract.js's worker script hard-codes and Stapler
+ *    cannot rename — overwriting whatever was there. That store is a staging
+ *    copy now, re-seeded from verified bytes before every run.
+ * A model cached before this change (only in `keyval-store`) is migrated the
+ * first time it is checked — if, and only if, it hashes to the pinned value.
  */
 
 import { DB_OPEN_TIMEOUT_MS } from '../db';
+import { logEvent } from '../errors';
+import { hasModelBytes } from '../opfs';
+import { expectedModelHash } from './model';
 
-const DB_NAME = 'keyval-store';
-const STORE_NAME = 'keyval';
+/** tesseract.js's own cache: idb-keyval's default database (not Stapler's to rename). */
+const TESSERACT_DB_NAME = 'keyval-store';
+const TESSERACT_STORE_NAME = 'keyval';
+
+/** S6b — Stapler's own record of each verified model. */
+export const MODEL_DB_NAME = 'stapler-ocr-models';
+const MODEL_STORE_NAME = 'models';
+
+/** One verified model, as Stapler keeps it. */
+export interface StoredModelRecord {
+  bytes: Uint8Array;
+  /** Hex SHA-256 the bytes were verified at when stored. */
+  sha256: string;
+  /** `pinned`: matches `MODEL_SHA256`. `upload`: a user's own file (its OPFS copy is the source). */
+  source: 'pinned' | 'upload';
+}
 
 function cacheKey(lang: string): string {
   return `./${lang}.traineddata`;
+}
+
+/** Hex-encoded SHA-256, the encoding `MODEL_SHA256` uses. */
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 /**
@@ -43,7 +86,11 @@ function cacheKey(lang: string): string {
  * caller already treats a rejection as "storage unavailable"; Clear-all used to
  * hang on this open with autosave already suspended.
  */
-function openDb(timeoutMs = DB_OPEN_TIMEOUT_MS): Promise<IDBDatabase> {
+function openDb(
+  name: string,
+  storeName: string,
+  timeoutMs = DB_OPEN_TIMEOUT_MS
+): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     let settled = false;
     const timer = setTimeout(() => {
@@ -58,14 +105,14 @@ function openDb(timeoutMs = DB_OPEN_TIMEOUT_MS): Promise<IDBDatabase> {
     };
     let request: IDBOpenDBRequest;
     try {
-      request = indexedDB.open(DB_NAME);
+      request = indexedDB.open(name);
     } catch (err) {
       finish(() => reject(err));
       return;
     }
     request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains(STORE_NAME)) {
-        request.result.createObjectStore(STORE_NAME);
+      if (!request.result.objectStoreNames.contains(storeName)) {
+        request.result.createObjectStore(storeName);
       }
     };
     request.onsuccess = () => {
@@ -82,24 +129,177 @@ function openDb(timeoutMs = DB_OPEN_TIMEOUT_MS): Promise<IDBDatabase> {
   });
 }
 
-/** Test hook: the bounded open, with a short timeout. */
-export const __openDbForTests = openDb;
+/** Test hook: the bounded open of tesseract's cache, with a short timeout. */
+export const __openDbForTests = (timeoutMs?: number) =>
+  openDb(TESSERACT_DB_NAME, TESSERACT_STORE_NAME, timeoutMs);
 
-/** True only when `lang`'s traineddata bytes are actually sitting in tesseract's own cache right now. */
-export async function hasCachedModel(lang: string): Promise<boolean> {
-  if (typeof indexedDB === 'undefined') return false;
-  try {
-    const db = await openDb();
+/** One key-value store: just the operations this module needs. */
+export interface ModelKeyValueStore {
+  get(key: string): Promise<unknown>;
+  put(key: string, value: unknown): Promise<void>;
+  delete(key: string): Promise<void>;
+  /** Every key with its value. */
+  entries(): Promise<[IDBValidKey, unknown][]>;
+  /** Deletes the keys `match` accepts; returns how many. */
+  deleteWhere(match: (key: IDBValidKey) => boolean): Promise<number>;
+}
+
+function indexedDbStore(name: string, storeName: string): ModelKeyValueStore {
+  const run = async <T>(
+    mode: IDBTransactionMode,
+    body: (store: IDBObjectStore, done: (value: T) => void, fail: (err: unknown) => void) => void
+  ): Promise<T> => {
+    const db = await openDb(name, storeName);
     try {
-      return await new Promise<boolean>((resolve, reject) => {
-        const tx = db.transaction(STORE_NAME, 'readonly');
-        const request = tx.objectStore(STORE_NAME).get(cacheKey(lang));
-        request.onsuccess = () => resolve(request.result !== undefined);
-        request.onerror = () => reject(request.error);
+      return await new Promise<T>((resolve, reject) => {
+        const tx = db.transaction(storeName, mode);
+        let result: T;
+        body(
+          tx.objectStore(storeName),
+          value => {
+            result = value;
+            if (mode === 'readonly') resolve(value);
+          },
+          reject
+        );
+        if (mode === 'readwrite') {
+          tx.oncomplete = () => resolve(result);
+          tx.onerror = () => reject(tx.error);
+        }
       });
     } finally {
       db.close();
     }
+  };
+  return {
+    get: key =>
+      run('readonly', (store, done, fail) => {
+        const request = store.get(key);
+        request.onsuccess = () => done(request.result);
+        request.onerror = () => fail(request.error);
+      }),
+    put: (key, value) =>
+      run<void>('readwrite', (store, done) => {
+        store.put(value, key);
+        done(undefined);
+      }),
+    delete: key =>
+      run<void>('readwrite', (store, done) => {
+        store.delete(key);
+        done(undefined);
+      }),
+    entries: () =>
+      run('readonly', (store, done, fail) => {
+        const out: [IDBValidKey, unknown][] = [];
+        const request = store.openCursor();
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) return done(out);
+          out.push([cursor.key, cursor.value]);
+          cursor.continue();
+        };
+        request.onerror = () => fail(request.error);
+      }),
+    deleteWhere: match =>
+      run('readwrite', (store, done, fail) => {
+        let removed = 0;
+        const request = store.openCursor();
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) return done(removed);
+          if (match(cursor.key)) {
+            cursor.delete();
+            removed += 1;
+          }
+          cursor.continue();
+        };
+        request.onerror = () => fail(request.error);
+      })
+  };
+}
+
+let stores: { tesseract: ModelKeyValueStore; models: ModelKeyValueStore } | null = null;
+
+function cacheStores() {
+  stores ??= {
+    tesseract: indexedDbStore(TESSERACT_DB_NAME, TESSERACT_STORE_NAME),
+    models: indexedDbStore(MODEL_DB_NAME, MODEL_STORE_NAME)
+  };
+  return stores;
+}
+
+/** Test seam: in-memory stores in place of IndexedDB (`null` restores it). */
+export function __setModelStoresForTests(
+  next: { tesseract: ModelKeyValueStore; models: ModelKeyValueStore } | null
+): void {
+  stores = next;
+}
+
+function isRecord(value: unknown): value is StoredModelRecord {
+  const r = value as Partial<StoredModelRecord> | undefined;
+  return (
+    !!r &&
+    r.bytes instanceof Uint8Array &&
+    typeof r.sha256 === 'string' &&
+    (r.source === 'pinned' || r.source === 'upload')
+  );
+}
+
+/** Whether `bytes`, hashing to `actual`, may be used as `lang`'s model. */
+async function trusted(lang: string, record: StoredModelRecord, actual: string): Promise<boolean> {
+  if (actual === expectedModelHash(lang)) return true;
+  // An uploaded model has no pinned hash: it must still hash to what was
+  // recorded when it was stored, and its OPFS original must still be there.
+  return record.source === 'upload' && actual === record.sha256 && (await hasModelBytes(lang));
+}
+
+function storageAvailable(): boolean {
+  return stores !== null || typeof indexedDB !== 'undefined';
+}
+
+/**
+ * True only when a **verified** copy of `lang`'s model is stored right now —
+ * its bytes re-hashed, not a flag trusted — and it has just been written into
+ * tesseract's own cache for the engine to load. False (never a throw) when
+ * there is none, it no longer matches its hash (it is then discarded and the
+ * caller asks for consent again), or storage cannot be read.
+ */
+export async function hasCachedModel(lang: string): Promise<boolean> {
+  if (!storageAvailable()) return false;
+  const { tesseract, models } = cacheStores();
+  try {
+    let record: StoredModelRecord | null = null;
+    const stored = await models.get(lang);
+    if (isRecord(stored)) {
+      record = stored;
+    } else {
+      // Migration: a model cached before S6b exists only in tesseract's store.
+      const legacy = await tesseract.get(cacheKey(lang));
+      if (legacy instanceof Uint8Array) {
+        const actual = await sha256Hex(legacy);
+        if (actual === expectedModelHash(lang)) {
+          record = { bytes: legacy, sha256: actual, source: 'pinned' };
+          await models.put(lang, record);
+        } else {
+          // Unverifiable. An uploaded model is re-seeded from its OPFS copy
+          // by `runOcr`'s `isModelReady`; anything else is asked for again.
+          await tesseract.delete(cacheKey(lang));
+          return false;
+        }
+      }
+    }
+    if (!record) return false;
+
+    const actual = await sha256Hex(record.bytes);
+    if (!(await trusted(lang, record, actual))) {
+      logEvent('warn', 'ocr.cache', `stored ${lang} model failed its hash check; discarded`);
+      await models.delete(lang);
+      await tesseract.delete(cacheKey(lang));
+      return false;
+    }
+    // The verified bytes, over whatever tesseract's store holds now.
+    await tesseract.put(cacheKey(lang), record.bytes);
+    return true;
   } catch {
     // Treated as "not cached" rather than propagated: a probe that can throw
     // is not a safe thing to gate a consent decision on, and "ask again" is
@@ -109,112 +309,81 @@ export async function hasCachedModel(lang: string): Promise<boolean> {
 }
 
 /**
- * Seeds tesseract's own cache directly, in the exact shape its loader reads
- * back (see the module doc above). After this resolves, tesseract's normal
- * cache-hit path uses these bytes with no network request of its own —
- * whether they came from a verified CDN download or a manual upload.
+ * Stores `lang`'s model: the canonical, hashed copy in Stapler's database, and
+ * the bytes in tesseract's own cache, in the exact shape its loader reads back
+ * (see the module doc above). Bytes matching the pinned hash are recorded as
+ * `pinned`; anything else — a manual upload — as `upload`, verified from then
+ * on against the hash taken here.
  */
 export async function writeCachedModel(lang: string, bytes: Uint8Array): Promise<void> {
-  const db = await openDb();
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, 'readwrite');
-      tx.objectStore(STORE_NAME).put(bytes, cacheKey(lang));
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-  } finally {
-    db.close();
-  }
+  const { tesseract, models } = cacheStores();
+  const sha256 = await sha256Hex(bytes);
+  const source = sha256 === expectedModelHash(lang) ? 'pinned' : 'upload';
+  await models.put(lang, { bytes, sha256, source } satisfies StoredModelRecord);
+  await tesseract.put(cacheKey(lang), bytes);
 }
 
 function isModelKey(key: IDBValidKey): key is string {
   return typeof key === 'string' && key.endsWith('.traineddata');
 }
 
+function byteLength(value: unknown): number {
+  const v = value as { byteLength?: number; length?: number } | undefined;
+  return v?.byteLength ?? v?.length ?? 0;
+}
+
 /**
- * GAP-12 — the language models in tesseract's cache and their sizes, for the
- * trust panel. Only `*.traineddata` keys are counted: `keyval-store` is
+ * GAP-12 — the language models stored, and their sizes, for the trust panel:
+ * Stapler's verified copies, plus any not-yet-migrated copy in tesseract's
+ * store. Only `*.traineddata` keys are counted there: `keyval-store` is
  * idb-keyval's default name, so on a shared web origin another page could own
  * other keys in it. Never throws.
  */
 export async function listCachedModels(): Promise<{ lang: string; bytes: number }[]> {
-  if (typeof indexedDB === 'undefined') return [];
+  if (!storageAvailable()) return [];
+  const { tesseract, models } = cacheStores();
+  const out = new Map<string, number>();
   try {
-    const db = await openDb();
-    try {
-      return await new Promise((resolve, reject) => {
-        const out: { lang: string; bytes: number }[] = [];
-        const tx = db.transaction(STORE_NAME, 'readonly');
-        const request = tx.objectStore(STORE_NAME).openCursor();
-        request.onsuccess = () => {
-          const cursor = request.result;
-          if (!cursor) return resolve(out);
-          if (isModelKey(cursor.key)) {
-            const value = cursor.value as { byteLength?: number; length?: number } | undefined;
-            out.push({
-              lang: cursor.key.replace(/^.*\//, '').replace(/\.traineddata$/, ''),
-              bytes: value?.byteLength ?? value?.length ?? 0
-            });
-          }
-          cursor.continue();
-        };
-        request.onerror = () => reject(request.error);
-      });
-    } finally {
-      db.close();
+    for (const [key, value] of await models.entries()) {
+      if (typeof key === 'string' && isRecord(value)) out.set(key, value.bytes.byteLength);
     }
   } catch {
-    return [];
+    // Unreadable: reported as empty, like the rest of this panel.
   }
+  try {
+    for (const [key, value] of await tesseract.entries()) {
+      if (!isModelKey(key)) continue;
+      const lang = key.replace(/^.*\//, '').replace(/\.traineddata$/, '');
+      if (!out.has(lang)) out.set(lang, byteLength(value));
+    }
+  } catch {
+    // As above.
+  }
+  return [...out].map(([lang, bytes]) => ({ lang, bytes }));
 }
 
 /**
- * GAP-12 — removes every language model from tesseract's cache (and nothing
- * else in that store). Returns how many were removed.
+ * GAP-12 — removes every language model: Stapler's verified copies and
+ * tesseract's cache entries (and nothing else in tesseract's store). Returns
+ * how many entries were removed. Throws when either store cannot be cleared.
  */
 export async function clearCachedModels(): Promise<number> {
-  if (typeof indexedDB === 'undefined') return 0;
-  const db = await openDb();
-  try {
-    return await new Promise<number>((resolve, reject) => {
-      let removed = 0;
-      const tx = db.transaction(STORE_NAME, 'readwrite');
-      const request = tx.objectStore(STORE_NAME).openCursor();
-      request.onsuccess = () => {
-        const cursor = request.result;
-        if (!cursor) return;
-        if (isModelKey(cursor.key)) {
-          cursor.delete();
-          removed += 1;
-        }
-        cursor.continue();
-      };
-      tx.oncomplete = () => resolve(removed);
-      tx.onerror = () => reject(tx.error);
-    });
-  } finally {
-    db.close();
-  }
+  if (!storageAvailable()) return 0;
+  const { tesseract, models } = cacheStores();
+  const ours = await models.deleteWhere(() => true);
+  const theirs = await tesseract.deleteWhere(isModelKey);
+  return ours + theirs;
 }
 
 /**
- * Removes `lang`'s bytes from tesseract's cache. The OCR worker runs tesseract
- * with `cacheMethod: 'readOnly'` (audit 2026-09-25 CNV-2), so tesseract itself
+ * Removes `lang`'s model from both stores. The OCR worker runs tesseract with
+ * `cacheMethod: 'readOnly'` (audit 2026-09-25 CNV-2), so tesseract itself
  * never deletes a bad entry any more — this is the one place that does, when a
  * model fails its trial init or the user removes their downloaded models.
  */
 export async function deleteCachedModel(lang: string): Promise<void> {
-  if (typeof indexedDB === 'undefined') return;
-  const db = await openDb();
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, 'readwrite');
-      tx.objectStore(STORE_NAME).delete(cacheKey(lang));
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-  } finally {
-    db.close();
-  }
+  if (!storageAvailable()) return;
+  const { tesseract, models } = cacheStores();
+  await models.delete(lang);
+  await tesseract.delete(cacheKey(lang));
 }

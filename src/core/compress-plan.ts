@@ -11,7 +11,7 @@
  */
 import type { ImageFacts, PageImageInventory } from './workers/process.worker';
 import type { PageTextPresence } from './workers/render.worker';
-import { translate } from './i18n';
+import { tPlural, translate } from './i18n';
 
 export type PageRoute = 'raster' | 'surgical' | 'already-optimized' | 'skip';
 
@@ -20,8 +20,15 @@ export interface PagePlan {
   route: PageRoute;
   /** Shown in the report, so it has to read as an explanation, not a code. */
   reason: string;
-  /** Images on this page worth re-encoding, for the `surgical` route. */
-  reencode: { name: string; objectNumber: number }[];
+  /**
+   * Images on this page worth re-encoding, for the `surgical` route.
+   *
+   * `lossless` marks an image whose stream stores its samples unencoded and is
+   * *not* over-sampled: it is Flate-compressed in place, sample for sample,
+   * rather than decoded and written back as a JPEG (see `ImageFacts.rawSamples`).
+   * Everything else is a downscale-and-JPEG candidate, as before.
+   */
+  reencode: { name: string; objectNumber: number; lossless?: boolean }[];
   /** Bytes currently occupied by images we can act on. */
   actionableBytes: number;
   /**
@@ -39,11 +46,17 @@ export interface PagePlan {
    *
    * This is only used to pick CMP-05's representative page — "the one with the
    * most image area" — so it deliberately measures what is *on the page*, not
-   * what is unique in the file. Stored pixels stand in for displayed area for
-   * the same reason `effectiveDpi` uses the full-page-span assumption: the
-   * placement CTM is not available at this stage.
+   * what is unique in the file. Stored pixels stand in for displayed area
+   * because they are known for every image, measured placement or not.
    */
   imagePixels: number;
+  /**
+   * The part of `actionableBytes` held by this page's `lossless` candidates, and
+   * the Flate size measured for them (`ImageFacts.rawSamples`). Kept apart from
+   * `targetPixels` because a lossless re-compression is not a JPEG and its size
+   * has nothing to do with the JPEG pixel model. Absent when there are none.
+   */
+  lossless?: { bytes: number; projectedBytes: number };
 }
 
 export interface CompressionPlan {
@@ -108,6 +121,13 @@ const MEANINGFUL_TEXT_CHARS = 1;
 
 /** Below this ratio of stored to displayed pixels there is nothing to gain. */
 const MIN_DOWNSCALE_RATIO = 1.15;
+
+/**
+ * A raw-sample image is only rewritten losslessly when its measured Flate size
+ * is at most this fraction of what it occupies now. Below a ten percent gain the
+ * rewrite is churn, and pure noise — which Flate cannot shrink — never gets near.
+ */
+const LOSSLESS_MAX_KEPT_FRACTION = 0.9;
 
 export interface ClassifyOptions {
   /** Target render resolution for the raster path, in DPI. */
@@ -284,20 +304,49 @@ function countOnce(images: ImageFacts[], counted: Set<number>): ImageFacts[] {
   return fresh;
 }
 
-/** Stored pixels per point, i.e. the effective DPI of an image on the page. */
+/** The size the page's content stream draws `image` at, when it was measured. */
+function placedSize(image: ImageFacts): { width: number; height: number } | undefined {
+  const width = image.placedWidthPt;
+  const height = image.placedHeightPt;
+  if (width === undefined || height === undefined) return undefined;
+  if (!(width > 0) || !(height > 0) || !Number.isFinite(width) || !Number.isFinite(height)) {
+    return undefined;
+  }
+  return { width, height };
+}
+
+/**
+ * Stored pixels per point (×72), i.e. the effective DPI of an image as drawn.
+ *
+ * When the inventory measured the image's placement from the content stream's
+ * CTM (`ImageFacts.placedWidthPt`), that is what it is judged against, per axis,
+ * and the *lower* of the two axes is the answer — the same rule CMP-03's encoder
+ * applies (`targetSize` in `render.worker.ts` only downscales when both axes are
+ * over the target), so the plan never calls an image over-sampled that the
+ * encoder would then leave at full size.
+ *
+ * Only without a measurement does it fall back to assuming the image spans the
+ * page. That fallback under-reports how over-sampled a smaller image is — which
+ * was the whole story before placements were measured: a 1300 px image drawn
+ * 480 pt wide on A4 is 195 DPI, and the page-span reading called it ~140.
+ */
 export function effectiveDpi(image: ImageFacts, pageWidth: number, pageHeight: number): number {
-  // Without the content-stream CTM we cannot know the true placement, so assume
-  // the image spans the page — the conservative reading, since it under-reports
-  // how over-sampled the image is and so under-promises the saving.
+  const placed = placedSize(image);
+  if (placed) {
+    return Math.min((image.width / placed.width) * 72, (image.height / placed.height) * 72);
+  }
   const byWidth = pageWidth > 0 ? (image.width / pageWidth) * 72 : 0;
   const byHeight = pageHeight > 0 ? (image.height / pageHeight) * 72 : 0;
   return Math.max(byWidth, byHeight);
 }
 
 /**
- * Pixels an image will actually be re-encoded at, under the same full-page-span
- * assumption `effectiveDpi` uses. Clamped to the source's own pixel count: an
- * image already below the target never gets *upscaled* by this estimate.
+ * Pixels an image will actually be re-encoded at. With a measured placement this
+ * mirrors the encoder's own `targetSize`: the drawn size at the target DPI,
+ * clamped to the source, and the source size untouched when the downscale would
+ * be under `MIN_DOWNSCALE_RATIO`. Without one, the page-span assumption
+ * `effectiveDpi` falls back to. Never more than the source's own pixel count: an
+ * image already below the target is never *upscaled* by this estimate.
  */
 function targetPixelCount(
   image: ImageFacts,
@@ -305,9 +354,27 @@ function targetPixelCount(
   pageHeight: number,
   rasterDpi: number
 ): number {
+  const placed = placedSize(image);
+  if (placed) {
+    const wantedW = Math.max(1, Math.round((placed.width / 72) * rasterDpi));
+    const wantedH = Math.max(1, Math.round((placed.height / 72) * rasterDpi));
+    const ratio = Math.min(image.width / wantedW, image.height / wantedH);
+    if (!(ratio >= MIN_DOWNSCALE_RATIO)) return image.width * image.height;
+    return Math.min(image.width, wantedW) * Math.min(image.height, wantedH);
+  }
   const maxW = Math.max(1, Math.round((pageWidth / 72) * rasterDpi));
   const maxH = Math.max(1, Math.round((pageHeight / 72) * rasterDpi));
   return Math.min(image.width, maxW) * Math.min(image.height, maxH);
+}
+
+/**
+ * True when `image`'s stream holds unencoded samples that measurably deflate —
+ * a candidate for the lossless route. See `ImageFacts.rawSamples`.
+ */
+function worthFlating(image: ImageFacts): boolean {
+  const raw = image.rawSamples;
+  if (!raw || !(image.byteLength > 0)) return false;
+  return raw.projectedFlateBytes <= image.byteLength * LOSSLESS_MAX_KEPT_FRACTION;
 }
 
 /** Pixels a whole re-rendered page will contain at `rasterDpi` — the raster route. */
@@ -371,16 +438,51 @@ export function classifyPages(
    * listing it on page A alone sized the single replacement for page A and left
    * page B's larger placement silently inheriting that downscale. Listing it on
    * every page that carries it lets "largest use wins" see every use.
+   *
+   * And it is that largest use — the lowest effective DPI across every text page
+   * carrying the object — that decides whether the object is over-sampled at all,
+   * because it is the size the encoder will produce. Judging "over-sampled on
+   * *some* page" instead promised a downscale the encoder then declined, and
+   * re-JPEGed the image at its full size for nothing.
    */
-  const candidateObjects = new Set<number>();
+  const governing = new Map<
+    number,
+    { image: ImageFacts; pageWidth: number; pageHeight: number; dpi: number }
+  >();
   for (const page of inventory) {
     if (!hasTextOn(page.pageIndex)) continue;
     for (const image of page.images) {
       if (image.objectNumber < 0) continue;
       if (!safetyOf(image).surgical) continue;
-      if (oversampled(image, page.width, page.height)) candidateObjects.add(image.objectNumber);
+      const dpi = effectiveDpi(image, page.width, page.height);
+      const previous = governing.get(image.objectNumber);
+      if (!previous || dpi < previous.dpi) {
+        governing.set(image.objectNumber, {
+          image,
+          pageWidth: page.width,
+          pageHeight: page.height,
+          dpi
+        });
+      }
     }
   }
+  /** Objects to downscale and re-encode as JPEG. */
+  const jpegObjects = new Set<number>();
+  /** Objects whose unencoded samples are Flate-compressed in place, losslessly. */
+  const losslessObjects = new Set<number>();
+  for (const [objectNumber, use] of governing) {
+    if (use.dpi > options.rasterDpi * MIN_DOWNSCALE_RATIO) jpegObjects.add(objectNumber);
+    else if (worthFlating(use.image)) losslessObjects.add(objectNumber);
+  }
+  const isLossless = (image: ImageFacts) =>
+    image.objectNumber >= 0 && losslessObjects.has(image.objectNumber);
+  /** Pixels the one encode of `image` will hold, sized by its governing use. */
+  const encodePixels = (image: ImageFacts, page: PageImageInventory) => {
+    const use = image.objectNumber >= 0 ? governing.get(image.objectNumber) : undefined;
+    return use
+      ? targetPixelCount(use.image, use.pageWidth, use.pageHeight, options.rasterDpi)
+      : targetPixelCount(image, page.width, page.height, options.rasterDpi);
+  };
 
   /** Object numbers whose bytes have already been added to the totals. */
   const counted = new Set<number>();
@@ -461,11 +563,12 @@ export function classifyPages(
 
     const candidates = safety.filter(entry => {
       if (!entry.surgical) return false;
-      // Only worth re-encoding if it is meaningfully over-sampled for the target
-      // *on some page* — a shared image is judged once, document-wide, so every
-      // page carrying it reports it and its largest placement decides the size.
+      // Worth re-encoding if it is meaningfully over-sampled at its largest
+      // placement, or if it stores raw samples that Flate measurably shrinks — a
+      // shared image is judged once, document-wide, so every page carrying it
+      // reports it and its largest placement decides the size.
       return entry.image.objectNumber >= 0
-        ? candidateObjects.has(entry.image.objectNumber)
+        ? jpegObjects.has(entry.image.objectNumber) || losslessObjects.has(entry.image.objectNumber)
         : oversampled(entry.image, page.width, page.height);
     });
 
@@ -492,21 +595,49 @@ export function classifyPages(
     );
     const bytes = fresh.reduce((n, image) => n + image.byteLength, 0);
     actionableBytes += bytes;
-    const targetPixels = fresh.reduce(
-      (n, image) => n + targetPixelCount(image, page.width, page.height, options.rasterDpi),
-      0
-    );
+    // Only JPEG candidates are projected through the pixel model; a lossless
+    // candidate's size is its measured Flate size, carried separately.
+    const targetPixels = fresh
+      .filter(image => !isLossless(image))
+      .reduce((n, image) => n + encodePixels(image, page), 0);
+    const freshLossless = fresh.filter(isLossless);
+    const lossless =
+      freshLossless.length > 0
+        ? {
+            bytes: freshLossless.reduce((n, image) => n + image.byteLength, 0),
+            projectedBytes: freshLossless.reduce(
+              (n, image) =>
+                n + Math.min(image.byteLength, image.rawSamples?.projectedFlateBytes ?? Infinity),
+              0
+            )
+          }
+        : undefined;
+    const losslessCount = candidates.filter(entry => isLossless(entry.image)).length;
+    const jpegCount = candidates.length - losslessCount;
     pages.push({
       pageIndex: page.pageIndex,
       route: 'surgical',
-      reason: `Has text — ${candidates.length} over-sampled image(s) re-encoded, text left untouched`,
+      reason:
+        losslessCount === 0
+          ? `Has text — ${jpegCount} over-sampled image(s) re-encoded, text left untouched`
+          : jpegCount === 0
+            ? tPlural(
+                'Has text — {count} uncompressed images re-compressed losslessly, text left untouched',
+                losslessCount
+              )
+            : translate(
+                'Has text — {oversampled} over-sampled image(s) re-encoded and {uncompressed} uncompressed image(s) re-compressed losslessly, text left untouched',
+                { oversampled: jpegCount, uncompressed: losslessCount }
+              ),
       reencode: candidates.map(entry => ({
         name: entry.image.name,
-        objectNumber: entry.image.objectNumber
+        objectNumber: entry.image.objectNumber,
+        ...(isLossless(entry.image) ? { lossless: true } : {})
       })),
       actionableBytes: bytes,
       targetPixels,
-      imagePixels
+      imagePixels,
+      ...(lossless ? { lossless } : {})
     });
   }
 
@@ -524,14 +655,12 @@ export function classifyPages(
  * 300 DPI target and a 72 DPI target of the same source produced an identical
  * estimate — the dominant reason it was measured 20–84% off.
  *
- * `pixels` here is computed the same conservative, full-page-span way
- * `effectiveDpi`/`targetPixelCount` already do — this stage has no measured CTM
- * placement (that only exists inside `render.worker.ts`'s real operator-list
- * walk, which is too expensive to run during the "instant" pre-flight estimate).
- * For an image that does not actually span the page, this overstates the target
- * pixel count and so the projected bytes — the same direction of error the rest
- * of this module already accepts deliberately (see CMP-04's doc comment above
- * `estimateSavings`).
+ * `pixels` here is what `targetPixelCount` computes: from the image's placement
+ * as the inventory measured it from the content stream (no pixels decoded), or,
+ * where that could not be measured, from the conservative full-page-span
+ * assumption — which overstates the target pixel count of an image that does
+ * not span the page, and so the projected bytes, the direction of error CMP-04's
+ * doc comment above `estimateSavings` accepts deliberately.
  *
  * The `pixels^0.6` shape and the `k(quality)` coefficients are fit against this
  * project's own re-encoder (`OffscreenCanvas.convertToBlob('image/jpeg', q)`),
@@ -572,25 +701,45 @@ function projectedReencodeBytes(pixels: number, quality: number): number {
  * looser (larger) of the two, but it *is* anchored to this specific file's own
  * achieved compression ratio — so it is kept as a ceiling: whichever model
  * projects fewer bytes wins, never the pixel model alone.
+ *
+ * Lossless candidates (`PagePlan.lossless`) are taken out of both models: they
+ * are not JPEGs, so neither the pixel fit nor the quality fraction describes
+ * them. Their projection is the Flate size the inventory measured on their own
+ * samples, capped at their current size.
  */
 export function estimateSavings(
   plan: CompressionPlan,
   totalBytes: number,
   quality: number
 ): { estimatedBytes: number; estimatedFraction: number } {
+  const { bytes: losslessBytes, projected: losslessProjected } = losslessTotals(plan);
+  const jpegActionable = Math.max(0, plan.actionableBytes - losslessBytes);
   const pixelProjected = plan.pages.reduce(
     (sum, page) => sum + projectedReencodeBytes(page.targetPixels, quality),
     0
   );
   const qualityKeptFraction = Math.min(0.95, Math.max(0.1, quality * 0.55));
-  const qualityProjected = plan.actionableBytes * qualityKeptFraction;
-  const cappedProjection = Math.min(pixelProjected, qualityProjected, plan.actionableBytes);
+  const qualityProjected = jpegActionable * qualityKeptFraction;
+  const cappedProjection =
+    Math.min(pixelProjected, qualityProjected, jpegActionable) + losslessProjected;
   const nonActionableBytes = Math.max(0, totalBytes - plan.actionableBytes);
   const estimated = Math.max(1, nonActionableBytes + cappedProjection);
   return {
     estimatedBytes: Math.round(estimated),
     estimatedFraction: totalBytes > 0 ? 1 - estimated / totalBytes : 0
   };
+}
+
+/** Stored bytes of every lossless candidate in `plan`, and their projected Flate size. */
+function losslessTotals(plan: CompressionPlan): { bytes: number; projected: number } {
+  let bytes = 0;
+  let projected = 0;
+  for (const page of plan.pages) {
+    if (!page.lossless) continue;
+    bytes += page.lossless.bytes;
+    projected += Math.min(page.lossless.bytes, page.lossless.projectedBytes);
+  }
+  return { bytes, projected };
 }
 
 /** Below this, telling the truth beats saving a pointless file (CMP-04). */
@@ -650,7 +799,11 @@ export interface PreviewMeasurement {
  *    non-actionable bytes weigh, and every raster page is scaled by area from it.
  *
  * Pages on the *other* actionable route from the one measured keep the
- * pre-flight model, since nothing was measured for them.
+ * pre-flight model, since nothing was measured for them. Lossless candidates
+ * (`PagePlan.lossless`) always keep their measured Flate projection: the per-pixel
+ * figure is a JPEG cost and says nothing about them. When the measured page
+ * itself carries some, their output is still inside `afterBytes`, so the
+ * per-pixel figure comes out a little high — the direction that promises less.
  *
  * Returns `null` — "keep the pre-flight estimate" — whenever the measurement
  * cannot support a ratio: a page with no re-encode target, or a measured output
@@ -677,6 +830,9 @@ export function refineEstimate(
   let projectedImages = 0;
   let vanishing = 0;
   for (const page of plan.pages) {
+    if (page.lossless) {
+      projectedImages += Math.min(page.lossless.bytes, page.lossless.projectedBytes);
+    }
     if (page.targetPixels <= 0) continue;
     if (page.route === route) {
       projectedImages += perPixel * page.targetPixels;

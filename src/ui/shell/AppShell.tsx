@@ -55,6 +55,7 @@ import {
   sessionRecoveryChecked
 } from '../../core/session-recovery';
 import { useLocation } from 'wouter-preact';
+import { useDocumentTitle } from '../documentTitle';
 import { toolRoute } from '../../core/tools';
 import { useImageImportOptions } from '../useImageImportOptions';
 import { useExternalOpen } from '../useExternalOpen';
@@ -77,6 +78,7 @@ import {
   customShortcuts
 } from '../../core/shortcuts';
 import { useUnsavedGuard } from '../useUnsavedGuard';
+import { showPendingClearNotice } from '../clearNotice';
 import { FloatingLayer } from '../components/FloatingTooltip';
 import styles from './AppShell.module.css';
 
@@ -95,6 +97,7 @@ function isTypingTarget(target: EventTarget | null): boolean {
 
 export function AppShell({ children }: { children: ComponentChildren }) {
   const [, setLocation] = useLocation();
+  useDocumentTitle();
   const { requestOptions, node } = useImageImportOptions();
   useExternalOpen(requestOptions); // GAP-2: files opened with / shared to the installed web app
   const [showWelcome, setShowWelcome] = useState(false);
@@ -116,6 +119,12 @@ export function AppShell({ children }: { children: ComponentChildren }) {
     void readSetting<boolean>(WELCOME_KEY).then(seen => {
       if (!seen) setShowWelcome(true);
     });
+  }, []);
+
+  // AUDIT-2026-10-10 M4 — a Clear-all that left data behind says so here,
+  // after the reload that would otherwise have swallowed its warning.
+  useEffect(() => {
+    showPendingClearNotice();
   }, []);
 
   // DOC-11 — offered once, on mount, before the autosave watcher below is
@@ -155,7 +164,12 @@ export function AppShell({ children }: { children: ComponentChildren }) {
         title: translate('Restore your previous session?'),
         body,
         confirmLabel: translate('Restore'),
-        cancelLabel: translate('Start fresh')
+        cancelLabel: translate('Start fresh'),
+        // "Start fresh" deletes the saved session, so neither Escape, the scrim
+        // nor a close button may answer for the user, and focus starts on the
+        // safe answer (AUDIT-2026-10-10 UI2).
+        dismissible: false,
+        initialFocus: 'confirm'
       });
     });
   }, []);
@@ -219,6 +233,10 @@ export function AppShell({ children }: { children: ComponentChildren }) {
 
   useEffect(() => {
     const pasteImage = async (event: ClipboardEvent) => {
+      // Like the keydown handler above: nothing global acts behind an open
+      // dialog — a paste over a confirmation used to insert a page unseen
+      // (AUDIT-2026-10-10 UI11).
+      if (isModalOpen()) return;
       if (isTypingTarget(event.target)) return;
 
       const doc = activeDoc.value;

@@ -24,9 +24,18 @@
  *    module; tesseract's blob wrapper is disabled (`workerBlobURL: false`).
  *    HEIC decodes in the bundled `image.worker.ts` (libheif-js WASM, no
  *    eval) — audit CONV-1 replaced heic2any, whose blob worker needed both.
- *  - `style-src 'unsafe-inline'` — dependencies (pdf.js, pptxgenjs) create
- *    `<style>` elements at run time. Styles cannot fetch anything here because
- *    `img-src`/`font-src` stay local.
+ *  - `style-src 'unsafe-inline'` — the one known need is `public/privacy.html`,
+ *    a static page with an inline `<style>` element (it is copied verbatim,
+ *    outside the bundle, so it cannot link `tokens.css`). The editor itself
+ *    sets styles only through Preact `style={…}` props, which write
+ *    `element.style` (CSSOM) and are not governed by `style-src` at all; pdf.js
+ *    and pptxgenjs, once the reason given here, now run only inside workers,
+ *    which have no DOM. Whether anything else on a page still injects a
+ *    `<style>` element or `style="…"` attribute at run time has not been
+ *    verified in a browser (audit 2026-10-10), so the source stays until that
+ *    is checked; a hash of privacy.html's block could then replace it. Styles
+ *    cannot fetch anything here either way, because `img-src`/`font-src`
+ *    stay local.
  *
  * Where the policy does *not* reach (audit 2026-10-01 PLT-2):
  *  - Workers on the website. A `<meta>` CSP governs only the document it is
@@ -35,20 +44,29 @@
  *    inside a worker was not blocked (probed: it reached the network, while
  *    the extension — whose manifest CSP does cover its workers — refused it).
  *    The backstop is `src/core/workers/network-guard.ts`, imported first by
- *    every `*.worker.ts` entry: it wraps `fetch`, `XMLHttpRequest`,
- *    `importScripts` and refuses `WebSocket`/`EventSource`/`WebTransport`/
- *    `RTCPeerConnection`, allowing this `connect-src` minus its remote source
- *    (self, `blob:`, `data:` — `network-policy.ts`). The pinned OCR paths are
+ *    every `*.worker.ts` entry: it wraps `fetch`, `XMLHttpRequest#open`
+ *    (on the prototype), `importScripts`, `Cache#add`/`addAll`, `FontFace`
+ *    with a `url()` source, and `new Worker`/`SharedWorker` (same-origin
+ *    scripts only), and refuses `WebSocket`/`WebSocketStream`/`EventSource`/
+ *    `WebTransport`/`RTCPeerConnection`, allowing this `connect-src` minus its
+ *    remote source (self, `blob:`, `data:` — `network-policy.ts`). Each input
+ *    is normalised the way the real API reads it (`toString()`), and that
+ *    normalised value is what is both checked and forwarded (audit
+ *    2026-10-10 S3). The pinned OCR paths are
  *    not needed there: the model is downloaded on the main thread, under the
  *    meta CSP; `tests/unit/network-guard-worker.test.ts` keeps any future
  *    worker allowlist a subset of `OCR_MODEL_CONNECT_SOURCES`.
- *  - Still uncovered there: tesseract's vendored nested worker
- *    (`ocr/worker.min.js`, copied verbatim, so nothing can be imported into
- *    it — it is only ever given same-origin paths and a `langPath` that
- *    cannot reach the network), a dynamic `import()` of a remote URL (no
- *    global to wrap; the source and bundle scans forbid any non-relative
- *    specifier), and the service worker `sw.js`, which issues no request
- *    except Cache API reads of this build's own files.
+ *  - Still uncovered there: the *inside* of tesseract's vendored nested
+ *    worker (`ocr/worker.min.js`, copied verbatim, so nothing can be imported
+ *    into it — the guard only ensures it is started from a same-origin
+ *    script, and it is only ever given same-origin paths and a `langPath`
+ *    that cannot reach the network), a dynamic `import()` or a static
+ *    `import` in a module worker of a remote URL (no global to wrap; the
+ *    source and bundle scans forbid any non-relative specifier), and the
+ *    service worker `sw.js`, which issues no request except Cache API reads
+ *    of this build's own files. The guard is a backstop against a
+ *    dependency's stray request, not a sandbox: code that is already hostile
+ *    inside a worker is out of its scope.
  *  - `frame-ancestors`/`report-uri` cannot be set from a meta tag; the policy
  *    uses neither. A host that can send response headers would close all of
  *    the above at once; GitHub Pages cannot.

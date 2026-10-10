@@ -92,15 +92,20 @@ test.describe('GAP-12 — clear all local data', () => {
     expect(await storedState(page)).toEqual({ sessionDocs: 0, signatures: 0, pdfs: [] });
 
     // A second reload still restores nothing (nothing wrote the record back).
+    // Audit 2026-10-10 T10: was a fixed 1 s sleep before checking for the
+    // prompt. An import is refused while the startup recovery check is still
+    // pending or its prompt is up (`waitForImportReadiness`), so the import
+    // succeeding is the positive signal that the check has finished — and
+    // decided there was nothing to offer.
     await page.goto('/');
     await expect(page.locator('header')).toBeVisible();
-    await page.waitForTimeout(1000);
+    await importFile(page, FIXTURE);
     await expect(page.getByRole('dialog', { name: 'Restore your previous session?' })).toHaveCount(
       0
     );
+    await expect(page.getByText('Answer the restore prompt first.')).toHaveCount(0);
 
     // The Sign panel (it needs a document open) shows an empty library.
-    await importFile(page, FIXTURE);
     await gotoTool(page, 'sign');
     await expect(page.getByRole('button', { name: 'Create a signature' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Use this typed signature' })).toHaveCount(0);

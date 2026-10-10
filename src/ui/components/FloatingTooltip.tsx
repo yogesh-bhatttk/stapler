@@ -34,6 +34,7 @@ import type { ComponentChildren } from 'preact';
 import { createPortal } from 'preact/compat';
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import styles from './FloatingTooltip.module.css';
+import { currentLocale, localeDirection } from '../../core/i18n';
 
 /** Where the bubble sits relative to its anchor, in logical terms. */
 export type FloatingSide = 'inline-end' | 'block-end';
@@ -139,7 +140,18 @@ export const FLOATING_LAYER_ID = 'floating-layer';
  * so a tooltip is in the landmark structure wherever its trigger is.
  */
 export function FloatingLayer() {
-  return <div id={FLOATING_LAYER_ID} className={styles.layer} />;
+  // The app locale's lang/dir, stated on the host itself: on a landing page the
+  // locale is scoped to the app's mount rather than <html> (`setLocaleRoot`,
+  // UI14), and a bubble must never inherit the static English page's instead.
+  const locale = currentLocale.value;
+  return (
+    <div
+      id={FLOATING_LAYER_ID}
+      className={styles.layer}
+      lang={locale}
+      dir={localeDirection(locale)}
+    />
+  );
 }
 
 export interface FloatingTooltipProps {

@@ -84,6 +84,25 @@ export interface PlacedImage {
    * caller is actually asking is "can I place this as-is?".
    */
   axisAligned: boolean;
+  /**
+   * The image's own drawn size, in points, along each of its axes — the lengths
+   * of the unit square's two edges through the CTM — **before** any form
+   * `/BBox` clip and regardless of rotation.
+   *
+   * The rectangle above is what a slide needs: where the visible part lands.
+   * Compression (CMP-01) needs something else — how many points the image's
+   * full pixel grid is stretched across, which is what decides whether it is
+   * over-sampled. The clipped rectangle would read a big image shown through a
+   * small window as tiny (and so hugely over-sampled), and a rotated image's
+   * bounding box as larger than it is; neither is what the image is drawn at.
+   * This is the same measure CMP-03's own walker in `render.worker.ts` takes
+   * from pdf.js's operator list, so the planner and the encoder agree.
+   *
+   * Optional only so a hand-built `PlacedImage` still type-checks; the walker
+   * always fills it in.
+   */
+  drawnWidth?: number;
+  drawnHeight?: number;
 }
 
 /**
@@ -320,7 +339,9 @@ function walk(
         name,
         objectNumber: info.objectNumber,
         ...bounds,
-        axisAligned: isAxisAligned(ctm)
+        axisAligned: isAxisAligned(ctm),
+        drawnWidth: Math.hypot(ctm[0], ctm[1]),
+        drawnHeight: Math.hypot(ctm[2], ctm[3])
       });
       continue;
     }

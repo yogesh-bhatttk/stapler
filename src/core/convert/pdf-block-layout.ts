@@ -21,7 +21,19 @@
  * tool says so in its own copy and ships behind a mandatory preview (PLAN §5.5).
  */
 
-import { PDFDocument, PDFFont, PDFImage, PDFPage, StandardFonts, rgb } from 'pdf-lib';
+import {
+  PDFDocument,
+  PDFFont,
+  PDFImage,
+  PDFPage,
+  StandardFonts,
+  clip,
+  endPath,
+  popGraphicsState,
+  pushGraphicsState,
+  rectangle,
+  rgb
+} from 'pdf-lib';
 import { DOC_HAIRLINE_RGB, SUMMARY_ACCENT_RGB } from '../doc-colors';
 import { corrupt } from '../errors';
 import { tPlural, translate } from '../i18n';
@@ -32,6 +44,7 @@ import {
   type LinkWrapState,
   newSubstitutionTally,
   sanitizeWinAnsiText,
+  splitOversizedWord,
   type SubstitutionTally
 } from '../markdown-to-pdf';
 import { checkpoint, type JobHandle } from '../workers/protocol';
@@ -160,23 +173,6 @@ function fontFor(fonts: FontSet, bold: boolean, italic: boolean): PDFFont {
   if (bold) return fonts.bold;
   if (italic) return fonts.italic;
   return fonts.regular;
-}
-
-/** Splits a word too long for its own line, so it wraps instead of overflowing. */
-function splitOversizedWord(text: string, font: PDFFont, size: number, maxWidth: number): string[] {
-  const parts: string[] = [];
-  let current = '';
-  for (const char of text) {
-    const candidate = current + char;
-    if (current.length > 0 && font.widthOfTextAtSize(candidate, size) > maxWidth) {
-      parts.push(current);
-      current = char;
-    } else {
-      current = candidate;
-    }
-  }
-  if (current.length > 0) parts.push(current);
-  return parts;
 }
 
 /**
@@ -722,7 +718,30 @@ export async function layoutBlocksToPdf(
         if (!embedded) continue;
         const width = item.width > 0 ? item.width * scale : embedded.width * PX_TO_PT * scale;
         const height = item.height > 0 ? item.height * scale : embedded.height * PX_TO_PT * scale;
-        page.drawImage(embedded, { x: toX(item.x), y: toY(item.y) - height, width, height });
+        const x = toX(item.x);
+        const y = toY(item.y) - height;
+        const crop = item.crop;
+        if (crop) {
+          // CV4: the whole image, scaled so its kept part fills the box, drawn
+          // through a clip to the box — the cropped-away edges stay hidden.
+          const fullWidth = width / (1 - crop.left - crop.right);
+          const fullHeight = height / (1 - crop.top - crop.bottom);
+          page.pushOperators(
+            pushGraphicsState(),
+            rectangle(x, y, width, height),
+            clip(),
+            endPath()
+          );
+          page.drawImage(embedded, {
+            x: x - crop.left * fullWidth,
+            y: y - crop.bottom * fullHeight,
+            width: fullWidth,
+            height: fullHeight
+          });
+          page.pushOperators(popGraphicsState());
+        } else {
+          page.drawImage(embedded, { x, y, width, height });
+        }
         pageUsed = true;
         images += 1;
         continue;

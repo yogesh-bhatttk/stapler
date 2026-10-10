@@ -199,8 +199,12 @@ export function SinglePageView({
           variant="tertiary"
           size="compact"
           icon={ChevronLeft}
-          disabled={pageIndex === 0}
-          onClick={() => onPageIndexChange(pageIndex - 1)}
+          // `aria-disabled`, not `disabled`: reaching the first page with this
+          // button focused must not drop focus to <body> (UI23).
+          aria-disabled={pageIndex === 0 ? 'true' : undefined}
+          onClick={() => {
+            if (pageIndex > 0) onPageIndexChange(pageIndex - 1);
+          }}
         >
           {t('Previous')}
         </Button>
@@ -212,8 +216,10 @@ export function SinglePageView({
           size="compact"
           icon={ChevronRight}
           iconPosition="right"
-          disabled={pageIndex >= pages.length - 1}
-          onClick={() => onPageIndexChange(pageIndex + 1)}
+          aria-disabled={pageIndex >= pages.length - 1 ? 'true' : undefined}
+          onClick={() => {
+            if (pageIndex < pages.length - 1) onPageIndexChange(pageIndex + 1);
+          }}
         >
           {t('Next')}
         </Button>

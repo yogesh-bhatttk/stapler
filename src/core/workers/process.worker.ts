@@ -111,6 +111,9 @@ import {
   LineCapStyle,
   rgb,
   concatTransformationMatrix,
+  clip,
+  endPath,
+  rectangle,
   drawObject,
   popGraphicsState,
   pushGraphicsState
@@ -118,9 +121,9 @@ import {
 import type { PDFField, PDFImage, PDFContext, PDFEmbeddedPage } from 'pdf-lib';
 import { Encodings, Font as StandardFontMetrics, FontNames } from '@pdf-lib/standard-fonts';
 import type { IFontNames } from '@pdf-lib/standard-fonts';
-import { zipSync } from 'fflate';
+import { zipSync, zlibSync } from 'fflate';
 import type { JobHandle } from './protocol';
-import { checkpoint, releaseJobHandlesAfterCall, subJob } from './protocol';
+import { checkpoint, releaseJobHandlesAfterCall, reportNotice, subJob } from './protocol';
 import { corrupt, fromUnknown, internal, unsupported } from '../errors';
 import { loadPdfDocument, loadPdfDocumentWithRestrictions } from '../pdf/load';
 import type { ImagesToPdfOptions } from '../operations';
@@ -138,7 +141,9 @@ import type { LayoutBlock } from '../convert/html-to-pdf-blocks';
 import { batesLabel } from '../bates';
 import { generateQrRaster, encodeCode128Bars } from '../barcode';
 import { encodePng } from '../png';
-import { addOcrTextLayerToDocument } from '../ocr/textLayer';
+import { decodeStreamBytes } from '../pdf/predictor';
+import { jpegHasAdobeMarker, readJpegInfo } from '../jpeg-info';
+import { addOcrTextLayerToDocument, pagesWithVisibleText } from '../ocr/textLayer';
 import type { OcrLayerReport, OcrPageLayer } from '../ocr/types';
 import {
   normalizeRotation,
@@ -331,6 +336,35 @@ export interface ImageFacts {
   isImageMask: boolean;
   /** Encoded size of the image stream in bytes. */
   byteLength: number;
+  /**
+   * CMP-01 — the size, in points, this page actually draws the image at: the
+   * largest of its `Do`s on this page, read from the content stream's CTM
+   * (`pdf/image-placements.ts`'s `drawnWidth`/`drawnHeight`, i.e. unclipped and
+   * along the image's own axes). Absent when no `Do` of it could be measured —
+   * drawn only through a pattern, inside a form whose content could not be
+   * parsed, past the per-page placement cap, or on a page whose content stream
+   * does not parse — in which case the planner falls back to assuming the image
+   * spans the page.
+   *
+   * Without it an image placed smaller than the page was judged against the
+   * whole page and read as far less over-sampled than it is: a 1300 px image
+   * drawn 480 pt wide on A4 is 195 DPI, and the page-span reading made it ~140.
+   */
+  placedWidthPt?: number;
+  placedHeightPt?: number;
+  /**
+   * CMP-01 — set only for an image whose stream holds its samples *unencoded*
+   * (no `/Filter`, or only `ASCIIHexDecode`/`ASCII85Decode`, which are text
+   * transports rather than compression), with no `/DecodeParms` and no external
+   * `/F` file. Such a stream can be Flate-compressed losslessly — the samples,
+   * and therefore every colour space, `/Decode`, mask and bit-depth question, are
+   * untouched — so it is worth acting on even at the target resolution.
+   *
+   * `projectedFlateBytes` is measured, not guessed: a few slices of the actual
+   * samples are deflated and the ratio scaled up, with a margin, to the whole
+   * stream. Pure noise therefore projects no saving, and is left alone.
+   */
+  rawSamples?: { sampleBytes: number; projectedFlateBytes: number };
 }
 
 export interface PageImageInventory {
@@ -348,6 +382,8 @@ export interface FormFieldData {
   options?: string[];
   isReadOnly: boolean;
   rects: { pageIndex: number; x: number; y: number; width: number; height: number }[];
+  /** The field's `/TU` tooltip — its human-readable name, when the form has one. */
+  tooltip?: string;
 }
 
 /**
@@ -713,6 +749,12 @@ export interface ProcessJob extends LocaleAware, AnnotationSummaryJob {
    * `imageStats` is the measured per-image breakdown CMP-06's sidecar prints:
    * every image the caller asked about, with the original stream's stored byte
    * length, the replacement's, and why anything skipped was skipped.
+   *
+   * `losslessImages` (`pageIndex → object numbers`, CMP-01) names images whose
+   * streams store unencoded samples: each is Flate-compressed in place, the
+   * samples and every other dictionary entry untouched, and only when the result
+   * is smaller. The verdict that a stream is raw is re-taken from the file here,
+   * not trusted from the plan.
    */
   rebuildCompressed(
     bytes: Uint8Array,
@@ -721,7 +763,8 @@ export interface ProcessJob extends LocaleAware, AnnotationSummaryJob {
       number,
       Record<number, { jpeg: Uint8Array; width: number; height: number; maskBytes?: Uint8Array }>
     >,
-    job?: JobHandle
+    job?: JobHandle,
+    losslessImages?: Record<number, number[]>
   ): Promise<{ bytes: Uint8Array; keptOriginal: boolean; imageStats: ImageResultStat[] }>;
   imagesToPdf(
     images: PdfImageSource[],
@@ -954,6 +997,11 @@ export interface ProcessJob extends LocaleAware, AnnotationSummaryJob {
     layers: OcrPageLayer[],
     job?: JobHandle
   ): Promise<{ bytes: Uint8Array } & OcrLayerReport>;
+  /**
+   * CV9 — of `pageIndices`, the pages that already draw real (visible) text,
+   * which an OCR run skips unless told to do every page. Reads only.
+   */
+  ocrPagesWithText(bytes: Uint8Array, pageIndices: number[]): Promise<number[]>;
   /**
    * DOC-09 — contact sheet export.
    *
@@ -1348,16 +1396,24 @@ async function drawStamps(
  * title ("Appendix" twice) — a `Record` keyed by name would silently keep only the
  * last of them, i.e. lose a slice of the user's document. Collisions get a numeric
  * suffix instead.
+ *
+ * AUDIT-2026-10-10 L4 — compared case-insensitively ("Summary" and "SUMMARY"
+ * are one file on Windows and macOS, so a directory write lost one of them).
+ * `used` holds lower-cased names.
  */
-function uniqueName(used: Set<string>, preferred: string | undefined, fallback: string): string {
+export function uniqueName(
+  used: Set<string>,
+  preferred: string | undefined,
+  fallback: string
+): string {
   const stem = (preferred ?? '').trim() || fallback;
   let candidate = `${stem}.pdf`;
   let counter = 2;
-  while (used.has(candidate)) {
+  while (used.has(candidate.toLowerCase())) {
     candidate = `${stem}-${counter}.pdf`;
     counter += 1;
   }
-  used.add(candidate);
+  used.add(candidate.toLowerCase());
   return candidate;
 }
 
@@ -1419,7 +1475,15 @@ async function applyNUp(
     }
   }
 
-  const finalDoc = await PDFDocument.create();
+  // P5 — the imposed sheets are the same document: its /Info and how it opens
+  // (already carried onto `outDoc` from the primary source) come along, rather
+  // than pdf-lib's Producer and fresh dates.
+  const finalDoc = await PDFDocument.create({ updateMetadata: false });
+  {
+    const copier = PDFObjectCopier.for(outDoc.context, finalDoc.context);
+    carryDocumentInfo(outDoc, finalDoc, copier);
+    preserveDocumentCatalog(outDoc, finalDoc, copier, [...READER_CATALOG_KEYS, 'Metadata']);
+  }
 
   // PDF-12: every page embedded in *one* call. `embedPage` builds a fresh object
   // copier per call, so a logo or font shared by ten pages came out as ten
@@ -2014,50 +2078,107 @@ function writeOutline(outDoc: PDFDocument, nodes: OutlineNode[]): void {
   attachOutline(outDoc, nodes.map(convert));
 }
 
-function reattachAcroForm(outDoc: PDFDocument, contributors: PDFDocument[]): void {
+/** A field renamed by {@link reattachAcroForm} so two files' values stay apart. */
+interface FieldRename {
+  from: string;
+  to: string;
+}
+
+/**
+ * `pageOrigins` — one entry per output page, naming the source document that
+ * page came from — is what tells a *second copy of the same field* from a
+ * *different field that happens to share its name*.
+ *
+ * The first is a field whose widgets landed on two output pages (or one page
+ * placed twice): those roots are merged into one field with several widgets,
+ * which is what the source document meant. The second is two filled copies of
+ * one form merged together: doc A's `Name` = "Alice" and doc B's `Name` =
+ * "Bob". Merging those fused them into one field whose single `/V` was
+ * "Alice" — Bob's value was gone from the output and nothing said so. A root
+ * from a *different* source therefore keeps its value and its appearance under
+ * a new, unique name (`Name_2`), and the rename is returned so the caller can
+ * tell the user. Without `pageOrigins` (a single-source rebuild) every page
+ * counts as the same origin, which is the old, correct behaviour there.
+ */
+function reattachAcroForm(
+  outDoc: PDFDocument,
+  contributors: PDFDocument[],
+  pageOrigins?: readonly string[]
+): FieldRename[] {
   const fields: PDFRef[] = [];
   const seenRoots = new Set<string>();
-  const rootByName = new Map<string, PDFRef>();
+  /** `${origin}\u0000${original name}` → the root every same-origin copy merges into. */
+  const rootByOriginName = new Map<string, PDFRef>();
+  /** Every root name in use in the output so far, after renames. */
+  const usedNames = new Set<string>();
+  const renames: FieldRename[] = [];
 
-  for (const page of outDoc.getPages()) {
+  // Pass 1: every widget's page, root and origin, plus every original root name
+  // — so a generated `Name_2` can never collide with a field one of the
+  // *later* documents already calls `Name_2`.
+  const entries: { widget: PDFDict; pageRef: PDFRef; rootRef: PDFRef; origin: string }[] = [];
+  const originalNames = new Set<string>();
+  outDoc.getPages().forEach((page, pageIndex) => {
     const annots = page.node.Annots();
-    if (!annots) continue;
+    if (!annots) return;
     for (let i = 0; i < annots.size(); i++) {
       const ref = annots.get(i);
       if (!(ref instanceof PDFRef)) continue;
       const widget = outDoc.context.lookupMaybe(ref, PDFDict);
       if (!widget) continue;
       if (nameOf(widget.get(PDFName.of('Subtype'))) !== 'Widget') continue;
-
-      // /P survived the copy pointing at the *source* page object, which is not
-      // in the output page tree. Left alone, viewers and our own field-geometry
-      // lookup cannot tell which page a field is on.
-      widget.set(PDFName.of('P'), page.ref);
-
       const rootRef = fieldRootRef(outDoc, ref, widget);
-      if (seenRoots.has(rootRef.toString())) continue;
+      entries.push({ widget, pageRef: page.ref, rootRef, origin: pageOrigins?.[pageIndex] ?? '' });
       const rootDict = outDoc.context.lookupMaybe(rootRef, PDFDict);
-      if (!rootDict) continue;
-
-      // pdf-lib builds a fresh object copier per `copyPages` call, so a field
-      // with widgets on two output pages arrives as two independent field dicts
-      // with the same name. Two same-named entries in /Fields is a form where
-      // filling by name reaches only one of them — merge them into one field.
-      const name = textOf(rootDict.get(PDFName.of('T')));
-      const existing = name === undefined ? undefined : rootByName.get(name);
-      if (existing) {
-        mergeFieldNode(outDoc, existing, rootRef);
-        seenRoots.add(rootRef.toString());
-        continue;
-      }
-
-      seenRoots.add(rootRef.toString());
-      if (name !== undefined) rootByName.set(name, rootRef);
-      fields.push(rootRef);
+      const name = rootDict ? textOf(rootDict.get(PDFName.of('T'))) : undefined;
+      if (name !== undefined) originalNames.add(name);
     }
+  });
+
+  for (const { widget, pageRef, rootRef, origin } of entries) {
+    // /P survived the copy pointing at the *source* page object, which is not
+    // in the output page tree. Left alone, viewers and our own field-geometry
+    // lookup cannot tell which page a field is on.
+    widget.set(PDFName.of('P'), pageRef);
+
+    if (seenRoots.has(rootRef.toString())) continue;
+    const rootDict = outDoc.context.lookupMaybe(rootRef, PDFDict);
+    if (!rootDict) continue;
+    seenRoots.add(rootRef.toString());
+
+    const name = textOf(rootDict.get(PDFName.of('T')));
+    if (name === undefined) {
+      fields.push(rootRef);
+      continue;
+    }
+
+    // pdf-lib builds a fresh object copier per `copyPages` call, so a field
+    // with widgets on two output pages arrives as two independent field dicts
+    // with the same name. Two same-named entries in /Fields is a form where
+    // filling by name reaches only one of them — merge them into one field.
+    // Only within one source, though: see the doc comment.
+    const key = `${origin}\u0000${name}`;
+    const existing = rootByOriginName.get(key);
+    if (existing) {
+      mergeFieldNode(outDoc, existing, rootRef);
+      continue;
+    }
+
+    if (usedNames.has(name)) {
+      let n = 2;
+      while (usedNames.has(`${name}_${n}`) || originalNames.has(`${name}_${n}`)) n++;
+      const renamed = `${name}_${n}`;
+      rootDict.set(PDFName.of('T'), PDFHexString.fromText(renamed));
+      renames.push({ from: name, to: renamed });
+      usedNames.add(renamed);
+    } else {
+      usedNames.add(name);
+    }
+    rootByOriginName.set(key, rootRef);
+    fields.push(rootRef);
   }
 
-  if (fields.length === 0) return;
+  if (fields.length === 0) return renames;
 
   const form = outDoc.context.obj({}) as PDFDict;
   form.set(PDFName.of('Fields'), outDoc.context.obj(fields) as PDFArray);
@@ -2077,6 +2198,7 @@ function reattachAcroForm(outDoc: PDFDocument, contributors: PDFDocument[]): voi
   }
 
   outDoc.catalog.set(PDFName.of('AcroForm'), outDoc.context.register(form));
+  return renames;
 }
 
 /**
@@ -2416,6 +2538,14 @@ function wrapTextForPdf(
 }
 
 /**
+ * P5 — how the document opens: the panel shown (`/PageMode`), the page layout,
+ * viewer preferences and the natural language. Page-independent like the list
+ * below, but kept out of it on purpose: that list is also what the redaction and
+ * scrub rebuilds carry, and those paths' behaviour is not this list's to change.
+ */
+const READER_CATALOG_KEYS = ['PageMode', 'PageLayout', 'ViewerPreferences', 'Lang'];
+
+/**
  * Catalog entries that mean the same thing however the pages were rearranged:
  * none of them is indexed by page number or points at a page object.
  */
@@ -2439,6 +2569,10 @@ const PAGE_INDEPENDENT_CATALOG_KEYS = [
  */
 const FULL_CATALOG_KEYS = [
   ...PAGE_INDEPENDENT_CATALOG_KEYS,
+  ...READER_CATALOG_KEYS,
+  'Metadata',
+  'AF',
+  'Collection',
   'StructTreeRoot',
   'OCProperties',
   'PageLabels',
@@ -2596,6 +2730,507 @@ function preserveDocumentCatalog(
 }
 
 /**
+ * P5 — carries `source`'s document information dictionary into `out` verbatim.
+ *
+ * `out` must have been created with `updateMetadata: false`. pdf-lib's default
+ * stamps its own Producer ("pdf-lib (https://github.com/Hopding/pdf-lib)"), a
+ * fresh Creator and new dates on every document it creates, so every rebuild
+ * used to hand back a file whose Title, Author, Subject and Keywords were gone
+ * and whose Producer named a library the user never chose. The original
+ * Producer and dates are kept rather than restamped, so the `/Info` entries
+ * stay consistent with the XMP packet carried alongside them — a PDF/A
+ * validator rejects a file whose two copies of the metadata disagree.
+ */
+function carryDocumentInfo(source: PDFDocument, out: PDFDocument, copier: PDFObjectCopier): void {
+  const raw = source.context.trailerInfo.Info;
+  const info = raw instanceof PDFRef ? source.context.lookupMaybe(raw, PDFDict) : raw;
+  if (!(info instanceof PDFDict)) return;
+  out.context.trailerInfo.Info = out.context.register(copier.copy(info));
+}
+
+/** One entry of a name tree, with the key object exactly as the source wrote it. */
+interface NameTreeEntry {
+  text: string;
+  key: PDFString | PDFHexString;
+  value: PDFObject;
+}
+
+/** Every entry of a name tree, walking `/Kids`, in tree order. */
+function nameTreeEntries(root: PDFDict | undefined): NameTreeEntry[] {
+  const out: NameTreeEntry[] = [];
+  const visited = new Set<PDFDict>();
+  const visit = (node: PDFDict | undefined, depth: number) => {
+    if (!node || depth > 32 || visited.has(node)) return;
+    visited.add(node);
+    const names = node.lookupMaybe(PDFName.of('Names'), PDFArray);
+    for (let i = 0; names && i + 1 < names.size(); i += 2) {
+      const key = names.lookup(i);
+      if (key instanceof PDFString || key instanceof PDFHexString) {
+        out.push({ text: key.decodeText(), key, value: names.get(i + 1) });
+      }
+    }
+    const kids = node.lookupMaybe(PDFName.of('Kids'), PDFArray);
+    for (let i = 0; kids && i < kids.size(); i++) visit(kids.lookupMaybe(i, PDFDict), depth + 1);
+  };
+  visit(root, 0);
+  return out;
+}
+
+/** A name-tree key for a generated name, plain when it can be. */
+function nameTreeKey(text: string): PDFString | PDFHexString {
+  return /^[\x20-\x7e]*$/.test(text) ? PDFString.of(text) : PDFHexString.fromText(text);
+}
+
+/** Byte order of two name-tree keys — the order §7.9.6 requires a leaf's `/Names` in. */
+function compareKeyBytes(a: PDFString | PDFHexString, b: PDFString | PDFHexString): number {
+  const x = a.asBytes();
+  const y = b.asBytes();
+  for (let i = 0; i < Math.min(x.length, y.length); i++) {
+    if (x[i] !== y[i]) return x[i] - y[i];
+  }
+  return x.length - y.length;
+}
+
+/** A single-leaf name tree holding `entries`, sorted as the spec requires. */
+function flatNameTree(
+  out: PDFDocument,
+  entries: { key: PDFString | PDFHexString; value: PDFObject }[]
+): PDFDict {
+  const names = out.context.obj([]) as PDFArray;
+  for (const { key, value } of [...entries].sort((a, b) => compareKeyBytes(a.key, b.key))) {
+    names.push(key);
+    names.push(value);
+  }
+  const tree = out.context.obj({}) as PDFDict;
+  tree.set(PDFName.of('Names'), names);
+  return tree;
+}
+
+/** The first `${base}_2`, `${base}_3`, … not in `used`. */
+function uniqueKey(used: Set<string>, base: string): string {
+  if (!used.has(base)) return base;
+  let n = 2;
+  while (used.has(`${base}_${n}`)) n++;
+  return `${base}_${n}`;
+}
+
+/** A destination's explicit array, whether written bare or as a `<< /D [...] >>` dict. */
+function destinationArray(doc: PDFDocument, value: unknown): PDFArray | undefined {
+  const resolved = value instanceof PDFRef ? doc.context.lookup(value) : value;
+  if (resolved instanceof PDFArray) return resolved;
+  if (resolved instanceof PDFDict) return resolved.lookupMaybe(PDFName.of('D'), PDFArray);
+  return undefined;
+}
+
+/**
+ * P4 — the document-level entries a page-by-page rebuild has to carry on its own:
+ * attached files, the portfolio, layers and named destinations.
+ *
+ * `copyPages` copies pages, and the catalog is not a page. Before this, deleting
+ * one page, reordering, or merging silently removed every attachment — an
+ * invoice's CSV, a portfolio's members — because `/Names` was only carried when
+ * the pages came through unchanged, and `/AF`/`/Collection` never were.
+ *
+ *  • `/Names /EmbeddedFiles`: merged across every contributor. A name already
+ *    taken by an earlier file gets `_2` unless the two attachments are the same
+ *    bytes, in which case the second is the same file and is not duplicated.
+ *  • `/AF` (associated files) and `/Collection` (portfolio): carried — the files
+ *    are not tied to any page.
+ *  • `/OCProperties`: carried through each contributor's shared copier, so the
+ *    groups are the very objects the pages' `/OC` marks name; several
+ *    contributors' configurations are merged (groups, on/off state, order).
+ *    Dropping it is not neutral: a layer the author switched off draws again.
+ *  • Named destinations (`/Names /Dests` and the legacy catalog `/Dests`): rebuilt
+ *    through the page map. A destination whose page this export left out is
+ *    dropped on its own — the old behaviour dropped the whole tree, attachments
+ *    with it. A name already used by an earlier contributor is renamed and that
+ *    contributor's links are rewritten to match, so a link never lands in the
+ *    other file's chapter.
+ *
+ * Every entry is skipped if the output already has it (the unchanged-pages path
+ * copies the whole catalog first). What still is not carried is measured
+ * afterwards by {@link describeDroppedCatalogItems}.
+ */
+function carryDocumentLevelEntries(
+  outDoc: PDFDocument,
+  contributors: PDFDocument[],
+  contributorDocIds: Map<PDFDocument, string>,
+  copierFor: (doc: PDFDocument) => PDFObjectCopier,
+  pageRefMap: Map<string, PDFRef>,
+  outputPageOrigins: readonly string[]
+): void {
+  const catalog = outDoc.catalog;
+  const has = (key: string) => catalog.get(PDFName.of(key)) !== undefined;
+  const namesCarried = has('Names');
+
+  // /AF — the union of every contributor's associated files.
+  if (!has('AF')) {
+    const af = outDoc.context.obj([]) as PDFArray;
+    for (const doc of contributors) {
+      const source = doc.catalog.lookupMaybe(PDFName.of('AF'), PDFArray);
+      for (let i = 0; source && i < source.size(); i++) af.push(copierFor(doc).copy(source.get(i)));
+    }
+    if (af.size() > 0) catalog.set(PDFName.of('AF'), af);
+  }
+
+  // /Collection — a portfolio's presentation; one source's, since there is one view.
+  if (!has('Collection')) {
+    const owner = contributors.find(doc => doc.catalog.get(PDFName.of('Collection')) !== undefined);
+    if (owner) {
+      catalog.set(
+        PDFName.of('Collection'),
+        copierFor(owner).copy(owner.catalog.get(PDFName.of('Collection'))!)
+      );
+    }
+  }
+
+  // /OCProperties — see the doc comment.
+  if (!has('OCProperties')) {
+    let merged: PDFDict | undefined;
+    const append = (target: PDFDict, source: PDFDict, key: string) => {
+      const extra = source.lookupMaybe(PDFName.of(key), PDFArray);
+      if (!extra) return;
+      const existing = target.lookupMaybe(PDFName.of(key), PDFArray);
+      if (!existing) {
+        target.set(PDFName.of(key), extra);
+        return;
+      }
+      for (let i = 0; i < extra.size(); i++) existing.push(extra.get(i));
+    };
+    for (const doc of contributors) {
+      const oc = doc.catalog.lookupMaybe(PDFName.of('OCProperties'), PDFDict);
+      if (!oc) continue;
+      const copied = copierFor(doc).copy(oc);
+      if (!merged) {
+        merged = copied;
+        continue;
+      }
+      append(merged, copied, 'OCGs');
+      const into = merged.lookupMaybe(PDFName.of('D'), PDFDict);
+      const from = copied.lookupMaybe(PDFName.of('D'), PDFDict);
+      if (into && from) {
+        for (const key of ['ON', 'OFF', 'Order', 'RBGroups', 'Locked']) append(into, from, key);
+      }
+    }
+    if (merged) catalog.set(PDFName.of('OCProperties'), outDoc.context.register(merged));
+  }
+
+  if (namesCarried) return;
+
+  // /Names /EmbeddedFiles — merged, with unique names.
+  const files: { key: PDFString | PDFHexString; value: PDFObject }[] = [];
+  const fileNames = new Set<string>();
+  const fileBytes = new Map<string, Uint8Array | undefined>();
+  const embeddedBytes = (doc: PDFDocument, value: unknown): Uint8Array | undefined => {
+    const spec = value instanceof PDFRef ? doc.context.lookupMaybe(value, PDFDict) : value;
+    if (!(spec instanceof PDFDict)) return undefined;
+    const ef = spec.lookupMaybe(PDFName.of('EF'), PDFDict);
+    const stream = ef?.lookup(PDFName.of('F')) ?? ef?.lookup(PDFName.of('UF'));
+    return stream instanceof PDFRawStream ? stream.contents : undefined;
+  };
+  const sameBytes = (a: Uint8Array | undefined, b: Uint8Array | undefined) =>
+    !!a && !!b && a.length === b.length && a.every((v, i) => v === b[i]);
+  for (const doc of contributors) {
+    const tree = doc.catalog
+      .lookupMaybe(PDFName.of('Names'), PDFDict)
+      ?.lookupMaybe(PDFName.of('EmbeddedFiles'), PDFDict);
+    for (const entry of nameTreeEntries(tree)) {
+      const bytes = embeddedBytes(doc, entry.value);
+      if (fileNames.has(entry.text) && sameBytes(fileBytes.get(entry.text), bytes)) continue;
+      const text = uniqueKey(fileNames, entry.text);
+      fileNames.add(text);
+      fileBytes.set(text, bytes);
+      files.push({
+        key: text === entry.text ? entry.key : nameTreeKey(text),
+        value: copierFor(doc).copy(entry.value)
+      });
+    }
+  }
+
+  // Named destinations — both spellings, each kept in the form its source used,
+  // because a viewer that finds `/Names /Dests` never looks at the catalog's
+  // `/Dests` (pdf.js among them).
+  const destNames = new Set<string>();
+  const treeDests: { key: PDFString | PDFHexString; value: PDFObject }[] = [];
+  const legacyDests = outDoc.context.obj({}) as PDFDict;
+  for (const doc of contributors) {
+    const docId = contributorDocIds.get(doc);
+    const refIndex = pageRefIndex(doc);
+    const copier = copierFor(doc);
+    const renamed = new Map<string, string>();
+
+    const remap = (value: unknown): PDFArray | undefined => {
+      const array = destinationArray(doc, value);
+      const page = array?.get(0);
+      if (!array || !(page instanceof PDFRef)) return undefined;
+      const index = refIndex.get(page.objectNumber);
+      const target = index === undefined ? undefined : pageRefMap.get(`${docId}:${index}`);
+      if (!target) return undefined; // The page is not in this export.
+      const copy = outDoc.context.obj([target]) as PDFArray;
+      for (let i = 1; i < array.size(); i++) copy.push(copier.copy(array.get(i)));
+      return copy;
+    };
+    const claim = (text: string): string => {
+      const name = destNames.has(text) ? uniqueKey(destNames, text) : text;
+      destNames.add(name);
+      if (name !== text) renamed.set(text, name);
+      return name;
+    };
+
+    const tree = doc.catalog
+      .lookupMaybe(PDFName.of('Names'), PDFDict)
+      ?.lookupMaybe(PDFName.of('Dests'), PDFDict);
+    for (const entry of nameTreeEntries(tree)) {
+      const dest = remap(entry.value);
+      if (!dest) continue;
+      const name = claim(entry.text);
+      treeDests.push({ key: name === entry.text ? entry.key : nameTreeKey(name), value: dest });
+    }
+    const legacy = doc.catalog.lookupMaybe(PDFName.of('Dests'), PDFDict);
+    for (const [key, value] of legacy?.entries() ?? []) {
+      const dest = remap(value);
+      if (!dest) continue;
+      legacyDests.set(PDFName.of(claim(key.decodeText())), dest);
+    }
+
+    if (renamed.size > 0) {
+      outDoc.getPages().forEach((page, index) => {
+        if (outputPageOrigins[index] === docId) renameDestinationsOn(page, renamed);
+      });
+    }
+  }
+
+  const names = outDoc.context.obj({}) as PDFDict;
+  if (files.length > 0) names.set(PDFName.of('EmbeddedFiles'), flatNameTree(outDoc, files));
+  if (treeDests.length > 0) names.set(PDFName.of('Dests'), flatNameTree(outDoc, treeDests));
+  if (names.entries().length > 0) catalog.set(PDFName.of('Names'), outDoc.context.register(names));
+  if (legacyDests.entries().length > 0 && !has('Dests')) {
+    catalog.set(PDFName.of('Dests'), outDoc.context.register(legacyDests));
+  }
+}
+
+/** Rewrites named-destination links on `page` whose name is in `renamed`. */
+function renameDestinationsOn(page: PDFPage, renamed: Map<string, string>): void {
+  const rename = (value: unknown): PDFObject | undefined => {
+    if (value instanceof PDFName) {
+      const to = renamed.get(value.decodeText());
+      return to === undefined ? undefined : PDFName.of(to);
+    }
+    if (value instanceof PDFString || value instanceof PDFHexString) {
+      const to = renamed.get(value.decodeText());
+      return to === undefined ? undefined : nameTreeKey(to);
+    }
+    return undefined;
+  };
+  const annots = page.node.Annots();
+  for (let i = 0; annots && i < annots.size(); i++) {
+    const annot = annots.lookup(i);
+    if (!(annot instanceof PDFDict)) continue;
+    const dest = rename(annot.get(PDFName.of('Dest')));
+    if (dest) annot.set(PDFName.of('Dest'), dest);
+    const action = annot.lookupMaybe(PDFName.of('A'), PDFDict);
+    if (action && action.get(PDFName.of('S')) === PDFName.of('GoTo')) {
+      const target = rename(action.get(PDFName.of('D')));
+      if (target) action.set(PDFName.of('D'), target);
+    }
+  }
+}
+
+/**
+ * Catalog entries a rebuild never discloses losing: the page tree and the
+ * entries rebuilt separately (`/AcroForm`, `/Outlines`), and the file-format
+ * declarations (`/Version`, `/Extensions`) that pdf-lib writes for the output
+ * itself.
+ */
+const REBUILT_CATALOG_KEYS = new Set([
+  'Type',
+  'Pages',
+  'AcroForm',
+  'Outlines',
+  'Version',
+  'Extensions',
+  'Metadata'
+]);
+
+/**
+ * P4 — what a source catalog had that the composed one does not, in words.
+ *
+ * Measured, not listed: every entry present in a contributor's catalog (and
+ * every `/Names` subtree) that is absent from the output is named, so a key
+ * this code has never heard of is still disclosed rather than lost quietly.
+ */
+function describeDroppedCatalogItems(outDoc: PDFDocument, contributors: PDFDocument[]): string[] {
+  const labels = new Set<string>();
+  const label = (key: string): string => {
+    switch (key) {
+      case 'StructTreeRoot':
+      case 'MarkInfo':
+        return translate('accessibility tags');
+      case 'PageLabels':
+        return translate('page labels');
+      case 'JavaScript':
+      case 'OpenAction':
+      case 'AA':
+        return translate('document scripts and open actions');
+      case 'Threads':
+        return translate('article threads');
+      default:
+        return key;
+    }
+  };
+  const outNames = outDoc.catalog.lookupMaybe(PDFName.of('Names'), PDFDict);
+  for (const doc of contributors) {
+    for (const [name] of doc.catalog.entries()) {
+      const key = name.decodeText();
+      if (REBUILT_CATALOG_KEYS.has(key)) continue;
+      if (key === 'Names') {
+        const names = doc.catalog.lookupMaybe(PDFName.of('Names'), PDFDict);
+        for (const [sub] of names?.entries() ?? []) {
+          if (outNames?.get(sub) === undefined) labels.add(label(sub.decodeText()));
+        }
+        continue;
+      }
+      if (outDoc.catalog.get(name) === undefined) labels.add(label(key));
+    }
+  }
+  return [...labels];
+}
+
+/**
+ * P6 — applies a normalization matrix (uniform scale + translate) to everything
+ * on a page, and writes the new page boxes from the origin.
+ *
+ *  • Content is wrapped in `q <matrix> cm <visible> re W n … Q`: the clip is the
+ *    old visible box in the old coordinates, so content the author had cropped
+ *    away stays hidden even where it would now fall inside the new page (the
+ *    letterbox margin of a "fit").
+ *  • Every annotation's geometry — `/Rect`, `/QuadPoints`, `/Vertices`, `/L`,
+ *    `/CL`, `/InkList` (and `/RD`, which is a size, scaled only) — goes through
+ *    the same matrix. `translateContent` moved the content alone, so links and
+ *    form widgets stayed behind, ~36pt off on a Letter → A4.
+ *  • `/MediaBox` and `/CropBox` become `[0 0 W H]`; `/BleedBox`, `/TrimBox` and
+ *    `/ArtBox` are mapped through the matrix and clipped to the new page.
+ *
+ * Deliberately not `page.getContentStream()` first (as pdf-lib's own
+ * `translateContent`/`scaleContent` do): that would put the page's *drawing*
+ * stream inside the wrapper, and every watermark or stamp drawn afterwards in
+ * the new page's coordinates would be transformed a second time.
+ */
+function normalizePageGeometry(
+  doc: PDFDocument,
+  page: PDFPage,
+  visible: { x: number; y: number; width: number; height: number },
+  matrix: [number, number, number, number, number, number],
+  width: number,
+  height: number
+): { removedAnnotations: number; hiddenWidgets: number } {
+  const [scale, , , , tx, ty] = matrix;
+  const context = doc.context;
+  page.node.normalize();
+  const start = context.register(
+    context.contentStream([
+      pushGraphicsState(),
+      concatTransformationMatrix(...matrix),
+      rectangle(visible.x, visible.y, visible.width, visible.height),
+      clip(),
+      endPath()
+    ])
+  );
+  const end = context.register(context.contentStream([popGraphicsState()]));
+  page.node.wrapContentStreams(start, end);
+
+  const mapPoints = (array: PDFArray | undefined) => {
+    if (!array) return;
+    for (let i = 0; i + 1 < array.size(); i += 2) {
+      const x = array.lookup(i);
+      const y = array.lookup(i + 1);
+      if (!(x instanceof PDFNumber) || !(y instanceof PDFNumber)) continue;
+      array.set(i, PDFNumber.of(scale * x.asNumber() + tx));
+      array.set(i + 1, PDFNumber.of(scale * y.asNumber() + ty));
+    }
+  };
+  // An annotation lying wholly in the cropped-away area was invisible; after a
+  // "fit" it could land in the new page's margin and show. A link or markup
+  // there is removed (with any popup hanging off it). A form widget is kept —
+  // removing it would delete its field and value — and reported instead.
+  const outside = (annot: PDFDict): boolean => {
+    const rect = annotationRect(annot);
+    if (!rect || rect[2] - rect[0] <= 0 || rect[3] - rect[1] <= 0) return false;
+    return (
+      rect[2] <= visible.x ||
+      rect[0] >= visible.x + visible.width ||
+      rect[3] <= visible.y ||
+      rect[1] >= visible.y + visible.height
+    );
+  };
+  let removedAnnotations = 0;
+  let hiddenWidgets = 0;
+  const original = page.node.Annots();
+  if (original) {
+    const removed = new Set<PDFDict>();
+    const entries = original.asArray();
+    const dictOf = (entry: PDFObject) =>
+      entry instanceof PDFDict ? entry : context.lookupMaybe(entry, PDFDict);
+    for (const entry of entries) {
+      const annot = dictOf(entry);
+      if (!annot || nameOf(annot.get(PDFName.of('Subtype'))) === 'Popup' || !outside(annot)) {
+        continue;
+      }
+      if (nameOf(annot.get(PDFName.of('Subtype'))) === 'Widget') hiddenWidgets++;
+      else removed.add(annot);
+    }
+    if (removed.size > 0) {
+      const kept = entries.filter(entry => {
+        const annot = dictOf(entry);
+        if (!annot) return true;
+        if (removed.has(annot)) return false;
+        const parent = annot.lookup(PDFName.of('Parent'));
+        return !(
+          nameOf(annot.get(PDFName.of('Subtype'))) === 'Popup' &&
+          parent instanceof PDFDict &&
+          removed.has(parent)
+        );
+      });
+      removedAnnotations = entries.length - kept.length;
+      if (kept.length === 0) page.node.delete(PDFName.of('Annots'));
+      else page.node.set(PDFName.of('Annots'), context.obj(kept));
+    }
+  }
+
+  const annots = page.node.Annots();
+  const seen = new Set<PDFDict>();
+  for (let i = 0; annots && i < annots.size(); i++) {
+    const annot = annots.lookup(i);
+    if (!(annot instanceof PDFDict) || seen.has(annot)) continue;
+    seen.add(annot);
+    for (const key of ['Rect', 'QuadPoints', 'Vertices', 'L', 'CL']) {
+      mapPoints(annot.lookupMaybe(PDFName.of(key), PDFArray));
+    }
+    const ink = annot.lookupMaybe(PDFName.of('InkList'), PDFArray);
+    for (let j = 0; ink && j < ink.size(); j++) mapPoints(ink.lookupMaybe(j, PDFArray));
+    const rd = annot.lookupMaybe(PDFName.of('RD'), PDFArray);
+    for (let j = 0; rd && j < rd.size(); j++) {
+      const v = rd.lookup(j);
+      if (v instanceof PDFNumber) rd.set(j, PDFNumber.of(v.asNumber() * scale));
+    }
+  }
+
+  for (const key of ['BleedBox', 'TrimBox', 'ArtBox']) {
+    const box = numberArray(page.node, key, 4);
+    page.node.delete(PDFName.of(key));
+    if (!box) continue;
+    const x0 = Math.max(0, Math.min(box[0], box[2]) * scale + tx);
+    const y0 = Math.max(0, Math.min(box[1], box[3]) * scale + ty);
+    const x1 = Math.min(width, Math.max(box[0], box[2]) * scale + tx);
+    const y1 = Math.min(height, Math.max(box[1], box[3]) * scale + ty);
+    if (x1 > x0 && y1 > y0) page.node.set(PDFName.of(key), context.obj([x0, y0, x1, y1]));
+  }
+  page.node.set(PDFName.of('MediaBox'), context.obj([0, 0, width, height]));
+  page.node.set(PDFName.of('CropBox'), context.obj([0, 0, width, height]));
+  return { removedAnnotations, hiddenWidgets };
+}
+
+/**
  * Draws a fixed, unrotated header and/or footer line — small running text in the
  * top/bottom margin band, distinct from the single positioned/rotatable
  * watermark stamp above.
@@ -2665,7 +3300,9 @@ async function composePages(
   globalTotal: number = pages.length,
   extras: ComposeExtras = {}
 ): Promise<PDFDocument> {
-  const outDoc = await PDFDocument.create();
+  // `updateMetadata: false`: the source's own /Info is carried below (P5), not
+  // pdf-lib's Producer and a fresh set of dates.
+  const outDoc = await PDFDocument.create({ updateMetadata: false });
   const getSource = sourceCache(sources);
 
   // An XFA form's fields live in an XML payload hanging off /AcroForm, which no
@@ -2822,6 +3459,10 @@ async function composePages(
     }
   }
 
+  /** P6 — output page numbers where normalization removed / kept out-of-crop annotations. */
+  const normalizeRemovedOn: number[] = [];
+  const normalizeHiddenWidgetsOn: number[] = [];
+
   for (let i = 0; i < pages.length; i++) {
     const ref = pages[i];
     await checkpoint(job, i / pages.length, translate(label, { page: i + 1, total: pages.length }));
@@ -2872,8 +3513,41 @@ async function composePages(
       copied.setRotation(degrees(normalizeRotation(copied.getRotation().angle + ref.rotation)));
     }
 
+    // See the M2 / PDF-9 note further down for why this is the *source* /Rotate.
+    const sourceRotation = normalizeRotation(copied.getRotation().angle - ref.rotation);
+    const preCropFrame = pageDisplayFrame(copied, sourceRotation);
+
+    // The user's crop is applied before normalization (P6): it was drawn on the
+    // source page as rendered, and normalizing scales and centres whatever is
+    // then visible — so the cropped-away margin is neither scaled into the new
+    // page nor revealed by it.
+    if (ref.cropBox) {
+      // The incoming cropBox is top-left normalised [0,1] in display space.
+      // Mapping two opposite corners and taking the extents is rotation-agnostic:
+      // whichever corner ends up bottom-left in page space, min/max finds it.
+      const c0 = displayPointToPage(
+        preCropFrame,
+        ref.cropBox.x * preCropFrame.displayWidth,
+        ref.cropBox.y * preCropFrame.displayHeight
+      );
+      const c1 = displayPointToPage(
+        preCropFrame,
+        (ref.cropBox.x + ref.cropBox.width) * preCropFrame.displayWidth,
+        (ref.cropBox.y + ref.cropBox.height) * preCropFrame.displayHeight
+      );
+      const cropX = Math.min(c0.x, c1.x);
+      const cropY = Math.min(c0.y, c1.y);
+      copied.setCropBox(cropX, cropY, Math.abs(c1.x - c0.x), Math.abs(c1.y - c0.y));
+    }
+
     if (normalize) {
-      const { width, height } = copied.getSize();
+      // P6 — the *visible* box (CropBox ∩ MediaBox, with its real origin), not
+      // `getSize()`. Scaling the raw MediaBox scaled content the author had
+      // cropped away into the new page and then overwrote the CropBox with the
+      // full page, revealing it; an offset MediaBox ([100 100 712 892]) kept its
+      // origin under pdf-lib's `setSize`, so the page came out shifted.
+      const visible = visiblePageBox(copied);
+      const { width, height } = visible;
 
       // /Rotate is a display-only transform — content stays in the page's raw
       // (unrotated) MediaBox. A 595x842 page with /Rotate 90 displays as
@@ -2913,29 +3587,36 @@ async function composePages(
         factor = Math.max(scaleX, scaleY);
       }
 
-      if (factor !== 1) {
-        copied.scale(factor, factor);
-      }
-
       const scaledW = width * factor;
       const scaledH = height * factor;
 
       // The target box, mapped back from displayed orientation to the raw
-      // (unrotated) content space that setSize/translateContent operate in.
+      // (unrotated) content space the boxes and content live in.
       const rawTargetW = swapped ? targetH : targetW;
       const rawTargetH = swapped ? targetW : targetH;
 
-      // translateContent shifts the origin so the content is centered
+      // One matrix for everything on the page — content and annotations alike:
+      // move the visible box's corner to the origin, scale, and centre.
       const dx = (rawTargetW - scaledW) / 2;
       const dy = (rawTargetH - scaledH) / 2;
-
-      if (dx !== 0 || dy !== 0) {
-        copied.translateContent(dx, dy);
-      }
-
-      // Override the boxes to match the target size exactly
-      copied.setSize(rawTargetW, rawTargetH);
-      copied.setCropBox(0, 0, rawTargetW, rawTargetH);
+      const matrix: [number, number, number, number, number, number] = [
+        factor,
+        0,
+        0,
+        factor,
+        dx - visible.x * factor,
+        dy - visible.y * factor
+      ];
+      const outcome = normalizePageGeometry(
+        outDoc,
+        copied,
+        visible,
+        matrix,
+        rawTargetW,
+        rawTargetH
+      );
+      if (outcome.removedAnnotations > 0) normalizeRemovedOn.push(pageOffset + i + 1);
+      if (outcome.hiddenWidgets > 0) normalizeHiddenWidgetsOn.push(pageOffset + i + 1);
     }
 
     outDoc.addPage(copied);
@@ -2961,27 +3642,9 @@ async function composePages(
     // `getSize()`, the raw MediaBox from (0, 0). On a page with bleed, a crop
     // or an offset MediaBox the two disagree, and a signature placed at the
     // top-left of what the user saw landed outside the visible page.
-    const sourceRotation = normalizeRotation(copied.getRotation().angle - ref.rotation);
-    const frame = pageDisplayFrame(copied, sourceRotation);
-
-    if (ref.cropBox) {
-      // The incoming cropBox is top-left normalised [0,1] in display space.
-      // Mapping two opposite corners and taking the extents is rotation-agnostic:
-      // whichever corner ends up bottom-left in page space, min/max finds it.
-      const c0 = displayPointToPage(
-        frame,
-        ref.cropBox.x * frame.displayWidth,
-        ref.cropBox.y * frame.displayHeight
-      );
-      const c1 = displayPointToPage(
-        frame,
-        (ref.cropBox.x + ref.cropBox.width) * frame.displayWidth,
-        (ref.cropBox.y + ref.cropBox.height) * frame.displayHeight
-      );
-      const cropX = Math.min(c0.x, c1.x);
-      const cropY = Math.min(c0.y, c1.y);
-      copied.setCropBox(cropX, cropY, Math.abs(c1.x - c0.x), Math.abs(c1.y - c0.y));
-    }
+    // Without normalization this is the uncropped visible box, exactly as before
+    // the crop moved above; a normalized page is a new page, framed afresh.
+    const frame = normalize ? pageDisplayFrame(copied, sourceRotation) : preCropFrame;
 
     // Edge-anchored furniture — the 9-point watermark grid, the header/footer
     // band, the Bates number — is positioned against the page the reader will
@@ -3172,6 +3835,50 @@ async function composePages(
   // out. Resolved before anything below walks the annotations.
   resolvePageTombstone(outDoc, tombstone);
 
+  if (normalizeRemovedOn.length > 0) {
+    await reportNotice(
+      job,
+      translate('Annotations that lay outside the cropped area were removed (pages {pages}).', {
+        pages: normalizeRemovedOn.join(', ')
+      })
+    );
+  }
+  if (normalizeHiddenWidgetsOn.length > 0) {
+    await reportNotice(
+      job,
+      translate(
+        'Form fields that lay outside the cropped area were kept and may now show in the page margin (pages {pages}).',
+        { pages: normalizeHiddenWidgetsOn.join(', ') }
+      )
+    );
+  }
+
+  /** The shared, page-premapped copier of a contributor (every contributor has one). */
+  const copierFor = (doc: PDFDocument): PDFObjectCopier => {
+    let copier = copiers.get(doc);
+    if (!copier) {
+      copier = PDFObjectCopier.for(doc.context, outDoc.context);
+      copiers.set(doc, copier);
+    }
+    return copier;
+  };
+
+  // P5 — the document's title, author, subject and keywords, and how it opens,
+  // come from the primary (first) contributor. Its XMP packet only when it is
+  // the *only* contributor: the packet describes one file (a `pdfaid`
+  // conformance claim among it), and stamping it onto pages assembled from
+  // several would claim something nobody checked.
+  const primary = contributors[0];
+  if (primary) {
+    carryDocumentInfo(primary, outDoc, copierFor(primary));
+    preserveDocumentCatalog(
+      primary,
+      outDoc,
+      copierFor(primary),
+      contributors.length === 1 ? [...READER_CATALOG_KEYS, 'Metadata'] : READER_CATALOG_KEYS
+    );
+  }
+
   if (nup) {
     // N-up rebuilds every page as an embedded form XObject, so widgets no longer
     // have a page of their own to sit on. Carrying /AcroForm there would point
@@ -3179,7 +3886,17 @@ async function composePages(
     return applyNUp(outDoc, nup, job);
   }
 
-  reattachAcroForm(outDoc, contributors);
+  const outputPageOrigins = pages.map(p => p.sourceDocId);
+  const renamedFields = reattachAcroForm(outDoc, contributors, outputPageOrigins);
+  if (renamedFields.length > 0) {
+    await reportNotice(
+      job,
+      translate(
+        'Form fields with the same name in different files were kept apart by renaming: {names}.',
+        { names: renamedFields.map(r => `"${r.from}" → "${r.to}"`).join(', ') }
+      )
+    );
+  }
 
   if (extras.formFieldsToCreate && extras.formFieldsToCreate.length > 0) {
     const form = outDoc.getForm();
@@ -3283,6 +4000,26 @@ async function composePages(
       outDoc,
       copiers.get(only),
       unchanged ? FULL_CATALOG_KEYS : PAGE_INDEPENDENT_CATALOG_KEYS
+    );
+  }
+  // P4 — attachments, portfolio, layers and named destinations, whatever the
+  // page order; then say out loud whatever still could not come along.
+  carryDocumentLevelEntries(
+    outDoc,
+    contributors,
+    contributorDocIds,
+    copierFor,
+    pageRefMap,
+    outputPageOrigins
+  );
+  const droppedItems = describeDroppedCatalogItems(outDoc, contributors);
+  if (droppedItems.length > 0) {
+    await reportNotice(
+      job,
+      translate(
+        'Not carried into the result, because they describe the original page order or a single source file: {items}.',
+        { items: droppedItems.join(', ') }
+      )
     );
   }
 
@@ -3874,9 +4611,153 @@ function collectImages(
       hasMask: dict.get(PDFName.of('Mask')) !== undefined,
       maskKind: maskKindOf(smask, mask),
       isImageMask,
-      byteLength: stream instanceof PDFRawStream ? stream.contents.length : stream.sizeInBytes()
+      byteLength: stream instanceof PDFRawStream ? stream.contents.length : stream.sizeInBytes(),
+      // An encrypted file's stream bytes are ciphertext, not samples.
+      rawSamples: doc.isEncrypted ? undefined : rawSampleFacts(stream, doc.context)
     });
   }
+}
+
+/** Filters that only carry bytes as text. Neither compresses anything. */
+const TEXT_TRANSPORT_FILTERS = new Set(['ASCIIHexDecode', 'ASCII85Decode']);
+
+/**
+ * The samples of an image stream that stores them unencoded — no `/Filter`, or
+ * only text-transport filters — or `undefined` for anything else: a real
+ * compression filter, any non-null `/DecodeParms` (`/DP`), an external `/F`
+ * file, or a stream that was not read from the file (whose stored bytes are not
+ * what `contents` holds).
+ *
+ * Shared by CMP-01's inventory, which measures how well these samples deflate,
+ * and by `rebuildCompressed`, which re-takes the same verdict from the file
+ * before it rewrites anything rather than trusting the plan.
+ */
+function rawImageSamples(stream: PDFStream, context: PDFContext): Uint8Array | undefined {
+  if (!(stream instanceof PDFRawStream)) return undefined;
+  const dict = stream.dict;
+  if (dict.get(PDFName.of('F')) !== undefined) return undefined;
+  for (const key of ['DecodeParms', 'DP']) {
+    const parms = dict.lookup(PDFName.of(key));
+    if (parms === undefined || parms === PDFNull) continue;
+    if (parms instanceof PDFArray) {
+      let allNull = true;
+      for (let i = 0; i < parms.size(); i++) {
+        if (parms.lookup(i) !== PDFNull) allNull = false;
+      }
+      if (allNull) continue;
+    }
+    return undefined;
+  }
+  const filters = filterNamesOf(dict.get(PDFName.of('Filter')), context);
+  if (!filters.every(name => TEXT_TRANSPORT_FILTERS.has(name))) return undefined;
+  if (filters.length === 0) return stream.contents;
+  try {
+    return decodePDFRawStream(stream).decode();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Bytes per slice when projecting how well a large raw image deflates. */
+const RAW_SAMPLE_SLICE = 32 * 1024;
+
+/**
+ * The Flate level both the projection and the real re-compression use, so the
+ * whole-stream measurement below is exactly what `rebuildCompressed` writes.
+ */
+const RAW_FLATE_LEVEL = 6;
+
+/**
+ * CMP-01 — `ImageFacts.rawSamples`: how large these unencoded samples would be
+ * once Flate-compressed.
+ *
+ * A stream up to three slices long is deflated whole, so its projection is the
+ * exact result. A longer one is measured on three slices (start, middle, end)
+ * and the ratio is scaled to the whole stream with a margin — deflating a slice
+ * is slightly *worse* than deflating the whole (a cold window), and the margin
+ * covers content the slices did not see. The projection is shown to the user
+ * before any work happens, so it errs towards promising less.
+ */
+function rawSampleFacts(
+  stream: PDFStream,
+  context: PDFContext
+): ImageFacts['rawSamples'] | undefined {
+  const samples = rawImageSamples(stream, context);
+  if (!samples || samples.length === 0) return undefined;
+  const n = samples.length;
+  const slices =
+    n <= RAW_SAMPLE_SLICE * 3
+      ? [samples]
+      : [
+          samples.subarray(0, RAW_SAMPLE_SLICE),
+          samples.subarray(
+            Math.floor((n - RAW_SAMPLE_SLICE) / 2),
+            Math.floor((n - RAW_SAMPLE_SLICE) / 2) + RAW_SAMPLE_SLICE
+          ),
+          samples.subarray(n - RAW_SAMPLE_SLICE)
+        ];
+  let measuredIn = 0;
+  let measuredOut = 0;
+  for (const slice of slices) {
+    measuredIn += slice.length;
+    measuredOut += zlibSync(slice, { level: RAW_FLATE_LEVEL }).length;
+  }
+  if (slices.length === 1) return { sampleBytes: n, projectedFlateBytes: measuredOut };
+  const ratio = Math.min(1, (measuredOut / measuredIn) * 1.1 + 0.02);
+  return { sampleBytes: n, projectedFlateBytes: Math.ceil(n * ratio) };
+}
+
+/**
+ * CMP-01 — object number → the largest size, in points along the image's own
+ * axes, this page draws each image at. `undefined` when the page's placements
+ * cannot be read completely (an unparseable content stream, or more `Do`s than
+ * the walker's cap), so the planner falls back to its page-span assumption for
+ * every image on the page rather than trusting a partial answer.
+ *
+ * The walk is CNV-12's (`findImagePlacements`) and its resolver; `formCache` and
+ * `decoding` are shared across pages for the reasons `imagePlacements` gives.
+ */
+async function drawnImageSizes(
+  page: PDFPage,
+  context: PDFContext,
+  formCache: Map<number, PlacementXObject>,
+  decoding: Set<number>
+): Promise<Map<number, { width: number; height: number }> | undefined> {
+  let statements: Statement[] | null;
+  try {
+    statements = await pageContentStatements(page, context);
+  } catch {
+    return undefined;
+  }
+  if (!statements) return undefined;
+  const { resolve } = await placementResolver(
+    pageXObjectDictOf(page, context),
+    context,
+    0,
+    formCache,
+    decoding
+  );
+  const scan = findImagePlacements(statements, resolve);
+  if (scan.overflow > 0) return undefined;
+  const sizes = new Map<number, { width: number; height: number }>();
+  for (const placement of scan.placements) {
+    if (placement.objectNumber < 0) continue;
+    const width = placement.drawnWidth ?? 0;
+    const height = placement.drawnHeight ?? 0;
+    if (!(width > 0) || !(height > 0) || !Number.isFinite(width) || !Number.isFinite(height)) {
+      continue;
+    }
+    const previous = sizes.get(placement.objectNumber);
+    // An image drawn twice has to survive at the size of its largest use — the
+    // same per-axis maximum `render.worker.ts`'s walker keeps.
+    sizes.set(
+      placement.objectNumber,
+      previous
+        ? { width: Math.max(previous.width, width), height: Math.max(previous.height, height) }
+        : { width, height }
+    );
+  }
+  return sizes;
 }
 
 /* ------------------------------------------------------------------ *
@@ -4079,26 +4960,37 @@ const TRANSPORT_FILTERS = new Set([
   'RL'
 ]);
 
+/** A raw JPEG 2000 codestream starts with SOC (FF 4F) then SIZ (FF 51); a JP2 file with a box. */
+function isJ2kCodestream(bytes: Uint8Array): boolean {
+  return bytes[0] === 0xff && bytes[1] === 0x4f && bytes[2] === 0xff && bytes[3] === 0x51;
+}
+
 /**
- * Strips the transport filters wrapping a codec payload (`[/ASCII85Decode
- * /DCTDecode]` is a JPEG inside ASCII85), leaving the codec's own bytes.
- *
- * Done by handing pdf-lib a synthetic stream carrying only the wrapper filters,
- * rather than reimplementing ASCII85/LZW/Flate — the decoders are already there
- * and already exercised; `decodePDFRawStream` simply refuses to run a chain that
- * ends in an image codec.
+ * CV7 — why a DCT/JPX image cannot be handed over as its own file, given its
+ * /Decode array; null when it can. The one non-identity /Decode that is the
+ * norm rather than a remap is an Adobe CMYK JPEG's `[1 0 1 0 1 0 1 0]`:
+ * Photoshop stores CMYK inverted and marks it with the APP14 "Adobe" segment,
+ * every reader of the standalone file undoes that, and the PDF's /Decode is
+ * how the same undo is spelled inside a PDF. JPX ignores /Decode when it
+ * carries its own alpha (`/SMaskInData` > 0).
  */
-function stripTransportFilters(
-  contents: Uint8Array,
-  wrappers: string[],
+function embeddedCodecDecodeProblem(
+  dict: PDFDict,
+  payload: Uint8Array,
+  codec: string,
   context: PDFContext
-): Uint8Array {
-  if (wrappers.length === 0) return contents;
-  const filters = PDFArray.withContext(context);
-  for (const name of wrappers) filters.push(PDFName.of(name));
-  const dict = PDFDict.withContext(context);
-  dict.set(PDFName.of('Filter'), filters);
-  return decodePDFRawStream(PDFRawStream.of(dict, contents)).decode();
+): string | null {
+  const decode = decodeArrayOf(dict, context);
+  if (!decode || decode.length === 0) return null;
+  const identity = decode.length % 2 === 0 && decode.every((v, i) => v === (i % 2 === 0 ? 0 : 1));
+  if (identity) return null;
+  if (codec === 'JPXDecode' && numberOf(dict, 'SMaskInData', 0) > 0) return null;
+  if (codec !== 'JPXDecode') {
+    const info = readJpegInfo(payload);
+    const inverted = decode.length === 8 && decode.every((v, i) => v === (i % 2 === 0 ? 1 : 0));
+    if (inverted && info?.components === 4 && jpegHasAdobeMarker(payload)) return null;
+  }
+  return translate('a non-default /Decode array, which remaps sample values on display');
 }
 
 export interface ExtractedImageEntry {
@@ -4172,7 +5064,8 @@ type ExtractOutcome = { ok: true; file: ExtractedFile } | { ok: false; reason: s
  *  • `/DCTDecode` → the stream is a complete JFIF/Adobe JPEG. Written out
  *    byte-for-byte, including a CMYK JPEG's Adobe APP14 marker: no decode
  *    happens, so nothing can be lost.
- *  • `/JPXDecode` → likewise a complete JPEG 2000 codestream, written as `.jp2`.
+ *  • `/JPXDecode` → likewise a complete JPEG 2000 file, written as `.jp2` — or
+ *    `.j2k` when it is a bare codestream with no JP2 box wrapper (CV15).
  *    CMP-03 refuses these because pdf.js cannot re-encode them; extraction can
  *    hand them over untouched precisely *because* it never decodes them.
  *  • Transport filters only (Flate/LZW/ASCII85/ASCIIHex/RunLength, or none) →
@@ -4181,7 +5074,9 @@ type ExtractOutcome = { ok: true; file: ExtractedFile } | { ok: false; reason: s
  *
  * Everything else — JBIG2 (whose stream is an embedded segment sequence with its
  * globals in a separate object, not a standalone file), CCITT (a fax codestream
- * with no container), CMYK and /Separation rasters, a non-identity `/Decode` — is
+ * with no container), CMYK and /Separation rasters, a non-identity `/Decode`
+ * (on a DCT/JPX image too, bar an Adobe CMYK JPEG's inverted one — CV7), a
+ * /Predictor we cannot undo (CV2) — is
  * refused with a reason. Following CMP-03's precedent: skip cleanly and report,
  * never write a file that claims to be the image and is not.
  */
@@ -4215,14 +5110,23 @@ function extractImageFile(
       };
     }
     try {
-      const payload = stripTransportFilters(stream.contents, wrappers, context);
+      // CV2: through the predictor-aware decoder, so a predicted Flate wrapper
+      // around the codec is undone too.
+      const payload = decodeStreamBytes(stream, filters.length - 1);
+      // CV7: the codec's file carries the samples, not the PDF's /Decode
+      // remapping, so a non-identity /Decode would extract a different picture
+      // from the one on the page (DeviceGray [1 0] comes out inverted).
+      const remap = embeddedCodecDecodeProblem(dict, payload, codec, context);
+      if (remap) return { ok: false, reason: remap };
       return {
         ok: true,
         file: {
           // A copy, not a view into the parsed file's buffer: these bytes outlive
           // the document and are transferred to the main thread.
           bytes: new Uint8Array(payload),
-          ext: codec === 'JPXDecode' ? 'jp2' : 'jpg'
+          // CV15: a bare JPEG 2000 codestream (SOC + SIZ markers) is not a JP2
+          // file — the JP2 box wrapper is what `.jp2` promises.
+          ext: codec === 'JPXDecode' ? (isJ2kCodestream(payload) ? 'j2k' : 'jp2') : 'jpg'
         }
       };
     } catch (err) {
@@ -4256,7 +5160,10 @@ function extractImageFile(
 
   let samples: Uint8Array;
   try {
-    samples = decodePDFRawStream(stream).decode();
+    // CV2: `decodePDFRawStream` ignores /DecodeParms /Predictor, which left
+    // PNG/TIFF-predicted rows in place of the samples — a scrambled picture
+    // reported as extracted.
+    samples = decodeStreamBytes(stream);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
@@ -4455,7 +5362,9 @@ function normalAppearanceRef(doc: PDFDocument, annot: PDFDict): PDFRef | undefin
 
   const asRef = (value: unknown): PDFRef | undefined => {
     if (value instanceof PDFRef) {
-      return doc.context.lookupMaybe(value, PDFStream) ? value : undefined;
+      // `lookup`, not `lookupMaybe(…, PDFStream)`: the latter throws on a ref to
+      // a non-stream (a broken appearance), where "nothing to draw" is the answer.
+      return doc.context.lookup(value) instanceof PDFStream ? value : undefined;
     }
     return value instanceof PDFStream ? doc.context.register(value) : undefined;
   };
@@ -4613,6 +5522,158 @@ function flattenAnnotations(doc: PDFDocument): { baked: number; dropped: number 
   return { baked, dropped };
 }
 
+/** A visible widget whose value has nothing drawable — flattening it would lose the value. */
+class UndrawableFieldsError extends Error {
+  constructor(readonly fieldNames: string[]) {
+    super(fieldNames.join(', '));
+  }
+}
+
+/**
+ * True when a visible widget with no drawable appearance still stands for a
+ * value the user would lose — text typed, an option chosen, a box ticked.
+ * An empty field, an unchecked box, a push button or an unsigned signature
+ * draws nothing in a viewer either, so dropping it loses nothing.
+ */
+function widgetCarriesValue(field: PDFField | undefined, widget: PDFDict): boolean {
+  if (field instanceof PDFTextField) return (field.getText() ?? '') !== '';
+  if (field instanceof PDFDropdown || field instanceof PDFOptionList) {
+    return field.getSelected().length > 0;
+  }
+  if (field instanceof PDFCheckBox || field instanceof PDFRadioGroup) {
+    const state = widget.get(PDFName.of('AS'));
+    return state instanceof PDFName && state !== PDFName.of('Off');
+  }
+  if (field) return false; // Push buttons, signatures: nothing typed to lose.
+  // An orphan widget (not reachable from /Fields): judge by its own /V.
+  const value = textOf(widget.lookup(PDFName.of('V')));
+  return value !== undefined && value !== '';
+}
+
+/**
+ * SGN-05 / audit P3 — draws every form widget into its page and removes the form,
+ * or changes nothing at all.
+ *
+ * Not `form.flatten()`, which got three things wrong:
+ *  • it ignored `/F`, so a Hidden or NoView field — an internal note, a
+ *    reviewer-only value — was drawn onto the page as visible ink;
+ *  • it placed each appearance with a plain translate to the widget's corner,
+ *    ignoring the appearance's `/Matrix` and `/BBox` (§12.5.5), so a rotated
+ *    widget's value landed outside its box;
+ *  • a widget it could not draw was `console.error`ed and its field removed
+ *    anyway — the value silently gone, the export reported as a success.
+ *
+ * Here: appearances are regenerated first, field by field, so a failure names
+ * the field; every widget is then *planned* — hidden ones dropped undrawn, the
+ * rest resolved through `/AS` to one appearance stream — and only if every
+ * visible widget that carries a value has something to draw is anything
+ * changed. Otherwise this throws ({@link UndrawableFieldsError}) with the
+ * document untouched, and the caller refuses. Widgets are drawn in page
+ * `/Annots` order with {@link appearanceMatrix}, exactly as
+ * {@link flattenAnnotations} draws every other annotation.
+ *
+ * Leaves `/AcroForm` in place with an empty `/Fields`; returns the field count.
+ */
+function flattenFormWidgets(doc: PDFDocument): number {
+  const form = doc.getForm();
+  const fields = form.getFields();
+  if (fields.length > 0) {
+    const font = form.getDefaultFont();
+    for (const field of fields) {
+      if (!field.needsAppearancesUpdate()) continue;
+      try {
+        field.defaultUpdateAppearances(font);
+      } catch (err) {
+        throw new Error(
+          `"${field.getName()}": ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err }
+        );
+      }
+    }
+  }
+
+  const fieldOfWidget = new Map<PDFDict, PDFField>();
+  for (const field of fields) {
+    for (const widget of field.acroField.getWidgets()) fieldOfWidget.set(widget.dict, field);
+  }
+
+  type Plan = {
+    page: PDFPage;
+    entry: PDFObject;
+    draw?: { ref: PDFRef; stream: PDFStream; rect: [number, number, number, number] };
+  };
+  const plans: Plan[] = [];
+  const undrawable: string[] = [];
+  for (const page of doc.getPages()) {
+    const annots = page.node.lookupMaybe(PDFName.of('Annots'), PDFArray);
+    if (!annots) continue;
+    for (const entry of annots.asArray()) {
+      const widget = entry instanceof PDFDict ? entry : doc.context.lookupMaybe(entry, PDFDict);
+      if (!widget || nameOf(widget.get(PDFName.of('Subtype'))) !== 'Widget') continue;
+
+      const flagValue = widget.lookup(PDFName.of('F'));
+      const flags = flagValue instanceof PDFNumber ? flagValue.asNumber() : 0;
+      const invisible = (flags & ANNOT_FLAG_HIDDEN) !== 0 || (flags & ANNOT_FLAG_NOVIEW) !== 0;
+      const rect = annotationRect(widget);
+      if (invisible || !rect || rect[2] - rect[0] <= 0 || rect[3] - rect[1] <= 0) {
+        // Not on screen before, so not on the page after.
+        plans.push({ page, entry });
+        continue;
+      }
+
+      const ref = normalAppearanceRef(doc, widget);
+      const stream = ref ? doc.context.lookupMaybe(ref, PDFStream) : undefined;
+      if (ref && stream) {
+        plans.push({ page, entry, draw: { ref, stream, rect } });
+        continue;
+      }
+      const field = fieldOfWidget.get(widget);
+      if (widgetCarriesValue(field, widget)) {
+        undrawable.push(field?.getName() ?? textOf(widget.lookup(PDFName.of('T'))) ?? '?');
+        continue;
+      }
+      plans.push({ page, entry });
+    }
+  }
+  if (undrawable.length > 0) throw new UndrawableFieldsError([...new Set(undrawable)]);
+
+  // Nothing has been changed until here.
+  const removed = new Map<PDFPage, Set<PDFObject>>();
+  for (const { page, entry, draw } of plans) {
+    if (draw) {
+      const key = page.node.newXObject('FlatWidget', draw.ref);
+      page.pushOperators(
+        pushGraphicsState(),
+        concatTransformationMatrix(...appearanceMatrix(draw.stream, draw.rect)),
+        drawObject(key),
+        popGraphicsState()
+      );
+    }
+    let set = removed.get(page);
+    if (!set) removed.set(page, (set = new Set()));
+    set.add(entry);
+  }
+  for (const [page, entries] of removed) {
+    const annots = page.node.lookupMaybe(PDFName.of('Annots'), PDFArray);
+    if (!annots) continue;
+    const kept = annots.asArray().filter(entry => !entries.has(entry));
+    if (kept.length === 0) page.node.delete(PDFName.of('Annots'));
+    else page.node.set(PDFName.of('Annots'), doc.context.obj(kept));
+  }
+  acroFormDictOf(doc)?.set(PDFName.of('Fields'), doc.context.obj([]));
+  return fields.length;
+}
+
+/** The refusal for a flatten that would have lost values, in the user's words. */
+function undrawableFieldsRefusal(err: UndrawableFieldsError) {
+  return corrupt(
+    translate(
+      'These form fields have a value but nothing Stapler can draw for it: {fields}. Flattening would lose those values, so nothing was saved.',
+      { fields: err.fieldNames.map(n => `"${n}"`).join(', ') }
+    )
+  );
+}
+
 /* ------------------------------------------------------------------ *
  * API
  * ------------------------------------------------------------------ */
@@ -4651,6 +5712,10 @@ const api: ProcessJob = {
     const doc = await load(bytes, true);
     const pages = doc.getPages();
     const out: PageImageInventory[] = [];
+    // Shared across pages, as in `imagePlacements`: a letterhead form repeated
+    // on every page is decoded once.
+    const formCache = new Map<number, PlacementXObject>();
+    const decodingForms = new Set<number>();
 
     for (let i = 0; i < pages.length; i++) {
       await checkpoint(
@@ -4665,6 +5730,20 @@ const api: ProcessJob = {
       const resources = page.node.Resources();
       const xobjects = resources?.lookupMaybe(PDFName.of('XObject'), PDFDict);
       if (xobjects) collectImages(xobjects, resources, doc, images, new Set());
+
+      // CMP-01 — where each image is actually drawn, so over-sampling is judged
+      // against its placement rather than the whole page. Skipped on an
+      // encrypted file (`load(bytes, true)` lets one through): its content
+      // streams are ciphertext, and a walk over them would measure noise.
+      if (images.length > 0 && !doc.isEncrypted) {
+        const drawn = await drawnImageSizes(page, doc.context, formCache, decodingForms);
+        for (const image of images) {
+          const placed = image.objectNumber >= 0 ? drawn?.get(image.objectNumber) : undefined;
+          if (!placed) continue;
+          image.placedWidthPt = placed.width;
+          image.placedHeightPt = placed.height;
+        }
+      }
 
       out.push({ pageIndex: i, images, width: size.width, height: size.height });
     }
@@ -4754,13 +5833,20 @@ const api: ProcessJob = {
         rects.push({ pageIndex, ...pageRectToDisplayFractions(frame, rect) });
       }
 
+      // `/TU` is the form author's label for the field, the best accessible
+      // name the on-page overlay can give its control (AUDIT-2026-10-10 UI9).
+      const tu = field.acroField.dict.lookup(PDFName.of('TU'));
+      const tooltip =
+        tu instanceof PDFString || tu instanceof PDFHexString ? tu.decodeText().trim() : '';
+
       fields.push({
         name: field.getName(),
         type,
         value,
         options,
         isReadOnly: field.isReadOnly(),
-        rects
+        rects,
+        ...(tooltip ? { tooltip } : {})
       });
     }
 
@@ -5082,13 +6168,9 @@ const api: ProcessJob = {
       // appearance pass rather than letting the pass fail and refuse.
       ensureAcroFormDefaults(doc);
       try {
-        try {
-          form.updateFieldAppearances();
-        } catch {
-          // ignore appearance generation fallback errors
-        }
-        form.flatten();
+        flattenFormWidgets(doc);
       } catch (err) {
+        if (err instanceof UndrawableFieldsError) throw undrawableFieldsRefusal(err);
         // Flatten generates an appearance stream per field; a form with a broken
         // /DA or a missing /DR font throws here. Half a flatten is a mangled
         // document, so this is a refusal, not a fallback.
@@ -5100,6 +6182,10 @@ const api: ProcessJob = {
           )
         );
       }
+      // The removed widgets and field dicts — a hidden field's value among
+      // them — would otherwise still be written, unreferenced, into the file.
+      await doc.flush();
+      sweepUnreachableObjects(doc);
     }
     await checkpoint(job, 0.9, translate('Writing file'));
     return transfer(await saveOutput(doc));
@@ -5337,13 +6423,9 @@ Q
       // appearance pass below cannot resolve the /Helvetica its fields name.
       ensureAcroFormDefaults(doc);
       try {
-        try {
-          form.updateFieldAppearances();
-        } catch {
-          // ignore appearance generation fallback errors
-        }
-        form.flatten();
+        flattenFormWidgets(doc);
       } catch (err) {
+        if (err instanceof UndrawableFieldsError) throw undrawableFieldsRefusal(err);
         // Half a flatten is a mangled document: some fields drawn and removed,
         // the rest still interactive. Refuse, exactly as the fill path does.
         throw corrupt(
@@ -5362,6 +6444,10 @@ Q
 
     await checkpoint(job, 0.5, translate('Drawing annotations'));
     const { baked, dropped } = flattenAnnotations(doc);
+    // Removed field and annotation dicts — a hidden field's value among them —
+    // would otherwise still be written, unreferenced, into the file.
+    await doc.flush();
+    sweepUnreachableObjects(doc);
     await checkpoint(job, 0.8, translate('Writing file'));
     return transferOut({
       bytes: await saveOutput(doc),
@@ -5515,7 +6601,7 @@ Q
     return transferOut({ bytes: zipped, isZip: true, fileCount: slices.length });
   },
 
-  async rebuildCompressed(bytes, rasterPages, replacedImages, job) {
+  async rebuildCompressed(bytes, rasterPages, replacedImages, job, losslessImages) {
     const source = await load(bytes);
 
     // Image replacement happens on the source document first: once the page's
@@ -5865,7 +6951,108 @@ Q
       }
     }
 
-    const out = await PDFDocument.create();
+    // CMP-01 — raw samples, Flate-compressed in place. Not a re-encode: the
+    // samples come out of the new stream byte-for-byte, so the colour space,
+    // `/Decode`, bit depth, `/SMask`/`/Mask` and every other entry keep meaning
+    // exactly what they meant, which is why none of the JPEG path's mask locks
+    // apply. The object keeps its number (`assign`), so every page, form and
+    // mask reference to it stays valid and a shared image is rewritten once.
+    const reflated = new Map<number, { originalBytes: number; compressedBytes: number }>();
+    const notReflated = new Map<
+      number,
+      { reason: string; originalBytes?: number; compressedBytes?: number }
+    >();
+    const losslessEntries = Object.entries(losslessImages ?? {});
+    for (let at = 0; at < losslessEntries.length; at++) {
+      const [pageIndexKey, objectNumbers] = losslessEntries[at];
+      await checkpoint(
+        job,
+        0.4 + (at / losslessEntries.length) * 0.1,
+        translate('Re-encoding images')
+      );
+      const pageIndex = Number(pageIndexKey);
+      const page = pages[pageIndex];
+      if (!page) continue;
+      const resources = page.node.Resources();
+      const pageXObjects = resources?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+      const refs = pageXObjects
+        ? collectImageRefs(pageXObjects, source.context, new Set(), resources)
+        : [];
+
+      for (const objectNumber of objectNumbers) {
+        const matches = refs.filter(r => r.ref.objectNumber === objectNumber);
+        const imageId = matches.length > 0 ? nameKey(matches[0].key) : `object-${objectNumber}`;
+        // Already swapped for a JPEG above: that is this image's outcome.
+        if (embedded.has(objectNumber)) continue;
+        if (matches.length === 0) {
+          note({
+            pageIndex,
+            imageId,
+            objectNumber,
+            status: 'skipped',
+            skipReason:
+              'This image is not reachable from the page in the document being rebuilt, so nothing was replaced.'
+          });
+          continue;
+        }
+        const done = reflated.get(objectNumber);
+        if (done) {
+          note({ pageIndex, imageId, objectNumber, ...done, status: 're-encoded' });
+          continue;
+        }
+        let refused = notReflated.get(objectNumber);
+        if (!refused) {
+          const ref = matches[0].ref;
+          const stream = source.context.lookupMaybe(ref, PDFStream);
+          const samples = stream ? rawImageSamples(stream, source.context) : undefined;
+          const originalBytes = stream ? storedStreamBytes(stream) : null;
+          if (!stream || !samples || originalBytes === null || !(stream instanceof PDFRawStream)) {
+            refused = {
+              reason: 'The image stream is not stored as raw samples, so it was left untouched.',
+              ...(originalBytes !== null ? { originalBytes } : {})
+            };
+          } else {
+            const flated = zlibSync(samples, { level: RAW_FLATE_LEVEL });
+            // CMP-04, per image, exactly as for a JPEG replacement.
+            if (flated.byteLength >= originalBytes) {
+              refused = {
+                reason:
+                  `Lossless compression produced ${flated.byteLength} bytes against the original ` +
+                  `${originalBytes}, so the original stream was kept.`,
+                originalBytes,
+                compressedBytes: flated.byteLength
+              };
+            } else {
+              const dict = stream.dict.clone(source.context);
+              dict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
+              dict.delete(PDFName.of('DecodeParms'));
+              dict.delete(PDFName.of('DP'));
+              dict.set(PDFName.of('Length'), PDFNumber.of(flated.byteLength));
+              source.context.assign(ref, PDFRawStream.of(dict, flated));
+              const sizes = { originalBytes, compressedBytes: flated.byteLength };
+              reflated.set(objectNumber, sizes);
+              note({ pageIndex, imageId, objectNumber, ...sizes, status: 're-encoded' });
+              continue;
+            }
+          }
+          notReflated.set(objectNumber, refused);
+        }
+        note({
+          pageIndex,
+          imageId,
+          objectNumber,
+          ...(refused.originalBytes !== undefined ? { originalBytes: refused.originalBytes } : {}),
+          ...(refused.compressedBytes !== undefined
+            ? { compressedBytes: refused.compressedBytes }
+            : {}),
+          status: 'skipped',
+          skipReason: refused.reason
+        });
+      }
+    }
+
+    // P5 — not pdf-lib's Producer and dates: the source's /Info is carried below.
+    const out = await PDFDocument.create({ updateMetadata: false });
     // The catalog is carried further down, through the page-premapped copier
     // (N-1): copied here with a copier of its own, every bookmark destination
     // dragged in a full orphan copy of its target page — original content and
@@ -5907,7 +7094,7 @@ Q
     }
 
     const hasRaster = rasterImages.size > 0;
-    const hasReencoded = embedded.size > 0;
+    const hasReencoded = embedded.size > 0 || reflated.size > 0;
     // No raster page and no image actually swapped means no compression work
     // happened at all. Rebuilding anyway would still change the byte length —
     // pdf-lib re-serialises, drops unreferenced objects and rewrites the xref —
@@ -5945,6 +7132,7 @@ Q
     for (let i = 0; i < total; i++) reserved.set(i, reservePageRef(out));
     premapSourcePages(copier, source, reserved, tombstone);
     preserveDocumentCatalog(source, out, copier);
+    carryDocumentInfo(source, out, copier);
     const copies: PDFPage[] = [];
     for (const idx of kept) {
       copies.push(copyPageInto(copier, source.getPage(idx), reserved.get(idx)!, out));
@@ -6053,6 +7241,17 @@ Q
         rasterizedPages: [],
         imageStats
       });
+    }
+    // Audit P4 — whatever the rebuilt catalog did not carry is said, not lost
+    // quietly. Only on this path: a kept original lost nothing.
+    const droppedItems = describeDroppedCatalogItems(out, [source]);
+    if (droppedItems.length > 0) {
+      await reportNotice(
+        job,
+        translate('Not carried into the compressed file: {items}.', {
+          items: droppedItems.join(', ')
+        })
+      );
     }
     return transferOut({ bytes: rebuilt, keptOriginal: false, rasterizedPages: [], imageStats });
   },
@@ -7493,6 +8692,10 @@ Q
     }
 
     return found;
+  },
+
+  async ocrPagesWithText(bytes, pageIndices) {
+    return pagesWithVisibleText(await load(bytes), pageIndices);
   },
 
   async addOcrTextLayer(bytes, layers, job) {
@@ -9680,6 +10883,21 @@ function stripOverlappingAnnotations(
 
   const kept: unknown[] = [];
   let removedAny = false;
+  /** Every annotation removed below, by reference and by dictionary. */
+  const removedRefs = new Set<string>();
+  const removedDicts = new Set<PDFDict>();
+  const isRemoved = (value: unknown): boolean =>
+    value instanceof PDFRef
+      ? removedRefs.has(value.toString())
+      : value instanceof PDFDict && removedDicts.has(value);
+  const forget = (annotRef: unknown, annotDict: PDFDict) => {
+    removedDicts.add(annotDict);
+    if (annotRef instanceof PDFRef) {
+      removedRefs.add(annotRef.toString());
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (doc.context as any).indirectObjects.delete(annotRef);
+    }
+  };
 
   for (let a = 0; a < annots.size(); a++) {
     const annotRef = annots.get(a);
@@ -9777,13 +10995,47 @@ function stripOverlappingAnnotations(
     // Appearance streams are separate objects holding the drawn text; the
     // sweep below collects them once nothing points at them any more.
     annotDict.delete(PDFName.of('AP'));
-    if (annotRef instanceof PDFRef) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (doc.context as any).indirectObjects.delete(annotRef);
-    }
+    forget(annotRef, annotDict);
   }
 
   if (!removedAny) return redactedFields;
+
+  // AUDIT-2026-10-10 P10 — what hangs off a removed annotation goes with it: its
+  // `/Popup` (whose `/Parent` would otherwise point at a deleted object) and
+  // every reply to it (`/IRT`), which is a comment *about* the marked content
+  // and routinely quotes it. Repeated to a fixed point, so a reply's own popup
+  // and a reply to a reply go too. A surviving annotation whose `/Popup` was
+  // itself removed loses the key rather than keeping a dangling reference.
+  const resolveAnnot = (ref: unknown): PDFDict | undefined =>
+    ref instanceof PDFDict
+      ? ref
+      : ref instanceof PDFRef
+        ? (doc.context.lookup(ref) as PDFDict | undefined)
+        : undefined;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let k = kept.length - 1; k >= 0; k--) {
+      const dict = resolveAnnot(kept[k]);
+      if (!(dict instanceof PDFDict)) continue;
+      const popupOfRemoved =
+        nameOf(dict.get(PDFName.of('Subtype'))) === 'Popup' &&
+        isRemoved(dict.get(PDFName.of('Parent')));
+      if (!popupOfRemoved && !isRemoved(dict.get(PDFName.of('IRT')))) continue;
+      dict.delete(PDFName.of('Contents'));
+      dict.delete(PDFName.of('RC'));
+      dict.delete(PDFName.of('AP'));
+      forget(kept[k], dict);
+      kept.splice(k, 1);
+      changed = true;
+    }
+  }
+  for (const ref of kept) {
+    const dict = resolveAnnot(ref);
+    if (dict instanceof PDFDict && isRemoved(dict.get(PDFName.of('Popup')))) {
+      dict.delete(PDFName.of('Popup'));
+    }
+  }
 
   const newAnnots = PDFArray.withContext(doc.context);
   for (const ref of kept) newAnnots.push(ref as PDFRef);

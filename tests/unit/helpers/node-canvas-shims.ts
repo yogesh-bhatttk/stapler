@@ -40,7 +40,9 @@ class NodeOffscreenCanvas {
   async convertToBlob({ type = 'image/png', quality }: { type?: string; quality?: number } = {}) {
     const buffer: Buffer =
       type === 'image/jpeg'
-        ? this.canvas.toBuffer('image/jpeg', quality ?? 0.92)
+        ? // @napi-rs/canvas takes JPEG quality on a 0–100 scale; the web API's is 0–1.
+          // Passed through unscaled, every value encoded at the lowest quality.
+          this.canvas.toBuffer('image/jpeg', Math.round((quality ?? 0.92) * 100))
         : this.canvas.toBuffer('image/png');
     return {
       arrayBuffer: async () =>

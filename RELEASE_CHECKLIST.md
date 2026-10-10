@@ -10,10 +10,11 @@ so it gets its own explicit step below rather than being buried inside "run veri
 - [ ] **Manifest Update:** Ensure the `version` field in `public/manifest.json` matches the new version.
 - [ ] **Changelog:** Move the `[Unreleased]` entries in `CHANGELOG.md` under a new
       `[x.y.z] — YYYY-MM-DD` heading.
-- [ ] **`pnpm check` (or `npm run check`):** typecheck, lint, format, design-token
+- [ ] **`pnpm check`:** typecheck, lint, format, design-token
       audit, contrast audit. Must be clean on the tree you intend to release.
-- [ ] **`pnpm test` (or `npm test`):** the full Vitest unit suite.
-- [ ] **`pnpm test:e2e` (or `npm run test:e2e`):** the full Playwright suite —
+- [ ] **`pnpm test`:** the full Vitest unit suite. (Use `pnpm`, not `npm run`/`npx`:
+      `package.json` pins pnpm through `devEngines`, so npm refuses with `EBADDEVENGINES`.)
+- [ ] **`pnpm test:e2e`:** the full Playwright suite —
       includes every P0 tool flow, accessibility, and performance budgets.
 - [ ] **Zero-network test is green:** confirm `tests/e2e/zero-network.spec.ts`
       passed in the run above (it is part of `test:e2e`, but check it by name —
@@ -228,15 +229,17 @@ so it gets its own explicit step below rather than being buried inside "run veri
       known limitation is disclosed in the relevant panel, not silent.
 - [ ] **HEIC decoder licence (legal review, before first store release):**
       `libheif-js` (the HEIC decoder, `src/core/raster-decode.ts`) is LGPL-3.0. It
-      ships as a separate, replaceable WASM chunk with its licence text included in
-      `THIRD_PARTY_LICENSES.txt` (see `scripts/third-party-licenses.mjs`), which
-      satisfies LGPL §4's "prominent notice" requirement, but confirm with counsel
-      that this distribution shape is acceptable before the first Chrome Web Store /
-      AMO submission. Not required again for routine updates once cleared.
+      ships in its own lazily loaded chunk of the image worker (its WASM inlined into
+      that chunk). `THIRD_PARTY_LICENSES.txt` (see `scripts/third-party-licenses.mjs`)
+      carries its LGPL-3.0 and GPL-3.0 texts, links to the libheif-js, libheif and
+      libde265 sources, and says how to rebuild Stapler with a replacement; the README
+      repeats the notice. Confirm with counsel that this distribution shape is
+      acceptable before the first Chrome Web Store / AMO submission. Not required again
+      for routine updates once cleared.
 
 ## 2. Build the Extension
 - [ ] **Clean Build:** Remove any old `dist/ext` folder.
-- [ ] **Build:** Run `npm run build:ext` — emits the unpacked extension to `dist/ext`.
+- [ ] **Build:** Run `pnpm build:ext` — emits the unpacked extension to `dist/ext`.
 - [ ] **Review Artifacts:** Check `dist/ext` for `manifest.json`, `background.js`,
       `editor.html`, and every icon size, correctly minified.
 
@@ -258,9 +261,13 @@ so it gets its own explicit step below rather than being buried inside "run veri
       `…-firefox.zip` and `…-web.zip` — the *contents* of `dist/ext` / `dist/firefox` /
       `dist/web`, every `*.map` left out, fixed timestamps so a rebuild of the same tree
       gives identical bytes — plus a `<zip>.sha256` next to each zip and
-      `dist/release/SHA256SUMS` covering all three. Do not zip by hand. (`--skip-build`
-      re-packages existing `dist/` output.) On a tag push, the release workflow (§6) runs
-      this for you; run it locally only to rehearse.
+      `dist/release/SHA256SUMS` covering all three, and `dist/release/BUILD_INFO.txt`
+      (the Node and pnpm versions that built them). It refuses a `dist/` that contains
+      the e2e test hook. Do not zip by hand. (`--skip-build` re-packages existing `dist/`
+      output.) On a tag push, the release workflow (§5) runs this for you; run it locally
+      only to rehearse. The `Release dry run` workflow runs it on every pull request that
+      touches the build scripts, workflows, `vite.config.ts`, the manifest or
+      `package.json`.
 - [ ] **Extension e2e:** `pnpm test:e2e:ext` passes against that build (with
       `STAPLER_EXT_PREBUILT=1` to test the `dist/ext` you just packaged rather than a
       rebuild).
@@ -269,44 +276,18 @@ so it gets its own explicit step below rather than being buried inside "run veri
       pdf.js upgrade, re-check its table — `tests/unit/browser-floors.test.ts` fails
       until you do.
 
-## 5. Chrome Web Store Publishing
-- [ ] **Upload the CI-built zips, never a local build.** Download the zips from the
-      GitHub release the tag created (they are the bytes the release workflow tested)
-      and upload those to every store, and submit the source at that tag when AMO asks
-      for it. A local `pnpm package` of the same source is not byte-identical to the CI
-      build, so a reviewer rebuilding from source would not match a locally built upload.
-- [ ] **Upload Package:** Go to the [Chrome Developer Dashboard](https://chrome.google.com/webstore/devconsole).
-- [ ] **Create/Update Item:** Upload `dist/release/stapler-<version>-chrome.zip`.
-- [ ] **Update Listing:** Ensure all Store Listing details (description, screenshots, promotional images) are up-to-date (refer to `docs/STORE_LISTING.md`).
-- [ ] **Privacy Policy:** Ensure the Privacy Policy URL is still correct and accessible (or points to the bundled/GitHub version if applicable).
-- [ ] **Submit for Review:** Click "Submit for Review".
+## 5. Tag the release and let CI build it
+Do this **before** uploading anything to a store: the zips the stores get are the ones
+this workflow builds and tests from the tag (§6, §6b), so they do not exist until the tag
+is pushed.
 
-## 5b. Edge Add-ons and Firefox AMO (DIST-04)
-- [ ] **Edge:** `dist/ext` is Edge-compatible unmodified — no separate build. Load it via
-      `edge://extensions` → "Load unpacked" and repeat the "No install warning" and
-      "Functionality Check" steps from §3 before uploading the same `.zip` to the
-      [Edge Add-ons Developer Dashboard](https://partner.microsoft.com/en-us/dashboard/microsoftedge/).
-- [ ] **Firefox build:** Run `npm run build:ext:firefox` — emits a second unpacked
-      directory, `dist/firefox`, with an AMO-shaped `manifest.json` (`browser_specific_settings.gecko.id`,
-      `background.scripts` instead of `service_worker`).
-- [ ] **Firefox gecko.id:** Before the first real AMO submission, replace the placeholder
-      `gecko.id` in `scripts/firefox-manifest.mjs` with the ID AMO issues (or the one you
-      chose at registration) — grep the file for `TODO(DIST-04)`.
-- [ ] **Load Temporary Add-on:** `about:debugging#/runtime/this-firefox` → "Load Temporary
-      Add-on" → select `dist/firefox/manifest.json`. Repeat the "Functionality Check" from
-      §3, paying particular attention to file open/save: Firefox has no File System Access
-      API, so opening should fall back to `<input type=file>` and saving to a browser
-      download, not a picker.
-- [ ] **Submit:** upload `dist/release/stapler-<version>-firefox.zip` (made by
-      `pnpm package`, §4) at
-      [addons.mozilla.org/developers](https://addons.mozilla.org/developers/).
-
-## 6. Post-Release
 - [ ] **Git Tag:** `git tag v<version> && git push origin v<version>` — the tag must
       equal `v` + `package.json`'s `version`, or the workflow stops at its first step.
 - [ ] **Release workflow:** the tag push runs `.github/workflows/release.yml`
       (audit 2026-10-01 PLT-7 / DIST-07). It builds **once** (`pnpm package`, job
-      `build`) and uploads `dist/release/` as the `release` artifact; every later job
+      `build`), runs the pinned `addons-linter` on the Firefox zip (errors fail the
+      release; read its warnings), and uploads `dist/release/` (zips, checksums,
+      `BUILD_INFO.txt`) as the `release` artifact; every later job
       uses that artifact rather than rebuilding:
       - `bundle-network` unpacks all three shipped zips and runs the zero-network
         bundle scan on them;
@@ -326,10 +307,44 @@ so it gets its own explicit step below rather than being buried inside "run veri
         their `.sha256` files and `SHA256SUMS`, with generated notes (`-` in the tag →
         pre-release).
 - [ ] **Review and publish the draft:** on the repository's Releases page, check the
-      draft has all seven assets, replace the generated notes with this version's
-      `CHANGELOG.md` section, then publish. The zips you upload to the stores (§5,
-      §5b) should be the draft's own assets — `sha256sum --check <zip>.sha256` on the
+      draft has all eight assets (three zips, three `.sha256`, `SHA256SUMS`, `BUILD_INFO.txt`), replace the generated notes with this version's
+      `CHANGELOG.md` section, then publish. The zips you upload to the stores (§6,
+      §6b) should be the draft's own assets — `sha256sum --check <zip>.sha256` on the
       downloaded file proves it — not a local rebuild.
+## 6. Chrome Web Store Publishing
+- [ ] **Upload the CI-built zips, never a local build.** Download the zips from the
+      GitHub release the tag created in §5 (they are the bytes the release workflow tested)
+      and upload those to every store, and submit the source at that tag when AMO asks
+      for it. A local `pnpm package` of the same source is not byte-identical to the CI
+      build, so a reviewer rebuilding from source would not match a locally built upload.
+- [ ] **Upload Package:** Go to the [Chrome Developer Dashboard](https://chrome.google.com/webstore/devconsole).
+- [ ] **Create/Update Item:** Upload `stapler-<version>-chrome.zip` from the GitHub release (§5).
+- [ ] **Update Listing:** Ensure all Store Listing details (description, screenshots, promotional images) are up-to-date (refer to `docs/STORE_LISTING.md`).
+- [ ] **Privacy Policy:** Ensure the Privacy Policy URL is still correct and accessible (or points to the bundled/GitHub version if applicable).
+- [ ] **Submit for Review:** Click "Submit for Review".
+
+## 6b. Edge Add-ons and Firefox AMO (DIST-04)
+- [ ] **Edge:** `dist/ext` is Edge-compatible unmodified — no separate build. Load it via
+      `edge://extensions` → "Load unpacked" and repeat the "No install warning" and
+      "Functionality Check" steps from §3 before uploading the same `.zip` to the
+      [Edge Add-ons Developer Dashboard](https://partner.microsoft.com/en-us/dashboard/microsoftedge/).
+- [ ] **Firefox build:** Run `pnpm build:ext:firefox` — emits a second unpacked
+      directory, `dist/firefox`, with an AMO-shaped `manifest.json` (`browser_specific_settings.gecko.id`,
+      `background.scripts` instead of `service_worker`).
+- [ ] **Firefox gecko.id:** the add-on ID is `stapler-offline-pdf@stapler.app`, set in
+      `scripts/firefox-manifest.mjs`. Confirm `dist/firefox/manifest.json` carries exactly
+      that ID. Never change it once AMO has a listing under it: AMO treats a new ID as a
+      different add-on, and existing users would stop receiving updates.
+- [ ] **Load Temporary Add-on:** `about:debugging#/runtime/this-firefox` → "Load Temporary
+      Add-on" → select `dist/firefox/manifest.json`. Repeat the "Functionality Check" from
+      §3, paying particular attention to file open/save: Firefox has no File System Access
+      API, so opening should fall back to `<input type=file>` and saving to a browser
+      download, not a picker.
+- [ ] **Submit:** upload `stapler-<version>-firefox.zip` from the GitHub release (§5) at
+      [addons.mozilla.org/developers](https://addons.mozilla.org/developers/).
+
+## 7. Post-Release
+
 - [ ] **Website deploy:** unpack `stapler-<version>-web.zip` onto the static host. The
       site's entry scripts are content-hashed and its service worker serves each page
       from its own versioned cache, so open tabs keep running their version until the

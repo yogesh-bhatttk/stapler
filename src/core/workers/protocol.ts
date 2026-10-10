@@ -31,6 +31,13 @@ export interface JobPort {
   progress(fraction: number | null, label: string): void | Promise<void>;
   /** Resolves true once the caller has aborted. */
   cancelled(): boolean | Promise<boolean>;
+  /**
+   * A fact about a result that otherwise succeeded, which the caller must pass
+   * on to the user — a form field renamed so two files' values stay apart, a
+   * document-level item a rebuild could not carry. Optional: a port without it
+   * simply hears nothing (see {@link reportNotice}).
+   */
+  notice?(message: string): void | Promise<void>;
 }
 
 /** What the worker receives: the port, proxied across the boundary. */
@@ -39,6 +46,8 @@ export type JobHandle = Comlink.Remote<JobPort> | JobPort;
 export interface JobOptions {
   signal?: AbortSignal;
   onProgress?: (fraction: number | null, label: string) => void;
+  /** Receives every {@link JobPort.notice} the worker reports, already translated. */
+  onNotice?: (message: string) => void;
 }
 
 /**
@@ -53,6 +62,9 @@ export function createJobHandle(options: JobOptions = {}): JobHandle {
     },
     cancelled() {
       return options.signal?.aborted ?? false;
+    },
+    notice(message) {
+      options.onNotice?.(message);
     }
   };
   return Comlink.proxy(port);
@@ -118,8 +130,30 @@ export function subJob(job: JobHandle | undefined, from: number, to: number): Jo
     },
     cancelled() {
       return job.cancelled();
+    },
+    notice(message) {
+      return reportNotice(job, message);
     }
   };
+}
+
+/**
+ * Worker-side: passes a user-facing notice to the caller, if it listens.
+ *
+ * Never throws. Across Comlink every property of a remote port looks present,
+ * so a port built without `notice` only reveals that by rejecting the call —
+ * which must not fail an operation whose result is otherwise good.
+ */
+export async function reportNotice(job: JobHandle | undefined, message: string): Promise<void> {
+  // Called as a method, never through `.call`: on a Comlink remote `.call` is
+  // just another remote property path, not Function.prototype.call.
+  const port = job as JobPort | undefined;
+  if (typeof port?.notice !== 'function') return;
+  try {
+    await port.notice(message);
+  } catch {
+    // The caller has no notice channel; the result itself is unaffected.
+  }
 }
 
 /**

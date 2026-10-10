@@ -39,6 +39,7 @@ import { ReflowView } from '../tools/reflow/ReflowView';
 import { SideBySideView } from '../tools/side-by-side/SideBySideView';
 import { sideBySideSourceId } from '../tools/side-by-side/state';
 import { useTranslation } from '../../core/i18n';
+import { shortcutLabel } from '../../core/shortcuts';
 
 export function Canvas() {
   const t = useTranslation();
@@ -82,7 +83,14 @@ export function Canvas() {
   );
 
   if (!tool) {
-    return <EmptyState title={t('Unknown tool')} body={t('Pick one from the rail or press ⌘K.')} />;
+    return (
+      <EmptyState
+        title={t('Unknown tool')}
+        body={t('Pick one from the rail or press {shortcut}.', {
+          shortcut: shortcutLabel('palette')
+        })}
+      />
+    );
   }
 
   if (tool.id === 'batch') {
@@ -100,7 +108,10 @@ export function Canvas() {
         title={t('No document open')}
         body={
           doc
-            ? t('Every page in this document has been deleted. Undo with ⌘Z, or open another file.')
+            ? t(
+                'Every page in this document has been deleted. Undo with {shortcut}, or open another file.',
+                { shortcut: shortcutLabel('undo') }
+              )
             : t('Open a PDF or some images to start. Nothing is uploaded.')
         }
       />

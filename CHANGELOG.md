@@ -10,6 +10,54 @@ Pre-1.0. See `docs/TICKETS.md` for the ticket-by-ticket state of every feature â
 this file starts tracking user-facing changes from the first tagged release
 onward, not the full development history before it.
 
+### Fixed
+
+- **Redaction** marks now follow their page when pages are deleted, moved or
+  undone (they used to land on whatever page took that position), rotated text
+  can be found and redacted, and gradients and comment pop-ups under a mark are
+  removed too.
+- **Crashes**: a PDF whose embedded image data contains certain bytes, and a
+  tiny malformed TIFF, could freeze or crash the tab. Both are handled now.
+- **Lost work**: crops and Annotate marks count as unsaved changes; Escape no
+  longer throws away the "Restore your previous session?" offer; inserting an
+  image with Insert no longer hangs.
+- **Protect**: unticked permissions now apply even when no owner password is
+  entered.
+- **Forms**: merging two filled copies of the same form keeps both sets of
+  answers; flattening never prints hidden fields and never drops a value silently.
+- **Kept on export**: attachments, portfolios, document title and author, and
+  the opening view now survive page edits, merges and compression; anything that
+  can't be carried is named. Every export includes the same edits whichever tool
+  saves it, and watermarks are no longer applied twice.
+- **Conversions**: extracted images from many generator tools are no longer
+  scrambled; rotated and right-to-left text extract in the right order;
+  PowerPoint picture crops are honoured; OCR text lands in the right place and
+  pages that already have text are skipped; Markdown code keeps its indentation.
+- **Files**: folder exports never overwrite existing files; a cancelled batch
+  writes nothing; large ZIPs are built off the main thread; "Remove blank
+  pages" no longer flags a page with one short line of text; damaged files get a
+  clear "try Repair" message.
+- **Accessibility and languages**: form fields, table cells, file tabs and hints
+  are announced properly; focus is never lost at the ends of a pager or after
+  scrolling; tab titles follow the tool; shortcut hints match your platform;
+  count messages use correct plural forms; sizes and dates follow the chosen
+  language; a "System" theme option is back.
+
+### Changed
+
+- The privacy policy and store listing now describe the one optional download
+  (the OCR language model, only after you agree) and exactly what is stored on
+  your device, and list the real per-tool limits instead of "no limits".
+- Large documents use about half the memory: working through a 100 MB PDF
+  (merge, edit, split, compress) now peaks around 850 MB instead of 1.7 GB, and
+  Compress no longer analyses the document twice. Compress also now shrinks
+  images drawn smaller than the page and uncompressed images it used to call
+  "already optimized".
+- The extension is about 2 MB smaller to download (each translation now ships
+  once, and an unused 2.9 MB OCR file was dropped).
+- The website refuses to run inside another site's frame, and tells you when
+  your browser is too old instead of failing on the first PDF.
+
 ## [0.3.1] â€” 2026-10-06
 
 ### Fixed

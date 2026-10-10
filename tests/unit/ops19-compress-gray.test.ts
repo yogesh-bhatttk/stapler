@@ -161,7 +161,11 @@ async function colourScan(): Promise<Uint8Array> {
   }
   ctx.fillStyle = 'rgb(200, 30, 30)';
   ctx.fillRect(900, 80, 260, 50);
-  const jpeg = new Uint8Array(canvas.toBuffer('image/jpeg', 0.92));
+  // @napi-rs/canvas takes JPEG quality on a 0–100 scale. 70 sits below the
+  // default re-encode quality (0.75 at the scan's own 150 DPI), so colour
+  // compression alone cannot beat it at the defaults — the premise several
+  // tests here start from — while the 72 DPI settings still pay.
+  const jpeg = new Uint8Array(canvas.toBuffer('image/jpeg', 70));
 
   const doc = await PDFDocument.create();
   const image = await doc.embedJpg(jpeg);

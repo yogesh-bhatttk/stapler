@@ -12,6 +12,7 @@ import { tKey, translate, useTranslation } from '../../../core/i18n';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { Check, ScanSearch } from 'lucide-preact';
 import {
+  documents,
   registerSource,
   repointPage,
   replaceWithSource,
@@ -77,6 +78,11 @@ async function encodeJpeg(image: ImageData): Promise<Uint8Array> {
   canvas.getContext('2d')?.putImageData(image, 0, 0);
   const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
   return new Uint8Array(await blob.arrayBuffer());
+}
+
+/** AUDIT-2026-10-10 M1 — `pageKey` is still one of `docId`'s pages. */
+function stillHasPage(docId: string, pageKey: string): boolean {
+  return Boolean(documents.value.find(d => d.id === docId)?.pages.some(p => p.key === pageKey));
 }
 
 export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: CleanupEditorProps) {
@@ -329,12 +335,21 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         client.release();
       }
 
+      // AUDIT-2026-10-10 M1 — leaving the editor aborts the job, but only
+      // cooperatively: the encode/load above ran to completion anyway. A
+      // cancelled job must not then rewrite the document; nor may one whose
+      // page was deleted meanwhile.
+      if (job.signal?.aborted) throw cancelled();
+      if (!stillHasPage(docId, page.key)) return;
       await writeSourceBytes(newSource.id, bytes);
+      if (job.signal?.aborted) throw cancelled();
       registerSource(newSource);
       // A single-page result (the non-flatten path) is replaced outright; flatten's
       // whole-document result repoints just this page, leaving its siblings alone.
       if (pages.length === 1 && resultPageIndex === 0) {
-        replaceWithSource(docId, newSource);
+        // Built from this one page, without its stamps or marks: those are
+        // kept on the same page key (M2), not dropped.
+        replaceWithSource(docId, newSource, { pageForPage: true, keepStamps: true });
       } else {
         notify('info', translate('Applied to this page.'), {
           detail: translate('Move to the next page to clean it, then export when you are done.')
@@ -473,9 +488,31 @@ export function CleanupEditor({ docId, pages, pageIndex, onPageIndexChange }: Cl
         client.release();
       }
 
+      // M1 — as in `apply`: a cancelled job, or one whose pages changed
+      // under it, leaves the document as it is.
+      if (job.signal?.aborted) throw cancelled();
+      if (documents.value.find(d => d.id === docId)?.pages !== pages) {
+        notify('warning', translate('The pages changed while cleaning — nothing was applied.'), {
+          detail: translate('Run it again on the document as it is now.'),
+          timeout: 0
+        });
+        return;
+      }
       await writeSourceBytes(newSource.id, bytes);
+      if (job.signal?.aborted) throw cancelled();
       registerSource(newSource);
-      replaceWithSource(docId, newSource);
+      // Both paths keep every page's key, so its stamps, Annotate marks, crop
+      // box, bookmarks and alt text stay attached (M2). The de-warp path
+      // rebuilds `pages` one for one, in order; flatten rewrites the single
+      // source they all come from page for page, so each page keeps its own
+      // source index and rotation too. Neither bakes the stamps in.
+      replaceWithSource(
+        docId,
+        newSource,
+        settings.flattenBackground
+          ? { sameSourceLayout: true, keepStamps: true }
+          : { pageForPage: true, keepStamps: true }
+      );
       notify('success', translate('All pages cleaned.'));
     });
 
@@ -642,13 +679,19 @@ function CornerHandles({
         }
       });
     };
+    // A touch drag the browser takes over (scroll, palm rejection) ends with
+    // `pointercancel`, never `pointerup` — without it the listeners leaked and
+    // the corner kept following the next pointer (AUDIT-2026-10-10 UI27).
+    cleanupDrag.current?.();
     const end = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', end);
+      window.removeEventListener('pointercancel', end);
       cleanupDrag.current = null;
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', end);
+    window.addEventListener('pointercancel', end);
     cleanupDrag.current = end;
   };
 

@@ -280,6 +280,25 @@ body {
   overflow: hidden;
 }
 
+/*
+ * Direction icons mirror under RTL (AUDIT-2026-10-10 UI22). The pager's
+ * Previous/Next buttons already swap sides in an RTL flex row, so a chevron
+ * that kept pointing left would point *away* from the page it goes to. Only
+ * icons whose meaning is a reading direction are listed — not chevron-down,
+ * not the symmetric arrow-left-right.
+ */
+[dir='rtl']
+  :is(
+    .lucide-chevron-left,
+    .lucide-chevron-right,
+    .lucide-chevrons-left,
+    .lucide-chevrons-right,
+    .lucide-arrow-left,
+    .lucide-arrow-right
+  ) {
+  transform: scaleX(-1);
+}
+
 /* Visible only to screen readers — used for live progress announcements. */
 .srOnly {
   position: absolute;

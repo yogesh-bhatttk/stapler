@@ -23,11 +23,14 @@
   transform: translateZ(0); /* Hardware acceleration */
 }
 
-.button:active:not(:disabled) {
+.button:active:not(:disabled, [aria-disabled='true']) {
   transform: scale(0.96);
 }
 
-.button:disabled {
+/* `aria-disabled` is the focusable flavour: a pager button that runs out of
+   pages keeps focus instead of dropping it to <body> (UI23). */
+.button:disabled,
+.button[aria-disabled='true'] {
   opacity: 0.5;
   cursor: not-allowed;
   pointer-events: none;

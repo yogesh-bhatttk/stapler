@@ -206,7 +206,10 @@ describe('RT-1 — undo past a save', () => {
     expect(live('A').sourceHandle).toEqual({ fileId: 'f2', writable: true });
   });
 
-  it('undoing a step that moved the baseline itself (replaceWithSource) moves it back', () => {
+  // AUDIT-2026-10-10 — `replaceWithSource` no longer moves the baseline (a
+  // rewrite is an unsaved edit until a save re-anchors it), so the baseline
+  // is the opened one throughout and undoing the rewrite lands clean.
+  it('a replaceWithSource rewrite leaves the baseline alone; undoing it lands clean', () => {
     source('s');
     const opened = open('A');
     source('redacted', 2);
@@ -219,7 +222,8 @@ describe('RT-1 — undo past a save', () => {
         { width: 1, height: 1 }
       ]
     });
-    expect(live('A').baseline).not.toBe(opened.baseline);
+    expect(live('A').baseline).toBe(opened.baseline);
+    expect(live('A').dirty).toBe(true);
     undo();
     expect(live('A').baseline).toBe(opened.baseline);
     expect(live('A').dirty).toBe(false);

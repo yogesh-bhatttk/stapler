@@ -20,12 +20,14 @@
  */
 import {
   PDFArray,
+  PDFDict,
   PDFDocument,
   PDFFont,
   PDFHexString,
   PDFName,
   PDFOperator,
   PDFPage,
+  PDFRawStream,
   PDFRef,
   PDFStream,
   beginText,
@@ -41,6 +43,8 @@ import {
   TextRenderingMode
 } from 'pdf-lib';
 import { Encodings } from '@pdf-lib/standard-fonts';
+import { visiblePageBox } from '../pdf/display-frame';
+import { decodeStreamBytes } from '../pdf/predictor';
 import { embedDevanagariFont } from './devanagariFont';
 import {
   decodeStream,
@@ -186,7 +190,10 @@ export function drawInvisibleWords(
 ): { added: number; skipped: number } {
   const scale = layer.dpi / 72;
   const rotation = page.getRotation().angle;
-  const crop = page.getCropBox();
+  // CV6: the box the page was rendered (and OCR'd) at is pdf.js's view —
+  // CropBox ∩ MediaBox — not the raw CropBox, which may reach past the
+  // MediaBox (or be stated corner-reversed) and would shift every word.
+  const crop = visiblePageBox(page);
   const box: PageBox = {
     x0: crop.x,
     y0: crop.y,
@@ -332,6 +339,132 @@ async function stripExistingText(doc: PDFDocument, page: PDFPage): Promise<boole
   const newStream = doc.context.flateStream(merged.slice(0, pos));
   page.node.set(PDFName.of('Contents'), doc.context.register(newStream));
   return true;
+}
+
+/* ------------------------------------------------------------------ *
+ * CV9 — pages that already carry real text
+ * ------------------------------------------------------------------ */
+
+const SHOW_OPERATORS = new Set(['Tj', 'TJ', "'", '"']);
+const MAX_FORM_DEPTH = 8;
+
+function opName(token: { bytes: Uint8Array }): string {
+  return String.fromCharCode(...token.bytes);
+}
+
+/** A content-stream name operand (`/Fm0`, `#`-escapes undone) as pdf-lib keys it. */
+function nameOperand(token: { type: string; bytes: Uint8Array } | undefined): string | null {
+  if (!token || token.type !== 'name') return null;
+  return opName(token)
+    .slice(1)
+    .replace(/#([0-9a-fA-F]{2})/g, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+/**
+ * Whether `bytes` (a content stream) shows any text in a visible rendering
+ * mode — anything but 3 (invisible) and 7 (clip only), which is what an OCR
+ * text layer uses — following `Do` into form XObjects. `null` when some part
+ * cannot be read (an undecodable filter, an inline image the parser refuses):
+ * then nobody can say, and the caller treats the page as having none.
+ */
+function showsVisibleText(
+  bytes: Uint8Array,
+  resources: PDFDict | undefined,
+  tr: string,
+  depth: number,
+  seen: Set<PDFStream>
+): boolean | null {
+  let statements;
+  try {
+    statements = parseContentStream(tokenizeContentStream(bytes));
+  } catch {
+    return null;
+  }
+  let current = tr;
+  const stack: string[] = [];
+  let unknown = false;
+  for (const statement of statements) {
+    const op = opName(statement.operator);
+    if (op === 'q') stack.push(current);
+    else if (op === 'Q') current = stack.pop() ?? current;
+    else if (op === 'Tr' && statement.operands.length === 1)
+      current = opName(statement.operands[0]);
+    else if (SHOW_OPERATORS.has(op)) {
+      if (current !== '3' && current !== '7') return true;
+    } else if (op === 'Do' && depth < MAX_FORM_DEPTH) {
+      const name = nameOperand(statement.operands[0]);
+      const xobjects = resources?.lookupMaybe(PDFName.of('XObject'), PDFDict);
+      const form = name ? xobjects?.lookup(PDFName.of(name)) : undefined;
+      if (!(form instanceof PDFStream) || seen.has(form)) continue;
+      if (form.dict.get(PDFName.of('Subtype')) !== PDFName.of('Form')) continue;
+      seen.add(form);
+      let inner: Uint8Array;
+      try {
+        inner = form instanceof PDFRawStream ? decodeStreamBytes(form) : form.getContents();
+      } catch {
+        unknown = true;
+        continue;
+      }
+      const own = form.dict.lookupMaybe(PDFName.of('Resources'), PDFDict) ?? resources;
+      const found = showsVisibleText(inner, own, current, depth + 1, seen);
+      if (found) return true;
+      if (found === null) unknown = true;
+    }
+  }
+  return unknown ? null : false;
+}
+
+/**
+ * CV9 — of `pageIndices`, the pages whose content already draws real, visible
+ * text (a born-digital page, or a scan someone typed over). OCR on such a page
+ * would add a second copy of its text under the first, so a run skips them
+ * unless the user asks for every page. A previous invisible OCR layer does not
+ * count: re-running OCR replaces it (`stripExistingText`). A page that cannot
+ * be read is not reported, so it is OCR'd as before.
+ */
+export function pagesWithVisibleText(doc: PDFDocument, pageIndices: readonly number[]): number[] {
+  const pages = doc.getPages();
+  const out: number[] = [];
+  for (const index of pageIndices) {
+    const page = pages[index];
+    if (!page) continue;
+    const contents = page.node.Contents();
+    if (!contents) continue;
+    const streams: unknown[] =
+      contents instanceof PDFArray
+        ? contents
+            .asArray()
+            .map(entry => (entry instanceof PDFRef ? doc.context.lookup(entry) : entry))
+        : [contents];
+    const chunks: Uint8Array[] = [];
+    let readable = true;
+    for (const stream of streams) {
+      if (!(stream instanceof PDFStream)) {
+        readable = false;
+        break;
+      }
+      try {
+        chunks.push(
+          stream instanceof PDFRawStream ? decodeStreamBytes(stream) : stream.getContents()
+        );
+      } catch {
+        readable = false;
+        break;
+      }
+    }
+    if (!readable) continue;
+    // The array's streams are one stream split at arbitrary token boundaries.
+    const joined = new Uint8Array(chunks.reduce((n, c) => n + c.length + 1, 0));
+    let at = 0;
+    for (const chunk of chunks) {
+      joined.set(chunk, at);
+      at += chunk.length;
+      joined[at++] = 0x0a;
+    }
+    const resources = page.node.Resources();
+    if (showsVisibleText(joined, resources, '0', 0, new Set()) === true) out.push(index);
+  }
+  return out;
 }
 
 /**

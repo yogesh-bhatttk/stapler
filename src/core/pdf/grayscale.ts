@@ -41,8 +41,7 @@ import {
   PDFRawStream,
   PDFRef,
   PDFStream,
-  PDFString,
-  decodePDFRawStream
+  PDFString
 } from 'pdf-lib';
 import type { PDFContext, PDFDocument, PDFObject } from 'pdf-lib';
 import { zlibSync } from 'fflate';
@@ -56,6 +55,7 @@ import {
 import { parseFunction, parseFunctionOrArray, type PdfFunction } from './functions';
 import { encodeGraySamples, GRAY_JPEG_QUALITY, packOneBit, type EncodedGray } from '../gray-encode';
 import { translate } from '../i18n';
+import { decodeStreamBytes } from './predictor';
 
 export type GrayMode = 'gray' | 'bw';
 
@@ -297,7 +297,8 @@ function decodedBytes(stream: PDFStream): Uint8Array {
   if (stream instanceof PDFRawStream) {
     const filters = filterNames(stream.dict, stream.dict.context);
     if (filters.length === 0) return stream.getContents();
-    return decodePDFRawStream(stream).decode();
+    // CV2: pdf-lib's own decoder ignores /DecodeParms /Predictor.
+    return decodeStreamBytes(stream);
   }
   const maybe = stream as unknown as { getUnencodedContents?: () => Uint8Array };
   if (typeof maybe.getUnencodedContents === 'function') return maybe.getUnencodedContents();

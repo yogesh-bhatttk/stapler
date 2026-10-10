@@ -19,6 +19,7 @@
  * photo is sideways". The pixels that come back are already upright. A TIFF
  * page is turned by its own Orientation tag (274) in `decodeTiffPages` (IMG-9).
  */
+import { formatBytes, formatBytesUp } from './bytes';
 import { corrupt, unsupported } from './errors';
 import { translate } from './i18n';
 import { jpegPassthrough, readJpegInfo } from './jpeg-info';
@@ -52,6 +53,41 @@ function assertFrameSize(width: number, height: number, name: string): void {
         '{name} is {width}×{height} pixels, larger than the {limit}-pixel ' +
           'limit a browser can draw. Downscale it and import that instead.',
         { name, width, height, limit: MAX_RASTER_PIXELS.toLocaleString('en-US') }
+      ),
+      { width, height }
+    );
+  }
+}
+
+/**
+ * CV14 — the most memory one HEIC/TIFF frame may need while it is decoded in
+ * the worker. {@link MAX_RASTER_PIXELS} alone allowed ~2.8 GB at its edge (a
+ * TIFF's decoded strips, UTIF's RGBA copy, then the oriented copy), which
+ * takes the tab down instead of refusing. 1 GB still decodes a 100 MP 8-bit
+ * RGB scan with a quarter-turn Orientation tag.
+ */
+export const MAX_DECODE_BYTES = 1_000_000_000;
+
+/**
+ * Refuses a frame whose peak decode memory (`bytesPerPixel` over the whole
+ * frame, plus `extraBytes` such as a TIFF's decoded strips) would pass
+ * {@link MAX_DECODE_BYTES}, before anything that size is allocated.
+ */
+function assertDecodeBudget(
+  width: number,
+  height: number,
+  bytesPerPixel: number,
+  extraBytes: number,
+  name: string
+): void {
+  const peak = width * height * bytesPerPixel + extraBytes;
+  if (peak > MAX_DECODE_BYTES) {
+    throw unsupported(
+      translate(
+        '{name} is {width}×{height} pixels; decoding it would need about {size} of ' +
+          'memory, more than the {limit} Stapler allows for one image. Downscale it ' +
+          'and import that instead.',
+        { name, width, height, size: formatBytesUp(peak), limit: formatBytes(MAX_DECODE_BYTES) }
       ),
       { width, height }
     );
@@ -124,6 +160,8 @@ export async function decodeHeicToRgba(
     const width = image.get_width();
     const height = image.get_height();
     assertFrameSize(width, height, name);
+    // The RGBA target, plus libheif's own decoded planes (about 2 bytes a pixel).
+    assertDecodeBudget(width, height, 6, 0, name);
     const data = new Uint8ClampedArray(width * height * 4);
     const ok = await new Promise<unknown>(resolve =>
       image.display({ data, width, height }, resolve)
@@ -157,6 +195,8 @@ export async function decodeTiffPages(
   name = translate('This TIFF file')
 ): Promise<number> {
   const UTIF = await import('utif');
+  // CV1: UTIF has no loop or bounds guards of its own — check the structure first.
+  assertTiffStructure(bytes, name);
   // UTIF wants an ArrayBuffer that is exactly the file.
   const buffer = bytes.slice().buffer as ArrayBuffer;
   const ifds = UTIF.decode(buffer);
@@ -168,8 +208,25 @@ export async function decodeTiffPages(
     // refused without allocating it.
     const declaredWidth = Number((ifd.t256 as number[] | undefined)?.[0] ?? 0);
     const declaredHeight = Number((ifd.t257 as number[] | undefined)?.[0] ?? 0);
+    const orientation = tiffOrientation(ifd as unknown as Record<string, unknown>);
     if (declaredWidth > 0 && declaredHeight > 0) {
       assertFrameSize(declaredWidth, declaredHeight, name);
+      // CV14: UTIF's decoded strips and its RGBA copy are alive together, and a
+      // quarter-turn Orientation then needs a second RGBA frame (the strips are
+      // dropped by then; 2–4 are turned in place).
+      const bits = (ifd.t258 as number[] | undefined) ?? [
+        Number((ifd.t277 as number[] | undefined)?.[0] ?? 1)
+      ];
+      const bitsPerPixel = bits.reduce((sum, b) => sum + Math.min(32, Number(b) || 0), 0);
+      const strips = Math.ceil((declaredWidth * Math.max(1, bitsPerPixel)) / 8) * declaredHeight;
+      const rgba = declaredWidth * declaredHeight * 4;
+      assertDecodeBudget(
+        declaredWidth,
+        declaredHeight,
+        0,
+        Math.max(strips + rgba, orientation >= 5 && orientation <= 8 ? 2 * rgba : 0),
+        name
+      );
     }
     UTIF.decodeImage(buffer, ifd);
     const width = ifd.width;
@@ -186,7 +243,7 @@ export async function decodeTiffPages(
         height,
         data: new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, width * height * 4)
       },
-      tiffOrientation(ifd as unknown as Record<string, unknown>)
+      orientation
     );
     await visit.onPage(frame, i, ifds.length);
   }
@@ -220,11 +277,15 @@ export function flattenOnWhite(frame: RgbaFrame): RgbaFrame {
  * Applies a TIFF/EXIF Orientation value (tag 274: 1 = upright, 2–8 = the
  * mirrors and quarter turns) so the frame comes back the way it is meant to be
  * viewed — the same thing `createImageBitmap(…, { imageOrientation:
- * 'from-image' })` does for a JPEG. 5–8 swap width and height. Values outside
+ * 'from-image' })` does for a JPEG. 5–8 swap width and height and return a new
+ * frame; 2–4 turn the given frame in place and return it. Values outside
  * 2..8 (absent, 1, garbage) return the frame unchanged.
  */
 export function orientFrame(frame: RgbaFrame, orientation: number): RgbaFrame {
   if (!Number.isInteger(orientation) || orientation < 2 || orientation > 8) return frame;
+  // CV14: a mirror or half turn keeps the shape, so it swaps pixels in place
+  // instead of allocating a second full frame.
+  if (orientation <= 4) return flipInPlace(frame, orientation !== 4, orientation !== 2);
   const { width: w, height: h, data } = frame;
   const swap = orientation >= 5;
   const outW = swap ? h : w;
@@ -274,10 +335,198 @@ export function orientFrame(frame: RgbaFrame, orientation: number): RgbaFrame {
   return { width: outW, height: outH, data: out };
 }
 
+/**
+ * Mirrors a frame horizontally (`flipX`), vertically (`flipY`) or both (a half
+ * turn), in place: each pixel is swapped with its mirror image once.
+ */
+function flipInPlace(frame: RgbaFrame, flipX: boolean, flipY: boolean): RgbaFrame {
+  const { width: w, height: h, data } = frame;
+  // One 32-bit word per pixel when the buffer allows it (UTIF's always does).
+  const aligned = data.byteOffset % 4 === 0;
+  const px = aligned ? new Uint32Array(data.buffer, data.byteOffset, w * h) : null;
+  const swap = (i: number, j: number) => {
+    if (px) {
+      const t = px[i];
+      px[i] = px[j];
+      px[j] = t;
+      return;
+    }
+    for (let k = 0; k < 4; k++) {
+      const t = data[i * 4 + k];
+      data[i * 4 + k] = data[j * 4 + k];
+      data[j * 4 + k] = t;
+    }
+  };
+  if (flipX && flipY) {
+    // A half turn reverses the pixel order.
+    for (let i = 0, j = w * h - 1; i < j; i++, j--) swap(i, j);
+  } else if (flipX) {
+    for (let y = 0; y < h; y++) {
+      for (let i = y * w, j = i + w - 1; i < j; i++, j--) swap(i, j);
+    }
+  } else if (flipY) {
+    for (let top = 0, bottom = h - 1; top < bottom; top++, bottom--) {
+      for (let x = 0; x < w; x++) swap(top * w + x, bottom * w + x);
+    }
+  }
+  return frame;
+}
+
 /** The Orientation tag (274) of a decoded UTIF IFD, or 1 when absent. */
 export function tiffOrientation(ifd: Record<string, unknown>): number {
   const value = (ifd.t274 as number[] | undefined)?.[0];
   return typeof value === 'number' ? value : 1;
+}
+
+/* ------------------------------------------------------------------ *
+ * TIFF structure check (CV1)
+ * ------------------------------------------------------------------ */
+
+/** More IFDs than any real TIFF holds (a 1,000-page fax is already absurd). */
+export const MAX_TIFF_IFDS = 1000;
+/** Nesting depth for SubIFD / EXIF / MakerNote IFDs (UTIF recurses into them). */
+const MAX_TIFF_IFD_DEPTH = 8;
+/** Bytes per value of the TIFF field types UTIF reads; it skips the others. */
+const TIFF_TYPE_SIZE: Readonly<Record<number, number>> = {
+  1: 1,
+  2: 1,
+  3: 2,
+  4: 4,
+  5: 8,
+  7: 1,
+  8: 2,
+  9: 4,
+  10: 8,
+  11: 4,
+  12: 8
+};
+
+/**
+ * Walks every IFD `UTIF.decode` would visit — the main next-IFD chain, the
+ * SubIFD (330), EXIF (34665), DNG private (50740) and MakerNote (37500) IFDs
+ * it recurses into, and a Nikon MakerNote's nested TIFF — and refuses, with a
+ * clear message, anything that would send UTIF into an endless loop or an
+ * unbounded allocation (it has no guards of its own):
+ *  - an IFD offset seen before: a chain that loops back on itself makes UTIF's
+ *    `while (true)` push one IFD per lap until the tab runs out of memory (a
+ *    26-byte file is enough);
+ *  - an IFD, its entry table or its next-IFD pointer outside the file: UTIF
+ *    reads `undefined`, gets NaN, and loops the same way;
+ *  - a field whose declared count runs past the end of the file: UTIF pushes
+ *    `count` values one at a time — up to four billion of them;
+ *  - more than {@link MAX_TIFF_IFDS} IFDs, or nesting deeper than
+ *    {@link MAX_TIFF_IFD_DEPTH}.
+ * Reads the raw bytes only; nothing is allocated per entry.
+ */
+export function assertTiffStructure(bytes: Uint8Array, name: string): void {
+  const damaged = (reason: string): never => {
+    throw corrupt(
+      translate('{name} is a damaged TIFF ({reason}), so it could not be imported.', {
+        name,
+        reason
+      })
+    );
+  };
+  const tooDeep = () => damaged(translate('its directories nest too deeply'));
+  let visited = 0;
+
+  const walkFile = (data: Uint8Array, fileDepth: number): void => {
+    if (data.length < 8) damaged(translate('the file is too short'));
+    // UTIF takes anything but "II" as big-endian, and never checks the magic.
+    const le = data[0] === 0x49 && data[1] === 0x49;
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    const u16 = (at: number) => view.getUint16(at, le);
+    const u32 = (at: number) => view.getUint32(at, le);
+    if (fileDepth === 0) {
+      if (!le && !(data[0] === 0x4d && data[1] === 0x4d)) {
+        damaged(translate('no TIFF byte-order mark'));
+      }
+      if (u16(2) === 43) {
+        throw unsupported(
+          translate(
+            '{name} is a BigTIFF, which Stapler cannot read. Save it as a standard TIFF and import that.',
+            { name }
+          )
+        );
+      }
+      if (u16(2) !== 42) damaged(translate('no TIFF signature'));
+    }
+    const seen = new Set<number>();
+    /** Whether UTIF would find an entry count at `offset` (else it reads NaN and stops). */
+    const readable = (offset: number) => offset + 2 <= data.length;
+
+    const readIfd = (offset: number, depth: number): number => {
+      if (depth > MAX_TIFF_IFD_DEPTH) tooDeep();
+      if (seen.has(offset)) damaged(translate('its page directories loop back on themselves'));
+      seen.add(offset);
+      if (++visited > MAX_TIFF_IFDS) {
+        damaged(translate('more than {max} page directories', { max: MAX_TIFF_IFDS }));
+      }
+      const count = u16(offset);
+      const end = offset + 2 + count * 12;
+      if (end + 4 > data.length) {
+        damaged(translate('a page directory runs past the end of the file'));
+      }
+      for (let i = 0; i < count; i++) {
+        const entry = offset + 2 + i * 12;
+        const tag = u16(entry);
+        const type = u16(entry + 2);
+        const num = u32(entry + 4);
+        const voff = u32(entry + 8);
+        const size = TIFF_TYPE_SIZE[type];
+        if (size === undefined) continue; // UTIF skips a type it does not know
+        const length = size * num;
+        // Up to 4 bytes sit in the entry itself (UTIF tests the count; same thing).
+        const valueAt = length <= 4 ? entry + 8 : voff;
+        if (valueAt + length > data.length) {
+          damaged(translate('a field runs past the end of the file'));
+        }
+        const values = (): number[] => {
+          const out: number[] = [];
+          for (let j = 0; j < num; j++) {
+            if (type === 3) out.push(u16(valueAt + 2 * j));
+            else if (type === 4) out.push(u32(valueAt + 4 * j));
+            else if (type === 8) out.push(view.getInt16(valueAt + 2 * j, le));
+            else if (type === 9) out.push(view.getInt32(valueAt + 4 * j, le));
+            else if (type === 1 || type === 7) out.push(data[valueAt + j]);
+          }
+          return out;
+        };
+        if (tag === 330 || tag === 34665) {
+          // UTIF takes every value as an IFD offset, whatever the field type.
+          for (const sub of values()) {
+            if (Number.isInteger(sub) && sub >= 0 && readable(sub)) readIfd(sub, depth + 1);
+          }
+        } else if (tag === 50740 && (type === 1 || type === 7) && num >= 4) {
+          const sub = u32(valueAt);
+          if (readable(sub) && u16(sub) < 300) readIfd(sub, depth + 1);
+        } else if (tag === 37500) {
+          const nikon =
+            (type === 1 || type === 7) &&
+            num > 10 &&
+            String.fromCharCode(...data.subarray(valueAt, valueAt + 5)) === 'Nikon';
+          if (nikon) {
+            // UTIF decodes a Nikon MakerNote as a whole TIFF of its own.
+            if (fileDepth >= MAX_TIFF_IFD_DEPTH) tooDeep();
+            walkFile(data.subarray(valueAt + 10, valueAt + num), fileDepth + 1);
+          } else if (readable(voff) && u16(voff) < 300) {
+            readIfd(voff, depth + 1);
+          }
+        }
+      }
+      return end;
+    };
+
+    let next = u32(4);
+    for (;;) {
+      if (!readable(next) || next < 8) {
+        damaged(translate('a page directory points outside the file'));
+      }
+      next = u32(readIfd(next, 0));
+      if (next === 0) break;
+    }
+  };
+  walkFile(bytes, 0);
 }
 
 /* ------------------------------------------------------------------ *

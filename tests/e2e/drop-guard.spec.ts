@@ -13,6 +13,7 @@ import { expect, test, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { ensureFixture, textPdf } from './fixtures';
 import { openApp } from './helpers';
+import { waitForJobsIdle } from './audit-2026-10-10-helpers';
 
 /** Dispatches dragenter → dragover → drop of a real PDF `File` on the element `selector` matches. */
 async function dropPdfOn(page: Page, selector: string) {
@@ -69,8 +70,12 @@ test.describe('HRD-32 §1.1 — dropping a file on an open document', () => {
       await expect(
         page.getByText('Use "Add PDF" to insert pages into this document.').first()
       ).toBeVisible();
-      // Given time to import if it were going to: neither a new tab nor new pages.
-      await page.waitForTimeout(1500);
+      // Neither a new tab nor new pages. Audit 2026-10-10 T10: was a fixed
+      // 1.5 s sleep. An import would hold the app's job slot (RT-7) — the tab's
+      // close control turns aria-disabled, the action bar shows progress — so
+      // "no job for a run of frames" after the drop is the positive signal
+      // that nothing was imported, rather than a guess at how long one takes.
+      await waitForJobsIdle(page);
       expect(page.url()).toBe(url);
       await expect(page.getByRole('button', { name: 'Close text-3.pdf' })).toHaveCount(1);
       await expect(page.getByRole('button', { name: 'Close dropped.pdf' })).toHaveCount(0);
@@ -87,7 +92,9 @@ test.describe('HRD-32 §1.1 — dropping a file on an open document', () => {
     // rather than switching to Organize, so the tab is what is asserted.
     const tab = page.getByRole('button', { name: 'Close dropped.pdf' });
     await expect(tab).toHaveCount(1, { timeout: 30_000 });
-    await page.waitForTimeout(1000);
+    // Audit 2026-10-10 T10: was a fixed 1 s sleep. Settled when no job has
+    // been running for a run of frames: any second import has ended by then.
+    await waitForJobsIdle(page);
     await expect(tab).toHaveCount(1);
     // Same page: only the in-app route (the hash) may change.
     expect(page.url().split('#')[0]).toBe(url.split('#')[0]);

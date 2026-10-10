@@ -64,7 +64,7 @@ function colourJpeg(seed: number, w = 32, h = 32): Uint8Array {
   ctx.fillRect(0, 0, w, h);
   ctx.fillStyle = 'rgb(255, 0, 0)';
   ctx.fillRect(2, 2, w / 2, h / 2);
-  return new Uint8Array(canvas.toBuffer('image/jpeg', 0.9));
+  return new Uint8Array(canvas.toBuffer('image/jpeg', 90)); // @napi-rs/canvas takes 0–100
 }
 
 /** Largest |R−G|, |G−B| per page, rendered with annotations. */

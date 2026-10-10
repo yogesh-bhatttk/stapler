@@ -197,6 +197,12 @@ export interface PptxShape {
    * r:id>` for a chart, `<dgm:relIds r:dm>` for SmartArt).
    */
   relationshipId?: string;
+  /**
+   * A picture's `<a:blipFill><a:srcRect>` crop (CV4): the fraction of the
+   * source image cut away at each edge (`l="25000"` = 25 %). Negative values
+   * pad instead. Absent when the picture is not cropped.
+   */
+  crop?: PptxCrop;
   /** A table shape's grid. */
   table?: PptxTable;
   /** A `graphic` shape's kind, from its `<a:graphicData uri>`. */
@@ -225,6 +231,28 @@ export interface PptxShape {
    * where the group's unrotated rectangle puts it.
    */
   groupRotated?: boolean;
+}
+
+/** Fractions of a picture's source image cut away at each edge (OOXML `a:srcRect`). */
+export interface PptxCrop {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/** The `<a:srcRect>` of a picture's `<a:blipFill>`, or undefined when it crops nothing. */
+function srcRectOf(body: string): PptxCrop | undefined {
+  const fill = /<(?:p|a):blipFill\b[^]*?<\/(?:p|a):blipFill>/.exec(body)?.[0] ?? '';
+  const tag = /<a:srcRect\b[^<>]*>/.exec(fill)?.[0];
+  if (!tag) return undefined;
+  const edge = (name: string) => {
+    const value = Number(attribute(tag, name) ?? 0);
+    // ST_Percentage: thousandths of a percent.
+    return Number.isFinite(value) ? value / 100_000 : 0;
+  };
+  const crop = { left: edge('l'), top: edge('t'), right: edge('r'), bottom: edge('b') };
+  return crop.left || crop.top || crop.right || crop.bottom ? crop : undefined;
 }
 
 export interface PptxSlideMedia {
@@ -987,11 +1015,13 @@ function shapesOf(slideXml: string): PptxShape[] {
 
       if (element.name === 'p:pic') {
         const blip = /<a:blip\b[^<>]*>/.exec(element.body);
+        const crop = srcRectOf(element.body);
         out.push({
           kind: 'picture',
           ...geometry,
           ...flags,
-          ...(blip ? { relationshipId: attribute(blip[0], 'r:embed') ?? '' } : {})
+          ...(blip ? { relationshipId: attribute(blip[0], 'r:embed') ?? '' } : {}),
+          ...(crop ? { crop } : {})
         });
         continue;
       }

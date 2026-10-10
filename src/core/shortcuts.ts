@@ -276,9 +276,52 @@ export function resetShortcuts() {
   mirrorToLocalStorage(null);
 }
 
+/** Apple platforms label the modifier ⌘; everything else, Ctrl. */
+export function isApplePlatform(): boolean {
+  return typeof navigator !== 'undefined' && /mac|iphone|ipad/i.test(navigator.userAgent);
+}
+
+/**
+ * The label for a shortcut as it is actually bound right now — remapped
+ * (DS-09) or default — with this platform's modifier names. UI copy that
+ * names a shortcut renders this instead of a hard-coded "⌘K", which was wrong
+ * on Windows/Linux and after any remap (AUDIT-2026-10-10 UI19).
+ */
+export function shortcutLabel(id: string): string {
+  if (id === 'redo' && !customShortcuts.value.redo && isApplePlatform()) {
+    // Redo also answers ⇧⌘Z by default (`eventMatchesRedoShortcut`); that is
+    // the chord a Mac user expects to be told.
+    return formatBinding({ key: 'z', mod: true, shift: true });
+  }
+  return formatBinding(getEffectiveBinding(id));
+}
+
+/**
+ * The same binding in `aria-keyshortcuts` syntax ("Control+K", "Meta+Shift+Z"),
+ * or undefined when the shortcut is unbound.
+ */
+export function ariaKeyShortcuts(binding: ShortcutBinding): string | undefined {
+  if (!binding || !binding.key) return undefined;
+  const parts: string[] = [];
+  if (binding.mod) parts.push(isApplePlatform() ? 'Meta' : 'Control');
+  if (binding.alt) parts.push('Alt');
+  if (binding.shift) parts.push('Shift');
+  const key = binding.key;
+  parts.push(
+    key === ' '
+      ? 'Space'
+      : key === 'delete' || key === 'backspace'
+        ? 'Delete'
+        : key.length === 1
+          ? key.toUpperCase()
+          : key
+  );
+  return parts.join('+');
+}
+
 export function formatBinding(binding: ShortcutBinding): string {
   if (!binding || !binding.key) return '';
-  const isApple = typeof navigator !== 'undefined' && /mac|iphone|ipad/i.test(navigator.userAgent);
+  const isApple = isApplePlatform();
   const modSymbol = isApple ? '⌘' : 'Ctrl';
   const altSymbol = isApple ? '⌥' : 'Alt';
   const shiftSymbol = isApple ? '⇧' : 'Shift';

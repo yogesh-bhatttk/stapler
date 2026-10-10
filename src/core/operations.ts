@@ -50,6 +50,7 @@ import {
   type PageRef
 } from './store';
 import { readSourceBytes } from './opfs';
+import { clampRenderScale } from './render-limits';
 import { bitmapToJpeg } from './image';
 import { bitmapKey, thumbnailCache } from './render-cache';
 import { getSignature } from './signatures';
@@ -373,18 +374,40 @@ export async function readDocumentOutline(bytes: Uint8Array) {
  * replaced rather than stripped, so two distinct titles stay distinct; a title that
  * sanitizes to nothing falls back to the caller's default. Length is capped well
  * under the 255-byte limit every filesystem in play imposes.
+ *
+ * AUDIT-2026-10-10 L4 — the cap is in code points *and* UTF-8 bytes (80 CJK
+ * characters are 240 bytes; with " (12).pdf" that broke the limit, and a
+ * UTF-16 `slice` could cut a surrogate pair in half). Trailing dots and
+ * spaces are removed *after* the cut, and Windows' reserved device names
+ * (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, with or without
+ * an extension) get a trailing `_` — Windows refuses to create them.
  */
+export const MAX_FILE_STEM_CHARS = 80;
+export const MAX_FILE_STEM_BYTES = 180;
+
+const WINDOWS_RESERVED_STEM = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])$/i;
+
 export function sanitizeFileStem(title: string, fallback: string): string {
-  const cleaned = title
+  const normalised = title
     // eslint-disable-next-line no-control-regex -- control characters are exactly what must go
     .replace(/[\x00-\x1f\x7f]/g, ' ')
     .replace(/[/\\<>:"|?*]/g, '-')
     .replace(/\s+/g, ' ')
     .trim()
-    .replace(/^\.+/, '')
-    .replace(/\.+$/, '')
-    .slice(0, 80)
-    .trim();
+    .replace(/^\.+/, '');
+  const encoder = new TextEncoder();
+  let cut = '';
+  let bytes = 0;
+  let chars = 0;
+  for (const ch of normalised) {
+    const size = encoder.encode(ch).byteLength;
+    if (chars + 1 > MAX_FILE_STEM_CHARS || bytes + size > MAX_FILE_STEM_BYTES) break;
+    cut += ch;
+    bytes += size;
+    chars += 1;
+  }
+  let cleaned = cut.replace(/[.\s]+$/, '');
+  if (WINDOWS_RESERVED_STEM.test(cleaned.split('.')[0].trim())) cleaned = `${cleaned}_`;
   return cleaned || fallback;
 }
 
@@ -734,6 +757,10 @@ export async function compressDocument(
   // image at that one encode, so it is still embedded exactly once in the output.
   const encodedByObjectNumber = new Map<number, EncodedImage>();
   const namesByPage: Record<number, { name: string; objectNumber: number }[]> = {};
+  // CMP-01 — images whose unencoded samples are Flate-compressed in place by the
+  // rebuild itself. Nothing is decoded or re-encoded for these, so they never go
+  // near the render worker.
+  const losslessByPage: Record<number, number[]> = {};
 
   // One lease for every read, so every call reaches the instance that owns the
   // handle. See the note in `planCompression`.
@@ -762,11 +789,16 @@ export async function compressDocument(
           continue;
         }
 
-        if (page.reencode.length === 0) continue;
-        namesByPage[page.pageIndex] = page.reencode;
+        const lossless = page.reencode.filter(e => e.lossless);
+        if (lossless.length > 0) {
+          losslessByPage[page.pageIndex] = lossless.map(e => e.objectNumber);
+        }
+        const jpeg = page.reencode.filter(e => !e.lossless);
+        if (jpeg.length === 0) continue;
+        namesByPage[page.pageIndex] = jpeg;
         surgical.push({
           pageIndex: page.pageIndex,
-          objectNumbers: page.reencode.map(e => e.objectNumber)
+          objectNumbers: jpeg.map(e => e.objectNumber)
         });
       }
 
@@ -811,7 +843,7 @@ export async function compressDocument(
 
   if (options.signal?.aborted) throw cancelled();
   const result = await processWorker.lease(api =>
-    api.rebuildCompressed(bytes, rasterPages, replacedImages, job)
+    api.rebuildCompressed(bytes, rasterPages, replacedImages, job, losslessByPage)
   );
 
   return {
@@ -904,6 +936,7 @@ export async function compressToTargetSize(
       const base = index / MAX_TARGET_TRIALS;
       const trialJob: JobOptions = {
         signal: options.signal,
+        onNotice: options.onNotice,
         onProgress: (fraction, label) =>
           options.onProgress?.(
             base + (fraction ?? 0) / MAX_TARGET_TRIALS,
@@ -1474,9 +1507,9 @@ async function verifyRedaction(
           return {
             region,
             pass: false,
-            detail: translate(
-              'The output still contains {count} page object(s) outside its page tree, which can carry the original, unredacted content. The redaction is unproven.',
-              { count: residual.orphanPages }
+            detail: tPlural(
+              'The output still contains {count} page objects outside its page tree, which can carry the original, unredacted content. The redaction is unproven.',
+              residual.orphanPages
             )
           };
         }
@@ -1825,22 +1858,33 @@ export async function detectSignatureLines(
   });
 }
 
-/** CNV-02 — pages to a ZIP of images. */
+/**
+ * CNV-02 — pages to a ZIP of images.
+ *
+ * AUDIT-2026-10-10 M9 — a page too large for a browser canvas at `dpi` is
+ * rendered at the largest scale that fits (the worker clamps, as every other
+ * render path does) and its 1-based number is passed to `onReducedDetail`.
+ */
 export async function pagesToImageArchive(
   bytes: Uint8Array,
   pageIndices: number[],
   format: 'png' | 'jpeg',
   dpi: number,
-  options: JobOptions = {}
+  options: JobOptions & { onReducedDetail?: (pageNumbers: number[]) => void } = {}
 ): Promise<Uint8Array> {
   const { zipSync } = await import('fflate');
   const files: Record<string, Uint8Array> = {};
   const pad = Math.max(2, String(Math.max(...pageIndices, 1) + 1).length);
 
+  const reduced: number[] = [];
   await renderWorker.lease(async api => {
-    const { handle } = await api.loadDocument(bytes);
+    const { handle, pageSizes } = await api.loadDocument(bytes);
     try {
       for (let i = 0; i < pageIndices.length; i++) {
+        const size = pageSizes?.[pageIndices[i]];
+        if (size && clampRenderScale(size.width, size.height, dpi / 72).clamped) {
+          reduced.push(pageIndices[i] + 1);
+        }
         // `break` would exit quietly with whatever pages were already rendered,
         // and the caller has no way to tell that from a real, complete export —
         // it would save a truncated ZIP as if the job had finished.
@@ -1859,6 +1903,7 @@ export async function pagesToImageArchive(
     }
   });
 
+  if (reduced.length > 0) options.onReducedDetail?.(reduced);
   options.onProgress?.(0.95, translate('Compressing archive'));
   // Store, not deflate: PNG and JPEG are already compressed, so deflating them
   // costs seconds and saves nothing.
@@ -2959,6 +3004,8 @@ export async function autoTrimDocument(
 
   // GAP-11a — recorded in the history of the document these pages belong to
   // (the one passed in), not whichever happens to be active by now.
+  // AUDIT-2026-10-10 M1 — cancelled during the last page: set nothing.
+  if (options?.signal?.aborted) throw cancelled();
   const owner = documents.value.find(d => d.pages.some(p => p.key === pagesToTrim[0].key));
   commit(owner?.id);
   cropBoxes.value = { ...cropBoxes.value, ...updates };
@@ -3052,6 +3099,7 @@ export {
 export function progressBand(options: JobOptions, from: number, to: number): JobOptions {
   return {
     signal: options.signal,
+    onNotice: options.onNotice,
     onProgress: (fraction, label) =>
       options.onProgress?.(
         fraction === null ? null : from + (to - from) * Math.min(1, Math.max(0, fraction)),

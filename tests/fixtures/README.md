@@ -117,9 +117,19 @@ specs that need those `ensureFixture` them, and nothing else reads them.
   predictable page count and per-page marker text (`textPdf(n)`).
 - `mixed-sizes.pdf` — A4, Letter, and Legal pages in one document, for merge and normalise
   assertions (`mixedSizePdf`).
-- `heavy.pdf` — a large (~20MB) document with bloated, non-deduplicated text content, for
-  memory-safety testing (`heavyPdf`).
+- `heavy.pdf` — about 5.4 MB (5,471,418 bytes as generated): ten A4 pages that all draw
+  one shared, uncompressed 1350×1350 RGB noise image, so the file is just over the 5 MB
+  per-file budget the merge test asserts against, for memory-safety testing (`heavyPdf`).
 - `not-a-pdf.pdf` — bytes that do not start with a PDF header, for import-error tests.
+- `.generated/large-100mb.pdf` — about 101 MB: twenty A4 pages, each drawing its own
+  uncompressed 1300×1300 RGB noise image plus a "Large fixture page N" line, generated on
+  demand by `ensureLargePdf` (`tests/e2e/audit-2026-10-10-helpers.ts`) for NFR-03's
+  every-P0-operation memory test in `perf.spec.ts`. Never committed.
+- `.ocr-model/eng.traineddata.gz` — not generated: an optional local copy of the pinned
+  English OCR model, which the OCR e2e tests serve at the pinned URL instead of reaching the
+  CDN. It must match `MODEL_SHA256.eng` (`src/core/ocr/model.ts`) or it is ignored; the
+  offline tests skip, saying so, without it. `STAPLER_LIVE_OCR=1` runs the live CDN test,
+  which records it. `STAPLER_OCR_MODEL_FILE` points elsewhere.
 - `transparent-image.pdf` — a 1600×1200 RGBA image over text, in four vertical bands of
   known colour and known alpha (opaque, half, clear, opaque), drawn at 400×300pt so it is
   over-sampled for the 150 DPI default (`transparentImagePdf`). **Must not regress:** after

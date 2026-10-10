@@ -21,6 +21,7 @@ import {
   applyContrastBrightness,
   applyDespeckle,
   deskew,
+  OCR_STROKE_FILL,
   type Preset
 } from '../cv/enhance';
 import { checkpoint, releaseJobHandlesAfterCall, type JobHandle } from './protocol';
@@ -213,7 +214,9 @@ const api: CVJob = {
     let current = bitmapToImageData(bitmap);
 
     await checkpoint(job, 0.3, translate('Correcting for lighting and shadow'));
-    current = applyAdaptiveThreshold(current, 25, 10);
+    // CV10: the 25 px window alone hollows any stroke thicker than itself (a
+    // large grey heading at 300 DPI); the stroke fill keeps it solid.
+    current = applyAdaptiveThreshold(current, 25, 10, OCR_STROKE_FILL);
 
     await checkpoint(job, 0.7, translate('Removing noise'));
     current = applyDespeckle(current);

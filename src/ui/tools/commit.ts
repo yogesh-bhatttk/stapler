@@ -9,8 +9,9 @@ import { tKey, tPlural, translate } from '../../core/i18n';
  */
 import { platform } from '../../platform/current';
 import { confirmAction, notify, requestExportReview } from '../../core/notify';
-import { internal, isCancellation } from '../../core/errors';
-import { unzipSync, zipSync } from 'fflate';
+import { cancelled, internal, isCancellation } from '../../core/errors';
+import { unzipInWorker, zipInWorker } from '../../core/zip';
+import type { OutputDirectory } from '../../platform';
 import {
   applyRedactions,
   compressDocument,
@@ -44,6 +45,7 @@ import {
   activeDoc,
   deletePages,
   documentRestrictions,
+  pageStateFor,
   refreshBaseline,
   registerSource,
   replaceWithSource,
@@ -83,6 +85,8 @@ import {
   splitSettings,
   extractImagesSettings
 } from './state';
+import { splitSettingsError } from './split/validate';
+import { shortcutLabel } from '../../core/shortcuts';
 import { extractSettings } from './extract/state';
 import {
   exactPageOutputs,
@@ -116,7 +120,16 @@ import { extractImagesReport, summarize } from './extract-images/state';
 import { formFields, formValues, formulas } from './sign/state';
 import { applyFormulas } from '../../core/formula';
 import { XFA_MESSAGE } from '../../core/pdf/xfa';
-import { pendingRedactions, redactionReport } from './redact/state';
+import {
+  notifyWithdrawnMarks,
+  pendingRedactions,
+  redactionReport,
+  reportOf,
+  resolveRedactionMarks,
+  toWorkerRegion,
+  type PendingRedaction
+} from './redact/state';
+import { batch } from '@preact/signals';
 import { protection, protectionActive, protectionIssue } from './protect/state';
 import { withInheritedRestrictions, type ProtectionSettings } from '../../core/pdf/encrypt';
 import { scrubSettings } from './metadata/state';
@@ -157,7 +170,7 @@ import {
 } from './convert/ppt-to-pdf-state';
 import { runOcr } from '../../core/ocr/runOcr';
 import { renderWorker } from '../../core/workers';
-import { altTextMap } from './acc/state';
+import { altTextForExport, altTextMap } from './acc/state';
 import { fastWebViewExport, loadExportSettings } from './export-settings';
 
 /**
@@ -529,6 +542,9 @@ async function save(
   // handler: a tool that forgot to pass it would quietly export an
   // unrestricted copy, which is the failure this whole path exists to prevent.
   const restrictions = documentRestrictions(doc);
+  // H2 — the crop boxes and Annotate marks these bytes were composed with,
+  // read before any dialog below gives the user a chance to change them.
+  const savedPageState = pageStateFor(doc.pages.map(page => page.key));
   // HRD-23: fast web view is a layout rewrite of the unencrypted bytes, so it
   // runs before protection — whose plain-xref, object-number-order re-save
   // keeps the first-page-first numbering it produces.
@@ -605,7 +621,7 @@ async function save(
     if (overwrite) {
       const saved = await platform.saveOver(doc.sourceHandle.fileId, bytes);
       if (saved) {
-        refreshBaseline(doc.id, doc.pages, doc.annotations);
+        refreshBaseline(doc.id, doc.pages, doc.annotations, savedPageState);
         notify('success', translate('Saved {name}', { name: doc.name }), {
           detail: note(formatBytes(bytes.byteLength))
         });
@@ -619,8 +635,26 @@ async function save(
   }
 
   const saved = await platform.saveFileAs(bytes, name);
+  if (saved && !platform.supportsFileSystemAccess) {
+    // AUDIT-2026-10-10 L3 — without the File System Access API the file goes
+    // out as a browser download, and `true` only means the download *started*:
+    // the user can still cancel the browser's own save prompt, and nothing
+    // reports back. Saying "Saved" and marking the document clean on that
+    // basis let the unsaved-changes guard wave a tab closed over work that
+    // never reached the disk. Worded as what is known, and the document keeps
+    // its unsaved mark.
+    notify('success', translate('Download started: {name}', { name }), {
+      detail: translate(
+        '{size} · your browser saves it. This document still counts as having unsaved changes, so closing it will ask first.',
+        { size: note(formatBytes(bytes.byteLength)) }
+      )
+    });
+    return saved;
+  }
   if (saved) {
-    if (refreshesBaseline) refreshBaseline(doc.id, doc.pages, doc.annotations);
+    if (refreshesBaseline) {
+      refreshBaseline(doc.id, doc.pages, doc.annotations, savedPageState);
+    }
     notify('success', translate('Saved {name}', { name }), {
       detail: note(formatBytes(bytes.byteLength))
     });
@@ -691,14 +725,44 @@ async function restrictZipMembers(
   restrictions: number,
   job?: JobOptions
 ): Promise<Uint8Array> {
-  const files = unzipSync(bytes);
+  // AUDIT-2026-10-10 M6 — opened and rebuilt in the zip worker, not with
+  // `unzipSync`/`zipSync` on the main thread.
+  const files = await unzipInWorker(bytes, { signal: job?.signal });
   const restricted: Record<string, Uint8Array> = {};
   for (const [name, member] of Object.entries(files)) {
     restricted[name] = name.toLowerCase().endsWith('.pdf')
       ? await restrictDocument(member, restrictions, job ?? {})
       : member;
   }
-  return zipSync(restricted);
+  return zipInWorker(restricted, { signal: job?.signal, transfer: true });
+}
+
+/**
+ * M6/L4 — writes every member of `zipBytes` into `dir`: inflated in the zip
+ * worker, and never over an existing file (the directory writer adds ` (n)`).
+ * Returns how many were written and how many had to be renamed.
+ */
+async function writeZipToDirectory(
+  dir: OutputDirectory,
+  zipBytes: Uint8Array,
+  job?: JobOptions
+): Promise<{ count: number; renamed: number }> {
+  const files = await unzipInWorker(zipBytes, { signal: job?.signal });
+  let renamed = 0;
+  for (const [fileName, bytes] of Object.entries(files)) {
+    if ((await dir.write(fileName, bytes)) !== fileName) renamed += 1;
+  }
+  return { count: Object.keys(files).length, renamed };
+}
+
+/** L4 — the "some names were taken" note for a directory save's toast. */
+function renamedDetail(renamed: number): string | undefined {
+  return renamed > 0
+    ? tPlural(
+        '{count} names were already taken in that folder, so those files were saved with a number added instead of replacing what was there.',
+        renamed
+      )
+    : undefined;
 }
 
 /**
@@ -761,76 +825,14 @@ export interface CommitContext {
 type CommitHandler = (context: CommitContext) => Promise<void>;
 
 import { cropBoxes } from './crop/state';
-import {
-  batesSettings,
-  watermarkSettings,
-  headerFooterSettings,
-  barcodeStampSettings
-} from './watermark/state';
-import {
-  entriesToNodes,
-  outlineDocId,
-  outlineEdited,
-  outlineTree,
-  topLevelSlices
-} from './outline/state';
+import { outlineDocId, outlineTree, topLevelSlices } from './outline/state';
 import { nupSettings } from './nup/state';
-import { pageAnnotations } from './annotate/state';
-
-import { type AnnotationSource } from '../../core/workers/process.worker';
-
-function getLayerAnnotations(): AnnotationSource[] {
-  const result: AnnotationSource[] = [];
-  for (const [pageKey, anns] of Object.entries(pageAnnotations.value)) {
-    for (const ann of anns) {
-      result.push({ ...ann, pageKey });
-    }
-  }
-  return result;
-}
-
-/** OPS-11 — the Bates stamp, or nothing when the user has not switched it on. */
-function getBates() {
-  const settings = batesSettings.value;
-  if (!settings.enabled) return undefined;
-  return {
-    prefix: settings.prefix,
-    digits: settings.digits,
-    start: settings.start,
-    position: settings.position,
-    fontSize: settings.fontSize
-  };
-}
-
-/** OPS-18 — the QR/barcode stamp, or nothing when disabled or empty. */
-function getBarcodeStamp() {
-  const settings = barcodeStampSettings.value;
-  if (!settings.enabled || !settings.text.trim()) return undefined;
-  return {
-    kind: settings.kind,
-    text: settings.text,
-    position: settings.position,
-    scale: settings.scale
-  };
-}
-
-/**
- * OPS-10 — the edited outline, or `undefined` to leave the document's own alone.
- *
- * Only the tree loaded *for this document*, and only once the user has actually
- * changed it. `outlineTree` is a single signal, so another document's bookmarks
- * would point at pages that are not in this one; and an unedited tree must not be
- * written back at all, because it was read from the first page's source document
- * and would silently drop the outlines a second, merged-in document contributed
- * through OPS-01.
- */
-function getOutline(doc: StaplerDoc, pages: PageRef[]) {
-  if (outlineDocId.value !== doc.id || !outlineEdited.value) return undefined;
-  return entriesToNodes(
-    outlineTree.value,
-    pages.map(page => page.key)
-  );
-}
+import {
+  documentContentBytes,
+  exportComposeRequest,
+  exportDocumentBytes,
+  layerAnnotationsFor
+} from './export-compose';
 
 /** OPS-12 — the loaded outline's top-level entries, as split boundaries and names. */
 function topLevelBookmarkSlices(doc: StaplerDoc, pages: PageRef[]) {
@@ -863,21 +865,7 @@ function alignmentUnlessComposed(doc: StaplerDoc): PageAlignment | undefined {
 // resized pages on merge/organize/crop/watermark/etc. once the Normalize panel
 // had ever been opened, since the signal defaults to non-null on first mount.
 const exportComposed: CommitHandler = async ({ doc, job }) => {
-  const bytes = await composeDocument(
-    {
-      pages: doc.pages,
-      annotations: doc.annotations,
-      cropBoxes: cropBoxes.value,
-      watermark: watermarkSettings.value,
-      headerFooter: headerFooterSettings.value,
-      nup: nupSettings.value,
-      layerAnnotations: getLayerAnnotations(),
-      outline: getOutline(doc, doc.pages),
-      bates: getBates(),
-      barcodeStamp: getBarcodeStamp()
-    },
-    job
-  );
+  const bytes = await composeDocument(exportComposeRequest(doc), job);
 
   // N-up collapses 2 or 4 *original* pages onto each output sheet — the same
   // "a different page layout entirely" case the contact sheet is (UX-04): a
@@ -885,8 +873,22 @@ const exportComposed: CommitHandler = async ({ doc, job }) => {
   // sheet), would either compare unrelated pages or — reading
   // `alignment.entries[sheetIndex]` — hand the wrong baseline page to a sheet
   // that never corresponded to it 1:1. After-only review instead.
+  //
+  // AUDIT-2026-10-10 M8 — and for the same reason it is not "the document,
+  // saved": `refreshesBaseline: false`, so it neither offers "Save over
+  // original" (which would replace the user's file with a booklet) nor marks
+  // the document clean.
   if (nupSettings.value) {
-    await reviewAndSave(doc, null, bytes, `${stem(doc.name)}-stapler.pdf`);
+    await reviewAndSave(
+      doc,
+      null,
+      bytes,
+      `${stem(doc.name)}-stapler.pdf`,
+      undefined,
+      undefined,
+      undefined,
+      false
+    );
     return;
   }
 
@@ -1071,21 +1073,24 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   watermark: exportComposed,
   outline: exportComposed,
   acc: async ({ doc, job }) => {
-    const altTexts = Object.fromEntries(altTextMap.value);
-    if (Object.keys(altTexts).length === 0) return;
+    // UI#12 — alt text is keyed by page *key* in the panel; the worker wants
+    // the page's index in the document being written, which is this one.
+    const altTexts = altTextForExport(altTextMap.value, doc.pages);
+    if (Object.keys(altTexts).length === 0) {
+      // Used to return without a word: the button looked broken.
+      notify('warning', translate('No alt text has been entered.'), {
+        detail: translate(
+          'Find the images in the Accessibility panel and describe at least one, then export again.'
+        )
+      });
+      return;
+    }
 
     const original = await composeDocument(
       { pages: doc.baseline, annotations: doc.annotations },
       job
     );
-    const bytes = await composeDocument(
-      {
-        pages: doc.pages,
-        annotations: doc.annotations,
-        layerAnnotations: getLayerAnnotations()
-      },
-      job
-    );
+    const bytes = await composeDocument(exportComposeRequest(doc), job);
 
     const finalBytes = await processWorker.lease(api =>
       api.applyAltText(bytes, altTexts, createJobHandle(job))
@@ -1117,35 +1122,12 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // as any other tool, so the review's diff isolates the marks this tool
     // itself adds, plus whatever Organize did since the baseline (`alignment`).
     const original = await composeDocument(
-      {
-        pages: doc.baseline,
-        annotations: doc.annotations,
-        cropBoxes: cropBoxes.value,
-        watermark: watermarkSettings.value,
-        headerFooter: headerFooterSettings.value,
-        nup: nupSettings.value,
-        outline: getOutline(doc, doc.baseline),
-        bates: getBates(),
-        barcodeStamp: getBarcodeStamp(),
-        allowXfaLoss: true
-      },
+      exportComposeRequest(doc, doc.baseline, { layerAnnotations: false, allowXfaLoss: true }),
       job
     );
     const bytes = await composeDocument(
-      {
-        pages: doc.pages,
-        annotations: doc.annotations,
-        cropBoxes: cropBoxes.value,
-        watermark: watermarkSettings.value,
-        headerFooter: headerFooterSettings.value,
-        nup: nupSettings.value,
-        layerAnnotations: getLayerAnnotations(),
-        outline: getOutline(doc, doc.pages),
-        bates: getBates(),
-        barcodeStamp: getBarcodeStamp(),
-        // Same as Sign: Annotate deliberately produces a static page.
-        allowXfaLoss: true
-      },
+      // Same as Sign: Annotate deliberately produces a static page.
+      exportComposeRequest(doc, doc.pages, { allowXfaLoss: true }),
       job
     );
     const alignment = alignmentUnlessComposed(doc);
@@ -1162,6 +1144,13 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
 
   split: async ({ doc, job }) => {
     const settings = splitSettings.value;
+
+    // UI6: the number fields are stored as typed; refuse an invalid one.
+    const numberError = splitSettingsError(settings);
+    if (numberError) {
+      notify('warning', numberError);
+      return;
+    }
 
     // X-8: refuse rather than cut at pages the user did not ask for.
     if (settings.mode === 'custom') {
@@ -1180,8 +1169,11 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         });
         return;
       }
+      // M3 — the selected pages as they would export: crop, marks and
+      // overlays included. No N-up (a page subset is not a sheet layout) and
+      // no outline (entries pointing at unselected pages would dangle).
       const bytes = await composeDocument(
-        { pages: selected, annotations: doc.annotations, layerAnnotations: getLayerAnnotations() },
+        exportComposeRequest(doc, selected, { nup: false, outline: false }),
         job
       );
       // UX-04: no diff against the original — a page subset, the same reason
@@ -1221,13 +1213,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       settings.mode === 'size'
         ? await (async () => {
             const plan = await planSizeSplitBoundaries(
-              {
-                pages: doc.pages,
-                annotations: doc.annotations,
-                layerAnnotations: getLayerAnnotations(),
-                bates: getBates(),
-                barcodeStamp: getBarcodeStamp()
-              },
+              exportComposeRequest(doc, doc.pages, { nup: false, outline: false }),
               // Decimal, like every size Stapler shows: "5000 KB" means
               // 5,000,000 bytes, the way upload portals count it (IMG-4).
               settings.targetSizeKb * 1000,
@@ -1283,13 +1269,13 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       )
     );
 
+    // M3 — each part carries the crop, the marks and the overlays its pages
+    // would export with. N-up is left out because `boundaries` are document
+    // page indices, and so is the outline: one tree cannot describe several
+    // files, and its entries would point at pages in the other parts.
     const result = await splitDocument(
       {
-        pages: doc.pages,
-        annotations: doc.annotations,
-        layerAnnotations: getLayerAnnotations(),
-        bates: getBates(),
-        barcodeStamp: getBarcodeStamp(),
+        ...exportComposeRequest(doc, doc.pages, { nup: false, outline: false }),
         boundaries,
         baseName: stem(doc.name),
         fileNames
@@ -1332,14 +1318,10 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       const dir = await platform.openDirectory();
       if (!dir) return; // User cancelled or unsupported
 
-      const files = unzipSync(zipBytes);
-      for (const [fileName, bytes] of Object.entries(files)) {
-        await dir.write(fileName, bytes);
-      }
-      notify(
-        'success',
-        translate('Saved {count} files to directory', { count: Object.keys(files).length })
-      );
+      const { count, renamed } = await writeZipToDirectory(dir, zipBytes, job);
+      notify('success', tPlural('Saved {count} files to directory', count), {
+        detail: renamedDetail(renamed)
+      });
     } else {
       await reviewAndSaveZip(doc, zipBytes, `${stem(doc.name)}-split.zip`);
     }
@@ -1357,7 +1339,8 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     const confirmed = await confirmAction({
       title: tPlural('Delete {count} pages?', selected.length),
       body: translate(
-        'They are removed from the workspace only. Undo with ⌘Z; the file on disk is untouched until you export.'
+        'They are removed from the workspace only. Undo with {shortcut}; the file on disk is untouched until you export.',
+        { shortcut: shortcutLabel('undo') }
       ),
       confirmLabel: translate('Delete pages'),
       tone: 'danger'
@@ -1396,7 +1379,8 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
         return;
       }
     }
-    const bytes = await currentDocumentBytes(job);
+    // M3 — the pages as they would export, Annotate marks and stamps included.
+    const bytes = await exportDocumentBytes(job);
     const selected = selectedPageKeys.value;
     const indices = doc.pages
       .map((page, index) => ({ page, index }))
@@ -1404,8 +1388,30 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       .map(({ index }) => index);
 
     if (!targetMode && !exact && settings.maxDimension === null) {
-      const archive = await pagesToImageArchive(bytes, indices, settings.format, settings.dpi, job);
-      await reviewAndSaveZip(doc, archive, `${stem(doc.name)}-${settings.dpi}dpi.zip`);
+      let reduced: number[] = [];
+      const archive = await pagesToImageArchive(bytes, indices, settings.format, settings.dpi, {
+        ...job,
+        onReducedDetail: pages => {
+          reduced = pages;
+        }
+      });
+      const saved = await reviewAndSaveZip(
+        doc,
+        archive,
+        `${stem(doc.name)}-${settings.dpi}dpi.zip`
+      );
+      // AUDIT-2026-10-10 M9 — never a silent downgrade: name the pages that
+      // came out below the DPI asked for.
+      if (saved && reduced.length > 0) {
+        notify('warning', translate('Reduced detail'), {
+          detail: tPlural(
+            '{count} pages are too large to render at {dpi} DPI, so they were saved at the highest resolution a browser canvas allows: pages {pages}.',
+            reduced.length,
+            { dpi: settings.dpi, pages: reduced.join(', ') }
+          ),
+          timeout: 0
+        });
+      }
       return;
     }
 
@@ -1631,9 +1637,15 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
    * `currentDocumentBytes`: composing re-embeds every image through pdf-lib, and
    * an extraction that promises the document's own bytes must not first put them
    * through a rebuild. Page indices are the source pages the workspace shows.
+   *
+   * AUDIT-2026-10-10 L7 — the comment above was true of the intent only: the
+   * code called `currentDocumentBytes`, which composes the watermark in, so an
+   * image watermark came out as one more "embedded image" on every page. The
+   * page content alone, with no stamp, overlay or crop — an untouched
+   * document's own file, as is.
    */
   'extract-img': async ({ doc, job }) => {
-    const bytes = await currentDocumentBytes(job);
+    const bytes = await documentContentBytes(job, { stamps: false, pages: doc.pages });
     const selected = selectedPageKeys.value;
     const indices = doc.pages
       .map((page, index) => ({ page, index }))
@@ -1661,14 +1673,10 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       if (!(await reviewZipOnly(result.bytes, translate('the extracted images'), job))) return;
       const dir = await platform.openDirectory();
       if (dir) {
-        const files = unzipSync(result.bytes);
-        for (const [fileName, bytes] of Object.entries(files)) {
-          await dir.write(fileName, bytes);
-        }
-        notify(
-          'success',
-          translate('Saved {count} images to directory', { count: summary.fileCount })
-        );
+        const { renamed } = await writeZipToDirectory(dir, result.bytes, job);
+        notify('success', tPlural('Saved {count} images to directory', summary.fileCount), {
+          detail: renamedDetail(renamed)
+        });
       }
     } else {
       const saved = await reviewAndSaveZip(doc, result.bytes, `${stem(doc.name)}-images.zip`);
@@ -1686,7 +1694,8 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
 
   compress: async ({ doc, job }) => {
     const settings = compressSettings.value;
-    const original = await currentDocumentBytes(job);
+    // M3 — the document as it would export, every pending edit included.
+    const original = await exportDocumentBytes(job);
 
     // DOC-07 — "aim for a size" replaces the manual DPI/quality pair with a
     // measured search. Everything it reports is the byte length of the file it
@@ -2053,10 +2062,8 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   cleanup: async ({ doc, job }) => {
     // The cleanup editor writes its result straight into the document, so committing
     // is an ordinary export of whatever the workspace now holds.
-    const bytes = await composeDocument(
-      { pages: doc.pages, annotations: doc.annotations, layerAnnotations: getLayerAnnotations() },
-      job
-    );
+    // M3 — every pending edit, not just the pages and marks.
+    const bytes = await composeDocument(exportComposeRequest(doc), job);
     await save(doc, bytes, `${stem(doc.name)}-cleaned.pdf`);
   },
 
@@ -2098,16 +2105,12 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // composed document, and `composePages` rebuilds /AcroForm on it so the
     // fields are there to write to. `fillFormFields` now throws if a name is
     // missing, so a regression here fails loudly instead of saving a blank form.
+    // M3 — every pending edit (crop, overlays, outline, Bates…), not just the
+    // stamps and marks. Stamping on top of an XFA form is the workaround the
+    // product offers for one, so this path accepts the loss of the dynamic
+    // payload that merge and split refuse.
     let bytes = await composeDocument(
-      {
-        pages: doc.pages,
-        annotations: doc.annotations,
-        layerAnnotations: getLayerAnnotations(),
-        // Stamping on top of an XFA form is the workaround the product offers
-        // for one, so this path accepts the loss of the dynamic payload that
-        // merge and split refuse.
-        allowXfaLoss: true
-      },
+      exportComposeRequest(doc, doc.pages, { allowXfaLoss: true }),
       job
     );
     if (hasValues || formulas.value.length > 0) {
@@ -2157,7 +2160,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // did since the baseline; its `comparable: false` fallback already
     // handles a resulting size mismatch gracefully, not an edge case.
     const original = await currentDocumentBytes(job, false, doc.baseline);
-    const bytes = await currentDocumentBytes(job, true);
+    const bytes = await exportDocumentBytes(job, { normalize: true });
     const alignment = alignmentUnlessComposed(doc);
     await reviewAndSave(
       doc,
@@ -2171,9 +2174,18 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   },
 
   redact: async ({ doc, job }) => {
-    const regions = pendingRedactions.value;
+    // AUDIT-2026-10-10 H1 — resolved by page key against the pages being
+    // redacted, here as well as in the panel's own effect: what the worker is
+    // handed must be the page the user marked, wherever it now sits.
+    const pages = doc.pages;
+    const resolved = resolveRedactionMarks(pendingRedactions.value, pages);
+    if (resolved.changed) {
+      pendingRedactions.value = resolved.kept;
+      notifyWithdrawnMarks(resolved.deleted, resolved.rotated);
+    }
+    const marks = resolved.kept;
 
-    if (regions.length === 0) {
+    if (marks.length === 0) {
       notify('warning', translate('No regions are marked.'), {
         detail: translate(
           'Draw a rectangle on the page, or search for text to mark every occurrence.'
@@ -2182,9 +2194,18 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       return;
     }
 
-    const original = await currentDocumentBytes(job);
-    const outcome = await applyRedactions(original, regions, job);
-    redactionReport.value = outcome;
+    // AUDIT-2026-10-10 M2 — the page content and the stamps (which
+    // `replaceWithSource` then drops, as they are now in the bytes), never the
+    // exported bytes: those carried the watermark and header/footer, which
+    // were then baked into the redacted source *and* still switched on, so
+    // the next export drew them twice. Crop boxes and Annotate marks stay
+    // live on the same page keys and are applied once, at export. The crop
+    // also moved every normalised coordinate on a cropped page, away from
+    // where the mark was drawn on the uncropped page view.
+    const original = await documentContentBytes(job, { stamps: true, pages });
+    const outcome = await applyRedactions(original, marks.map(toWorkerRegion), job);
+    // L2 — the report keeps the verdicts, not a second copy of the document.
+    redactionReport.value = reportOf(outcome);
 
     // RED-03: saving is blocked when any region fails verification.
     if (!outcome.verified) {
@@ -2217,10 +2238,26 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       client.release();
     }
 
+    // M1 — cancelled while the geometry was read: leave the document alone.
+    if (job.signal?.aborted) throw cancelled();
+    // The redacted bytes are a rebuild of exactly `pages`. Pages edited under
+    // the job would be replaced by a rebuild of a page list that no longer
+    // exists — refused rather than applied.
+    if (activeDoc.value?.id !== doc.id || activeDoc.value.pages !== pages) {
+      notify('warning', translate('The pages changed while redacting — nothing was applied.'), {
+        detail: translate('Your marks are kept. Run Verify & apply again.'),
+        timeout: 0
+      });
+      return;
+    }
     await writeSourceBytes(source.id, outcome.bytes);
     registerSource(source);
-    replaceWithSource(doc.id, source);
-    pendingRedactions.value = [];
+    const applied = new Set<PendingRedaction>(marks);
+    batch(() => {
+      // Only the marks just applied: one drawn while this ran is still pending.
+      pendingRedactions.value = pendingRedactions.value.filter(mark => !applied.has(mark));
+      replaceWithSource(doc.id, source, { pageForPage: true });
+    });
     const regionCount = outcome.verdicts.length;
     notify('success', translate('Redaction verified and applied.'), {
       detail: tPlural(
@@ -2237,7 +2274,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // diff and is built from `doc.baseline` instead: scrubbing itself touches
     // document properties, not page content, so the review's diff isolates to
     // whatever Organize did since the baseline (via `alignment`).
-    const current = await currentDocumentBytes(job);
+    const current = await exportDocumentBytes(job);
     const scrubbed = await scrubDocumentMetadata(current, scrubSettings.value ?? undefined, job);
     const original = await currentDocumentBytes(job, false, doc.baseline);
     const alignment = alignmentUnlessComposed(doc);
@@ -2275,11 +2312,12 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     // OCR must run on the *current* pages — the file actually being saved —
     // so this stays separate from `original` below, which is only for the
     // diff and is built from `doc.baseline` instead.
-    const current = await currentDocumentBytes(job);
+    const current = await exportDocumentBytes(job);
     const result = await runOcr(current, doc.pages.length, {
       ...job,
       lang: settings.lang,
-      pageIndices
+      pageIndices,
+      includePagesWithText: settings.includePagesWithText
     });
 
     // `null` is the user declining the model download. That is an answer, not a
@@ -2291,8 +2329,28 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       wordsSkipped: result.wordsSkipped,
       pages: result.pagesTouched,
       pagesReplaced: result.pagesReplaced,
-      pagesSkipped: result.skippedPages.length
+      pagesSkipped: result.skippedPages.length,
+      pagesWithText: result.pagesWithText.length
     };
+
+    // CV9 — pages that already have real text were left alone rather than
+    // given a second, OCR'd copy of it. Said, with the way to override it.
+    if (result.pagesWithText.length > 0) {
+      notify(
+        'info',
+        tPlural("{count} pages already have text and were not OCR'd", result.pagesWithText.length),
+        {
+          detail: translate(
+            'Pages {pages}. Running OCR on them would add a second copy of their text. To OCR them ' +
+              'anyway, turn on "Also OCR pages that already have text".',
+            { pages: result.pagesWithText.map(index => index + 1).join(', ') }
+          )
+        }
+      );
+      // Every requested page had text: nothing was OCR'd, so there is nothing
+      // to export and no "found no text" warning to give.
+      if (result.pagesWithText.length === (pageIndices?.length ?? doc.pages.length)) return;
+    }
 
     // §2.3 — some pages could not be recognised (most likely an oversized page
     // box past the browser's own canvas limit). The run still completed for
@@ -2409,7 +2467,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
   'contact-sheet': async ({ doc, job }) => {
     const { exportContactSheet } = await import('../../core/operations');
     const { contactSheetColumns } = await import('./contact-sheet/state');
-    const bytes = await currentDocumentBytes(job);
+    const bytes = await exportDocumentBytes(job);
     // The panel's column setting, not a hardcoded 4: the action bar's primary CTA
     // and the panel's own button are two routes to one export and must agree.
     const sheet = await exportContactSheet(doc.id, bytes, contactSheetColumns.value, job);
@@ -2466,7 +2524,7 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
     }
 
     // Conversion runs on the *current* pages — the file actually being saved.
-    const current = await currentDocumentBytes(job);
+    const current = await exportDocumentBytes(job);
     const result = await grayscaleDocument(
       current,
       pageIndices,
@@ -2591,7 +2649,13 @@ const HANDLERS: Record<ToolId, CommitHandler> = {
       } else {
         try {
           bytes = await composeDocument(
-            { pages: doc.pages, annotations: doc.annotations, cropBoxes: cropBoxes.value },
+            {
+              pages: doc.pages,
+              annotations: doc.annotations,
+              cropBoxes: cropBoxes.value,
+              // M3 — Annotate marks are edits of the document, like crops.
+              layerAnnotations: layerAnnotationsFor(doc.pages)
+            },
             job
           );
         } catch (err) {
@@ -2875,7 +2939,34 @@ export async function commitTool(toolId: ToolId, job: JobOptions): Promise<void>
   if (!handler) throw internal(`No commit action is defined for the ${toolId} tool.`);
   // `worksWithoutDocument` tools (md-to-pdf, batch) never read `context.doc`; the
   // cast keeps `CommitContext` simple for the many handlers that do require one.
-  await handler({ doc: doc as StaplerDoc, job });
+  await handler({ doc: doc as StaplerDoc, job: withExportNotices(job) });
+}
+
+/**
+ * Audit P2/P4/P6 — every compose or rebuild a commit runs reports, through its
+ * job, what it had to change or leave out to keep the result honest: a form
+ * field renamed so two files' values stay apart, a document-level item it
+ * could not carry, an annotation outside a crop. Wired once here, for every
+ * handler, rather than at each of the dozen compose calls (split, annotate,
+ * sign, accessibility, compress, cleanup, normalize, metadata, repair…), and
+ * shown as each notice arrives — so before the review dialog, not after the
+ * save. A message is shown once per commit even when the "before" compose of
+ * a review reports it too.
+ */
+function withExportNotices(job: JobOptions): JobOptions {
+  const shown = new Set<string>();
+  return {
+    ...job,
+    onNotice: message => {
+      job.onNotice?.(message);
+      if (shown.has(message)) return;
+      shown.add(message);
+      notify('warning', translate('The export changed or left out part of the document.'), {
+        detail: message,
+        timeout: 0
+      });
+    }
+  };
 }
 
 /** Re-exported so the extract panel can share the text pipeline. */

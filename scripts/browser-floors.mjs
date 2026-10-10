@@ -7,8 +7,9 @@
  * newest unguarded built-in any shipped code calls. pdf.js 6's *modern* build
  * is by far the most demanding: it calls every API below with no feature test
  * (checked against `node_modules/pdfjs-dist/build/pdf{,.worker}.mjs` 6.2.108 —
- * the one API it does guard, `Iterator.prototype.join`, is left out). Chrome
- * or Firefox below the floor installs fine and then fails to open any PDF.
+ * the one API it does guard, `Iterator.prototype.join`, is left out). Without
+ * a declared floor, Chrome or Firefox below it would install fine and then fail
+ * to open any PDF.
  *
  * Versions are MDN browser-compat-data `version_added`. `tests/unit/
  * browser-floors.test.ts` asserts the manifests match `max()` of this table,
@@ -16,9 +17,18 @@
  * a pdf.js upgrade that stops needing one is noticed, and the floors in the
  * Chrome manifest, the Firefox transform and this table cannot drift apart.
  *
+ * The cost is real, and the floor is *not* "older than every browser still
+ * receiving security updates": both numbers come from pdf.js 6's modern build
+ * alone (`Math.sumPrecise` sets Chrome 147,
+ * `Map.prototype.getOrInsertComputed` sets Firefox 144). That excludes
+ * supported browsers — Firefox ESR 140, and any Chromium-based browser or
+ * managed fleet still on a Chromium older than 147. The declared floor makes
+ * them refuse the install up front instead.
+ *
  * (Alternative the audit offered: `pdfjs-dist/legacy`, which is transpiled and
- * polyfilled for older browsers. Not taken — the floor below is already older
- * than every browser still receiving security updates.)
+ * polyfilled for older browsers and would lower both floors. Not taken so far;
+ * switching is the lever if those users matter more than the modern build's
+ * size and speed.)
  */
 
 /** @type {ReadonlyArray<{ api: string, needle: string, chrome: number, firefox: number, why: string }>} */

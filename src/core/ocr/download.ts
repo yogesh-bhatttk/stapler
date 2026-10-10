@@ -48,7 +48,18 @@ export async function fetchVerifiedModel(
 
   let response: Response;
   try {
-    response = await fetch(url, { signal });
+    // Audit 2026-10-10 S-info: the one request Stapler makes carries nothing
+    // about the user — no cookies or credentials, no referrer (which would
+    // name the extension or the page) — follows no redirect off the pinned
+    // URL, and is never answered from or written to the HTTP cache, so the
+    // hash check below always sees the bytes the CDN serves now.
+    response = await fetch(url, {
+      signal,
+      credentials: 'omit',
+      referrerPolicy: 'no-referrer',
+      redirect: 'error',
+      cache: 'no-store'
+    });
   } catch (err) {
     if (signal?.aborted) throw cancelled();
     throw internal(

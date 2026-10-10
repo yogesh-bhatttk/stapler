@@ -30,8 +30,25 @@ import {
 } from '../../../core/batch-filename';
 import { corrupt } from '../../../core/errors';
 import { looksLikePdf } from '../../../core/import';
-import { zipSync } from 'fflate';
+import { zipInWorker } from '../../../core/zip';
+import { directoryOutput } from '../../../platform/file-system';
+import { isCancellation } from '../../../core/errors';
 import { parseRecipe } from './recipe-settings';
+import { createJobHandle } from '../../../core/workers/protocol';
+
+/** M5 — the one "cancelled" outcome toast, with what (if anything) was written. */
+function notifyBatchCancelled(): void {
+  const written = batchProgress.value.completed;
+  notify('warning', translate('Batch Cancelled'), {
+    detail:
+      outputFormat.value === 'zip'
+        ? translate('Processing was cancelled by the user. No ZIP archive was written.')
+        : tPlural(
+            'Processing was cancelled by the user. {count} files were already saved to the output folder.',
+            written
+          )
+  });
+}
 
 /** Appends a per-file outcome to the run summary. */
 function addNote(note: BatchNote): void {
@@ -39,6 +56,22 @@ function addNote(note: BatchNote): void {
     ...batchProgress.value,
     notes: [...batchProgress.value.notes, note]
   };
+}
+
+/**
+ * Audit P4/P6 — a worker notice (an item a rebuild could not carry, an
+ * annotation outside a crop) as one summary note per file and message.
+ */
+function noteChanged(file: string, detail: string): void {
+  const seen = batchProgress.value.notes.some(
+    n => n.kind === 'changed' && n.file === file && n.detail === detail
+  );
+  if (!seen) addNote({ file, kind: 'changed', detail });
+}
+
+/** A job handle whose notices land in this file's summary notes. */
+function fileNoticeJob(file: string) {
+  return createJobHandle({ onNotice: message => noteChanged(file, message) });
 }
 
 // §2.1 — a synchronous reentrancy guard, set before this function's first
@@ -216,14 +249,18 @@ async function runBatchBody(
     );
     const resolvedNames = deduplicateNames(rawNames);
 
+    // AUDIT-2026-10-10 L4 — the same never-overwrite writer as every other
+    // folder export: a name already in the output folder (an earlier run's
+    // output, or anything else) gets " (n)" instead of being replaced.
+    const folder =
+      outputFormat.value === 'directory' && outDir
+        ? directoryOutput(outDir as unknown as Parameters<typeof directoryOutput>[0])
+        : null;
+
     for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
       const fileHandle = files[fileIndex];
-      if (signal?.aborted) {
-        notify('warning', translate('Batch Cancelled'), {
-          detail: translate('Processing was cancelled by the user.')
-        });
-        break;
-      }
+      // M5 — the cancel toast is raised once, after the loop.
+      if (signal?.aborted) break;
       batchProgress.value = { ...batchProgress.value, currentFile: fileHandle.name };
       try {
         const file = await fileHandle.getFile();
@@ -282,6 +319,9 @@ async function runBatchBody(
           if (toolId !== 'watermark' && toolId !== 'normalize' && toolId !== 'nup') {
             return inputBytes;
           }
+          // Audit P4/P6 — what a rebuild had to leave out, as this file's note
+          // in the run summary rather than one toast per file.
+          const job = fileNoticeJob(fileHandle.name);
           // Re-inspect current bytes so page maps reflect the document state
           // after any preceding tools (e.g. nup layout changes).
           const inspect = await processWorker.lease(api => api.inspect(inputBytes));
@@ -306,7 +346,7 @@ async function runBatchBody(
                 undefined,
                 undefined,
                 [],
-                undefined
+                job
               )
             );
           }
@@ -321,7 +361,7 @@ async function runBatchBody(
                 normalize,
                 undefined,
                 [],
-                undefined
+                job
               )
             );
           }
@@ -336,7 +376,7 @@ async function runBatchBody(
               undefined,
               nup,
               [],
-              undefined
+              job
             )
           );
         };
@@ -359,7 +399,9 @@ async function runBatchBody(
               });
             } else {
               preCompressBytes = currentBytes;
-              const res = await compressDocument(currentBytes, compress, report);
+              const res = await compressDocument(currentBytes, compress, report, {
+                onNotice: message => noteChanged(fileHandle.name, message)
+              });
               if (res.keptOriginal) {
                 addNote({
                   file: fileHandle.name,
@@ -507,14 +549,16 @@ async function runBatchBody(
         if (outputFormat.value === 'zip') {
           zipEntries[outName] = currentBytes;
         } else {
-          const outHandle = await outDir!.getFileHandle(outName, { create: true });
-          const writable = await outHandle.createWritable();
-          try {
-            await writable.write(currentBytes);
-            await writable.close();
-          } catch (writeErr) {
-            await (writable as unknown as { abort(): Promise<void> }).abort().catch(() => {});
-            throw writeErr;
+          const written = await folder!.write(outName, currentBytes);
+          if (written !== outName) {
+            addNote({
+              file: fileHandle.name,
+              kind: 'renamed',
+              detail: translate(
+                'Saved as {name}, because {original} already exists in the output folder.',
+                { name: written, original: outName }
+              )
+            });
           }
         }
 
@@ -536,12 +580,33 @@ async function runBatchBody(
       }
     }
 
+    // AUDIT-2026-10-10 M5 — a cancelled run reports itself as cancelled and,
+    // for ZIP output, writes nothing: opening the chosen file's writable used
+    // to truncate it to whatever partial (or empty) archive the run had got
+    // to, then announce "Batch Processing Complete".
+    if (signal?.aborted) {
+      notifyBatchCancelled();
+      return;
+    }
+
     if (outputFormat.value === 'zip' && outZip) {
       batchProgress.value = {
         ...batchProgress.value,
         currentFile: translate('Saving ZIP archive...')
       };
-      const zipBytes = zipSync(zipEntries);
+      // Built in the zip worker, PDFs stored rather than deflated again.
+      let zipBytes: Uint8Array;
+      try {
+        zipBytes = await zipInWorker(zipEntries, { signal, transfer: true });
+      } catch (err) {
+        if (!isCancellation(err)) throw err;
+        notifyBatchCancelled();
+        return;
+      }
+      if (signal?.aborted) {
+        notifyBatchCancelled();
+        return;
+      }
       const writable = await outZip.createWritable();
       try {
         await writable.write(zipBytes);
@@ -553,22 +618,42 @@ async function runBatchBody(
     }
 
     const kept = batchProgress.value.notes.filter(n => n.kind === 'kept-original');
-    notify(kept.length > 0 ? 'info' : 'success', translate('Batch Processing Complete'), {
-      detail: [
-        tPlural('Successfully processed {count} files.', batchProgress.value.completed),
-        tPlural('{count} failed.', batchProgress.value.failed),
-        kept.length > 0
-          ? tPlural(
-              '{count} files were written unchanged because compressing would not have made them smaller: {files}.',
-              kept.length,
-              { files: kept.map(n => n.file).join(', ') }
-            )
-          : null
-      ]
-        .filter(Boolean)
-        .join(' '),
-      timeout: kept.length > 0 ? 0 : undefined
-    });
+    const renamed = batchProgress.value.notes.filter(n => n.kind === 'renamed');
+    const changed = [
+      ...new Set(batchProgress.value.notes.filter(n => n.kind === 'changed').map(n => n.file))
+    ];
+    notify(
+      kept.length > 0 || changed.length > 0 || renamed.length > 0 ? 'info' : 'success',
+      translate('Batch Processing Complete'),
+      {
+        detail: [
+          tPlural('Successfully processed {count} files.', batchProgress.value.completed),
+          tPlural('{count} failed.', batchProgress.value.failed),
+          kept.length > 0
+            ? tPlural(
+                '{count} files were written unchanged because compressing would not have made them smaller: {files}.',
+                kept.length,
+                { files: kept.map(n => n.file).join(', ') }
+              )
+            : null,
+          changed.length > 0
+            ? translate(
+                'Some files had parts changed or left out — see the notes in the Batch panel: {files}.',
+                { files: changed.join(', ') }
+              )
+            : null,
+          renamed.length > 0
+            ? tPlural(
+                '{count} files were saved with a number added, because a file of that name was already in the output folder — nothing was replaced.',
+                renamed.length
+              )
+            : null
+        ]
+          .filter(Boolean)
+          .join(' '),
+        timeout: kept.length > 0 || changed.length > 0 || renamed.length > 0 ? 0 : undefined
+      }
+    );
   } catch (err) {
     console.error(err);
     notify('danger', translate('Batch Processing Failed'), { detail: String(err) });

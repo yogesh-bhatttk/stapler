@@ -11,6 +11,7 @@
  * action bar renders it on every tool screen for exactly that reason.
  */
 import { confirmAction } from '../core/notify';
+import { shortcutLabel } from '../core/shortcuts';
 import { translate } from '../core/i18n';
 import { clearPageSelection, discardPageChanges, type StaplerDoc } from '../core/store';
 import { cropBoxes } from './tools/crop/state';
@@ -90,7 +91,8 @@ async function discardAllChangesFlow(doc: StaplerDoc): Promise<boolean> {
   const confirmed = await confirmAction({
     title: translate('Discard all changes to this document?'),
     body: translate(
-      'Rotation, reordering, deletions, and duplicates revert to how this document looked when it was last opened or saved. Crop, watermark, header/footer, Bates, barcode, N-up, bookmarks, redaction marks, and annotations are cleared too — those apply to every open document, not just this one, and clearing them here is not undoable with ⌘Z the way the page list is.'
+      'Rotation, reordering, deletions, and duplicates revert to how this document looked when it was last opened or saved. Crop, watermark, header/footer, Bates, barcode, N-up, bookmarks, redaction marks, and annotations are cleared too — those apply to every open document, not just this one, and clearing them here is not undoable with {shortcut} the way the page list is.',
+      { shortcut: shortcutLabel('undo') }
     ),
     confirmLabel: translate('Discard everything'),
     cancelLabel: translate('Keep my changes'),

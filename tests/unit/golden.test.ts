@@ -19,7 +19,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { PDFDocument, StandardFonts } from 'pdf-lib';
+import {
+  PDFArray,
+  PDFDocument,
+  PDFName,
+  PDFRawStream,
+  StandardFonts,
+  decodePDFRawStream
+} from 'pdf-lib';
 import { unzipSync } from 'fflate';
 
 vi.mock('comlink', () => ({
@@ -585,6 +592,18 @@ describe('golden: OPS-06 crop', () => {
   });
 });
 
+/** The `q a 0 0 d e f cm` normalization wraps a page's content in, or null. */
+function normalizeMatrixOf(page: import('pdf-lib').PDFPage): number[] | null {
+  const contents = page.node.Contents();
+  const first = contents instanceof PDFArray ? page.doc.context.lookup(contents.get(0)) : contents;
+  if (!(first instanceof PDFRawStream)) return null;
+  const text = new TextDecoder('latin1').decode(
+    first.dict.has(PDFName.of('Filter')) ? decodePDFRawStream(first).decode() : first.contents
+  );
+  const match = /^\s*q\s+(\S+) 0 0 (\S+) (\S+) (\S+) cm/.exec(text);
+  return match ? match.slice(1).map(Number) : null;
+}
+
 describe('golden: OPS-09 normalize', () => {
   it('resizes every page to the requested target size and actually scales content', async () => {
     const { mixedSizePdf } = await import('../e2e/fixtures');
@@ -598,10 +617,6 @@ describe('golden: OPS-09 normalize', () => {
       rotation: 0
     }));
 
-    const { PDFPage } = await import('pdf-lib');
-    const scaleSpy = vi.spyOn(PDFPage.prototype, 'scale');
-    const translateSpy = vi.spyOn(PDFPage.prototype, 'translateContent');
-
     const output = await processWorkerImpl.compose(
       pages,
       { doc: bytes },
@@ -614,16 +629,13 @@ describe('golden: OPS-09 normalize', () => {
       silentJob
     );
 
-    // SCN-01 vacuous test fix: assert that content was actually translated/scaled
-    // rather than just the MediaBox bounds being modified.
-    expect(scaleSpy).toHaveBeenCalled();
-    expect(translateSpy).toHaveBeenCalled();
-
-    scaleSpy.mockRestore();
-    translateSpy.mockRestore();
-
     const doc = await PDFDocument.load(output);
     expect(doc.getPageCount()).toBe(pageCount);
+    // SCN-01 vacuous test fix: assert that content was actually translated/scaled
+    // rather than just the MediaBox bounds being modified — measured on the
+    // output's own content stream (audit P6: one `cm`, not pdf-lib's helpers).
+    const scales = doc.getPages().map(normalizeMatrixOf);
+    expect(scales.some(m => m !== null && Math.abs(m[0] - 1) > 0.01)).toBe(true);
     for (const page of doc.getPages()) {
       expect(page.getWidth()).toBeCloseTo(612, 0);
       expect(page.getHeight()).toBeCloseTo(792, 0);
@@ -637,10 +649,6 @@ describe('golden: OPS-09 normalize', () => {
     // as landscape even though width < height in raw content space.
     const pages = [{ key: 'p0', sourceDocId: 'doc', sourceIndex: 0, rotation: 90 }];
 
-    const { PDFPage } = await import('pdf-lib');
-    const scaleSpy = vi.spyOn(PDFPage.prototype, 'scale');
-    const translateSpy = vi.spyOn(PDFPage.prototype, 'translateContent');
-
     const output = await processWorkerImpl.compose(
       pages,
       { doc: bytes },
@@ -653,15 +661,10 @@ describe('golden: OPS-09 normalize', () => {
       silentJob
     );
 
-    // SCN-01 vacuous test fix: assert that content was actually translated/scaled
-    expect(scaleSpy).toHaveBeenCalled();
-    expect(translateSpy).toHaveBeenCalled();
-
-    scaleSpy.mockRestore();
-    translateSpy.mockRestore();
-
     const doc = await PDFDocument.load(output);
     const page = doc.getPage(0);
+    // SCN-01 vacuous test fix: assert that content was actually translated/scaled
+    expect(normalizeMatrixOf(page)).not.toBeNull();
     expect(page.getRotation().angle).toBe(90);
 
     // Raw MediaBox is portrait-shaped (612x792): once /Rotate 90 is applied by a

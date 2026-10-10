@@ -1,7 +1,7 @@
 import { activeDoc } from '../../../core/store';
 import { panelStyles } from '../../shell/panelStyles';
 import { useTranslation } from '../../../core/i18n';
-import { altTextMap, clearAltText, setAltText } from './state';
+import { altTextKey, altTextMap, clearAltText, setAltText } from './state';
 import { fromUnknown, isCancellation, logEvent } from '../../../core/errors';
 import { useEffect, useState } from 'preact/hooks';
 import { findImagesForAltText, currentDocumentBytes } from '../../../core/operations';
@@ -9,12 +9,23 @@ import { readAltText } from '../../../core/pdf/accessibility';
 import type { ImageAltInfo } from '../../../core/workers/process.worker';
 import type { JobOptions } from '../../../core/workers/protocol';
 
+/** The MIME type of a file `extractImageFile` writes (`image/${ext}` is wrong for jpg and j2k). */
+function imageMime(ext: string): string {
+  const known: Record<string, string> = {
+    jpg: 'image/jpeg',
+    png: 'image/png',
+    jp2: 'image/jp2',
+    j2k: 'image/j2c'
+  };
+  return known[ext] ?? 'application/octet-stream';
+}
+
 type ScanStatus = 'loading' | 'ready' | 'error';
 
 export function AccPanel() {
   const t = useTranslation();
   const doc = activeDoc.value;
-  const [images, setImages] = useState<(ImageAltInfo & { url: string })[]>([]);
+  const [images, setImages] = useState<(ImageAltInfo & { url: string; key: string })[]>([]);
   const [status, setStatus] = useState<ScanStatus>('loading');
 
   // Typed alt text belongs to a document, so it is dropped only when the
@@ -39,6 +50,9 @@ export function AccPanel() {
     void (async () => {
       try {
         const job: JobOptions = { signal: controller.signal };
+        // UI#12 — the page list these bytes are composed from, read in the
+        // same tick, so a result's page index names the page it came from.
+        const pages = doc.pages;
         const bytes = await currentDocumentBytes(job, true);
         const [result, existingAltText] = await Promise.all([
           findImagesForAltText(bytes, job),
@@ -50,8 +64,13 @@ export function AccPanel() {
         ]);
         if (controller.signal.aborted) return;
         const nextAltText = new Map<string, string>();
+        const keyOf = (img: ImageAltInfo) => {
+          const page = pages[img.pageIndex];
+          return page ? altTextKey(page, img.name) : null;
+        };
         for (const img of result) {
-          const key = `${img.pageIndex}:${img.name}`;
+          const key = keyOf(img);
+          if (key === null) continue;
           // What the user typed this session wins over what the file carries.
           const typed = altTextMap.value.get(key);
           const existing = existingAltText[`${img.pageIndex}:${img.objectNumber}`];
@@ -59,10 +78,12 @@ export function AccPanel() {
           else if (existing) nextAltText.set(key, existing);
         }
         altTextMap.value = nextAltText;
-        const withUrls = result.map(img => {
-          const url = URL.createObjectURL(new Blob([img.bytes], { type: `image/${img.ext}` }));
+        const withUrls = result.flatMap(img => {
+          const key = keyOf(img);
+          if (key === null) return [];
+          const url = URL.createObjectURL(new Blob([img.bytes], { type: imageMime(img.ext) }));
           urls.push(url);
-          return { ...img, url };
+          return [{ ...img, url, key }];
         });
         setImages(withUrls);
         setStatus('ready');
@@ -104,7 +125,7 @@ export function AccPanel() {
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
             {images.map(img => {
-              const key = `${img.pageIndex}:${img.name}`;
+              const key = img.key;
               return (
                 <div key={key} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                   <img

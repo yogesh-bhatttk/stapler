@@ -79,6 +79,13 @@ export interface ToolDefinition {
   selectable: boolean;
   /** False for tools that need a document loaded before they mean anything. */
   worksWithoutDocument?: boolean;
+  /**
+   * A reading/viewing aid that never produces a file (compare, read aloud,
+   * reflow, history, side by side, shortcuts). The action bar shows no primary
+   * button for these: a "Done" that did nothing but briefly hold the job slot
+   * was a dead control (AUDIT-2026-10-10 UI4).
+   */
+  viewOnly?: boolean;
 }
 
 export const TOOLS: readonly ToolDefinition[] = [
@@ -382,6 +389,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     canvasMode: 'grid',
     needsOptionsPanel: true,
     commitLabel: tKey('Done'),
+    viewOnly: true,
     selectable: false,
     worksWithoutDocument: true
   },
@@ -394,6 +402,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     canvasMode: 'single',
     needsOptionsPanel: true,
     commitLabel: tKey('Done'),
+    viewOnly: true,
     selectable: false
   },
   {
@@ -557,6 +566,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     canvasMode: 'grid',
     needsOptionsPanel: true,
     commitLabel: tKey('Done'),
+    viewOnly: true,
     selectable: false
   },
   {
@@ -568,6 +578,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     canvasMode: 'single',
     needsOptionsPanel: true,
     commitLabel: tKey('Done'),
+    viewOnly: true,
     selectable: false
   },
   {
@@ -579,6 +590,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     canvasMode: 'grid',
     needsOptionsPanel: true,
     commitLabel: tKey('Done'),
+    viewOnly: true,
     selectable: false,
     worksWithoutDocument: true
   },
@@ -591,6 +603,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     canvasMode: 'single',
     needsOptionsPanel: true,
     commitLabel: tKey('Done'),
+    viewOnly: true,
     selectable: false
   }
 ];

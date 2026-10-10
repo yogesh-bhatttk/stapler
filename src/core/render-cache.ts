@@ -17,6 +17,8 @@ import type { PinnedClient } from './workers/client';
 import type { RenderJob } from './workers/render.worker';
 import { logEvent } from './errors';
 import { readSourceBytes } from './opfs';
+import { cancelled } from './errors';
+import { isSourceRegistered as isSourceLive } from './source-liveness';
 
 /**
  * RT-10 — the cache is budgeted in **bytes**, not entries. It used to hold up
@@ -214,10 +216,21 @@ export function renderHandleFor(
   }
 
   const client = renderWorker.pin();
+  // L9 — the source can be closed while this open is in flight: its bytes are
+  // deleted asynchronously, so `readSourceBytes` can still win that race, and
+  // the close's `pruneRenderHandles` has already run (or ran before this entry
+  // existed). Checked again once the document is loaded; a handle for a source
+  // that is gone is closed and its pin released here, since nothing else will.
   const promise: HandleEntry['promise'] = readSourceBytes(sourceId)
-    .then(bytes =>
-      client.lease(api => api.loadDocument(bytes)).then(info => ({ handle: info.handle, client }))
-    )
+    .then(bytes => {
+      if (!isSourceLive(sourceId)) throw cancelled();
+      return client.lease(api => api.loadDocument(bytes));
+    })
+    .then(async info => {
+      if (isSourceLive(sourceId)) return { handle: info.handle, client };
+      await client.lease(api => api.closeDocument(info.handle)).catch(() => {});
+      throw cancelled();
+    })
     .catch(err => {
       // A failed open must not be cached, or every later thumbnail reuses the
       // rejection and the page stays blank with no way to retry.

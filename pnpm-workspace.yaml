@@ -7,3 +7,21 @@ allowBuilds:
   tesseract.js: false
 minimumReleaseAgeExclude:
   - '@cantoo/pdf-lib@2.9.1'
+overrides:
+  # GHSA-5p2g-fcmc-qvqq, GHSA-w3rx-r6r6-pgpr (image-size <=2.0.2, DoS). pptxgenjs
+  # declares `image-size ^1.2.1` but never loads it: its `browser` field maps it
+  # to `false`, and its Node build `require`s a different module (`sizeof`).
+  # So the 2.x major is safe here; the override only moves the audit.
+  'pptxgenjs>image-size': ^2.0.4
+  # Dev-only advisories (eslint > minimatch, vite/preact-preset > source-map-js):
+  # brace-expansion GHSA DoS fixes land in 5.0.12; source-map-js in 1.2.2.
+  # Same majors as the dependents ask for, so these are patch moves only.
+  'brace-expansion@5': ^5.0.12
+  'source-map-js@1': ^1.2.2
+auditConfig:
+  ignoreGhsas:
+    # sprintf-js <=1.1.3 (DoS via unbounded precision); no patched release
+    # exists on npm (1.1.3 is latest). Reached only as mammoth > argparse@1 >
+    # sprintf-js, and mammoth uses argparse only in its CLI (`bin/mammoth`),
+    # which the browser build never bundles. Drop this once a fix ships.
+    - GHSA-hp3w-g68c-fv3c

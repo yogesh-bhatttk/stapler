@@ -98,6 +98,33 @@ export function setTheme(preference: ThemePreference): void {
   void writeSetting(SETTING_KEY, preference);
 }
 
+/**
+ * The preference the top bar's theme button moves to next. `system` was
+ * unreachable once left (AUDIT-2026-10-10 UI25); the button now cycles through
+ * all three, starting with the theme you are *not* seeing so the first click
+ * always changes the screen: system → the opposite of what the OS shows → the
+ * OS's own theme pinned explicitly → system.
+ */
+export function nextThemePreference(
+  preference: ThemePreference,
+  systemTheme: 'light' | 'dark'
+): ThemePreference {
+  const opposite = systemTheme === 'dark' ? 'light' : 'dark';
+  if (preference === 'system') return opposite;
+  if (preference === opposite) return systemTheme;
+  return 'system';
+}
+
+/** The OS's theme, whatever the stored preference. */
+export function systemTheme(): 'light' | 'dark' {
+  return resolve('system');
+}
+
+/** Moves to {@link nextThemePreference}. */
+export function cycleTheme(): void {
+  setTheme(nextThemePreference(themePreference.value, systemTheme()));
+}
+
 /** Toggles between explicit light and dark, leaving `system` behind on first use. */
 export function toggleTheme(): void {
   setTheme(resolvedTheme.value === 'dark' ? 'light' : 'dark');

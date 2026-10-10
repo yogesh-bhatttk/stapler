@@ -6,6 +6,7 @@
 import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { openApp } from './helpers';
+import { waitForJobsIdle } from './audit-2026-10-10-helpers';
 
 test.describe('AUDIT-2026-09-25', () => {
   test('UI-2: a PDF dropped on the Home drop zone opens exactly one tab', async ({ page }) => {
@@ -25,7 +26,11 @@ test.describe('AUDIT-2026-09-25', () => {
 
     await expect(page.getByRole('listbox', { name: /Pages of/ })).toBeVisible({ timeout: 30_000 });
     // Both the zone and the window handler used to import — two identical tabs.
-    await page.waitForTimeout(1000);
+    // Audit 2026-10-10 T10: was a fixed 1 s sleep. Both handlers start on the
+    // same drop event, and an import holds the app's one job slot (RT-7) from
+    // its first task to its last; once no job has been running for a run of
+    // frames, a second import has either been refused or has finished.
+    await waitForJobsIdle(page);
     await expect(page.getByRole('button', { name: 'Close dropped.pdf' })).toHaveCount(1);
   });
 

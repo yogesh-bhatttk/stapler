@@ -165,13 +165,20 @@ function dirs(handles: ReturnType<typeof fileHandle>[]) {
   };
   const outDir = {
     name: 'out',
-    getFileHandle: async (name: string) => ({
-      createWritable: async () => ({
-        write: async (bytes: Uint8Array) => void written.push({ name, bytes }),
-        close: async () => {},
-        abort: async () => {}
-      })
-    })
+    // As the real API: without `create`, a missing name is NotFoundError (the
+    // batch writer probes before writing, AUDIT-2026-10-10 L4).
+    getFileHandle: async (name: string, options?: { create?: boolean }) => {
+      if (!options?.create && !written.some(w => w.name === name)) {
+        throw new DOMException('missing', 'NotFoundError');
+      }
+      return {
+        createWritable: async () => ({
+          write: async (bytes: Uint8Array) => void written.push({ name, bytes }),
+          close: async () => {},
+          abort: async () => {}
+        })
+      };
+    }
   };
   return { inDir, outDir, written };
 }

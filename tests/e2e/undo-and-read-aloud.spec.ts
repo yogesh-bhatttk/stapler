@@ -7,7 +7,7 @@ import { ensureFixture, textPdf } from './fixtures';
  * basics), driven through the real UI.
  */
 
-/** A document tab's switch button (its name gains "Unsaved changes" while dirty). */
+/** A document tab's switch button (its name gains visually-hidden "Unsaved changes" text while dirty — UI16). */
 function tab(tabs: Locator, name: string): Locator {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return tabs.getByRole('button', { name: new RegExp(`^(Unsaved changes )?${escaped}$`) });
@@ -37,14 +37,14 @@ test.describe('GAP-11a — undo is per document', () => {
     const grid = page.getByRole('listbox', { name: 'Pages of text-4.pdf' });
     await grid.getByRole('option', { name: /^Page 1 of/ }).focus();
     await page.keyboard.press('r');
-    await expect(tabB.getByLabel('Unsaved changes')).toBeVisible();
+    await expect(tabB.getByText('Unsaved changes', { exact: true })).toBeVisible();
 
     // Undo in the other document: nothing to undo there, B keeps its edit.
     await tab(tabs, 'text-3.pdf').click();
     await expect(page.getByRole('listbox', { name: 'Pages of text-3.pdf' })).toBeVisible();
     await page.keyboard.press('Control+z');
     await page.keyboard.press('Control+z');
-    await expect(tabB.getByLabel('Unsaved changes')).toBeVisible();
+    await expect(tabB.getByText('Unsaved changes', { exact: true })).toBeVisible();
     await expect(
       tabs.getByRole('button', { name: /^(Unsaved changes )?text-[34]\.pdf$/ })
     ).toHaveCount(2);
@@ -53,7 +53,7 @@ test.describe('GAP-11a — undo is per document', () => {
     await tabB.click();
     await expect(grid).toBeVisible();
     await page.keyboard.press('Control+z');
-    await expect(tabB.getByLabel('Unsaved changes')).toHaveCount(0);
+    await expect(tabB.getByText('Unsaved changes', { exact: true })).toHaveCount(0);
     // Opening is not an undo step: more Ctrl+Z leaves both documents open.
     await page.keyboard.press('Control+z');
     await expect(

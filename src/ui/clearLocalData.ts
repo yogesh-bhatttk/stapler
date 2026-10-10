@@ -27,6 +27,7 @@ import { clearSignatureLibrary } from '../core/signatures';
 import { removeAllOcrModels } from '../core/ocr/modelState';
 import { clearCachedModels } from '../core/ocr/tesseractCache';
 import { formatStorageBytes } from '../core/storage-persistence';
+import { notifyPartialClear, rememberPartialClear } from './clearNotice';
 
 function refuseWhileBusy(): boolean {
   const job = activeJob.value;
@@ -123,19 +124,12 @@ export async function confirmAndClearAllLocalData(
     suspendAutosave();
     const result = await clearAllLocalData();
     // RT-3 — a file that could not be deleted (locked by another tab) is
-    // reported, never counted as cleared.
+    // reported, never counted as cleared. AUDIT-2026-10-10 M4 — the reload
+    // below wipes any toast raised now, so the warning is also handed across
+    // the reload in sessionStorage and shown by the next page.
     if (isPartialClear(result)) {
-      notify('warning', translate('Some local data could not be cleared.'), {
-        detail:
-          result.filesFailed > 0
-            ? translate(
-                'Stored files that could not be deleted: {count}. Close every other Stapler tab and try again, or use your browser’s “Clear site data”.',
-                { count: result.filesFailed }
-              )
-            : translate(
-                'Browser storage did not respond. Use your browser’s “Clear site data” to remove the rest.'
-              )
-      });
+      notifyPartialClear(result.filesFailed);
+      rememberPartialClear(result.filesFailed);
     }
     // Nothing left to protect: skip the "leave page?" prompt on the reload.
     documents.value = documents.value.map(doc => (doc.dirty ? { ...doc, dirty: false } : doc));

@@ -15,8 +15,9 @@ import { render } from 'preact';
 import { App } from './AppRoot';
 import { installErrorHooks } from './errorHooks';
 import { initTheme } from './theme';
-import { initLocale } from '../core/i18n';
+import { initLocale } from '../core/i18n/load';
 import { startWebApp } from './pwa';
+import { renderBootBlock } from './bootGuard';
 import './styles/tokens.css';
 
 const root = document.getElementById('app');
@@ -37,8 +38,15 @@ installErrorHooks();
 // locale never flashes English/raw-key content first. The dictionary is a
 // bundled JSON asset (dynamic `import()`, not a network fetch — this app
 // makes none), so this adds an imperceptible delay, not a real network wait.
+// Web build only (`define` in vite.config.ts; absent under vitest and false in
+// the extension builds): refuse to boot inside a frame, or on a browser
+// missing the built-ins pdf.js needs, with a translated explanation instead.
+declare const __STAPLER_WEB_BUILD__: boolean | undefined;
+const WEB_BUILD = typeof __STAPLER_WEB_BUILD__ !== 'undefined' && __STAPLER_WEB_BUILD__;
+
 void (async () => {
   await initLocale();
+  if (WEB_BUILD && renderBootBlock(root, window)) return;
   render(<App />, root);
   startWebApp(); // GAP-2: web build only — offline service worker, "Open with", share target
 })();

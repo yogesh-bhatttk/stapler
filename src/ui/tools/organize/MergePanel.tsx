@@ -1,4 +1,4 @@
-import { tPlural, translate, useTranslation } from '../../../core/i18n';
+import { translate, useTranslation } from '../../../core/i18n';
 /**
  * Merge / insert options (OPS-01, OPS-04).
  *
@@ -9,16 +9,18 @@ import { useState } from 'preact/hooks';
 import { Plus } from 'lucide-preact';
 import { platform } from '../../../platform/current';
 import { PDF_AND_IMAGES } from '../../../platform/index';
-import { importFiles } from '../../../core/import';
-import { addDocument, appendPages, activeDoc, activeSources } from '../../../core/store';
-import { activeJob, notify, notifyError } from '../../../core/notify';
+import { activeDoc, activeSources } from '../../../core/store';
+import { notifyError } from '../../../core/notify';
 import { Button } from '../../components/Button';
 import { useImageImportOptions } from '../../useImageImportOptions';
-import { isPdfFile } from '../../../core/import';
-import { isSupportedImage } from '../../../core/image';
 import { panelStyles } from '../../shell/panelStyles';
 import { useJob } from '../../useJob';
-import { tryToRepairAction } from '../repair/state';
+import {
+  importIntoDocument,
+  mayPickFilesToAdd,
+  notifyMerged,
+  prepareFilesToAdd
+} from './import-into-document';
 import { DuplexSection } from './DuplexSection';
 
 export function MergePanel() {
@@ -32,59 +34,25 @@ export function MergePanel() {
   const addFiles = async () => {
     // Checked before the picker opens, not after: otherwise the user chooses
     // files only for the import to be refused and the choice discarded (UI-20).
-    if (activeJob.value !== null) {
-      notify('info', translate('Finish or cancel the current operation first.'));
-      return;
-    }
+    // M7 — and refused under the restore prompt, like every open path.
     setBusy(true);
     try {
+      if (!(await mayPickFilesToAdd())) return;
       const opened = await platform.openFiles({ multiple: true, accept: PDF_AND_IMAGES });
       if (opened.length === 0) return;
       const files = await Promise.all(opened.map(handle => handle.getFile()));
-      let imageOptions = undefined;
-      if (files.some(f => !isPdfFile(f) && isSupportedImage(f))) {
-        const opts = await requestOptions(files);
-        if (!opts) {
-          setBusy(false);
-          return;
-        }
-        imageOptions = opts;
-      }
+      // M7 — the document ceiling and memory soft limit. With nothing open,
+      // the first file becomes a new document — merge builds a document from
+      // scratch just like images-to-pdf does.
+      const prepared = await prepareFilesToAdd(files, doc ? 0 : 1, requestOptions);
+      if (!prepared) return;
 
       await run({ label: translate('Importing'), scope: 'merge.add' }, async job => {
-        const outcome = await importFiles(files, job, imageOptions);
-        // With nothing open yet, the first imported file becomes a new
-        // document rather than being silently dropped — merge builds a
-        // document from scratch just like images-to-pdf does.
-        let targetDocId = doc?.id ?? null;
-        for (const imported of outcome.imported) {
-          if (!targetDocId) {
-            const newDoc = {
-              id: crypto.randomUUID(),
-              name: imported.source.name,
-              pages: imported.pages,
-              annotations: [],
-              dirty: false
-            };
-            addDocument(newDoc);
-            targetDocId = newDoc.id;
-          } else {
-            appendPages(targetDocId, imported.pages);
-          }
-          for (const warning of imported.warnings) {
-            notify('warning', imported.source.name, { detail: warning });
-          }
-        }
-        // A failure on one file never stops the others, and each says why.
-        for (const failure of outcome.failures) {
-          notify('danger', translate('Could not add {name}', { name: failure.name }), {
-            detail: failure.message,
-            ...(failure.repairable ? { action: tryToRepairAction(failure.repairable) } : {})
-          });
-        }
-        if (outcome.imported.length > 0) {
-          notify('success', tPlural('Added {count} documents.', outcome.imported.length));
-        }
+        const added = await importIntoDocument(files, job, prepared.imageOptions, {
+          docId: doc?.id ?? null,
+          createIfMissing: true
+        });
+        if (added) notifyMerged(added.files);
       });
     } catch (err) {
       notifyError('merge.add', err);

@@ -60,17 +60,56 @@ export function windowMean(
 }
 
 /**
+ * CV10 — filling the inside of strokes wider than the threshold window.
+ *
+ * Bradley–Roth only compares a pixel with its own small window, so ink wider
+ * than that window is compared with *itself*: the inside of a grey stroke more
+ * than ~25 px thick (60 pt bold type at 300 DPI is ~37 px) has a mean equal to
+ * its own value, is "not darker", and turns white — the heading comes out as
+ * outlines, and OCR misreads it. (Pure black survives only because `0 <= 0`.)
+ *
+ * The fix is deliberately narrow, so the reason this is an adaptive threshold
+ * at all — a shadow or lighting gradient must not turn black — still holds. A
+ * pixel the small window left white is filled only when both:
+ *  - it is more than `t` percent darker than the mean of a `window`-sized
+ *    neighbourhood, big enough to reach the paper around a heading stroke (the
+ *    paper between letters is never darker than that, so it stays white); and
+ *  - it lies *between* two ink edges no more than `maxStroke` px apart, along
+ *    its row or its column — i.e. inside a stroke. The far side of a shadow
+ *    edge has no second edge within reach, so a shadow stays white.
+ */
+export interface StrokeFill {
+  window: number;
+  t: number;
+  maxStroke: number;
+}
+
+/** What OCR cleanup uses (`cv.worker.ts`): up to ~260 pt bold type at 300 DPI. */
+export const OCR_STROKE_FILL: StrokeFill = { window: 201, t: 20, maxStroke: 96 };
+
+/**
  * Bradley–Roth adaptive threshold: a pixel goes black when it is more than `t`
  * percent darker than the mean of its `window`-sized neighbourhood. Handles the
- * uneven lighting of a phone photo, which a global threshold cannot.
+ * uneven lighting of a phone photo, which a global threshold cannot. With
+ * `fill`, the inside of strokes wider than `window` is kept black too
+ * ({@link StrokeFill}).
  */
-export function applyAdaptiveThreshold(imageData: ImageData, window = 15, t = 15): ImageData {
+export function applyAdaptiveThreshold(
+  imageData: ImageData,
+  window = 15,
+  t = 15,
+  fill?: StrokeFill
+): ImageData {
   const { width, height, data } = imageData;
   const out = new ImageData(width, height);
   const result = out.data;
   const sum = integralLuma(data, width, height);
   const half = Math.max(1, Math.floor(window / 2));
   const factor = (100 - t) / 100;
+  // CV10: 1 = ink, 2 = a fill candidate (white here, dark against the big window).
+  const marks = fill ? new Uint8Array(width * height) : null;
+  const bigHalf = fill ? Math.max(half, Math.floor(fill.window / 2)) : 0;
+  const bigFactor = fill ? (100 - fill.t) / 100 : 0;
 
   for (let y = 0; y < height; y++) {
     const y1 = Math.max(0, y - half);
@@ -80,14 +119,81 @@ export function applyAdaptiveThreshold(imageData: ImageData, window = 15, t = 15
       const x2 = Math.min(width - 1, x + half);
       const mean = windowMean(sum, width, x1, y1, x2, y2);
       const i = (y * width + x) * 4;
-      const value = luma(data[i], data[i + 1], data[i + 2]) <= mean * factor ? 0 : 255;
+      const l = luma(data[i], data[i + 1], data[i + 2]);
+      const value = l <= mean * factor ? 0 : 255;
       result[i] = value;
       result[i + 1] = value;
       result[i + 2] = value;
       result[i + 3] = 255;
+      if (marks) {
+        if (value === 0) marks[y * width + x] = 1;
+        else {
+          const big = windowMean(
+            sum,
+            width,
+            Math.max(0, x - bigHalf),
+            Math.max(0, y - bigHalf),
+            Math.min(width - 1, x + bigHalf),
+            Math.min(height - 1, y + bigHalf)
+          );
+          if (l <= big * bigFactor) marks[y * width + x] = 2;
+        }
+      }
     }
   }
+  if (fill && marks) fillStrokes(result, marks, width, height, fill.maxStroke);
   return out;
+}
+
+/** Passes of {@link fillStrokes}: where strokes join (an H's crossbar), the joint fills on the next. */
+const STROKE_FILL_PASSES = 4;
+
+/**
+ * Turns black every fill candidate (`marks` 2) that sits between two ink
+ * pixels (`marks` 1) at most `maxStroke` apart along its row or its column.
+ * Runs of candidates are judged whole: a run bounded by ink at both ends, and
+ * short enough, is a stroke's inside. Filled pixels count as ink for the next
+ * pass, which is what fills a joint whose runs were too long on the first.
+ */
+function fillStrokes(
+  result: Uint8ClampedArray,
+  marks: Uint8Array,
+  width: number,
+  height: number,
+  maxStroke: number
+): void {
+  // Set by `paint`; read after each pass.
+  const pass = { changed: false };
+  const paint = (index: number) => {
+    const i = index * 4;
+    result[i] = 0;
+    result[i + 1] = 0;
+    result[i + 2] = 0;
+    marks[index] = 1;
+    pass.changed = true;
+  };
+  // One line (a row or a column) of `length` cells, the n-th at `at(n)`.
+  const scan = (length: number, at: (n: number) => number) => {
+    let n = 0;
+    while (n < length) {
+      if (marks[at(n)] !== 2) {
+        n++;
+        continue;
+      }
+      const start = n;
+      while (n < length && marks[at(n)] === 2) n++;
+      const bounded = start > 0 && marks[at(start - 1)] === 1 && n < length && marks[at(n)] === 1;
+      if (bounded && n - start <= maxStroke) {
+        for (let k = start; k < n; k++) paint(at(k));
+      }
+    }
+  };
+  for (let round = 0; round < STROKE_FILL_PASSES; round++) {
+    pass.changed = false;
+    for (let y = 0; y < height; y++) scan(width, n => y * width + n);
+    for (let x = 0; x < width; x++) scan(height, n => n * width + x);
+    if (!pass.changed) break;
+  }
 }
 
 /**

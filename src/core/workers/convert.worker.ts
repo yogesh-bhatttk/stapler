@@ -36,7 +36,7 @@ import './network-guard'; // PLT-2: first, so it wraps the network APIs before a
 import * as Comlink from 'comlink';
 import { loadLocale, tPlural, translate } from '../i18n';
 import type { LocaleAware } from './client';
-import { buildDocx } from '../convert/docx-writer';
+import { PICTURE_ONLY_DOCX_NOTE, buildDocx, isPictureOnly } from '../convert/docx-writer';
 import {
   attachImageBlocks,
   previewOutline,
@@ -358,6 +358,8 @@ export const convertWorkerImpl: ConvertJob = {
       if (failure) skipped.push(failure);
       imageCount = attachImageBlocks(model.pages, imageEntries, files, skipped);
     }
+    // CV13: a scan converted without OCR — said, not left for the user to find.
+    if (isPictureOnly(model)) skipped.unshift(translate(PICTURE_ONLY_DOCX_NOTE));
 
     const bytes = await buildDocx({ ...model, skipped }, job);
     // The outline is derived from the model the file was *just* written from, so

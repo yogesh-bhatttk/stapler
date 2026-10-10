@@ -20,7 +20,7 @@ const POINTS = [
   {
     icon: Layers,
     title: tKey('Merge, split, sign, compress, redact'),
-    body: tKey('No file-size cap, no daily limit, no watermark on anything you export.')
+    body: tKey('No quota, no daily limit, no watermark on anything you export.')
   },
   {
     icon: Zap,
