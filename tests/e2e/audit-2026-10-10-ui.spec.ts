@@ -102,7 +102,10 @@ test.describe('AUDIT-2026-10-10 UI', () => {
     await openApp(page);
     await page.getByRole('button', { name: 'Command palette' }).click();
     const input = page.getByRole('combobox', { name: 'Search tools and actions…' });
-    await expect(input).toBeFocused();
+    // The palette is lazy-loaded: on a cold CI runner its chunk can take a
+    // moment, so wait for it to mount before asserting where focus is.
+    await expect(input).toBeVisible({ timeout: 15_000 });
+    await expect(input).toBeFocused({ timeout: 10_000 });
     await page.keyboard.press('Tab');
     await expect(input).toBeFocused();
     await page.keyboard.press('Shift+Tab');

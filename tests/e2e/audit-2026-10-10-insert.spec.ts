@@ -19,7 +19,7 @@ test('Insert pages: an image shows the import-options dialog and is inserted', a
   const grid = page.getByRole('listbox', { name: /Pages of/ });
   const before = await grid.getByRole('option').count();
 
-  await writeFakeFiles(page, { 'in/photo.jpg': 'tests/fixtures/phone-photo-01.jpg' });
+  await writeFakeFiles(page, { 'in/photo.jpg': 'tests/fixtures/tiny.jpg' });
   await gotoTool(page, 'insert');
   await queuePick(page, 'in/photo.jpg');
   const choose = page.getByRole('button', { name: 'Choose PDFs or images to insert' });
@@ -42,7 +42,7 @@ test('Insert pages: cancelling the image dialog leaves the document and re-enabl
   const grid = page.getByRole('listbox', { name: /Pages of/ });
   const before = await grid.getByRole('option').count();
 
-  await writeFakeFiles(page, { 'in/photo.jpg': 'tests/fixtures/phone-photo-01.jpg' });
+  await writeFakeFiles(page, { 'in/photo.jpg': 'tests/fixtures/tiny.jpg' });
   await gotoTool(page, 'insert');
   await queuePick(page, 'in/photo.jpg');
   const choose = page.getByRole('button', { name: 'Choose PDFs or images to insert' });
