@@ -10,7 +10,20 @@ Pre-1.0. See `docs/TICKETS.md` for the ticket-by-ticket state of every feature �
 this file starts tracking user-facing changes from the first tagged release
 onward, not the full development history before it.
 
-## [0.4.0] — 2026-10-10
+## [0.4.1] — 2026-10-10
+
+The first published release of this work. `v0.4.0` was tagged but never
+published: a release gate caught the command-palette race below. 0.4.1 is
+0.4.0 plus these two fixes.
+
+### Fixed
+
+- The command palette's keyboard trap is in place the moment it opens; a Tab
+  pressed in the first instant could move focus to the page behind it.
+- The bundled privacy policy gives the OCR model's real size (about 3 MB for
+  English, 1.4 MB more for Hindi), not "about 12 MB".
+
+## [0.4.0] — 2026-10-10 (tagged, not published)
 
 ### Fixed
 

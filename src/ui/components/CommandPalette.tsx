@@ -7,7 +7,7 @@ import { translate } from '../../core/i18n';
  * now enumerates the registry, matches subsequence-style rather than by substring, and
  * returns focus to where it was opened from.
  */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { forwardRef } from 'preact/compat';
 import { useLocation } from 'wouter-preact';
 import { Home, Monitor, Moon, Search, Sun } from 'lucide-preact';
@@ -192,7 +192,10 @@ export const CommandPalette = forwardRef<HTMLDivElement, Record<string, never>>(
       };
     }, [open]);
 
-    useEffect(() => {
+    // Layout effect too: the search field takes focus as the palette mounts, and
+    // a plain effect only subscribes after paint — a Tab pressed in between
+    // escaped the trap (seen on a fast CI runner).
+    useLayoutEffect(() => {
       if (!open) return;
       const onKeyDown = (event: KeyboardEvent) => {
         if (stackEntry.current && !stackEntry.current.isTop()) return;

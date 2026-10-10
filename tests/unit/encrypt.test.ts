@@ -153,7 +153,10 @@ describe('encryptPdf', () => {
    * about to encrypt in its progress label, so the last label observed is a
    * direct, deterministic measurement of how far it ran.
    */
-  describe('cancellation inside the object loop', () => {
+  // AES-256 over a 300-page fixture plus Algorithm 2.B key derivation is real
+  // CPU work: vitest's default 5 s timeout was exceeded once on a busy machine
+  // (2026-10-10). 30 s still fails a genuine hang quickly.
+  describe('cancellation inside the object loop', { timeout: 30_000 }, () => {
     const LARGE = 'tests/fixtures/text-300.pdf';
 
     function tracker(cancelAfterChecks: number) {
