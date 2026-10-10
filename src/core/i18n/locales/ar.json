@@ -625,7 +625,6 @@
   "Move a scan corner": "تحريك زاوية المسح الضوئي",
   "Arrow keys on the handle": "مفاتيح الأسهم على المقبض",
   "Cannot render": "تعذّر العرض",
-  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no size limit or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "يؤدي Stapler كل عمله في {place} هذه. لا يتم رفع مستنداتك أبدًا، ولا يوجد حساب، ولا يوجد حد لحجم الملف أو علامة مائية. الإضافة لا تطلب أي أذونات على الإطلاق، ولهذا السبب لا يظهر أي تحذير عند تثبيتها.",
   "extension page": "صفحة الإضافة",
   "tab": "علامة التبويب",
   "Read the full privacy policy →": "اقرأ سياسة الخصوصية كاملة ←",
@@ -3175,5 +3174,6 @@
   "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_two": "يحتوي على نص — أُعيد ضغط صورتين غير مضغوطتين ({count}) دون فقدان، والنص كما هو",
   "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_few": "يحتوي على نص — أُعيد ضغط {count} صور غير مضغوطة دون فقدان، والنص كما هو",
   "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_many": "يحتوي على نص — أُعيد ضغط {count} صورة غير مضغوطة دون فقدان، والنص كما هو",
-  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_other": "يحتوي على نص — أُعيد ضغط {count} صورة غير مضغوطة دون فقدان، والنص كما هو"
+  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_other": "يحتوي على نص — أُعيد ضغط {count} صورة غير مضغوطة دون فقدان، والنص كما هو",
+  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no upload quota or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "يؤدي Stapler كل عمله في {place} هذه. لا يتم رفع مستنداتك أبدًا، ولا يوجد حساب، ولا توجد حصة رفع أو علامة مائية. الإضافة لا تطلب أي أذونات على الإطلاق، ولهذا السبب لا يظهر أي تحذير عند تثبيتها."
 }

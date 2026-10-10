@@ -10,6 +10,8 @@ Pre-1.0. See `docs/TICKETS.md` for the ticket-by-ticket state of every feature â
 this file starts tracking user-facing changes from the first tagged release
 onward, not the full development history before it.
 
+## [0.4.0] â€” 2026-10-10
+
 ### Fixed
 
 - **Redaction** marks now follow their page when pages are deleted, moved or
@@ -47,7 +49,8 @@ onward, not the full development history before it.
 
 - The privacy policy and store listing now describe the one optional download
   (the OCR language model, only after you agree) and exactly what is stored on
-  your device, and list the real per-tool limits instead of "no limits".
+  your device, and list the real per-tool limits instead of "no limits"; the
+  in-app privacy panel says "no upload quota" instead of "no size limit".
 - Large documents use about half the memory: working through a 100 MB PDF
   (merge, edit, split, compress) now peaks around 850 MB instead of 1.7 GB, and
   Compress no longer analyses the document twice. Compress also now shrinks

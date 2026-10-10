@@ -625,7 +625,6 @@
   "Move a scan corner": "स्कैन का कोना खिसकाएँ",
   "Arrow keys on the handle": "हैंडल पर तीर कुंजियाँ",
   "Cannot render": "रेंडर नहीं हो सकता",
-  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no size limit or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "Stapler अपना सारा काम इसी {place} में करता है। आपके दस्तावेज़ कभी अपलोड नहीं होते, कोई खाता नहीं है, और कोई आकार सीमा या वॉटरमार्क नहीं है। एक्सटेंशन को कोई अनुमति नहीं चाहिए, इसीलिए इसे इंस्टॉल करने पर कोई चेतावनी नहीं दिखती।",
   "extension page": "एक्सटेंशन पेज",
   "tab": "टैब",
   "Read the full privacy policy →": "पूरी गोपनीयता नीति पढ़ें →",
@@ -2423,5 +2422,6 @@
   "This PDF has no readable page tree — its catalog or page list is missing or damaged, often because the file was cut off. Nothing was changed. Try Repair, which rebuilds the structure from what the file still contains.": "इस PDF में पढ़ने योग्य पेज ट्री नहीं है — इसका कैटलॉग या पेज सूची गायब है या खराब है, अक्सर इसलिए कि फ़ाइल अधूरी कट गई। कुछ भी नहीं बदला गया। सुधारें आज़माएँ, जो फ़ाइल में अभी भी मौजूद सामग्री से संरचना फिर से बनाता है।",
   "Has text — {oversampled} over-sampled image(s) re-encoded and {uncompressed} uncompressed image(s) re-compressed losslessly, text left untouched": "पाठ मौजूद है — {oversampled} अधिक-नमूनाकृत छवि(याँ) फिर से एन्कोड और {uncompressed} असंपीड़ित छवि(याँ) बिना गुणवत्ता हानि के फिर से संपीड़ित, पाठ अपरिवर्तित",
   "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_one": "पाठ मौजूद है — {count} असंपीड़ित छवि बिना गुणवत्ता हानि के फिर से संपीड़ित, पाठ अपरिवर्तित",
-  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_other": "पाठ मौजूद है — {count} असंपीड़ित छवियाँ बिना गुणवत्ता हानि के फिर से संपीड़ित, पाठ अपरिवर्तित"
+  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_other": "पाठ मौजूद है — {count} असंपीड़ित छवियाँ बिना गुणवत्ता हानि के फिर से संपीड़ित, पाठ अपरिवर्तित",
+  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no upload quota or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "Stapler अपना सारा काम इसी {place} में करता है। आपके दस्तावेज़ कभी अपलोड नहीं होते, कोई खाता नहीं है, और कोई अपलोड कोटा या वॉटरमार्क नहीं है। एक्सटेंशन को कोई अनुमति नहीं चाहिए, इसीलिए इसे इंस्टॉल करने पर कोई चेतावनी नहीं दिखती।"
 }

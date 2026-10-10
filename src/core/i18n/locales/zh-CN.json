@@ -625,7 +625,6 @@
   "Move a scan corner": "移动扫描件的角点",
   "Arrow keys on the handle": "在手柄上使用方向键",
   "Cannot render": "无法渲染",
-  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no size limit or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "Stapler 的所有工作都在此{place}中完成。您的文档永远不会被上传，无需账户，也没有大小限制或水印。此扩展程序不请求任何权限，因此安装时不会显示任何警告。",
   "extension page": "扩展程序页面",
   "tab": "标签页",
   "Read the full privacy policy →": "阅读完整的隐私政策 →",
@@ -2423,5 +2422,6 @@
   "This PDF has no readable page tree — its catalog or page list is missing or damaged, often because the file was cut off. Nothing was changed. Try Repair, which rebuilds the structure from what the file still contains.": "此 PDF 没有可读取的页面树——其目录或页面列表缺失或已损坏，通常是因为文件被截断。未做任何更改。请尝试“修复”，它会根据文件中仍保留的内容重建结构。",
   "Has text — {oversampled} over-sampled image(s) re-encoded and {uncompressed} uncompressed image(s) re-compressed losslessly, text left untouched": "含文本 — {oversampled} 张过采样图像已重新编码，{uncompressed} 张未压缩图像已无损重新压缩，文本保持不变",
   "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_one": "含文本 — {count} 张未压缩图像已无损重新压缩，文本保持不变",
-  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_other": "含文本 — {count} 张未压缩图像已无损重新压缩，文本保持不变"
+  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_other": "含文本 — {count} 张未压缩图像已无损重新压缩，文本保持不变",
+  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no upload quota or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "Stapler 的所有工作都在此{place}中完成。您的文档永远不会被上传，无需账户，也没有上传配额或水印。此扩展程序不请求任何权限，因此安装时不会显示任何警告。"
 }

@@ -625,7 +625,6 @@
   "Move a scan corner": "Scan-Ecke verschieben",
   "Arrow keys on the handle": "Pfeiltasten auf dem Griff",
   "Cannot render": "Rendern nicht möglich",
-  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no size limit or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "Stapler erledigt seine gesamte Arbeit in {place}. Deine Dokumente werden nie hochgeladen, es gibt kein Konto, keine Größenbeschränkung und kein Wasserzeichen. Die Erweiterung wird ganz ohne Berechtigungen ausgeliefert, deshalb zeigt die Installation keine Warnungen an.",
   "extension page": "dieser Erweiterungsseite",
   "tab": "diesem Tab",
   "Read the full privacy policy →": "Vollständige Datenschutzerklärung lesen →",
@@ -2423,5 +2422,6 @@
   "This PDF has no readable page tree — its catalog or page list is missing or damaged, often because the file was cut off. Nothing was changed. Try Repair, which rebuilds the structure from what the file still contains.": "Diese PDF hat keinen lesbaren Seitenbaum – ihr Katalog oder ihre Seitenliste fehlt oder ist beschädigt, oft weil die Datei abgeschnitten wurde. Es wurde nichts geändert. Versuchen Sie „Reparieren“: Damit wird die Struktur aus dem wiederhergestellt, was die Datei noch enthält.",
   "Has text — {oversampled} over-sampled image(s) re-encoded and {uncompressed} uncompressed image(s) re-compressed losslessly, text left untouched": "Enthält Text — {oversampled} überabgetastete(s) Bild(er) neu codiert und {uncompressed} unkomprimierte(s) Bild(er) verlustfrei neu komprimiert, Text unverändert",
   "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_one": "Enthält Text — {count} unkomprimiertes Bild verlustfrei neu komprimiert, Text unverändert",
-  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_other": "Enthält Text — {count} unkomprimierte Bilder verlustfrei neu komprimiert, Text unverändert"
+  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_other": "Enthält Text — {count} unkomprimierte Bilder verlustfrei neu komprimiert, Text unverändert",
+  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no upload quota or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "Stapler erledigt seine gesamte Arbeit in {place}. Deine Dokumente werden nie hochgeladen, es gibt kein Konto, kein Upload-Kontingent und kein Wasserzeichen. Die Erweiterung wird ganz ohne Berechtigungen ausgeliefert, deshalb zeigt die Installation keine Warnungen an."
 }

@@ -1,6 +1,6 @@
 {
   "name": "stapler",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "description": "Offline PDF toolkit: merge, split, compress, sign, and redact entirely in the browser. No upload, no account, no daily limit.",
   "license": "MIT",

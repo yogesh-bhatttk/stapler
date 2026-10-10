@@ -625,7 +625,6 @@
   "Move a scan corner": "Mover una esquina del escaneo",
   "Arrow keys on the handle": "Teclas de flecha sobre el asa",
   "Cannot render": "No se puede renderizar",
-  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no size limit or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "Stapler hace todo su trabajo en esta {place}. Tus documentos nunca se suben, no hay cuenta, y no hay límite de tamaño ni marca de agua. La extensión no requiere ningún permiso, por eso instalarla no muestra advertencias.",
   "extension page": "página de la extensión",
   "tab": "pestaña",
   "Read the full privacy policy →": "Leer la política de privacidad completa →",
@@ -2573,5 +2572,6 @@
   "Has text — {oversampled} over-sampled image(s) re-encoded and {uncompressed} uncompressed image(s) re-compressed losslessly, text left untouched": "Tiene texto: {oversampled} imagen(es) sobremuestreada(s) se recodifican y {uncompressed} imagen(es) sin comprimir se recomprimen sin pérdida; el texto no se modifica",
   "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_one": "Tiene texto — {count} imagen sin comprimir recomprimida sin pérdida, texto intacto",
   "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_other": "Tiene texto — {count} imágenes sin comprimir recomprimidas sin pérdida, texto intacto",
-  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_many": "Tiene texto — {count} imágenes sin comprimir recomprimidas sin pérdida, texto intacto"
+  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_many": "Tiene texto — {count} imágenes sin comprimir recomprimidas sin pérdida, texto intacto",
+  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no upload quota or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "Stapler hace todo su trabajo en esta {place}. Tus documentos nunca se suben, no hay cuenta, y no hay cuota de subida ni marca de agua. La extensión no requiere ningún permiso, por eso instalarla no muestra advertencias."
 }

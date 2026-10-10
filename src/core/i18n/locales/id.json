@@ -625,7 +625,6 @@
   "Move a scan corner": "Pindahkan sudut pindaian",
   "Arrow keys on the handle": "Tombol panah pada gagang",
   "Cannot render": "Tidak dapat merender",
-  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no size limit or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "Stapler melakukan semua pekerjaannya di {place} ini. Dokumen Anda tidak pernah diunggah, tidak ada akun, dan tidak ada batas ukuran atau watermark. Ekstensi ini tidak memerlukan izin apa pun, itulah sebabnya pemasangannya tidak menampilkan peringatan.",
   "extension page": "halaman ekstensi",
   "tab": "tab",
   "Read the full privacy policy →": "Baca kebijakan privasi lengkap →",
@@ -2423,5 +2422,6 @@
   "This PDF has no readable page tree — its catalog or page list is missing or damaged, often because the file was cut off. Nothing was changed. Try Repair, which rebuilds the structure from what the file still contains.": "PDF ini tidak memiliki pohon halaman yang dapat dibaca — katalog atau daftar halamannya hilang atau rusak, sering kali karena file terpotong. Tidak ada yang diubah. Coba Perbaiki, yang membangun ulang strukturnya dari isi file yang masih tersisa.",
   "Has text — {oversampled} over-sampled image(s) re-encoded and {uncompressed} uncompressed image(s) re-compressed losslessly, text left untouched": "Berisi teks — {oversampled} gambar beresolusi berlebih dienkode ulang dan {uncompressed} gambar tak terkompresi dikompresi ulang tanpa kehilangan kualitas, teks tidak diubah",
   "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_one": "Berisi teks — {count} gambar tanpa kompresi dikompresi ulang tanpa kehilangan kualitas, teks tidak diubah",
-  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_other": "Berisi teks — {count} gambar tanpa kompresi dikompresi ulang tanpa kehilangan kualitas, teks tidak diubah"
+  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_other": "Berisi teks — {count} gambar tanpa kompresi dikompresi ulang tanpa kehilangan kualitas, teks tidak diubah",
+  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no upload quota or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "Stapler melakukan semua pekerjaannya di {place} ini. Dokumen Anda tidak pernah diunggah, tidak ada akun, dan tidak ada kuota unggah atau watermark. Ekstensi ini tidak memerlukan izin apa pun, itulah sebabnya pemasangannya tidak menampilkan peringatan."
 }

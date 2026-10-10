@@ -625,7 +625,6 @@
   "Move a scan corner": "Déplacer un coin de numérisation",
   "Arrow keys on the handle": "Touches fléchées sur la poignée",
   "Cannot render": "Rendu impossible",
-  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no size limit or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "Stapler effectue tout son travail dans cet(te) {place}. Vos documents ne sont jamais téléversés, il n’y a pas de compte, et il n’y a aucune limite de taille ni de filigrane. L’extension n’a aucune permission, c’est pourquoi son installation n’affiche aucun avertissement.",
   "extension page": "page d’extension",
   "tab": "onglet",
   "Read the full privacy policy →": "Lire la politique de confidentialité complète →",
@@ -2573,5 +2572,6 @@
   "Has text — {oversampled} over-sampled image(s) re-encoded and {uncompressed} uncompressed image(s) re-compressed losslessly, text left untouched": "Contient du texte — {oversampled} image(s) suréchantillonnée(s) réencodée(s) et {uncompressed} image(s) non compressée(s) recompressée(s) sans perte, texte inchangé",
   "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_one": "Contient du texte — {count} image non compressée recompressée sans perte, texte intact",
   "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_other": "Contient du texte — {count} images non compressées recompressées sans perte, texte intact",
-  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_many": "Contient du texte — {count} images non compressées recompressées sans perte, texte intact"
+  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_many": "Contient du texte — {count} images non compressées recompressées sans perte, texte intact",
+  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no upload quota or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "Stapler effectue tout son travail dans cet(te) {place}. Vos documents ne sont jamais téléversés, il n’y a pas de compte, et il n’y a aucun quota d’envoi ni de filigrane. L’extension n’a aucune permission, c’est pourquoi son installation n’affiche aucun avertissement."
 }

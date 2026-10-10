@@ -625,7 +625,6 @@
   "Move a scan corner": "スキャンの角を移動",
   "Arrow keys on the handle": "ハンドル上で矢印キー",
   "Cannot render": "レンダリングできません",
-  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no size limit or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "Stapler はすべての処理をこの{place}内で行います。ドキュメントがアップロードされることは一切なく、アカウントも不要で、サイズ制限や透かしもありません。この拡張機能は権限を一切要求しないため、インストール時に警告が表示されません。",
   "extension page": "拡張機能ページ",
   "tab": "タブ",
   "Read the full privacy policy →": "プライバシー ポリシーの全文を読む →",
@@ -2423,5 +2422,6 @@
   "This PDF has no readable page tree — its catalog or page list is missing or damaged, often because the file was cut off. Nothing was changed. Try Repair, which rebuilds the structure from what the file still contains.": "この PDF には読み取れるページツリーがありません。カタログまたはページ一覧が欠けているか破損しています（多くはファイルが途中で切れているためです）。何も変更していません。「修復」をお試しください。ファイルに残っている内容から構造を作り直します。",
   "Has text — {oversampled} over-sampled image(s) re-encoded and {uncompressed} uncompressed image(s) re-compressed losslessly, text left untouched": "テキストあり — 解像度過多の画像 {oversampled} 件を再エンコード、非圧縮の画像 {uncompressed} 件を可逆圧縮で再圧縮、テキストはそのまま",
   "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_one": "テキストあり — 非圧縮画像 {count} 枚を可逆圧縮しました。テキストはそのままです",
-  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_other": "テキストあり — 非圧縮画像 {count} 枚を可逆圧縮しました。テキストはそのままです"
+  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_other": "テキストあり — 非圧縮画像 {count} 枚を可逆圧縮しました。テキストはそのままです",
+  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no upload quota or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "Stapler はすべての処理をこの{place}内で行います。ドキュメントがアップロードされることは一切なく、アカウントも不要で、アップロード容量の制限や透かしもありません。この拡張機能は権限を一切要求しないため、インストール時に警告が表示されません。"
 }

@@ -625,7 +625,6 @@
   "Move a scan corner": "Mover um canto da digitalização",
   "Arrow keys on the handle": "Teclas de seta na alça",
   "Cannot render": "Não é possível renderizar",
-  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no size limit or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "O Stapler faz todo o trabalho nesta {place}. Seus documentos nunca são enviados, não há conta e não há limite de tamanho nem marca d'água. A extensão não requer nenhuma permissão, por isso a instalação não mostra avisos.",
   "extension page": "página da extensão",
   "tab": "aba",
   "Read the full privacy policy →": "Leia a política de privacidade completa →",
@@ -2573,5 +2572,6 @@
   "Has text — {oversampled} over-sampled image(s) re-encoded and {uncompressed} uncompressed image(s) re-compressed losslessly, text left untouched": "Tem texto — {oversampled} imagem(ns) superamostrada(s) recodificada(s) e {uncompressed} imagem(ns) sem compressão recomprimida(s) sem perda; o texto não é alterado",
   "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_one": "Tem texto — {count} imagem não compactada recompactada sem perdas, texto intacto",
   "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_other": "Tem texto — {count} imagens não compactadas recompactadas sem perdas, texto intacto",
-  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_many": "Tem texto — {count} imagens não compactadas recompactadas sem perdas, texto intacto"
+  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_many": "Tem texto — {count} imagens não compactadas recompactadas sem perdas, texto intacto",
+  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no upload quota or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "O Stapler faz todo o trabalho nesta {place}. Seus documentos nunca são enviados, não há conta e não há cota de envio nem marca d'água. A extensão não requer nenhuma permissão, por isso a instalação não mostra avisos."
 }

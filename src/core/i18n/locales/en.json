@@ -625,7 +625,6 @@
   "Move a scan corner": "Move a scan corner",
   "Arrow keys on the handle": "Arrow keys on the handle",
   "Cannot render": "Cannot render",
-  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no size limit or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no size limit or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.",
   "extension page": "extension page",
   "tab": "tab",
   "Read the full privacy policy →": "Read the full privacy policy →",
@@ -2423,5 +2422,6 @@
   "This PDF has no readable page tree — its catalog or page list is missing or damaged, often because the file was cut off. Nothing was changed. Try Repair, which rebuilds the structure from what the file still contains.": "This PDF has no readable page tree — its catalog or page list is missing or damaged, often because the file was cut off. Nothing was changed. Try Repair, which rebuilds the structure from what the file still contains.",
   "Has text — {oversampled} over-sampled image(s) re-encoded and {uncompressed} uncompressed image(s) re-compressed losslessly, text left untouched": "Has text — {oversampled} over-sampled image(s) re-encoded and {uncompressed} uncompressed image(s) re-compressed losslessly, text left untouched",
   "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_one": "Has text — {count} uncompressed image re-compressed losslessly, text left untouched",
-  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_other": "Has text — {count} uncompressed images re-compressed losslessly, text left untouched"
+  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_other": "Has text — {count} uncompressed images re-compressed losslessly, text left untouched",
+  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no upload quota or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no upload quota or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings."
 }

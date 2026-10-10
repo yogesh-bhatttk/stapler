@@ -15,6 +15,22 @@ import path from 'node:path';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
 const outDir = path.join(root, 'docs', 'screenshots');
+
+/**
+ * Closes every visible notification. Several can be up at once (e.g. the
+ * storage-persistence warning next to an edge-detection note), and a single
+ * locator click would hit two matches and fail — silently, behind a catch.
+ */
+async function dismissToasts(page) {
+  const close = page.getByRole('button', { name: 'Dismiss notification' });
+  for (let i = 0; i < 10 && (await close.count()) > 0; i++) {
+    await close
+      .first()
+      .click({ timeout: 3_000 })
+      .catch(() => {});
+    await page.waitForTimeout(150);
+  }
+}
 mkdirSync(outDir, { recursive: true });
 
 const BASE_URL = process.env.STAPLER_PREVIEW_URL ?? 'http://localhost:4173';
@@ -103,15 +119,13 @@ async function main() {
   // on this synthetic fixture (SCN-01 already tests the fallback), but it is
   // not the point of this screenshot — dismiss it so the before/after view
   // itself is what is visually convincing, per this ticket's requirement.
-  await page
-    .getByRole('button', { name: 'Dismiss notification' })
-    .click({ timeout: 3_000 })
-    .catch(() => {});
+  await dismissToasts(page);
   await page.screenshot({ path: path.join(outDir, '1-scan-cleanup.png') });
 
   // 2. Home launcher / tool grid.
   await openApp(page);
   await page.waitForSelector('text=Offline PDF tools');
+  await dismissToasts(page);
   await page.screenshot({ path: path.join(outDir, '2-home.png') });
 
   // 3. Merge, with a second source added to actually show the combine/reorder UI.
@@ -129,6 +143,7 @@ async function main() {
   // `{index + 1}. {source.name}` row text once cmyk-text.pdf becomes the
   // second source.
   await page.getByText('2. cmyk-text.pdf').waitFor({ timeout: 15_000 });
+  await dismissToasts(page);
   await page.screenshot({ path: path.join(outDir, '3-merge.png') });
 
   // 4. Redact, with a marked region.
@@ -142,10 +157,16 @@ async function main() {
   // above this one pushes it below the 1280x800 viewport fold — scroll it into
   // view so the screenshot still shows the actual mark, not just the toast.
   await marksHeading.scrollIntoViewIfNeeded();
+  // The match is on page 2: show that page, so the mark is on screen too.
+  await page.getByRole('button', { name: 'Next', exact: true }).click();
+  await page.getByText('Page 2 of 3', { exact: true }).waitFor({ timeout: 15_000 });
+  await page.waitForTimeout(500);
+  await dismissToasts(page);
   await page.screenshot({ path: path.join(outDir, '4-redact.png') });
 
   // 5. The offline trust panel — the product's central claim, in the UI itself.
   await page.getByRole('button', { name: /Offline/i }).click();
+  await dismissToasts(page);
   await page.screenshot({ path: path.join(outDir, '5-offline-trust.png') });
 
   await browser.close();

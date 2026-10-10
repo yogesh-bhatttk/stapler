@@ -31,7 +31,7 @@ export const TrustModal = forwardRef<HTMLDivElement, { onClose: () => void }>(fu
       <div className={styles.grid}>
         <p className={styles.pointBody}>
           {t(
-            'Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no size limit or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.',
+            'Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no upload quota or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.',
             { place: platform.kind === 'extension' ? t('extension page') : t('tab') }
           )}
         </p>

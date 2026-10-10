@@ -625,7 +625,6 @@
   "Move a scan corner": "Переместить угол скана",
   "Arrow keys on the handle": "Стрелки на маркере",
   "Cannot render": "Не удаётся отрисовать",
-  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no size limit or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "Stapler выполняет всю работу на этой {place}. Ваши документы никогда не загружаются на сервер, нет учётной записи, нет ограничения по размеру или водяного знака. Расширение не запрашивает никаких разрешений, поэтому при установке не отображается никаких предупреждений.",
   "extension page": "странице расширения",
   "tab": "вкладке",
   "Read the full privacy policy →": "Прочитать политику конфиденциальности полностью →",
@@ -2799,5 +2798,6 @@
   "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_one": "Есть текст — {count} несжатое изображение пережато без потерь, текст не тронут",
   "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_few": "Есть текст — {count} несжатых изображения пережаты без потерь, текст не тронут",
   "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_many": "Есть текст — {count} несжатых изображений пережаты без потерь, текст не тронут",
-  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_other": "Есть текст — {count} несжатого изображения пережато без потерь, текст не тронут"
+  "Has text — {count} uncompressed images re-compressed losslessly, text left untouched_other": "Есть текст — {count} несжатого изображения пережато без потерь, текст не тронут",
+  "Stapler does all its work in this {place}. Your documents are never uploaded, there is no account, and there is no upload quota or watermark. The extension ships with no permissions at all, which is why installing it shows no warnings.": "Stapler выполняет всю работу на этой {place}. Ваши документы никогда не загружаются на сервер, нет учётной записи, нет квоты на загрузку или водяного знака. Расширение не запрашивает никаких разрешений, поэтому при установке не отображается никаких предупреждений."
 }
