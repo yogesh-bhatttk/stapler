@@ -18,7 +18,7 @@
 
 Your files never leave your device. All processing is done locally. We do not collect, store, or transmit your documents or any personal data.
 
-There is exactly one exception to "no network", and it is opt-in: **OCR** needs a language model (about 12 MB) that is not bundled. The first time you run OCR in a language, Stapler asks before downloading it once from a pinned URL, checks its SHA-256 hash, and caches it on your device. You can also load the model from a file instead. Nothing about your documents is ever sent.
+There is exactly one exception to "no network", and it is opt-in: **OCR** needs a language model (about 3 MB for English, 1.4 MB more for Hindi) that is not bundled. The first time you run OCR in a language, Stapler asks before downloading it once from a pinned URL, checks its SHA-256 hash, and caches it on your device. You can also load the model from a file instead. Nothing about your documents is ever sent.
 
 For more details, please see our [Privacy Policy](public/privacy.html).
 

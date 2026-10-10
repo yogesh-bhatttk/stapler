@@ -151,14 +151,14 @@
 
       <h2>3. The one network request: OCR language models</h2>
       <p>
-        Text recognition (OCR) needs a language model of about 12 MB that is not bundled with
-        Stapler. The first time you run OCR in a language, Stapler asks before downloading it. Only
-        if you agree is it downloaded, once, from a fixed, pinned address on the public jsDelivr CDN
-        (<code>cdn.jsdelivr.net</code>); its SHA-256 hash is checked before use and the model is
-        then kept on your device (section 2). Like any web request, this download reveals your IP
-        address, your browser's user agent and which language model you asked for to jsDelivr and
-        the networks that serve it. It sends nothing about your documents. You can avoid the
-        download entirely by loading the model from a file instead.
+        Text recognition (OCR) needs a language model of about 3 MB (English; Hindi adds 1.4 MB)
+        that is not bundled with Stapler. The first time you run OCR in a language, Stapler asks
+        before downloading it. Only if you agree is it downloaded, once, from a fixed, pinned
+        address on the public jsDelivr CDN (<code>cdn.jsdelivr.net</code>); its SHA-256 hash is
+        checked before use and the model is then kept on your device (section 2). Like any web
+        request, this download reveals your IP address, your browser's user agent and which language
+        model you asked for to jsDelivr and the networks that serve it. It sends nothing about your
+        documents. You can avoid the download entirely by loading the model from a file instead.
       </p>
       <p>
         Apart from that, Stapler's own code makes no requests. Two things outside its control are
